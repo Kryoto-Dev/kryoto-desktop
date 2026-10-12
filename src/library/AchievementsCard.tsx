@@ -4,6 +4,7 @@ import { AsciiBar, Button, Caption, Card, Label } from '@/ui'
 import { call, on } from '@/lib/bridge'
 import type { LibraryGame } from '@/lib/library'
 import { cn } from '@/lib/utils'
+import { artSrc } from '@/lib/art'
 
 /** One achievement and whether it is yours (achievements.rs, game_achievements). */
 type GameAchievement = {
@@ -92,7 +93,7 @@ function Row({ a }: { a: GameAchievement }) {
         {secret ? (
           <EyeOff className="size-4 text-muted-foreground" aria-hidden />
         ) : picture ? (
-          <img src={picture} alt="" className={cn('size-full object-cover', !a.unlocked && !a.iconGray && 'grayscale')} />
+          <img src={artSrc(picture) ?? undefined} alt="" className={cn('size-full object-cover', !a.unlocked && !a.iconGray && 'grayscale')} />
         ) : (
           <Trophy className="size-4 text-muted-foreground" aria-hidden />
         )}

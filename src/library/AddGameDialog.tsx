@@ -7,6 +7,7 @@ import { fetchCatalogGame, library, slugFrom, type CatalogGame, type LibraryGame
 import { adultBlur, useHideAdult, useShowAdult, withoutAdult } from '@/lib/adult'
 import { cn } from '@/lib/utils'
 import { catalogApiUrl } from '@/lib/endpoint'
+import { artSrc } from '@/lib/art'
 
 type Hit = { slug: string; title: string; developer: string | null; year: number | null; cover_vertical: string | null; cover: string | null; nsfw: boolean }
 
@@ -141,7 +142,7 @@ export function AddGameDialog({
           <div className="flex gap-4">
             {found.cover ? (
               <img
-                src={found.cover}
+                src={artSrc(found.cover) ?? undefined}
                 alt=""
                 className={cn('w-20 shrink-0 object-cover', adultBlur(found.nsfw, showAdult))}
                 style={{ aspectRatio: '2 / 3', borderRadius: 'min(var(--kryo-radius), 8px)' }}
@@ -207,7 +208,7 @@ export function AddGameDialog({
                   >
                     {h.cover_vertical || h.cover ? (
                       <img
-                        src={(h.cover_vertical || h.cover)!}
+                        src={artSrc(h.cover_vertical || h.cover) ?? undefined}
                         alt=""
                         className={cn('h-12 w-8 shrink-0 object-cover', adultBlur(h.nsfw, showAdult))}
                         style={{ borderRadius: 'min(var(--kryo-radius), 4px)' }}

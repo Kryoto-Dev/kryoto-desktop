@@ -113,7 +113,7 @@ function GifView({ gif, auto }: { gif: Gif; auto: boolean }) {
       </button>
     )
   }
-  return <img src={gif.url} alt={gif.title || 'GIF'} width={w} height={h} className="kryo-radius object-cover" loading="lazy" />
+  return <img src={artSrc(gif.url) ?? undefined} alt={gif.title || 'GIF'} width={w} height={h} className="kryo-radius object-cover" loading="lazy" />
 }
 
 function size(n: number): string {
@@ -883,7 +883,7 @@ function GifPicker({ onClose, onPick }: { onClose: () => void; onPick: (g: Gif) 
       <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
         {gifs.map((g) => (
           <button key={g.id} type="button" onClick={() => onPick(g)} className="kryo-radius overflow-hidden border border-border" title={g.title}>
-            <img src={g.url} alt={g.title || 'GIF'} loading="lazy" className="aspect-square w-full object-cover" />
+            <img src={artSrc(g.url) ?? undefined} alt={g.title || 'GIF'} loading="lazy" className="aspect-square w-full object-cover" />
           </button>
         ))}
       </div>

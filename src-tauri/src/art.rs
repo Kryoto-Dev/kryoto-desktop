@@ -116,12 +116,12 @@ async fn current_steam_address(appid: &str, file: &str) -> Option<String> {
         _ => return None,
     };
     let res = client()
-        .get(format!("https://store.steampowered.com/api/appdetails?appids={appid}&filters=basic"))
+        .get(format!("https://kryo.to/api/steam/art?appid={appid}"))
         .send()
         .await
         .ok()?;
     let json: serde_json::Value = res.json().await.ok()?;
-    let url = json.get(appid)?.get("data")?.get(field)?.as_str()?.to_string();
+    let url = json.get(field)?.as_str()?.to_string();
     (url.starts_with("https://") && legacy_steam(&url).is_none()).then_some(url)
 }
 
@@ -169,7 +169,7 @@ pub async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> 
 }
 
 async fn fetch(url: &str) -> Result<Vec<u8>, String> {
-    let res = client().get(url).send().await.map_err(|e| {
+    let res = client().get(network_image_url(url)).send().await.map_err(|e| {
         if e.is_connect() || e.is_timeout() {
             "no connection".to_string()
         } else {
@@ -188,6 +188,29 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
         return Err("not an image".into());
     }
     Ok(bytes.to_vec())
+}
+
+/// The cache keeps the original URL as its key; network loads go through Kryoto.
+fn network_image_url(raw: &str) -> String {
+    static HOSTS: OnceLock<serde_json::Value> = OnceLock::new();
+    let hosts = HOSTS.get_or_init(|| serde_json::from_str(include_str!("../../src/lib/media-hosts.json")).expect("media host policy"));
+    let Ok(mut url) = url::Url::parse(raw) else { return raw.into() };
+    if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+        return raw.into();
+    }
+    let host = url.host_str().unwrap_or_default();
+    let exact = ["steamHosts", "mediaHosts"].iter().any(|key| {
+        hosts[*key].as_array().is_some_and(|list| list.iter().any(|v| v.as_str() == Some(host)))
+    });
+    let domain = ["steamDomains", "mediaDomains"].iter().any(|key| {
+        hosts[*key].as_array().is_some_and(|list| list.iter().filter_map(|v| v.as_str()).any(|d| host == d || host.ends_with(&format!(".{d}"))))
+    });
+    if !exact && !domain { return raw.into() }
+    let _ = url.set_scheme("https");
+    url.set_fragment(None);
+    let mut proxy = url::Url::parse("https://kryo.to/api/steam/image.jpg").expect("proxy URL");
+    proxy.query_pairs_mut().append_pair("url", url.as_str());
+    proxy.to_string()
 }
 
 /// Fetch a game's art into the cache ahead of time (when it is installed), so
@@ -257,5 +280,21 @@ mod tests {
         assert_eq!(mime(&[0xFF, 0xD8, 0xFF]), "image/jpeg");
         assert_eq!(mime(b"\x89PNG\r\n"), "image/png");
         assert_eq!(mime(b"<html>"), "application/octet-stream");
+    }
+
+    #[test]
+    fn blocked_media_uses_kryoto_even_when_prefetched() {
+        for raw in [
+            "https://shared.fastly.steamstatic.com/community_assets/images/apps/620/icon.jpg",
+            "https://cdn.discordapp.com/avatars/123/a.png?size=256",
+            "https://media2.giphy.com/media/abc/giphy.webp",
+        ] {
+            let proxy = url::Url::parse(&network_image_url(raw)).unwrap();
+            assert_eq!(proxy.host_str(), Some("kryo.to"));
+            assert_eq!(proxy.query_pairs().find(|(k, _)| k == "url").unwrap().1, raw);
+        }
+        for raw in ["https://dl.kryo.to/d/file", "https://steamstatic.com.evil.test/a.jpg", "http://127.0.0.1/a.jpg"] {
+            assert_eq!(network_image_url(raw), raw);
+        }
     }
 }

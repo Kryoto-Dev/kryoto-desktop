@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { RotateCw } from 'lucide-react'
+import { ArrowUpRight, RotateCw } from 'lucide-react'
 import { AsciiBar, Busy, Button, Caption, Modal } from '@/ui'
 import { explainUpdateError, updateFraction, updates, useUpdates } from '@/lib/updates'
+import { openExternal } from '@/lib/window'
+import { errorText } from '@/lib/bridge'
 
 /**
  * Offer a new version; never take the decision. Installing means restarting,
@@ -12,6 +14,16 @@ import { explainUpdateError, updateFraction, updates, useUpdates } from '@/lib/u
 export function UpdatePrompt({ busy }: { busy: { games: number; downloads: number } }) {
   const state = useUpdates()
   const [dismissed, setDismissed] = useState(false)
+  const [changelogError, setChangelogError] = useState<string | null>(null)
+
+  async function openChangelog() {
+    setChangelogError(null)
+    try {
+      await openExternal('https://kryo.to/changelog')
+    } catch (error) {
+      setChangelogError(`Could not open your browser: ${errorText(error)}`)
+    }
+  }
 
   useEffect(() => {
     void updates.loadVersion()
@@ -47,6 +59,10 @@ export function UpdatePrompt({ busy }: { busy: { games: number; downloads: numbe
           <Row k="New version" v={update.version} strong />
           {update.date ? <Row k="Released" v={update.date.split(' ')[0] ?? update.date} /> : null}
         </dl>
+        <Button size="sm" className="justify-self-start" onClick={() => void openChangelog()}>
+          View changelog <ArrowUpRight className="size-3" aria-hidden />
+        </Button>
+        {changelogError ? <p role="alert" className="text-[11px] text-destructive">{changelogError}</p> : null}
         {busy.games > 0 || busy.downloads > 0 ? (
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             {busy.games > 0 ? `${busy.games === 1 ? 'A game is' : `${busy.games} games are`} running: close it first, or this session's play time is not counted. ` : ''}

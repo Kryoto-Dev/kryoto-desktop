@@ -1,0 +1,6 @@
+{
+  "steamDomains": ["steamstatic.com", "steamusercontent.com"],
+  "steamHosts": ["media.steampowered.com", "cdn.steampowered.com", "steamcdn-a.akamaihd.net", "steamuserimages-a.akamaihd.net", "steamvideo-a.akamaihd.net"],
+  "mediaDomains": ["discordapp.com", "discordapp.net", "giphy.com", "tenor.com"],
+  "mediaHosts": ["images.igdb.com", "i.imgur.com", "i.redd.it", "preview.redd.it", "external-preview.redd.it", "i.ytimg.com", "img.youtube.com", "raw.githubusercontent.com", "avatars.githubusercontent.com", "images.unsplash.com"]
+}

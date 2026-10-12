@@ -27,7 +27,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-const STEAM_API: &str = "https://api.steampowered.com/IPlayerService/GetGameAchievements/v1/";
+// Kryoto fetches Steam's public schema so a blocked Steam domain cannot prevent
+// achievements.json from being generated, or the Desktop list from loading.
+const STEAM_API: &str = "https://kryo.to/api/steam/achievements";
 /// Where an icon file name from that answer lives.
 const ICON_BASE: &str = "https://shared.fastly.steamstatic.com/community_assets/images/apps";
 /// Inside `steam_settings`.
@@ -195,7 +197,9 @@ pub async fn write_gbe_schema(client: &reqwest::Client, settings: &Path, appid: 
                 if dest.exists() {
                     return None;
                 }
-                let res = client.get(&url).timeout(std::time::Duration::from_secs(20)).send().await.ok()?;
+                let mut proxy = url::Url::parse("https://kryo.to/api/steam/image.jpg").ok()?;
+                proxy.query_pairs_mut().append_pair("url", &url);
+                let res = client.get(proxy).timeout(std::time::Duration::from_secs(20)).send().await.ok()?;
                 if !res.status().is_success() {
                     return None;
                 }
