@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { artSrc, reportArt } from '@/lib/art'
+import { coverFor } from '@/lib/game-artwork'
 import { usePersisted } from '@/hooks/usePersisted'
 import { Download as DownloadIcon, Home, Search } from 'lucide-react'
 import { asciiTrack, Dropdown } from '@/ui'
@@ -153,7 +154,7 @@ export function Sidebar({
             {listed.map((e) => {
               const game = bySlug.get(e.slug)
               const adult = game ? game.nsfw : isAdult(e.slug)
-              const cover = game?.cover ?? (e.cover || null)
+              const cover = game ? coverFor(game) : (e.cover || null)
               return (
                 <button
                   key={e.slug}
@@ -198,8 +199,8 @@ export function Sidebar({
               g.id === selectedId ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
             )}
           >
-            {g.cover ? (
-              <img src={artSrc(g.cover) ?? undefined} onError={() => reportArt(g.cover!, 'sidebar')} alt="" className={cn("size-6 shrink-0 object-cover", adultBlur(g.nsfw, showAdult) && "blur-[3px]")} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
+            {coverFor(g) ? (
+              <img src={artSrc(coverFor(g)) ?? undefined} onError={() => reportArt(coverFor(g)!, 'sidebar')} alt="" className={cn("size-6 shrink-0 object-cover", adultBlur(g.nsfw, showAdult) && "blur-[3px]")} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
             ) : (
               <span className="size-6 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
             )}

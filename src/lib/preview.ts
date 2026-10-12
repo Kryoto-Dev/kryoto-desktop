@@ -387,6 +387,12 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     gamemode: false,
   }),
   library_list: () => clone(games),
+  library_artwork: (a) => {
+    const game = games.find((g) => g.id === a.id)
+    if (!game) throw new Error('Game not found.')
+    for (const key of ['cover', 'hero', 'logo', 'header']) if (a[key]) game[key] = a[key]
+    return clone(game)
+  },
   game_running: () => [...running],
   library_save: (a) => {
     const next = a.game as Record<string, unknown>

@@ -22,6 +22,9 @@ pub struct LibraryGame {
     pub slug: Option<String>,
     pub cover: Option<String>,
     pub hero: Option<String>,
+    /// Player-selected pictures, preserved independently of refreshed catalog art.
+    pub custom_cover: Option<String>,
+    pub custom_hero: Option<String>,
     /// The transparent title logo drawn over the hero, when Steam has one.
     pub logo: Option<String>,
     /// The wide store header, for rows and cards.
@@ -397,6 +400,19 @@ pub fn library_add(app: AppHandle, exe_path: String, mut game: LibraryGame) -> R
         game.id = id;
         games.push(game.clone());
         Ok(game)
+    })
+}
+
+/// Background art resolution must not overwrite a player's newer Properties edits.
+#[tauri::command(async)]
+pub fn library_artwork(app: AppHandle, id: String, cover: Option<String>, hero: Option<String>, logo: Option<String>, header: Option<String>) -> Result<LibraryGame, String> {
+    update(&app, |games| {
+        let game = games.iter_mut().find(|g| g.id == id).ok_or("Game not found.")?;
+        game.cover = cover.or(game.cover.take());
+        game.hero = hero.or(game.hero.take());
+        game.logo = logo.or(game.logo.take());
+        game.header = header.or(game.header.take());
+        Ok(game.clone())
     })
 }
 

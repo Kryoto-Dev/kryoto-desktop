@@ -6,6 +6,7 @@ import { capsulesFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
 import { usePersisted } from '@/hooks/usePersisted'
 import { Art } from '@/library/Art'
+import { coverFor, heroFor } from '@/lib/game-artwork'
 
 export { Art }
 
@@ -63,7 +64,7 @@ export function LibraryHome({
           {...ctx(last)}
           className="kryo-radius kryo-in relative h-64 overflow-hidden border border-border bg-card"
         >
-          <Art adult={last.nsfw} src={last.hero} fallback={[last.header, last.cover]} title="" className="absolute inset-0 size-full object-cover" />
+          <Art adult={last.nsfw} src={heroFor(last)} fallback={[last.header, coverFor(last)]} title="" className="absolute inset-0 size-full object-cover" />
           <div className="hero-side absolute inset-0" />
           <div className="relative flex h-full flex-col justify-end gap-3 p-7">
             <span className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
@@ -135,7 +136,7 @@ export function LibraryHome({
               className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 hover:-translate-y-1 hover:border-foreground/60"
             >
               <button type="button" onClick={() => onOpen(g.id)} className="kryo-square absolute inset-0" aria-label={`Open ${g.title}`}>
-                <Art adult={g.nsfw} src={g.cover} fallback={[g.header]} title={g.title} className="size-full object-cover" />
+                <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />
               </button>
               {running.has(g.id) ? (
                 <span className="kryo-pill absolute left-2 top-2 flex items-center gap-1 bg-background/80 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-success backdrop-blur">

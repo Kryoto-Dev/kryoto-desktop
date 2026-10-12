@@ -3,6 +3,7 @@ import { isTauri } from '@/lib/bridge'
 import { logWarn } from '@/lib/log'
 import { isOnline } from '@/lib/online'
 import { imageProxyUrl } from '@/lib/media'
+import { isCustomArt } from '@/lib/game-artwork'
 
 /**
  * Game art, through the client's own cache (`art.rs`): the first load keeps
@@ -14,7 +15,7 @@ export function artSrc(url: string | null | undefined): string | null {
   // kryo.to hands out some images by path (its image proxy).
   const absolute = u.startsWith('//') ? `https:${u}` : u.startsWith('/') ? `https://kryo.to${u}` : u
   if (!isTauri()) return imageProxyUrl(absolute)
-  if (!/^https?:\/\//i.test(absolute)) return imageProxyUrl(absolute)
+  if (!/^https?:\/\//i.test(absolute) && !isCustomArt(absolute)) return imageProxyUrl(absolute)
   const convert = (window as unknown as { __TAURI_INTERNALS__?: { convertFileSrc?: (p: string, protocol: string) => string } })
     .__TAURI_INTERNALS__?.convertFileSrc
   return convert ? convert(absolute, 'kimg') : imageProxyUrl(absolute)

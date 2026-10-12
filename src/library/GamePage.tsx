@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils'
 import { AddonsCard } from '@/library/AddonsCard'
 import { AchievementsCard } from '@/library/AchievementsCard'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
+import { automaticArtwork } from '@/lib/game-artwork'
 
 /**
  * One game. Its art across the top fading into the page, the logo on it, a
@@ -76,8 +77,15 @@ export function GamePage({
     setCatalog(null)
     setLatest(null)
     setAsked(false)
-    if (!game.slug || !online) return setAsked(true)
+    if (!online) return setAsked(true)
     let cancelled = false
+    if (!game.slug) {
+      if (game.cover && game.hero) return setAsked(true)
+      void automaticArtwork(game.title).then((art) => {
+        if (!cancelled && art) void library.refreshArtwork(game.id, { ...art, cover: game.cover ?? art.cover, hero: game.hero ?? art.hero }).then((g) => onGameChanged?.(g)).catch(() => {})
+      }).finally(() => !cancelled && setAsked(true))
+      return () => { cancelled = true }
+    }
     fetchCatalogGame(game.slug)
       .then((c) => {
         if (cancelled) return
@@ -85,7 +93,7 @@ export function GamePage({
         setLatest(c.version)
         const art = { hero: c.hero, logo: c.logo, header: c.header, cover: game.cover ?? c.cover }
         if (art.hero !== game.hero || art.logo !== (game.logo ?? null) || art.header !== (game.header ?? null) || art.cover !== game.cover) {
-          void library.save({ ...game, ...art }).then((g) => onGameChanged?.(g)).catch(() => {})
+          void library.refreshArtwork(game.id, art).then((g) => onGameChanged?.(g)).catch(() => {})
         }
       })
       .catch(() => {})
@@ -95,7 +103,7 @@ export function GamePage({
     }
     // Once per game and connection: saving the art must not fetch again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [game.slug, online])
+  }, [game.id, game.slug, online])
 
   const target = playTarget(game)
   const previewEntry = typeof target === 'number' ? target : game.entries.length ? 0 : null
@@ -118,9 +126,9 @@ export function GamePage({
         adult={game.nsfw}
         // Art saved before kryo.to resolved it (no header on record) waits for
         // the answer, so the banner does not show a guess and then swap.
-        pending={!asked && game.header === undefined}
-        banners={[catalog?.hero ?? game.hero, ...(catalog?.screenshots.slice(0, 1) ?? []), catalog?.header ?? game.header, game.cover]}
-        logo={catalog ? catalog.logo : game.logo}
+        pending={!game.customHero && !asked && game.header === undefined}
+        banners={[game.customHero, catalog?.hero ?? game.hero, ...(catalog?.screenshots.slice(0, 1) ?? []), catalog?.header ?? game.header, game.customCover, game.cover]}
+        logo={game.customHero ? null : catalog ? catalog.logo : game.logo}
       />
 
       <div className="kryo-radius relative z-10 mx-6 -mt-2 flex flex-wrap items-center gap-6 border border-border bg-card/90 p-4 backdrop-blur">

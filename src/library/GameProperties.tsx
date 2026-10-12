@@ -22,11 +22,13 @@ import { cn } from '@/lib/utils'
 import { VersionsList, type GetOurs } from '@/library/Versions'
 import { GameRepair } from '@/library/GameRepair'
 import { GameLogs } from '@/library/GameLogs'
+import { ArtworkEditor } from '@/library/ArtworkEditor'
 
-type Tab = 'general' | 'compat' | 'files' | 'versions' | 'kryoto' | 'logs' | 'repair'
+type Tab = 'general' | 'artwork' | 'compat' | 'files' | 'versions' | 'kryoto' | 'logs' | 'repair'
 
 const TABS = [
   ['general', 'General'],
+  ['artwork', 'Artwork'],
   ...(isWindowsHost() ? [] : ([['compat', 'Compatibility']] as const)),
   ['files', 'Installed files'],
   ['repair', 'Repair game'],
@@ -69,6 +71,7 @@ export function GameProperties({
   const [size, setSize] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [artBusy, setArtBusy] = useState(false)
   const [link, setLink] = useState(game.slug ? `kryo.to/game/${game.slug}` : '')
   const set = <K extends keyof LibraryGame>(key: K, value: LibraryGame[K]) => setDraft((d) => ({ ...d, [key]: value }))
 
@@ -173,13 +176,14 @@ export function GameProperties({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" disabled={busy} onClick={() => void save()}>
+          <Button variant="primary" disabled={busy || artBusy} onClick={() => void save()}>
             Save
           </Button>
         </>
       }
     >
       <Panes tabs={TABS} current={tab} onChange={setTab}>
+        {tab === 'artwork' ? <ArtworkEditor title={draft.title} value={draft} adult={draft.nsfw} onChange={(art) => setDraft((d) => ({ ...d, ...art }))} onBusy={setArtBusy} /> : null}
         {tab === 'general' ? (
           <>
             <Section title="Name">

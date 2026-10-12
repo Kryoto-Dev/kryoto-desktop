@@ -8,6 +8,8 @@ import { adultBlur, useHideAdult, useShowAdult, withoutAdult } from '@/lib/adult
 import { cn } from '@/lib/utils'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { artSrc } from '@/lib/art'
+import { ArtworkEditor } from '@/library/ArtworkEditor'
+import { type Artwork } from '@/lib/game-artwork'
 
 type Hit = { slug: string; title: string; developer: string | null; year: number | null; cover_vertical: string | null; cover: string | null; nsfw: boolean }
 
@@ -43,6 +45,8 @@ export function AddGameDialog({
   const [found, setFound] = useState<CatalogGame | null>(null)
   const [manual, setManual] = useState(false)
   const [title, setTitle] = useState('')
+  const [artwork, setArtwork] = useState<Artwork>({ cover: null, hero: null })
+  const [artBusy, setArtBusy] = useState(false)
   const [looking, setLooking] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -109,8 +113,11 @@ export function AddGameDialog({
         await library.add(picked, {
           title: found?.title ?? title.trim(),
           slug: found?.slug ?? null,
-          cover: found?.cover ?? null,
-          hero: found?.hero ?? null,
+          ...artwork,
+          cover: found?.cover ?? artwork.cover,
+          hero: found?.hero ?? artwork.hero,
+          logo: found?.logo ?? artwork.logo,
+          header: found?.header ?? artwork.header,
           executable: found?.executable ?? '',
           defaultArgs: found?.defaultArgs ?? '',
           entries: found?.entries ?? [],
@@ -131,6 +138,7 @@ export function AddGameDialog({
   const back = () => {
     setFound(null)
     setManual(false)
+    setArtwork({ cover: null, hero: null })
     setError(null)
     requestAnimationFrame(() => input.current?.focus())
   }
@@ -168,8 +176,10 @@ export function AddGameDialog({
           <Section title="Name">
             <input className={inputCls} value={title} autoFocus placeholder="Taken from the .exe when empty" onChange={(e) => setTitle(e.target.value)} />
           </Section>
+          <p className="text-xs text-muted-foreground">Steam artwork is matched automatically when you add the game. You can also pick it now.</p>
+          <ArtworkEditor title={title} value={artwork} onChange={(art) => setArtwork((current) => ({ ...current, ...art }))} onBusy={setArtBusy} />
           <div className="flex gap-2">
-            <Button variant="primary" disabled={busy} onClick={() => void chooseExe()}>
+            <Button variant="primary" disabled={busy || artBusy} onClick={() => void chooseExe()}>
               <FolderOpen className="size-3.5" />
               {busy ? 'Adding' : 'Find the .exe'}
             </Button>

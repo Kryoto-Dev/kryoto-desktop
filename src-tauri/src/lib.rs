@@ -1,6 +1,7 @@
 mod achievements;
 mod addons;
 mod art;
+mod managed_art;
 mod chat;
 mod compat;
 mod display_env;
@@ -1285,8 +1286,10 @@ pub fn run() {
             settings::settings_get,
             settings::settings_recover,
             settings::settings_save,
+            art::art_import,
             library::library_list,
             library::library_add,
+            library::library_artwork,
             library::library_save,
             library::library_remove,
             library::game_launch,

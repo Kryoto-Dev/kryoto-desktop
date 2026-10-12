@@ -14,11 +14,22 @@ use std::sync::{Mutex, OnceLock};
 use sha2::{Digest, Sha256};
 use tauri::http::{Request, Response, StatusCode};
 use tauri::{AppHandle, Manager, Runtime};
+use crate::managed_art::{managed_key, mime, MAX_BYTES};
 
 pub const SCHEME: &str = "kimg";
 
-/// Largest image kept (a 4K hero is about 3 MB).
-const MAX_BYTES: usize = 25 * 1024 * 1024;
+fn custom_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("custom-art"))
+}
+
+/// Copy a selected raster picture into durable app data. The original is untouched.
+#[tauri::command(async)]
+pub fn art_import(app: AppHandle, path: String) -> Result<String, String> {
+    let bytes = crate::managed_art::read_image(std::path::Path::new(&path))?;
+    let hash = Sha256::digest(&bytes);
+    let key: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    crate::managed_art::store(&custom_dir(&app)?, &bytes, &key)
+}
 
 fn dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     let d = app.path().app_cache_dir().ok()?.join("art");
@@ -31,26 +42,13 @@ fn key(url: &str) -> String {
     hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
-/// The image type from its first bytes (the cache keeps no headers).
-fn mime(bytes: &[u8]) -> &'static str {
-    match bytes {
-        [0xFF, 0xD8, ..] => "image/jpeg",
-        [0x89, b'P', b'N', b'G', ..] => "image/png",
-        [b'G', b'I', b'F', ..] => "image/gif",
-        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
-        [_, _, _, _, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', ..] => "image/avif",
-        _ if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") => "image/svg+xml",
-        _ => "application/octet-stream",
-    }
-}
-
 /// The remote address in a `kimg` request: everything after the host,
 /// percent-decoded.
 fn target(request: &Request<Vec<u8>>) -> Option<url::Url> {
     let raw = request.uri().path().trim_start_matches('/');
     let decoded = percent_decode(raw)?;
     let url = url::Url::parse(&decoded).ok()?;
-    matches!(url.scheme(), "http" | "https").then_some(url)
+    (matches!(url.scheme(), "http" | "https") || managed_key(&decoded).is_some()).then_some(url)
 }
 
 fn percent_decode(s: &str) -> Option<String> {
@@ -138,6 +136,12 @@ pub async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> 
     let Some(url) = target(&request) else {
         return respond(StatusCode::BAD_REQUEST, Vec::new());
     };
+    if let Some(key) = managed_key(url.as_str()) {
+        return match custom_dir(&app).and_then(|d| crate::managed_art::read_image(&d.join(key))) {
+            Ok(bytes) => respond(StatusCode::OK, bytes),
+            Err(_) => respond(StatusCode::NOT_FOUND, Vec::new()),
+        };
+    }
     let file = dir(&app).map(|d| d.join(key(url.as_str())));
     if let Some(bytes) = file.as_ref().and_then(|f| std::fs::read(f).ok()).filter(|b| !b.is_empty()) {
         return respond(StatusCode::OK, bytes);

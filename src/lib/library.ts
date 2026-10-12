@@ -1,6 +1,7 @@
 import { call, errorText, on } from '@/lib/bridge'
 import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
+import { automaticArtwork, coverFor } from '@/lib/game-artwork'
 
 /**
  * The Library: games on this PC and how each one starts.
@@ -25,6 +26,8 @@ export type LibraryGame = {
   slug: string | null
   cover: string | null
   hero: string | null
+  customCover?: string | null
+  customHero?: string | null
   /** The transparent title logo, when Steam has one. */
   logo?: string | null
   /** The wide store header, for rows and cards. */
@@ -210,9 +213,20 @@ export const gameLogs = {
 
 export const library = {
   list: () => call<LibraryGame[]>('library_list'),
-  add: (exePath: string, game: Partial<LibraryGame>) =>
-    call<LibraryGame>('library_add', { exePath, game: { ...BLANK_GAME, ...game } }),
+  add: async (exePath: string, game: Partial<LibraryGame>) => {
+    const title = game.title?.trim() || exePath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'Game'
+    const art = !game.slug && (!game.cover || !game.hero) ? await automaticArtwork(title) : null
+    return call<LibraryGame>('library_add', { exePath, game: {
+      ...BLANK_GAME, ...game, title,
+      cover: game.cover ?? art?.cover ?? null,
+      hero: game.hero ?? art?.hero ?? null,
+      logo: game.logo ?? art?.logo ?? null,
+      header: game.header ?? art?.header ?? null,
+    } })
+  },
   save: (game: LibraryGame) => call<LibraryGame>('library_save', { game }),
+  refreshArtwork: (id: string, art: { cover: string | null; hero: string | null; logo?: string | null; header?: string | null }) =>
+    call<LibraryGame>('library_artwork', { id, ...art, logo: art.logo ?? null, header: art.header ?? null }),
   remove: (id: string, deleteFiles: boolean) => call<boolean>('library_remove', { id, deleteFiles }),
   /** `joinLobby`: a Steam lobby id from a game invite (Kryoto Online games). */
   launch: (id: string, entry: number | null, joinLobby?: string) => call<void>('game_launch', { id, entry, joinLobby: joinLobby ?? null }),
@@ -319,9 +333,9 @@ export function logoFor(game: LibraryGame): string | null {
  * resolved, then the legacy Steam path (a guess that 404s for newer games),
  * then the cover.
  */
-export function capsulesFor(game: { hero?: string | null; cover: string | null; header?: string | null }): (string | null)[] {
+export function capsulesFor(game: { hero?: string | null; cover: string | null; header?: string | null; customCover?: string | null; customHero?: string | null }): (string | null)[] {
   const m = (game.hero ?? game.cover ?? '').match(/\/apps\/(\d+)\//)
-  return [game.header ?? null, m ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${m[1]}/header.jpg` : null, game.cover]
+  return [game.customCover ?? game.customHero ?? game.header ?? null, m ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${m[1]}/header.jpg` : null, coverFor({ ...game, hero: game.hero ?? null })]
 }
 
 /* ── Launch entries ──────────────────────────────────────── */

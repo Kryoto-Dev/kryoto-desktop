@@ -127,7 +127,7 @@ fn stored(g: &LibraryGame, folder: PathBuf) -> StoredGame {
         bytes: library::dir_size(&folder),
         folder: folder.to_string_lossy().into_owned(),
         last_played: g.last_played,
-        cover: g.cover.clone(),
+        cover: g.custom_cover.clone().or_else(|| g.cover.clone()),
         nsfw: g.nsfw,
     }
 }
