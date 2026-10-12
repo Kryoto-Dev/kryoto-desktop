@@ -187,7 +187,9 @@ pub fn find_in_folder(dir: &Path, not: u32, before: &HashSet<u32>) -> Option<u32
         if pid == not || pid == std::process::id() || before.contains(&pid) {
             return None;
         }
-        if p.status() == sysinfo::ProcessStatus::Zombie {
+        // Linux lists individual threads beside processes. Following a new
+        // worker's TID would mistake launcher activity for the game itself.
+        if p.thread_kind().is_some() || p.status() == sysinfo::ProcessStatus::Zombie {
             return None;
         }
         let by_exe = p.exe().map(|e| normalise(e).starts_with(&root)).unwrap_or(false);
@@ -258,6 +260,15 @@ mod tests {
     fn a_real_handoff_stops_the_new_process_and_preserves_existing_ones() {
         let mut unrelated = helper("30").spawn().unwrap();
         let before = existing();
+        // Keep a new launcher thread alive during the scan. On Linux it has
+        // the same exe and command line as this harness, but is not a game.
+        let (wake, sleeping) = std::sync::mpsc::channel();
+        let (ready, started) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            sleeping.recv().unwrap();
+        });
+        started.recv().unwrap();
         let root = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
         let session = Session::default();
         session.track(&root, &before);
@@ -266,6 +277,8 @@ mod tests {
         assert!(launcher.wait().unwrap().success());
         let mut game = helper("30").spawn().unwrap();
         let next = find_in_folder(&root, pid, &before);
+        wake.send(()).unwrap();
+        worker.join().unwrap();
         if next != Some(game.id()) {
             let _ = game.kill();
             let _ = game.wait();
