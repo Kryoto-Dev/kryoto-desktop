@@ -45,7 +45,7 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
     setBusy({ step: 'Starting', fraction: null })
     try {
       const tool = await call<CompatTool>('compat_install')
-      if (!s.defaultCompatTool) set('defaultCompatTool', tool.path)
+      if (!s.defaultCompatTool || !status?.tools.some((t) => t.path === s.defaultCompatTool)) set('defaultCompatTool', tool.path)
     } catch (e) {
       setError(errorText(e))
     } finally {

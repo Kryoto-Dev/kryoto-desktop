@@ -1,7 +1,7 @@
 {
   "name": "kryoto-desktop",
   "private": true,
-  "version": "0.2.14",
+  "version": "0.2.15",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -33,6 +33,7 @@
     "@types/node": "^26.6.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "playwright": "1.62.1",
     "sharp": "0.34.5",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.6.0",

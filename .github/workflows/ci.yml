@@ -44,7 +44,7 @@ jobs:
           '
 
   ui:
-    name: UI (typecheck, build)
+    name: UI (typecheck, build, browser tests)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -58,6 +58,24 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+
+      - name: Install the test browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser regressions, including Play and Stop
+        run: |
+          pnpm dev --host 127.0.0.1 > /tmp/kryoto-ui.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:1421/test/launch.html > /dev/null; then
+              node scripts/check-ui.mjs
+              exit $?
+            fi
+            sleep 1
+          done
+          cat /tmp/kryoto-ui.log
+          exit 1
 
   native:
     name: Native (${{ matrix.os }})

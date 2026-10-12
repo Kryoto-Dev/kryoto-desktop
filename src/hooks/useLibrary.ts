@@ -23,6 +23,8 @@ export function useLibrary() {
   const [starting, setStarting] = useState<Set<string>>(new Set())
   /** Stop was pressed before the process existed: stop it as soon as it does. */
   const stopWhenUp = useRef<Set<string>>(new Set())
+  const pendingLaunches = useRef<Map<string, { cancelled: boolean; stopped: boolean }>>(new Map())
+  const runningRevision = useRef(0)
   const without = (set: Set<string>, id: string) => {
     if (!set.has(id)) return set
     const next = new Set(set)
@@ -45,11 +47,12 @@ export function useLibrary() {
 
   const reload = useCallback(async () => {
     const request = ++generation.current
+    const revision = runningRevision.current
     try {
       const [list, live] = await Promise.all([library.list(), library.running()])
       if (request !== generation.current) return
       setGames(list)
-      setRunning(new Set(live))
+      if (revision === runningRevision.current) setRunning(new Set(live.filter(id => !stopWhenUp.current.has(id))))
       setRefreshError(null)
     } catch (e) {
       if (request === generation.current) setRefreshError(errorText(e))
@@ -75,32 +78,35 @@ export function useLibrary() {
   }, [reload])
 
   useEffect(() => {
-    void reload()
     let stop: (() => void) | undefined
     let cancelled = false
     void library
       .onState((event) => {
+        const cancelledStart = stopWhenUp.current.has(event.id)
+        runningRevision.current++
         setRunning((current) => {
           const next = new Set(current)
-          if (event.running) next.add(event.id)
+          if (event.running && !cancelledStart) next.add(event.id)
           else next.delete(event.id)
           return next
         })
         setStarting((current) => without(current, event.id))
-        if (event.running && stopWhenUp.current.delete(event.id)) void library.stop(event.id).catch(() => {})
+        if (event.running && stopWhenUp.current.has(event.id)) void library.stop(event.id).catch((e) => setError(errorText(e)))
         if (!event.running) {
           void reload()
           // A game gone within seconds almost never ran - say so instead of
           // leaving a Play button that silently did nothing.
-          if ((event.seconds ?? 0) < 5) {
+          if (!event.stopped && !stopWhenUp.current.has(event.id) && (event.seconds ?? 0) < 5) {
             const [message, quiet] = quickExit(event.code)
             setError(message, quiet)
           }
+          stopWhenUp.current.delete(event.id)
         }
       })
       .then((fn) => {
         if (cancelled) fn()
         else stop = fn
+        if (!cancelled) void reload()
       })
     return () => {
       cancelled = true
@@ -109,38 +115,62 @@ export function useLibrary() {
   }, [reload])
 
   const play = useCallback(async (id: string, entry: number | null, joinLobby?: string) => {
+    if (pendingLaunches.current.has(id)) return
+    const request = { cancelled: false, stopped: false }
+    pendingLaunches.current.set(id, request)
+    stopWhenUp.current.delete(id)
     setError(null)
     setStarting((current) => new Set(current).add(id))
     try {
       await library.launch(id, entry, joinLobby)
-      // A launch that went through always reports its process; one that
-      // somehow did not must not leave the button on Running for good.
-      window.setTimeout(() => {
-        setStarting((current) => {
-          if (!current.has(id)) return current
-          void reload()
-          return without(current, id)
-        })
-      }, 20_000)
+      if (request.cancelled && !request.stopped) await library.stop(id)
+      // Reconcile even if the start/exit event arrived before the listener.
+      if (pendingLaunches.current.get(id) === request) {
+        setStarting((current) => without(current, id))
+        void reload()
+      }
     } catch (e) {
       // It never started: back to Play, and say why.
-      setStarting((current) => without(current, id))
-      stopWhenUp.current.delete(id)
-      setError(errorText(e))
+      if (pendingLaunches.current.get(id) === request) {
+        setStarting((current) => without(current, id))
+        if (!request.cancelled) setError(errorText(e))
+      }
+    } finally {
+      if (pendingLaunches.current.get(id) === request) pendingLaunches.current.delete(id)
+      if (!pendingLaunches.current.has(id)) stopWhenUp.current.delete(id)
     }
   }, [reload])
 
   const stopGame = useCallback(async (id: string) => {
-    if (starting.has(id) && !running.has(id)) {
-      stopWhenUp.current.add(id)
-      return
-    }
+    stopWhenUp.current.add(id)
+    const pending = pendingLaunches.current.get(id)
+    if (pending) pending.cancelled = true
     try {
       await library.stop(id)
+      if (pending) {
+        pending.stopped = true
+        if (pendingLaunches.current.get(id) === pending) pendingLaunches.current.delete(id)
+      }
+      runningRevision.current++
+      setStarting((current) => without(current, id))
+      setRunning((current) => without(current, id))
+      void reload()
     } catch (e) {
-      setError(errorText(e))
+      // The stop request can reach Rust before the launch command. Keep the
+      // cancellation queued for its acknowledgement, with immediate feedback.
+      if (errorText(e).includes('not running')) {
+        runningRevision.current++
+        setStarting((current) => without(current, id))
+        setRunning((current) => without(current, id))
+        if (!pending) stopWhenUp.current.delete(id)
+        void reload()
+      } else {
+        if (pending) pending.cancelled = false
+        stopWhenUp.current.delete(id)
+        setError(errorText(e))
+      }
     }
-  }, [starting, running])
+  }, [reload])
 
   const upsert = useCallback((game: LibraryGame) => {
     setGames((list) => {
@@ -156,6 +186,14 @@ export function useLibrary() {
 
   // Starting counts as running everywhere the client shows it.
   const live = useMemo(() => (starting.size ? new Set([...running, ...starting]) : running), [running, starting])
+
+  // IPC events can be missed during a remount or a reload. Confirm active
+  // sessions against Rust so a lost exit event cannot leave Stop stuck.
+  useEffect(() => {
+    if (!live.size) return
+    const timer = window.setInterval(() => void reload(), 2_000)
+    return () => window.clearInterval(timer)
+  }, [live.size, reload])
 
   return { games, running: live, loaded, error: error ?? refreshError, errorQuiet: error ? errorQuiet : false, setError, reload, play, stop: stopGame, upsert, drop }
 }

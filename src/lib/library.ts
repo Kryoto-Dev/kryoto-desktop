@@ -174,7 +174,7 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
   })
 }
 
-export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null }
+export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null; stopped?: boolean }
 
 export const BLANK_GAME: LibraryGame = {
   id: '',

@@ -9,7 +9,7 @@ use crate::launch::{self, LaunchEntry, LaunchPlan};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
@@ -75,7 +75,7 @@ pub struct LibraryGame {
 }
 
 #[derive(Default)]
-pub struct Running(pub Mutex<HashMap<String, u32>>);
+pub struct Running(pub Mutex<HashMap<String, Arc<crate::handoff::Session>>>);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,6 +86,7 @@ struct GameEvent {
     seconds: Option<u64>,
     /// Exit code, when there is one.
     code: Option<i32>,
+    stopped: bool,
 }
 
 fn now() -> u64 {
@@ -199,10 +200,7 @@ fn recover<R: Runtime>(app: &AppHandle<R>) -> Vec<LibraryGame> {
         _ => (rebuild_from_folders(app), "the game folders"),
     };
     let _ = save(app, &games);
-    crate::logging::error(
-        "library",
-        &format!("library.json was damaged ({}); restored {} game(s) from {how}", damaged.display(), games.len()),
-    );
+    crate::logging::error("library", &format!("library.json was damaged ({}); restored {} game(s) from {how}", damaged.display(), games.len()));
     let body = if games.is_empty() {
         "Kryoto could not find your games again. Add them with Add a game, or ask support: the damaged list is kept.".to_string()
     } else {
@@ -335,10 +333,7 @@ async fn relink<R: Runtime>(app: &AppHandle<R>) {
 /// not lose either change.
 static WRITE: Mutex<()> = Mutex::new(());
 
-pub(crate) fn update<R: Runtime, T>(
-    app: &AppHandle<R>,
-    f: impl FnOnce(&mut Vec<LibraryGame>) -> Result<T, String>,
-) -> Result<T, String> {
+pub(crate) fn update<R: Runtime, T>(app: &AppHandle<R>, f: impl FnOnce(&mut Vec<LibraryGame>) -> Result<T, String>) -> Result<T, String> {
     let _guard = WRITE.lock().map_err(|_| "library lock poisoned")?;
     let mut games = load(app)?;
     let out = f(&mut games)?;
@@ -405,7 +400,14 @@ pub fn library_add(app: AppHandle, exe_path: String, mut game: LibraryGame) -> R
 
 /// Background art resolution must not overwrite a player's newer Properties edits.
 #[tauri::command(async)]
-pub fn library_artwork(app: AppHandle, id: String, cover: Option<String>, hero: Option<String>, logo: Option<String>, header: Option<String>) -> Result<LibraryGame, String> {
+pub fn library_artwork(
+    app: AppHandle,
+    id: String,
+    cover: Option<String>,
+    hero: Option<String>,
+    logo: Option<String>,
+    header: Option<String>,
+) -> Result<LibraryGame, String> {
     update(&app, |games| {
         let game = games.iter_mut().find(|g| g.id == id).ok_or("Game not found.")?;
         game.cover = cover.or(game.cover.take());
@@ -575,13 +577,6 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
     // on this computer (newest Proton, then umu-run, then Wine).
     let settings = crate::settings::load(app);
     let managed = crate::compat::managed_dir(app);
-    let own = game.compat_tool.clone().filter(|t| !t.trim().is_empty());
-    let fallback = settings.default_compat_tool.clone().filter(|t| !t.trim().is_empty());
-    let detected = if cfg!(windows) || own.is_some() || fallback.is_some() {
-        None
-    } else {
-        crate::compat::detect_in(managed.as_deref()).into_iter().next().map(|t| t.path)
-    };
     let umu = crate::compat::umu_run(managed.as_deref());
     // Settings > Compatibility's switches, only when the tool is really there.
     let mut wrappers = Vec::new();
@@ -599,9 +594,8 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
         // Settings > Controller's remaps, for SDL, Wine and Proton.
         env.extend(crate::pad::game_env(app));
     }
-    let tool = own.or(fallback).or(detected);
-    let tool_path = tool.as_deref().map(PathBuf::from);
-    let tool = tool.as_deref().map(Path::new);
+    let tool_path = tool_for(app, game, &settings)?;
+    let tool = tool_path.as_deref();
     let plan = launch::plan(&launch::PlanInput {
         install_dir: Path::new(&game.install_dir),
         executable: &game.executable,
@@ -620,6 +614,14 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
     Ok((plan, tool_path))
 }
 
+fn tool_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, settings: &crate::settings::Settings) -> Result<Option<PathBuf>, String> {
+    if cfg!(windows) {
+        return Ok(None);
+    }
+    let saved = game.compat_tool.as_deref().filter(|t| !t.trim().is_empty()).or(settings.default_compat_tool.as_deref().filter(|t| !t.trim().is_empty()));
+    crate::compat::resolve_tool(saved, &crate::compat::detect_in(crate::compat::managed_dir(app).as_deref()))
+}
+
 /// The exact line Play would run, for the Properties window.
 #[tauri::command(async)]
 pub fn game_launch_preview(app: AppHandle, game: LibraryGame, entry: Option<usize>) -> Result<String, String> {
@@ -628,23 +630,61 @@ pub fn game_launch_preview(app: AppHandle, game: LibraryGame, entry: Option<usiz
 
 #[tauri::command]
 pub fn game_running(running: State<'_, Running>) -> Vec<String> {
-    running.0.lock().map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    running.0.lock().map(|m| m.iter().filter(|(_, s)| !s.stopped()).map(|(id, _)| id.clone()).collect()).unwrap_or_default()
 }
 
 /// Start a game. `entry` is the Steam launch entry picked, or `None` for the
 /// release default.
-#[tauri::command(async)]
-pub fn game_launch(
-    app: AppHandle,
-    running: State<'_, Running>,
-    id: String,
-    entry: Option<usize>,
-    join_lobby: Option<String>,
-) -> Result<(), String> {
-    if running.0.lock().map(|m| m.contains_key(&id)).unwrap_or(false) {
-        return Err("It is already running.".into());
+#[tauri::command]
+pub async fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entry: Option<usize>, join_lobby: Option<String>) -> Result<(), String> {
+    let session = Arc::new(crate::handoff::Session::default());
+    {
+        let mut all = running.0.lock().map_err(|_| "state lock poisoned")?;
+        if all.get(&id).is_some_and(|s| !s.stopped() || s.pid().is_some()) {
+            return Err("It is already running.".into());
+        }
+        all.insert(id.clone(), session.clone());
     }
+    let task_id = id.clone();
+    let task_session = session.clone();
+    // Launch preparation includes synchronous file/process work and an async
+    // achievement fetch driven by block_on. It must run outside Tokio's async
+    // workers: nesting block_on there panics before any game is spawned.
+    let result = prepare_launch(move || launch_reserved(app, task_id, entry, join_lobby, task_session)).await;
+    if result.is_err() {
+        if let Ok(mut all) = running.0.lock() {
+            if all.get(&id).is_some_and(|s| Arc::ptr_eq(s, &session)) {
+                all.remove(&id);
+            }
+        }
+    }
+    result
+}
+
+async fn prepare_launch(task: impl FnOnce() -> Result<(), String> + Send + 'static) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(task).await.map_err(|e| format!("Could not prepare the game launch: {e}")).and_then(|result| result)
+}
+
+fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby: Option<String>, session: Arc<crate::handoff::Session>) -> Result<(), String> {
     let game = load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
+    if !cfg!(windows) {
+        let settings = crate::settings::load(&app);
+        let managed = crate::compat::managed_dir(&app);
+        // Recover the broken ARM install left by earlier releases if it is
+        // Kryoto's own tool and there is no usable replacement on the PC.
+        let mut tool = tool_for(&app, &game, &settings);
+        let saved = game.compat_tool.as_deref().or(settings.default_compat_tool.as_deref());
+        if tool.is_err() && saved.is_some_and(|p| managed.as_ref().is_some_and(|m| Path::new(p).starts_with(m))) {
+            tauri::async_runtime::block_on(crate::compat::compat_install(app.clone()))?;
+            tool = tool_for(&app, &game, &settings);
+        }
+        if tool?.is_some_and(|p| crate::compat::kind_of(&p) == "proton") && crate::compat::umu_run(managed.as_deref()).is_none() {
+            tauri::async_runtime::block_on(crate::compat::ensure_runtime(&app))?;
+        }
+    }
+    if session.stopped() {
+        return Err("Launch cancelled.".into());
+    }
     let (mut plan, tool) = plan_for(&app, &game, entry)?;
     crate::repair::can_launch(&app, &game)?;
     // From a game invite: start straight into the host's Steam lobby.
@@ -697,7 +737,7 @@ pub fn game_launch(
         plan.cwd = plan.exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(&game.install_dir));
     }
     if let Some(prefix) = plan.env.iter().find(|(k, _)| k == "WINEPREFIX" || k == "STEAM_COMPAT_DATA_PATH") {
-        let _ = std::fs::create_dir_all(&prefix.1);
+        std::fs::create_dir_all(&prefix.1).map_err(|e| format!("Could not create the game's compatibility prefix: {e}"))?;
     }
 
     // The name the player picked, into the emulator's files, before it reads them.
@@ -706,22 +746,13 @@ pub fn game_launch(
     crate::achievements::before_launch(&game);
 
     let mut cmd = launch::command(&plan);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Its own process group, so Stop takes Wine and everything it started.
-        cmd.process_group(0);
-    }
     // Everything the game (and Wine/Proton) prints goes into its log (game_logs.rs).
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let log = crate::game_logs::begin(&app, &game, &plan, tool.as_deref());
-    let mut child = match cmd.spawn() {
-        Ok(mut child) => {
-            if let Some(log) = &log {
-                log.capture(&mut child);
-            }
-            child
-        }
+    let before = crate::handoff::existing();
+    session.track(Path::new(&game.install_dir), &before);
+    let mut child = match session.spawn(&mut cmd) {
+        Ok(child) => child,
         // ERROR_ELEVATION_REQUIRED: the exe's manifest asks for administrator
         // rights, which a plain start cannot give. Ask Windows to elevate it
         // (the UAC prompt), through PowerShell so there is still a process to
@@ -731,7 +762,7 @@ pub fn game_launch(
             if let Some(log) = &log {
                 log.note("The game asks for administrator rights: started through Windows' prompt. Its output is not in this log.");
             }
-            elevated(&plan).spawn().map_err(|e| {
+            session.spawn(&mut elevated(&plan)).map_err(|e| {
                 let msg = format!("Could not start {} as administrator: {e}", plan.program.display());
                 if let Some(log) = &log {
                     log.note(&msg);
@@ -749,16 +780,17 @@ pub fn game_launch(
             return Err(msg);
         }
     };
+    if let Some(log) = &log { log.capture(&mut child); }
     let pid = child.id();
-    running.0.lock().map_err(|_| "state lock poisoned")?.insert(id.clone(), pid);
     let started = now();
+    let started_at = std::time::Instant::now();
     let _ = update(&app, |games| {
         if let Some(g) = games.iter_mut().find(|g| g.id == id) {
             g.last_played = Some(started);
         }
         Ok(())
     });
-    let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None });
+    let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None, stopped: false });
     crate::achievements::watch(app.clone(), &game, crate::achievements::roots_for(&plan.env));
     if crate::settings::load(&app).minimize_on_play {
         if let Some(w) = app.get_window("main") {
@@ -769,17 +801,23 @@ pub fn game_launch(
     let install_dir = PathBuf::from(&game.install_dir);
     std::thread::spawn(move || {
         let status = child.wait().ok();
+        let exited_after = started_at.elapsed().as_secs();
         let mut code = status.and_then(|s| s.code());
         let mut followed = None;
         // A quick exit is often a hand-over (a launcher, a game restarting
         // itself), not a crash: follow the process now running from the game's
         // folder, so Stop, "Playing" and the playtime all carry on with it.
-        if now().saturating_sub(started) < crate::handoff::HANDOFF_WITHIN_SECS {
-            if let Some(next) = crate::handoff::look_for(&install_dir, pid) {
-                if let Some(state) = app.try_state::<Running>() {
-                    if let Ok(mut m) = state.0.lock() {
-                        m.insert(id.clone(), next);
-                    }
+        if !session.stopped() {
+            // Failed starts should report immediately, without a 20s search
+            // concealing the error. Already-running children still count.
+            let next = crate::handoff::find_in_folder(&install_dir, pid, &before).or_else(|| {
+                status
+                    .filter(|s| s.success() && exited_after < crate::handoff::HANDOFF_WITHIN_SECS)
+                    .and_then(|_| crate::handoff::look_for(&install_dir, pid, &before, &session))
+            });
+            if let Some(next) = next {
+                if let Err(e) = session.follow(next) {
+                    crate::logging::error("library", &e);
                 }
                 crate::logging::info("library", &format!("{id}: followed the game to process {next}"));
                 followed = Some(next);
@@ -787,13 +825,15 @@ pub fn game_launch(
                 code = None;
             }
         }
-        let seconds = now().saturating_sub(started);
+        let seconds = if followed.is_some() { started_at.elapsed().as_secs() } else { exited_after };
         if let Some(log) = &log {
             log.finish(code, seconds, followed);
         }
         if let Some(state) = app.try_state::<Running>() {
             if let Ok(mut m) = state.0.lock() {
-                m.remove(&id);
+                if m.get(&id).is_some_and(|s| Arc::ptr_eq(s, &session)) {
+                    m.remove(&id);
+                }
             }
         }
         let _ = update(&app, |games| {
@@ -802,10 +842,7 @@ pub fn game_launch(
             }
             Ok(())
         });
-        let _ = app.emit(
-            "game-state",
-            GameEvent { id, running: false, seconds: Some(seconds), code },
-        );
+        let _ = app.emit("game-state", GameEvent { id, running: false, seconds: Some(seconds), code, stopped: session.stopped() });
     });
     Ok(())
 }
@@ -842,48 +879,32 @@ fn find_by_name(dir: &Path, name: &std::ffi::OsStr, depth: usize) -> Option<Path
 fn elevated(plan: &launch::LaunchPlan) -> std::process::Command {
     use std::os::windows::process::CommandExt;
     let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let mut script = format!(
-        "Start-Process -Verb RunAs -Wait -FilePath {} -WorkingDirectory {}",
+    let mut script = "$ErrorActionPreference='Stop'; ".to_string();
+    for (key, value) in &plan.env {
+        script.push_str(&format!("[Environment]::SetEnvironmentVariable({}, {}, 'Process'); ", quote(key), quote(value)));
+    }
+    script.push_str(&format!(
+        "try {{ $game = Start-Process -Verb RunAs -Wait -PassThru -FilePath {} -WorkingDirectory {}",
         quote(&plan.program.to_string_lossy()),
         quote(&plan.cwd.to_string_lossy()),
-    );
-    let args: Vec<String> = plan
-        .lead_args
-        .iter()
-        .cloned()
-        .chain((!plan.game_args.trim().is_empty()).then(|| plan.game_args.clone()))
-        .collect();
+    ));
+    let args: Vec<String> = plan.lead_args.iter().cloned().chain((!plan.game_args.trim().is_empty()).then(|| plan.game_args.clone())).collect();
     if !args.is_empty() {
         script.push_str(&format!(" -ArgumentList {}", quote(&args.join(" "))));
     }
+    script.push_str("; exit $game.ExitCode } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }");
     let mut cmd = std::process::Command::new("powershell");
     cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     cmd
 }
 
 /// Close a running game and everything it started.
 #[tauri::command(async)]
 pub fn game_stop(running: State<'_, Running>, id: String) -> Result<(), String> {
-    let pid = running
-        .0
-        .lock()
-        .map_err(|_| "state lock poisoned")?
-        .get(&id)
-        .copied()
-        .ok_or("It is not running.")?;
-    #[cfg(windows)]
-    let status = {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .status()
-    };
-    #[cfg(not(windows))]
-    let status = std::process::Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).status();
-    status.map_err(|e| e.to_string())?;
-    Ok(())
+    let session = running.0.lock().map_err(|_| "state lock poisoned")?.get(&id).cloned().ok_or("It is not running.")?;
+    session.stop()
 }
 
 /// Show a folder in the file manager.
@@ -918,7 +939,46 @@ pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{from_folder, parse, slugify, LibraryGame, MARKER};
+    use super::{from_folder, parse, prepare_launch, slugify, LibraryGame, MARKER};
+
+    #[test]
+    fn achievement_setup_in_an_async_launch_reaches_the_game_process() {
+        let root = std::env::temp_dir().join(format!("kryoto-async-launch-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("steam_appid.txt"), "620").unwrap();
+        let game = LibraryGame { install_dir: root.to_string_lossy().into_owned(), ..Default::default() };
+        let cwd = root.clone();
+        let result = tauri::async_runtime::block_on(async move {
+            prepare_launch(move || {
+                // This used to nest block_on on an async worker, panic, and
+                // leave Play waiting forever. No Steam request is needed here.
+                crate::achievements::before_launch(&game);
+                let plan = crate::launch::LaunchPlan {
+                    program: std::path::PathBuf::from(if cfg!(windows) { "cmd" } else { "true" }),
+                    game_args: if cfg!(windows) { "/C exit 0".into() } else { String::new() },
+                    lead_args: Vec::new(),
+                    env: Vec::new(),
+                    cwd,
+                    exe: std::path::PathBuf::new(),
+                };
+                let status = crate::launch::command(&plan).status().map_err(|e| e.to_string())?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err("The stand-in game did not start.".into())
+                }
+            })
+            .await
+        });
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn preparation_panics_reject_the_launch_instead_of_losing_its_ipc_reply() {
+        let result = tauri::async_runtime::block_on(prepare_launch(|| panic!("synthetic launch failure")));
+        assert!(result.unwrap_err().contains("Could not prepare the game launch"));
+    }
 
     #[test]
     fn a_zeroed_or_empty_list_is_damaged_not_empty() {

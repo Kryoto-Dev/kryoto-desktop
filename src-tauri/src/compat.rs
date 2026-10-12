@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Runtime};
 
+// Several Play presses and Settings can need the same missing runtime.
+// Serialize writes so they cannot unpack over one another's download.
+static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompatTool {
@@ -35,7 +39,8 @@ pub fn managed_dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
 #[cfg(unix)]
 pub fn on_path(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
+    let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+    std::env::split_paths(&path).filter(|d| !appdir.as_ref().is_some_and(|root| d.starts_with(root))).map(|d| d.join(program)).find(|p| p.is_file())
 }
 
 #[cfg(not(unix))]
@@ -62,7 +67,7 @@ fn protons_in(dirs: &[PathBuf]) -> Vec<CompatTool> {
         let Ok(read) = std::fs::read_dir(dir) else { continue };
         for entry in read.flatten() {
             let script = entry.path().join("proton");
-            if script.is_file() {
+            if script.is_file() && proton_matches_arch(&script, std::env::consts::ARCH) {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let path = script.to_string_lossy().into_owned();
                 if !out.iter().any(|t: &CompatTool| t.path == path) {
@@ -107,18 +112,63 @@ fn natural_key(s: &str) -> Vec<(u8, u64, String)> {
 
 #[cfg_attr(not(unix), allow(dead_code))]
 fn proton_dirs(home: &Path) -> Vec<PathBuf> {
-    let steams = [
+    let steams = steam_roots(home);
+    let mut dirs: Vec<PathBuf> = steams.iter().flat_map(|s| [s.join("compatibilitytools.d"), s.join("steamapps/common")]).collect();
+    dirs.push(PathBuf::from("/usr/share/steam/compatibilitytools.d"));
+    dirs
+}
+
+pub fn steam_roots(home: &Path) -> Vec<PathBuf> {
+    vec![
         home.join(".steam/steam"),
         home.join(".steam/root"),
         home.join(".local/share/Steam"),
         home.join(".var/app/com.valvesoftware.Steam/data/Steam"),
-    ];
-    let mut dirs: Vec<PathBuf> = steams
-        .iter()
-        .flat_map(|s| [s.join("compatibilitytools.d"), s.join("steamapps/common")])
-        .collect();
-    dirs.push(PathBuf::from("/usr/share/steam/compatibilitytools.d"));
-    dirs
+        home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    ]
+}
+
+/// Old clients picked the first archive, which can be ARM on an Intel PC.
+/// Check both the directory label and Wine's ELF header for custom installs.
+pub fn proton_matches_arch(tool: &Path, arch: &str) -> bool {
+    let Some(dir) = tool.parent() else {
+        return false;
+    };
+    let name = dir.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+    if (name.contains("aarch64") || name.contains("arm64")) && arch != "aarch64" {
+        return false;
+    }
+    if (name.contains("x86_64") || name.contains("amd64")) && arch != "x86_64" {
+        return false;
+    }
+    for rel in ["files/bin/wine", "files/bin/wine64", "dist/bin/wine", "dist/bin/wine64"] {
+        use std::io::Read;
+        let mut header = [0; 20];
+        if std::fs::File::open(dir.join(rel)).and_then(|mut f| f.read_exact(&mut header)).is_ok() && &header[..4] == b"\x7fELF" {
+            let machine = if header[5] == 2 { u16::from_be_bytes([header[18], header[19]]) } else { u16::from_le_bytes([header[18], header[19]]) };
+            return matches!((arch, machine), ("x86_64", 62 | 3) | ("aarch64", 183));
+        }
+    }
+    true
+}
+
+/// Recover a missing or wrong-architecture saved pick using a working tool.
+pub fn resolve_tool(saved: Option<&str>, tools: &[CompatTool]) -> Result<Option<PathBuf>, String> {
+    if let Some(saved) = saved {
+        let path = PathBuf::from(saved);
+        let resolved = if path.components().count() == 1 { on_path(saved) } else { path.is_file().then_some(path.clone()) };
+        if let Some(tool) = resolved {
+            if kind_of(&tool) != "proton" || proton_matches_arch(&tool, std::env::consts::ARCH) {
+                return Ok(Some(tool));
+            }
+        }
+        // A valid replacement avoids leaving existing installations broken.
+        if let Some(tool) = tools.first() {
+            return Ok(Some(PathBuf::from(&tool.path)));
+        }
+        return Err(format!("The compatibility tool {saved} is missing or does not match this computer ({}). Get Proton in Settings > Compatibility, or pick an installed Wine tool.", std::env::consts::ARCH));
+    }
+    Ok(tools.first().map(|t| PathBuf::from(&t.path)))
 }
 
 #[cfg(unix)]
@@ -205,6 +255,19 @@ struct Asset {
     browser_download_url: String,
 }
 
+fn proton_asset<'a>(release: &'a Release, arch: &str) -> Result<&'a Asset, String> {
+    let explicit = match arch {
+        "x86_64" | "aarch64" => format!("{}-{arch}.tar.gz", release.tag_name),
+        _ => return Err(format!("Proton downloads are not available for {arch}.")),
+    };
+    release
+        .assets
+        .iter()
+        .find(|a| a.name == explicit)
+        .or_else(|| (arch == "x86_64").then(|| release.assets.iter().find(|a| a.name == format!("{}.tar.gz", release.tag_name))).flatten())
+        .ok_or_else(|| format!("That Proton-GE release has no download for {arch}."))
+}
+
 #[derive(Clone, Serialize)]
 struct Progress {
     step: String,
@@ -260,13 +323,9 @@ async fn fetch<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, url: &s
 async fn untar(archive: &Path, into: &Path) -> Result<(), String> {
     let (archive, into) = (archive.to_path_buf(), into.to_path_buf());
     tauri::async_runtime::spawn_blocking(move || {
-        let out = std::process::Command::new("tar")
-            .arg("-xf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&into)
-            .output()
-            .map_err(|e| format!("Could not run tar: {e}"))?;
+        let mut cmd = std::process::Command::new("tar");
+        crate::launch::clean_appimage_env(&mut cmd);
+        let out = cmd.arg("-xf").arg(&archive).arg("-C").arg(&into).output().map_err(|e| format!("Could not run tar: {e}"))?;
         if out.status.success() {
             Ok(())
         } else {
@@ -292,25 +351,31 @@ pub async fn compat_install(app: AppHandle) -> Result<CompatTool, String> {
     if cfg!(windows) {
         return Err("Windows runs these games itself.".into());
     }
+    let _install = INSTALL.lock().await;
     let dir = managed_dir(&app).ok_or("No app data folder.")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let client = reqwest::Client::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(900))
         .build()
         .map_err(|e| e.to_string())?;
 
     progress(&app, "Looking for the newest Proton-GE", None);
     let rel = latest(&client, "GloriousEggroll/proton-ge-custom").await?;
-    let proton = dir.join(&rel.tag_name).join("proton");
-    if !proton.is_file() {
-        let tar = rel
-            .assets
-            .iter()
-            .find(|a| a.name.ends_with(".tar.gz"))
-            .ok_or("That Proton-GE release has no download.")?;
+    let tar = proton_asset(&rel, std::env::consts::ARCH)?;
+    let folder = tar.name.trim_end_matches(".tar.gz");
+    let mut proton = dir.join(folder).join("proton");
+    // Some releases use a version-only folder inside an architecture-labelled archive.
+    let legacy = dir.join(&rel.tag_name).join("proton");
+    if !proton.is_file() && legacy.is_file() && proton_matches_arch(&legacy, std::env::consts::ARCH) {
+        proton = legacy;
+    }
+    if !proton.is_file() || !proton_matches_arch(&proton, std::env::consts::ARCH) {
         let archive = dir.join(format!(".{}", tar.name));
         fetch(&app, &client, &tar.browser_download_url, &archive, &format!("Downloading {}", rel.tag_name)).await?;
-        if let Some(sum) = rel.assets.iter().find(|a| a.name.ends_with(".sha512sum")) {
+        let checksum = format!("{folder}.sha512sum");
+        if let Some(sum) = rel.assets.iter().find(|a| a.name == checksum) {
             progress(&app, "Checking the download", None);
             let want = client
                 .get(&sum.browser_download_url)
@@ -336,22 +401,48 @@ pub async fn compat_install(app: AppHandle) -> Result<CompatTool, String> {
         let _ = std::fs::remove_file(&archive);
         unpacked?;
         if !proton.is_file() {
+            proton = dir.join(&rel.tag_name).join("proton");
+        }
+        if !proton.is_file() {
             return Err(format!("{} unpacked without its proton script.", rel.tag_name));
+        }
+        if !proton_matches_arch(&proton, std::env::consts::ARCH) {
+            return Err("The downloaded Proton does not match this computer's architecture.".into());
         }
         crate::logging::info("compat", &format!("installed {}", rel.tag_name));
     }
 
+    install_umu(&app, &client, &dir).await?;
+
+    progress(&app, "Ready", Some(1.0));
+    Ok(CompatTool { name: folder.to_string(), path: proton.to_string_lossy().into_owned(), kind: "proton".into(), managed: true })
+}
+
+pub async fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
+    let _install = INSTALL.lock().await;
+    let dir = managed_dir(app).ok_or("No app data folder.")?;
+    if let Some(path) = umu_run(Some(&dir)) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    install_umu(app, &client, &dir).await?;
+    umu_run(Some(&dir)).ok_or("The game runtime launcher could not be installed.".into())
+}
+
+async fn install_umu(app: &AppHandle, client: &reqwest::Client, dir: &Path) -> Result<(), String> {
     if !dir.join("umu").join("umu-run").is_file() {
-        progress(&app, "Looking for the Steam runtime launcher (umu)", None);
-        let umu = latest(&client, "Open-Wine-Components/umu-launcher").await?;
-        let tar = umu
-            .assets
-            .iter()
-            .find(|a| a.name.ends_with("zipapp.tar"))
-            .ok_or("That umu release has no download.")?;
+        progress(app, "Looking for the Steam runtime launcher (umu)", None);
+        let umu = latest(client, "Open-Wine-Components/umu-launcher").await?;
+        let tar = umu.assets.iter().find(|a| a.name.ends_with("zipapp.tar")).ok_or("That umu release has no download.")?;
         let archive = dir.join(format!(".{}", tar.name));
-        fetch(&app, &client, &tar.browser_download_url, &archive, &format!("Downloading umu {}", umu.tag_name)).await?;
-        let unpacked = untar(&archive, &dir).await;
+        fetch(app, client, &tar.browser_download_url, &archive, &format!("Downloading umu {}", umu.tag_name)).await?;
+        let unpacked = untar(&archive, dir).await;
         let _ = std::fs::remove_file(&archive);
         unpacked?;
         if !dir.join("umu").join("umu-run").is_file() {
@@ -360,13 +451,7 @@ pub async fn compat_install(app: AppHandle) -> Result<CompatTool, String> {
         crate::logging::info("compat", &format!("installed umu {}", umu.tag_name));
     }
 
-    progress(&app, "Ready", Some(1.0));
-    Ok(CompatTool {
-        name: rel.tag_name,
-        path: proton.to_string_lossy().into_owned(),
-        kind: "proton".into(),
-        managed: true,
-    })
+    Ok(())
 }
 
 /// Remove a Proton (or umu) the client downloaded. Nothing outside its own
@@ -390,6 +475,60 @@ pub async fn compat_remove(app: AppHandle, path: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn release(names: &[&str]) -> Release {
+        Release {
+            tag_name: "GE-Proton11-7".into(),
+            assets: names.iter().map(|name| Asset { name: (*name).into(), browser_download_url: String::new() }).collect(),
+        }
+    }
+
+    #[test]
+    fn download_selection_matches_the_host_even_when_arm_is_first() {
+        let rel = release(&["GE-Proton11-7-aarch64.tar.gz", "GE-Proton11-7-x86_64.tar.gz"]);
+        assert_eq!(proton_asset(&rel, "x86_64").unwrap().name, "GE-Proton11-7-x86_64.tar.gz");
+        assert_eq!(proton_asset(&rel, "aarch64").unwrap().name, "GE-Proton11-7-aarch64.tar.gz");
+        assert!(proton_asset(&rel, "x86").is_err());
+        assert!(proton_asset(&release(&["GE-Proton11-7-aarch64.tar.gz"]), "x86_64").is_err());
+        let legacy = release(&["GE-Proton11-7.tar.gz"]);
+        assert!(proton_asset(&legacy, "x86_64").is_ok());
+        assert!(proton_asset(&legacy, "aarch64").is_err());
+    }
+
+    #[test]
+    fn wrong_architecture_is_rejected_by_label_and_elf_header() {
+        assert!(!proton_matches_arch(Path::new("/compat/GE-Proton11-7-aarch64/proton"), "x86_64"));
+        assert!(!proton_matches_arch(Path::new("/compat/GE-Proton11-7-x86_64/proton"), "aarch64"));
+        let root = std::env::temp_dir().join(format!("kryoto-arch-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("files/bin")).unwrap();
+        let mut header = [0u8; 20];
+        header[..4].copy_from_slice(b"\x7fELF");
+        header[5] = 1;
+        header[18..20].copy_from_slice(&183u16.to_le_bytes());
+        std::fs::write(root.join("files/bin/wine"), header).unwrap();
+        assert!(!proton_matches_arch(&root.join("proton"), "x86_64"));
+        assert!(proton_matches_arch(&root.join("proton"), "aarch64"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovery_checks_both_flatpak_steam_layouts() {
+        let home = std::env::temp_dir().join(format!("kryoto-steam-roots-{}", std::process::id()));
+        for root in steam_roots(&home).into_iter().filter(|p| p.to_string_lossy().contains("com.valvesoftware.Steam")) {
+            let proton = root.join("compatibilitytools.d/GE-Proton9-27/proton");
+            std::fs::create_dir_all(proton.parent().unwrap()).unwrap();
+            std::fs::write(&proton, "#!/bin/sh\n").unwrap();
+        }
+        assert_eq!(protons_in(&proton_dirs(&home)).len(), 2);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn invalid_saved_tool_recovers_to_a_detected_tool_or_explains_the_failure() {
+        let tools = vec![CompatTool { name: "working".into(), path: "/working/proton".into(), kind: "proton".into(), managed: true }];
+        assert_eq!(resolve_tool(Some("/missing/proton"), &tools).unwrap(), Some(PathBuf::from("/working/proton")));
+        assert!(resolve_tool(Some("/missing/proton"), &[]).unwrap_err().contains("Get Proton"));
+    }
 
     #[test]
     fn newer_protons_come_first() {

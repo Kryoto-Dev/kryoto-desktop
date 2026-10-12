@@ -138,7 +138,7 @@ fn process_alive(pid: u32) -> bool {
 /// The Steam lobby a running game of ours is in, if Kryoto Online reported one.
 #[tauri::command(async)]
 pub fn online_lobby(app: AppHandle, running: State<'_, Running>, id: String) -> Option<Lobby> {
-    let pid = running.0.lock().ok()?.get(&id).copied()?;
+    let pid = running.0.lock().ok()?.get(&id)?.pid()?;
     pick(&lobby_dirs(&app, &id), Some(pid), process_alive)
 }
 

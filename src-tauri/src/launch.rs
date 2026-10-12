@@ -257,12 +257,9 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
     };
 
     let line = parse_line(input.launch_options);
-    let game_args = [entry_args, line.extra_args.as_str()]
-        .iter()
-        .filter(|s| !s.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let existing_prefix = input.prefix_dir.join("pfx");
+    let wine_prefix = if existing_prefix.is_dir() { existing_prefix.as_path() } else { input.prefix_dir };
+    let game_args = [entry_args, line.extra_args.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ");
     let mut env = line.env.clone();
 
     let mut chain: Vec<String> = Vec::new();
@@ -279,9 +276,9 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
         for (k, v) in &input.env {
             set_default(&mut env, k, v);
         }
-        let tool = input.compat_tool.ok_or(
-            "This is a Windows game. Get Proton in Settings, Compatibility, or pick Wine or Proton under Properties, Compatibility.",
-        )?;
+        let tool = input
+            .compat_tool
+            .ok_or("This is a Windows game. Get Proton in Settings, Compatibility, or pick Wine or Proton under Properties, Compatibility.")?;
         let kind = crate::compat::kind_of(tool);
         let through_umu = kind == "proton" && input.umu.is_some();
         if through_umu {
@@ -293,38 +290,16 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
             // Steam's way: the Proton picked, run by umu inside the runtime.
             let proton_dir = tool.parent().unwrap_or(tool);
             set_default(&mut env, "PROTONPATH", &proton_dir.to_string_lossy());
-            set_default(&mut env, "WINEPREFIX", &input.prefix_dir.to_string_lossy());
-            set_default(&mut env, "GAMEID", "0");
+            set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
+            set_default(&mut env, "GAMEID", "umu-default");
         } else if kind == "umu" {
             // umu-run is Proton outside Steam: a prefix and a game id is all it needs.
-            set_default(&mut env, "WINEPREFIX", &input.prefix_dir.to_string_lossy());
-            set_default(&mut env, "GAMEID", "0");
+            set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
+            set_default(&mut env, "GAMEID", "umu-default");
         } else if kind == "proton" {
-            chain.push("run".into());
-            set_default(&mut env, "STEAM_COMPAT_DATA_PATH", &input.prefix_dir.to_string_lossy());
-            
-            // FIX: Dynamically resolve the correct Steam client installation path.
-            // Required because Arch Linux / CachyOS use ~/.local/share/Steam instead of ~/.steam/steam
-            // which causes "bare" Proton to fail silently.
-            let client = std::env::var("HOME")
-                .map(|h| {
-                    let arch_path = format!("{h}/.local/share/Steam");
-                    let flatpak_path = format!("{h}/.var/app/com.valvesoftware.Steam/.local/share/Steam");
-                    let ubuntu_path = format!("{h}/.steam/steam");
-
-                    if Path::new(&arch_path).exists() {
-                        arch_path
-                    } else if Path::new(&flatpak_path).exists() {
-                        flatpak_path
-                    } else {
-                        ubuntu_path // Fallback to default Ubuntu path
-                    }
-                })
-                .unwrap_or_else(|_| "/tmp".into());
-                
-            set_default(&mut env, "STEAM_COMPAT_CLIENT_INSTALL_PATH", &client);
+            return Err("Proton needs its game runtime. Get Proton in Settings > Compatibility to set it up, or pick Wine.".into());
         } else {
-            set_default(&mut env, "WINEPREFIX", &input.prefix_dir.to_string_lossy());
+            set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
         }
         if input.apply_overrides {
             if let Some(o) = wine_overrides_for(input.source) {
@@ -352,6 +327,7 @@ fn set_default(env: &mut Vec<(String, String)>, key: &str, value: &str) {
 /// Build the `Command` for a plan.
 pub fn command(plan: &LaunchPlan) -> std::process::Command {
     let mut cmd = std::process::Command::new(&plan.program);
+    clean_appimage_env(&mut cmd);
     cmd.args(&plan.lead_args);
     if !plan.game_args.is_empty() {
         #[cfg(windows)]
@@ -374,6 +350,62 @@ pub fn command(plan: &LaunchPlan) -> std::process::Command {
         cmd.process_group(0);
     }
     cmd
+}
+
+/// Keep the AppImage's Python and libraries out of external programs. Only
+/// entries under its mount are removed; host paths and explicit launch options
+/// survive. Never mutate Kryoto's own environment while other threads use it.
+pub fn clean_appimage_env(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "linux")]
+    if let Some(root) = std::env::var_os("APPDIR").map(PathBuf::from) {
+        apply_appimage_env(cmd, &root, std::env::vars_os());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cmd;
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn apply_appimage_env(cmd: &mut std::process::Command, root: &Path, vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>) {
+    if !root.is_absolute() {
+        return;
+    }
+    for (key, value) in vars {
+        if !matches!(
+            key.to_str(),
+            Some(
+                "PATH"
+                    | "LD_LIBRARY_PATH"
+                    | "LD_PRELOAD"
+                    | "PYTHONHOME"
+                    | "PYTHONPATH"
+                    | "GIO_EXTRA_MODULES"
+                    | "GIO_MODULE_DIR"
+                    | "GI_TYPELIB_PATH"
+                    | "GSETTINGS_SCHEMA_DIR"
+                    | "QT_PLUGIN_PATH"
+                    | "QT_QPA_PLATFORM_PLUGIN_PATH"
+                    | "GTK_PATH"
+                    | "GTK_EXE_PREFIX"
+                    | "GTK_DATA_PREFIX"
+                    | "XDG_DATA_DIRS"
+                    | "PERL5LIB"
+                    | "GST_PLUGIN_PATH"
+                    | "GST_PLUGIN_SYSTEM_PATH"
+            )
+        ) {
+            continue;
+        }
+        let paths: Vec<_> = std::env::split_paths(&value).collect();
+        let kept: Vec<_> = paths.iter().filter(|p| !p.starts_with(root)).collect();
+        if kept.len() == paths.len() {
+            continue;
+        }
+        if kept.is_empty() {
+            cmd.env_remove(&key);
+        } else if let Ok(clean) = std::env::join_paths(kept) {
+            cmd.env(&key, clean);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -454,12 +486,14 @@ mod tests {
     fn a_users_own_override_wins_and_proton_gets_its_variables() {
         let mut i = input(None, r#"WINEDLLOVERRIDES="winmm=n,b" %command%"#, false);
         i.compat_tool = Some(Path::new("/opt/GE-Proton9/proton"));
+        i.umu = Some(Path::new("/usr/bin/umu-run"));
         let p = plan(&i).unwrap();
-        assert_eq!(p.lead_args[0], "run");
+        assert_eq!(p.program, Path::new("/usr/bin/umu-run"));
         let env: std::collections::HashMap<_, _> = p.env.iter().cloned().collect();
         assert_eq!(env["WINEDLLOVERRIDES"], "winmm=n,b");
-        assert_eq!(env["STEAM_COMPAT_DATA_PATH"], "/data/prefixes/captain-hardcore");
-        assert!(env.contains_key("STEAM_COMPAT_CLIENT_INSTALL_PATH"));
+        assert_eq!(env["WINEPREFIX"], "/data/prefixes/captain-hardcore");
+        assert_eq!(env["GAMEID"], "umu-default");
+        assert_eq!(env["PROTONPATH"], "/opt/GE-Proton9");
     }
 
     #[test]
@@ -485,6 +519,51 @@ mod tests {
         let mut i = input(None, "", false);
         i.compat_tool = None;
         assert!(plan(&i).unwrap_err().contains("Wine or Proton"));
+    }
+
+    #[test]
+    fn proton_without_its_runtime_is_not_started_bare() {
+        let mut i = input(None, "", false);
+        i.compat_tool = Some(Path::new("/opt/GE-Proton/proton"));
+        assert!(plan(&i).unwrap_err().contains("game runtime"));
+    }
+
+    #[test]
+    fn switching_to_umu_or_wine_preserves_an_existing_proton_prefix() {
+        let root = std::env::temp_dir().join(format!("kryoto-prefix-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("pfx/drive_c")).unwrap();
+        let mut i = input(None, "", false);
+        i.prefix_dir = &root;
+        for tool in ["/usr/bin/wine", "/opt/proton/proton"] {
+            i.compat_tool = Some(Path::new(tool));
+            i.umu = Some(Path::new("/usr/bin/umu-run"));
+            let p = plan(&i).unwrap();
+            assert_eq!(p.env.iter().find(|(k, _)| k == "WINEPREFIX").unwrap().1, root.join("pfx").to_string_lossy());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appimage_environment_is_removed_without_losing_host_paths_or_overrides() {
+        let root = std::env::temp_dir().join(".mount_kryoto-test");
+        let host = std::env::temp_dir().join("host-python");
+        let vars = vec![
+            ("PYTHONHOME".into(), root.join("usr").into_os_string()),
+            ("PYTHONPATH".into(), std::env::join_paths([root.join("usr/share/pyshared"), host.clone()]).unwrap()),
+            ("PATH".into(), std::env::join_paths([root.join("usr/bin"), host.clone()]).unwrap()),
+            ("LD_LIBRARY_PATH".into(), root.join("usr/lib").into_os_string()),
+            ("DISPLAY".into(), ":0".into()),
+        ];
+        let mut cmd = std::process::Command::new("unused");
+        apply_appimage_env(&mut cmd, &root, vars);
+        let env: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(env[std::ffi::OsStr::new("PYTHONHOME")], None);
+        assert_eq!(env[std::ffi::OsStr::new("LD_LIBRARY_PATH")], None);
+        assert_eq!(env[std::ffi::OsStr::new("PYTHONPATH")], Some(host.as_os_str()));
+        assert_eq!(env[std::ffi::OsStr::new("PATH")], Some(host.as_os_str()));
+        assert!(!env.contains_key(std::ffi::OsStr::new("DISPLAY")));
+        cmd.env("PYTHONHOME", "explicit-player-setting");
+        assert_eq!(cmd.get_envs().find(|(k, _)| *k == "PYTHONHOME").unwrap().1, Some(std::ffi::OsStr::new("explicit-player-setting")));
     }
 
     #[test]
