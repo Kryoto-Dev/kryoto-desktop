@@ -57,7 +57,7 @@ export function UpdatePrompt({ busy }: { busy: { games: number; downloads: numbe
         <dl className="grid gap-1 text-[10px] uppercase tracking-wider">
           <Row k="You have" v={state.current || '-'} />
           <Row k="New version" v={update.version} strong />
-          {update.date ? <Row k="Released" v={update.date.split(' ')[0] ?? update.date} /> : null}
+          {update.date && Number.isFinite(Date.parse(update.date)) ? <Row k="Released" v={new Date(update.date).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })} /> : null}
         </dl>
         <Button size="sm" className="justify-self-start" onClick={() => void openChangelog()}>
           View changelog <ArrowUpRight className="size-3" aria-hidden />

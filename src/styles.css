@@ -684,3 +684,77 @@ html.kryo-pad .kryo-bp-tile:focus {
   --sidebar-border: oklch(0.83 0.045 350);
 }
 :root:not(.dark) { --info: oklch(0.55 0.14 240); }
+
+/* Calendar accents layer over the saved palette; removing data-season restores it. */
+:root:not(.dark)[data-season='halloween'] {
+  --primary: #a74308;
+  --primary-foreground: #fffaf3;
+  --ring: #a74308;
+  --season-decoration: #bd540e;
+}
+:root.dark[data-season='halloween'] {
+  --primary: #ffad56;
+  --primary-foreground: #241407;
+  --ring: #ffad56;
+  --season-decoration: #ffa95a;
+}
+:root:not(.dark)[data-season='christmas'] {
+  --primary: #236541;
+  --primary-foreground: #ffffff;
+  --ring: #236541;
+  --season-decoration: #438363;
+}
+:root.dark[data-season='christmas'] {
+  --primary: #8fd6ad;
+  --primary-foreground: #10291c;
+  --ring: #8fd6ad;
+  --season-decoration: #b1dfc8;
+}
+:root:not(.dark)[data-season='new-year'] {
+  --primary: #765700;
+  --primary-foreground: #ffffff;
+  --ring: #765700;
+  --season-decoration: #a08121;
+}
+:root.dark[data-season='new-year'] {
+  --primary: #f4d477;
+  --primary-foreground: #27200b;
+  --ring: #f4d477;
+  --season-decoration: #f4d477;
+}
+:root:not(.dark)[data-season='valentine'] {
+  --primary: #a72b59;
+  --primary-foreground: #ffffff;
+  --ring: #a72b59;
+  --season-decoration: #bb4c74;
+}
+:root.dark[data-season='valentine'] {
+  --primary: #ff9fc3;
+  --primary-foreground: #321322;
+  --ring: #ff9fc3;
+  --season-decoration: #f29aba;
+}
+:root:not(.dark)[data-season='easter'] {
+  --primary: #537025;
+  --primary-foreground: #ffffff;
+  --ring: #537025;
+  --season-decoration: #76944b;
+}
+:root.dark[data-season='easter'] {
+  --primary: #c1da88;
+  --primary-foreground: #202a0e;
+  --ring: #c1da88;
+  --season-decoration: #c1da88;
+}
+:root:not(.dark)[data-season='winter'] {
+  --primary: #286680;
+  --primary-foreground: #ffffff;
+  --ring: #286680;
+  --season-decoration: #4b8da9;
+}
+:root.dark[data-season='winter'] {
+  --primary: #a2d6eb;
+  --primary-foreground: #10242d;
+  --ring: #a2d6eb;
+  --season-decoration: #a2d6eb;
+}

@@ -27,6 +27,8 @@ export function PopupApp() {
       html.style.colorScheme = p.look.theme === 'light' ? 'light' : 'dark'
       html.dataset.palette = p.look.palette
       html.dataset.radius = p.look.radius
+      if (p.look.season) html.dataset.season = p.look.season
+      else delete html.dataset.season
       if (p.look.font) html.dataset.font = p.look.font
       else delete html.dataset.font
       focused.current = false

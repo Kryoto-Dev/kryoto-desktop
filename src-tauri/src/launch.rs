@@ -102,32 +102,32 @@ fn is_env_word(word: &str) -> Option<(String, String)> {
     Some((name.to_string(), value.to_string()))
 }
 
-/// Split on whitespace with double quotes grouping, quotes removed.
-pub fn split_words(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
+/// Read one word and its byte length, removing only its grouping quotes.
+fn read_word(text: &str) -> (String, usize) {
     let mut word = String::new();
-    let mut quoted = false;
-    let mut started = false;
-    for c in text.chars() {
+    let mut quote = None;
+    for (i, c) in text.char_indices() {
         match c {
-            '"' => {
-                quoted = !quoted;
-                started = true;
-            }
-            c if c.is_whitespace() && !quoted => {
-                if started {
-                    out.push(std::mem::take(&mut word));
-                    started = false;
-                }
-            }
-            c => {
-                word.push(c);
-                started = true;
-            }
+            '\'' | '"' if quote.is_none() => quote = Some(c),
+            c if quote == Some(c) => quote = None,
+            c if c.is_whitespace() && quote.is_none() => return (word, i),
+            c => word.push(c),
         }
     }
-    if started {
+    (word, text.len())
+}
+
+/// Split on whitespace with single or double quotes grouping, quotes removed.
+pub fn split_words(mut text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    loop {
+        text = text.trim_start();
+        if text.is_empty() {
+            break;
+        }
+        let (word, len) = read_word(text);
         out.push(word);
+        text = &text[len..];
     }
     out
 }
@@ -139,22 +139,10 @@ fn leading_env_len(text: &str) -> usize {
     loop {
         let trimmed = rest.trim_start();
         let skipped = rest.len() - trimmed.len();
-        // One word, quote-aware.
-        let mut quoted = false;
-        let mut len = 0;
-        for (i, c) in trimmed.char_indices() {
-            if c == '"' {
-                quoted = !quoted;
-            } else if c.is_whitespace() && !quoted {
-                len = i;
-                break;
-            }
-            len = i + c.len_utf8();
-        }
+        let (word, len) = read_word(trimmed);
         if len == 0 {
             return end;
         }
-        let word: String = trimmed[..len].chars().filter(|c| *c != '"').collect();
         if is_env_word(&word).is_none() {
             return end;
         }
@@ -449,6 +437,77 @@ mod tests {
         assert_eq!(forgot.env[1], ("A".into(), "b c".into()));
         assert_eq!(forgot.extra_args, "-x");
         assert_eq!(parse_line("   "), ParsedLine::default());
+    }
+
+    #[test]
+    fn single_quotes_group_arguments_and_preserve_other_quotes() {
+        for (line, expected) in [
+            ("--profile 'My save'", vec!["--profile", "My save"]),
+            ("--profile='My save'", vec!["--profile=My save"]),
+            (r#"--profile 'My "save"'"#, vec!["--profile", "My \"save\""]),
+            (r#"--profile "O'Brien save""#, vec!["--profile", "O'Brien save"]),
+            (r#"'' "" 'My 'save"#, vec!["", "", "My save"]),
+            ("--profile 'Mý save'\t-novid", vec!["--profile", "Mý save", "-novid"]),
+            (r#"--path 'C:\My saves\slot 1'"#, vec!["--path", r"C:\My saves\slot 1"]),
+            ("--profile 'My save", vec!["--profile", "My save"]),
+        ] {
+            assert_eq!(split_words(line), expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn single_quotes_group_environment_and_wrappers() {
+        let prefix = r#"PROFILE='My "save"' LABEL="O'Brien save" EMPTY=''"#;
+        let env = vec![("PROFILE".into(), "My \"save\"".into()), ("LABEL".into(), "O'Brien save".into()), ("EMPTY".into(), "".into())];
+        let p = parse_line(&format!("{prefix} --profile 'My save'"));
+        assert_eq!(p.env, env);
+        assert!(p.wrappers.is_empty());
+        assert_eq!(p.extra_args, "--profile 'My save'");
+
+        let p = parse_line(&format!("{prefix} '/opt/My wrapper/run' %command% --profile 'My save'"));
+        assert_eq!(p.env, env);
+        assert_eq!(p.wrappers, vec!["/opt/My wrapper/run"]);
+        assert_eq!(p.extra_args, "--profile 'My save'");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[ignore = "child process for the argument forwarding test"]
+    fn quoted_arguments_child_process() {
+        if let Ok(expected) = std::env::var("KRYOTO_LAUNCH_TEST_ARGS") {
+            let expected: Vec<String> = serde_json::from_str(&expected).unwrap();
+            assert_eq!(std::env::args().skip(1).collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn check_forwarded_args(line: &str, expected: &[&str]) {
+        let exe = std::env::current_exe().unwrap();
+        // libtest's --skip takes a value just like a game's --profile. Using
+        // it lets the same executable inspect the actual child process argv.
+        let options = "--exact launch::tests::quoted_arguments_child_process --ignored --test-threads=1";
+        let p = LaunchPlan {
+            cwd: exe.parent().unwrap().to_path_buf(),
+            program: exe.clone(),
+            exe,
+            lead_args: Vec::new(),
+            game_args: format!("{options} {line}"),
+            env: Vec::new(),
+        };
+        let mut args = vec!["--exact", "launch::tests::quoted_arguments_child_process", "--ignored", "--test-threads=1"];
+        args.extend_from_slice(expected);
+        let output = command(&p).env("KRYOTO_LAUNCH_TEST_ARGS", serde_json::to_string(&args).unwrap()).output().unwrap();
+        assert!(output.status.success(), "{line}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "the child argument check must run");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn single_quoted_arguments_reach_the_child_process() {
+        check_forwarded_args(
+            r#"--skip 'My save' --skip '"Night" save' --skip "O'Brien save" --skip 'Save\Slot 1' --skip slot' two' --skip 'Mý save'"#,
+            &["--skip", "My save", "--skip", "\"Night\" save", "--skip", "O'Brien save", "--skip", r"Save\Slot 1", "--skip", "slot two", "--skip", "Mý save"],
+        );
     }
 
     #[test]

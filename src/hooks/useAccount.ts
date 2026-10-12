@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { call, isTauri, on } from '@/lib/bridge'
 import { isOnline } from '@/lib/online'
-import type { AccountAppearance } from '@/lib/settings'
+import type { AccountAppearance, CatalogAppearance } from '@/lib/settings'
 
 export type Account = {
   username: string
@@ -35,19 +35,19 @@ export type Account = {
 export const GUEST: Account = { username: '', displayName: 'Guest', avatarUrl: null, appearance: null, guest: true }
 
 /** The site's actual theme, also available when signed out. */
-export function useCatalogTheme() {
-  const [theme, setTheme] = useState<'light' | 'dark' | null>(null)
+export function useCatalogAppearance() {
+  const [appearance, setAppearance] = useState<CatalogAppearance | null>(null)
   useEffect(() => {
     let stop: (() => void) | undefined
     let cancelled = false
-    void on<'light' | 'dark'>('catalog-theme', value => { if (!cancelled) setTheme(value) }).then(fn => {
+    void on<CatalogAppearance>('catalog-appearance', value => { if (!cancelled) setAppearance(value) }).then(fn => {
       if (cancelled) return fn()
       stop = fn
       if (isTauri()) void call('store_refresh_account').catch(() => {})
     }).catch(() => {})
     return () => { cancelled = true; stop?.() }
   }, [])
-  return theme
+  return appearance
 }
 
 /**

@@ -23,7 +23,6 @@ import { SHELF } from '@/ui/ascii/scenes'
 import { FriendsPage } from '@/friends/FriendsPage'
 import { CallOverlay } from '@/friends/CallOverlay'
 import { friendName, useFriends } from '@/hooks/useFriends'
-import { CommunityPage } from '@/community/CommunityPage'
 import { TitleBar } from '@/shell/TitleBar'
 import { NavBar, type NavTabSpec, type TopTab } from '@/shell/NavBar'
 import { UrlPill, WebSlot } from '@/shell/WebView'
@@ -551,7 +550,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         { label: 'Store', onSelect: () => openStore() },
         { label: 'Library', onSelect: () => go({ kind: 'home' }) },
         { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
-        { label: 'Community', onSelect: () => go({ kind: 'community' }) },
+        { label: 'Community', onSelect: () => openWeb('/community') },
         { label: 'Blog', onSelect: () => openWeb('/blog') },
         { label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) },
         { separator: true },
@@ -626,9 +625,9 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     {
       id: 'community',
       label: 'Community',
-      onOpen: () => go({ kind: 'community' }),
+      onOpen: () => openWeb('/community'),
       items: [
-        { label: 'Statistics', onSelect: () => go({ kind: 'community' }) },
+        { label: 'Statistics', onSelect: () => openWeb('/community?tab=stats') },
         { label: 'Blog', onSelect: () => openWeb('/blog') },
         { label: 'Collections', onSelect: () => openWeb('/collections/discover') },
         { label: 'Requests', onSelect: () => openWeb('/requests') },
@@ -659,9 +658,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       ? tabForUrl(webUrl, settings?.catalogEndpoint)
       : view.kind === 'friends' || view.kind === 'settings'
         ? 'profile'
-        : view.kind === 'community'
-          ? 'community'
-          : 'library'
+        : 'library'
 
   // Controllers (kryo.to feature flag `controller`): read while the account
   // has it, move around the client with one, and open Settings > Controller
@@ -772,13 +769,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   const catalogSlug = view.kind === 'catalog' && !catalogInstalled ? view.slug : null
 
   let content: React.ReactNode = null
-  if (view.kind === 'community') {
-    content = (
-      <div className="absolute inset-0 flex bg-background">
-        <CommunityPage games={lib.games} onGame={(slug) => openWeb(`/game/${slug}`)} onProfile={(u) => openWeb(`/user/${u}`)} />
-      </div>
-    )
-  } else if (view.kind === 'settings') {
+  if (view.kind === 'settings') {
     content = (
       <div className="absolute inset-0 flex bg-background">
         <SettingsPage

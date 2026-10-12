@@ -25,7 +25,6 @@ export type View =
   | { kind: 'catalog'; slug: string }
   | { kind: 'downloads' }
   | { kind: 'friends' }
-  | { kind: 'community' }
   | { kind: 'settings'; section: SettingsSection }
 
 export type History = { stack: View[]; index: number }

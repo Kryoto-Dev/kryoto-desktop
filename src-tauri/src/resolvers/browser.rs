@@ -175,8 +175,8 @@ const THIRD_PARTY_OK: &[&str] = &[
 /// Cloudflare's Turnstile frame included, and breaks the check (Desktop has
 /// been there once with a page-script plugin). Documents, fetches and XHRs
 /// are never refused, so the file itself, the host's API and any frame always
-/// load. VikingFile's page loads nothing from outside but Turnstile, so this
-/// changes nothing it needs.
+/// load. Hosts whose download controls cannot work with this policy must
+/// stay outside the native resolver and open in the user's browser.
 #[cfg(any(windows, test))]
 fn blocked(page_site: &str, request: &str) -> bool {
     let Ok(u) = request.parse::<Url>() else { return false };

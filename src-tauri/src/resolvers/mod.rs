@@ -7,7 +7,7 @@
 //!  * API hosts answer a plain HTTP client with the file's real address:
 //!    Pixeldrain, Gofile, Buzzheavier, MediaFire, FuckingFast. Catbox and
 //!    FileDitch-style direct links need nothing at all.
-//!  * Page hosts (VikingFile, Mocha, 1fichier, ...) only hand the file to a
+//!  * Page hosts (Mocha, 1fichier, ...) only hand the file to a
 //!    real browser, often after a check. Their page is opened in a hidden
 //!    window of our own, the host's own download button is pressed, and the
 //!    download it starts is taken over. If the check wants a person, the
@@ -102,8 +102,6 @@ pub(crate) fn st0807_file(url: &str) -> bool {
 
 /// Page hosts, by domain, and what stands in the way.
 const PAGE_HOSTS: &[(&str, &str)] = &[
-    ("vikingfile.com", "VikingFile"),
-    ("vik1ngfile.site", "VikingFile"),
     ("mocha.my", "Mocha"),
     ("dropdrive.org", "DropDrive"),
     // DropDrive's API and pages while dropdrive.org is suspended.
@@ -234,7 +232,6 @@ mod tests {
         assert_eq!(classify("https://pixeldrain.com/u/abcd1234").map(|c| c.1), Some("Pixeldrain"));
         assert_eq!(classify("https://gofile.io/d/dc1V9W").map(|c| c.0), Some(Kind::Api));
         assert_eq!(classify("https://buzzheavier.com/AbCd1234").map(|c| c.1), Some("Buzzheavier"));
-        assert_eq!(classify("https://vikingfile.com/f/xyz").map(|c| c.0), Some(Kind::Page));
         assert_eq!(classify("https://mocha.my/share/pvpgaoYk-6So_SEvo").map(|c| c.0), Some(Kind::Api));
         assert_eq!(classify("https://mocha.my/share/tok").map(|c| c.0), Some(Kind::Page));
         assert_eq!(classify("https://files.catbox.moe/x.7z").map(|c| c.0), Some(Kind::Direct));
@@ -246,6 +243,17 @@ mod tests {
         assert_eq!(classify("https://0807.st/p/Ab3dEfG"), None);
         assert_eq!(classify("https://mega.nz/file/abc"), None);
         assert_eq!(classify("magnet:?xt=urn:btih:abc"), None);
+    }
+
+    #[test]
+    fn vikingfile_opens_its_real_page_in_the_browser() {
+        for url in [
+            "https://vikingfile.com/f/xyz",
+            "https://www.vikingfile.com/f/xyz",
+            "https://vik1ngfile.site/f/xyz",
+        ] {
+            assert_eq!(classify(url), None, "VikingFile must bypass the native resolver and ad blocker");
+        }
     }
 
     #[test]

@@ -96,9 +96,9 @@ struct Account {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserReport {
-    /// The trusted site's actual scheme, including guest/theme-toggle changes.
+    /// The trusted site's resolved appearance, including guest preferences.
     #[serde(default)]
-    theme: Option<String>,
+    appearance: Option<serde_json::Value>,
     url: String,
     #[serde(default)]
     title: Option<String>,
@@ -439,9 +439,20 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     send({ account });
   });
   const json = (path) => fetch(path, { credentials: 'include' }).then((r) => r.json());
+  const reportAppearance = () => {
+    const root = document.documentElement;
+    send({ appearance: {
+      theme: root.classList.contains('dark') ? 'dark' : 'light',
+      palette: root.dataset.palette || 'monochrome',
+      radius: root.dataset.radius || 'pill',
+      font: root.dataset.font || 'teletext',
+      motion: root.dataset.motion || 'full',
+      season: root.dataset.season || null
+    } });
+  };
   const who = (full) => {
     if (!KRYO) return;
-    send({ theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light' });
+    reportAppearance();
     if (full) json('/api/changelog/latest').then((j) => send({ news: j })).catch(() => {});
     json('/api/auth/me')
       .then((j) => {
@@ -510,9 +521,9 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   let whoTimer = 0;
   const soon = () => { clearTimeout(whoTimer); whoTimer = setTimeout(() => who(false), 800); };
   window.__kryoDesktopRefresh = () => who(true);
-  if (KRYO) new MutationObserver(() => {
-    send({ theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light' });
-  }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  if (KRYO) new MutationObserver(reportAppearance).observe(document.documentElement, {
+    attributes: true, attributeFilter: ['class', 'data-palette', 'data-radius', 'data-font', 'data-motion', 'data-season']
+  });
   // Kryoto Desktop from the website (kryo.to lib/desktop-remote.ts, remote.rs):
   // take what was queued there, hand it to the downloader, and report the
   // downloads' progress back whenever it changes (and every half minute).
@@ -860,8 +871,8 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
     let actual = view.url().map_err(|e| e.to_string())?;
     // Only kryo.to itself may say who is signed in, or what is in their inbox.
     if is_kryoto(&actual, &app) {
-        if let Some(theme) = state.theme.filter(|t| matches!(t.as_str(), "light" | "dark")) {
-            let _ = app.emit_to("main", "catalog-theme", theme);
+        if let Some(appearance) = state.appearance.filter(|v| matches!(v["theme"].as_str(), Some("light" | "dark"))) {
+            let _ = app.emit_to("main", "catalog-appearance", appearance);
         }
         if let Some(account) = state.account {
             logging::set_account(account.as_ref().map(|a| a.username.clone()));

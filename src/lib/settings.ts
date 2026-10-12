@@ -75,6 +75,7 @@ export const RADII: { value: Radius; label: string }[] = [
 
 export type Look = Pick<Settings, 'palette' | 'radius' | 'font' | 'showAdult'> & {
   theme: 'system' | 'light' | 'dark'
+  season?: string | null
   reducedMotion?: boolean
   /** kryo.to's "Hide" for adult games: left out of every list the client draws from kryo.to. */
   hideAdult?: boolean
@@ -96,29 +97,45 @@ export type AccountAppearance = {
 const PALETTE_IDS = new Set(PALETTES.map((p) => p.id as string))
 const RADIUS_IDS = new Set(RADII.map((r) => r.value as string))
 
+/** Resolved appearance of the website, including signed-out preferences. */
+export type CatalogAppearance = {
+  theme: 'light' | 'dark'
+  palette?: string | null
+  radius?: string | null
+  font?: string | null
+  motion?: string | null
+  season?: string | null
+}
+const SEASON_IDS = new Set(['halloween', 'christmas', 'new-year', 'valentine', 'easter', 'winter'])
+
 /**
  * Follow the site's resolved theme, including its theme toggle.
  * A local theme choice also works offline and for guests.
  */
-export function effectiveLook(s: Settings, account: { appearance?: AccountAppearance | null } | null | undefined, catalogTheme?: 'light' | 'dark' | null): Look {
+export function effectiveLook(s: Settings, account: { appearance?: AccountAppearance | null } | null | undefined, catalog?: CatalogAppearance | null): Look {
   const a = account?.appearance
   const choice = s.theme ?? 'account'
   const accountTheme = a?.theme === 'light' || a?.theme === 'system' ? a.theme : 'dark'
-  const theme = choice === 'account' ? catalogTheme ?? accountTheme : choice
-  if (!a || !s.followAccount) return { theme, palette: s.palette, radius: s.radius, font: s.font, showAdult: s.showAdult }
+  const theme = choice === 'account' ? catalog?.theme ?? accountTheme : choice
+  const season = s.followAccount && catalog?.season && SEASON_IDS.has(catalog.season) ? catalog.season : null
+  if (!s.followAccount) return { theme, palette: s.palette, radius: s.radius, font: s.font, showAdult: s.showAdult }
+  const palette = catalog?.palette ?? a?.palette ?? s.palette
+  const radius = catalog?.radius ?? a?.radius ?? s.radius
+  const font = catalog?.font ?? a?.typeface ?? s.font
   return {
     theme,
-    palette: (a.palette && PALETTE_IDS.has(a.palette) ? a.palette : 'monochrome') as Palette,
-    radius: (a.radius && RADIUS_IDS.has(a.radius) ? a.radius : 'pill') as Radius,
-    font: a.typeface === 'mono' ? 'mono' : 'teletext',
-    showAdult: !a.nsfwBlur && !a.nsfwHide,
-    hideAdult: a.nsfwHide === true,
-    reducedMotion: a.motion === 'reduced',
+    season,
+    palette: (PALETTE_IDS.has(palette) ? palette : 'monochrome') as Palette,
+    radius: (RADIUS_IDS.has(radius) ? radius : 'pill') as Radius,
+    font: font === 'mono' ? 'mono' : 'teletext',
+    showAdult: a ? !a.nsfwBlur && !a.nsfwHide : s.showAdult,
+    hideAdult: a?.nsfwHide === true,
+    reducedMotion: (catalog?.motion ?? a?.motion) === 'reduced',
   }
 }
 
 /** Stamp the look on <html>, the way kryo.to does before first paint. */
-export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { theme?: 'system' | 'light' | 'dark'; reducedMotion?: boolean }) {
+export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { theme?: 'system' | 'light' | 'dark'; season?: string | null; reducedMotion?: boolean }) {
   const html = document.documentElement
   const dark = s.theme === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : s.theme !== 'light'
   html.classList.toggle('dark', dark)
@@ -127,6 +144,8 @@ export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { t
   else delete html.dataset.motion
   html.dataset.palette = s.palette || 'monochrome'
   html.dataset.radius = s.radius || 'pill'
+  if (s.season && SEASON_IDS.has(s.season)) html.dataset.season = s.season
+  else delete html.dataset.season
   if (s.font === 'mono') html.dataset.font = 'mono'
   else delete html.dataset.font
 }
