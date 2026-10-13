@@ -33,7 +33,7 @@ pub fn sources() -> Vec<Source> {
 pub fn repository(source: Emulator) -> Result<&'static str, String> {
     Ok(match source {
         Emulator::GbeFork => "Detanup01/gbe_fork",
-        Emulator::Online => "official-kryo-to/kryoto-online",
+        Emulator::Online => "Kryoto-Dev/kryoto-online",
         Emulator::Rune | Emulator::RuneSteak | Emulator::RuneSteamclient => "Mush-iii/rune-emu",
         Emulator::Custom => return Err("This source has no automatic repair.".into()),
     })

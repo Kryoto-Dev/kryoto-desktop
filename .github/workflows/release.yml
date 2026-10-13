@@ -121,11 +121,11 @@ jobs:
       # Goes away once the dependency becomes a pinned git revision.
       - name: Fetch kryoto-messaging
         shell: bash
-        run: git clone --depth 1 https://github.com/official-kryo-to/kryoto-messaging.git ../kryoto-messaging
+        run: git clone --depth 1 https://github.com/Kryoto-Dev/kryoto-messaging.git ../kryoto-messaging
       # The controller resolver (Cargo path dependency ../kryoto-padmap).
       - name: Fetch kryoto-padmap
         shell: bash
-        run: git clone --depth 1 https://github.com/official-kryo-to/kryoto-padmap.git ../kryoto-padmap
+        run: git clone --depth 1 https://github.com/Kryoto-Dev/kryoto-padmap.git ../kryoto-padmap
       - uses: pnpm/action-setup@v4
         with:
           version: 10
