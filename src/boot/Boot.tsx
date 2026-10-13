@@ -5,7 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { AsciiBar, Button } from '@/ui'
 import { AsciiArt } from '@/ui/ascii/AsciiArt'
 import { WORDMARK } from '@/ui/ascii/cells'
-import { KryoMark } from '@/ui/ascii/KryoMark'
+import { SplashScene } from '@/boot/SplashScene'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { isTauri, exitApp, mountStore, navigateCatalog, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -53,22 +53,34 @@ function Box({ children, className }: { children: ReactNode; className?: string 
 /* ── Splash ─────────────────────────────────────────────── */
 
 export function Splash({ onRevealed }: { onRevealed: () => void }) {
+  // The loading bar and the name come in once the mark has lit up.
+  const [lit, setLit] = useState(false)
   return (
-    <Box className="grid grid-rows-[1fr_auto]">
-      <div className="grid place-content-center justify-items-center gap-9 pt-6">
-        <KryoMark mode="reveal-shimmer" className="h-16" onRevealed={onRevealed} />
-        <div className="grid h-12 place-items-center">
-          <AsciiBar fraction={null} cells={16} showPct={false} className="text-muted-foreground" />
-        </div>
-      </div>
-      {/* The maker's mark on the line where the app names itself, as the
-          site's footer does: which build of Kryoto this is. */}
-      <p className="pointer-events-none flex items-baseline justify-center gap-2 pb-5 text-center text-[10px] uppercase tracking-[0.3em] text-muted-foreground">
-        <span aria-hidden className="kryo-ascii-art font-bold tracking-tight opacity-60">
-          K//
-        </span>
-        Kryoto Desktop {__APP_VERSION__}
-      </p>
+    <Box className="bg-black">
+      <SplashScene
+        onRevealed={() => {
+          setLit(true)
+          onRevealed()
+        }}
+      />
+      {lit ? (
+        <>
+          <div className="kryo-in pointer-events-none absolute inset-x-0 bottom-20 grid place-items-center">
+            <AsciiBar fraction={null} cells={16} showPct={false} className="text-foreground/60" />
+          </div>
+          {/* The maker's mark on the line where the app names itself, as the
+              site's footer does: which build of Kryoto this is. */}
+          <p
+            className="kryo-in pointer-events-none absolute inset-x-0 bottom-5 flex items-baseline justify-center gap-2 text-center text-[10px] uppercase tracking-[0.3em] text-muted-foreground"
+            style={{ animationDelay: '120ms' }}
+          >
+            <span aria-hidden className="kryo-ascii-art font-bold tracking-tight opacity-60">
+              K//
+            </span>
+            Kryoto Desktop {__APP_VERSION__}
+          </p>
+        </>
+      ) : null}
     </Box>
   )
 }

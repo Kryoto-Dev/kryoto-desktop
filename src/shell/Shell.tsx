@@ -17,7 +17,7 @@ import {
   Wine,
 } from 'lucide-react'
 import { Button, Check, ContextMenu, Modal, type MenuEntry } from '@/ui'
-import { KryoMorph } from '@/ui/ascii/KryoMorph'
+import { KryoAscii } from '@/ui/ascii/KryoAscii'
 import { EmptyState } from '@/ui/EmptyState'
 import { SHELF } from '@/ui/ascii/scenes'
 import { FriendsPage } from '@/friends/FriendsPage'
@@ -1015,7 +1015,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       {overlay?.kind === 'about' ? (
         <Modal title="About" onClose={() => setOverlay(null)}>
           <div className="grid justify-items-center gap-5 py-4 text-center">
-            <KryoMorph className="h-20" />
+            <KryoAscii animate className="text-[11px]" />
             <p className="text-[10px] uppercase tracking-[0.3em] text-muted-foreground">Kryoto Desktop {__APP_VERSION__}</p>
             <div className="flex gap-2">
               <Button size="sm" onClick={() => { setOverlay(null); openWeb('/changelog') }}>
