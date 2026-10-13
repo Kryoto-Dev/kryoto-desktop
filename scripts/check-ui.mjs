@@ -273,9 +273,13 @@ try {
       const dialog = achievements.getByRole('dialog', { name: 'Switch emulator for achievements', exact: true })
       const dropdown = dialog.getByRole('button', { name: 'Achievement emulator', exact: true })
       const labels = ['gbe_fork', 'RUNE', 'RUNE (Steakclient)', 'RUNE (Steamclient)']
+      await dropdown.getByText('gbe_fork', { exact: true }).waitFor()
       await dropdown.focus(); await achievements.keyboard.press('ArrowDown')
+      await dialog.getByRole('listbox', { name: 'Achievement emulator', exact: true }).waitFor()
+      await dialog.getByRole('option', { name: 'RUNE (Steamclient)', exact: true }).waitFor()
       assert.deepEqual(await dialog.getByRole('option').allTextContents(), labels)
       await achievements.keyboard.press('Home'); await achievements.keyboard.press('ArrowDown'); await achievements.keyboard.press('Enter')
+      await dropdown.getByText('RUNE', { exact: true }).waitFor()
       assert.equal(await dropdown.innerText(), 'RUNE')
       for (const label of ['RUNE', 'gbe_fork', 'RUNE (Steakclient)', 'RUNE (Steamclient)']) {
         await dropdown.click()
@@ -293,6 +297,7 @@ try {
         await notice.waitFor()
       }
       await achievements.keyboard.press('Escape')
+      await dialog.waitFor({ state: 'hidden' })
       assert.equal(await dialog.count(), 0)
     } finally { await achievements.close() }
   })
