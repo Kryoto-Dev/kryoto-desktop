@@ -261,6 +261,41 @@ try {
     await recovery.waitForFunction(() => ![...document.querySelectorAll('button')].some(b => b.textContent === 'Use defaults'))
     await recovery.close()
   })
+  await check('achievement repair offers gbe_fork and every RUNE profile with Undo between attempts', async () => {
+    const achievements = await browser.newPage({ viewport: { width: 1100, height: 860 } })
+    achievements.on('pageerror', e => failures.push(e.message))
+    try {
+      await achievements.goto(base)
+      await achievements.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Hades', exact: true }).click()
+      const notice = achievements.getByText('Achievement tracking is unavailable', { exact: true })
+      await notice.waitFor()
+      await achievements.getByRole('button', { name: 'Try another emulator', exact: true }).click()
+      const dialog = achievements.getByRole('dialog', { name: 'Switch emulator for achievements', exact: true })
+      const dropdown = dialog.getByRole('button', { name: 'Achievement emulator', exact: true })
+      const labels = ['gbe_fork', 'RUNE', 'RUNE (Steakclient)', 'RUNE (Steamclient)']
+      await dropdown.focus(); await achievements.keyboard.press('ArrowDown')
+      assert.deepEqual(await dialog.getByRole('option').allTextContents(), labels)
+      await achievements.keyboard.press('Home'); await achievements.keyboard.press('ArrowDown'); await achievements.keyboard.press('Enter')
+      assert.equal(await dropdown.innerText(), 'RUNE')
+      for (const label of ['RUNE', 'gbe_fork', 'RUNE (Steakclient)', 'RUNE (Steamclient)']) {
+        await dropdown.click()
+        await dialog.getByRole('option', { name: label, exact: true }).click()
+        const apply = dialog.getByRole('button', { name: `Switch to ${label}`, exact: true })
+        await apply.click()
+        const undo = dialog.getByRole('button', { name: 'Undo repair', exact: true })
+        await undo.waitFor()
+        await achievements.getByText('1 of 2', { exact: true }).waitFor()
+        await achievements.getByRole('region', { name: 'Hades', exact: true }).getByText(`Steam + ${label}`, { exact: true }).waitFor()
+        assert.equal(await notice.count(), 0)
+        assert.equal(await dropdown.isDisabled(), true)
+        assert.equal(await apply.isDisabled(), true)
+        await undo.click()
+        await notice.waitFor()
+      }
+      await achievements.keyboard.press('Escape')
+      assert.equal(await dialog.count(), 0)
+    } finally { await achievements.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }

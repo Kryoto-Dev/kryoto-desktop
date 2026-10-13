@@ -22,8 +22,8 @@ export function RepairPanel({ backend, portable = false, initialOnline = false, 
   const forAchievements = purpose === 'achievements'
   const [sources, setSources] = useState<RepairSource[]>([])
   const [mode, setMode] = useState<'offline' | 'online'>(initialOnline ? 'online' : 'offline')
-  const [source, setSource] = useState(initialOnline ? 'online' : 'gbe_fork')
-  const [status, setStatus] = useState(forAchievements ? 'Switch to gbe_fork, then start the game to check that it still works.' : 'Choose a source, then press the logo to repair.')
+  const [source, setSource] = useState(!forAchievements && initialOnline ? 'online' : 'gbe_fork')
+  const [status, setStatus] = useState(forAchievements ? 'Choose an emulator, then switch and start the game to check that it still works.' : 'Choose a source, then press the logo to repair.')
   const [busy, setBusy] = useState(false)
   const [undo, setUndo] = useState(false)
   const [result, setResult] = useState<RepairReport | null>(null)
@@ -42,7 +42,7 @@ export function RepairPanel({ backend, portable = false, initialOnline = false, 
       if (state.interrupted) setStatus('A repair was interrupted. Undo it to restore the previous files.')
       else if (state.undo_available && state.report) {
         setResult(state.report)
-        setStatus(forAchievements && state.report.source !== 'gbe_fork' ? 'A previous repair has a backup. Undo it before switching to gbe_fork.' : 'Done. Start the game and check whether it works.')
+        setStatus(forAchievements ? 'A previous repair has a backup. Test it, or Undo it before trying another emulator.' : 'Done. Start the game and check whether it works.')
       }
     }).catch((e: unknown) => !cancelled && setError(errorText(e)))
     void backend.listen((progress) => {
@@ -52,21 +52,21 @@ export function RepairPanel({ backend, portable = false, initialOnline = false, 
   }, [backend, forAchievements])
   useEffect(() => {
     const applied = result && sources.find((s) => s.label === result.source)
-    if (applied) { setMode(applied.online ? 'online' : 'offline'); setSource(applied.id) }
-  }, [sources, result])
+    if (applied && (!forAchievements || !applied.online)) { setMode(applied.online ? 'online' : 'offline'); setSource(applied.id) }
+  }, [sources, result, forAchievements])
 
-  const choices = sources.filter((s) => s.online === (mode === 'online'))
+  const choices = sources.filter((s) => forAchievements ? !s.online : s.online === (mode === 'online'))
+  const selected = choices.find((s) => s.id === source)
   function changeMode(next: 'offline' | 'online') {
     setMode(next)
     setSource(sources.find((s) => s.online === (next === 'online'))?.id ?? '')
   }
 
   async function run() {
-    const chosen = forAchievements ? 'gbe_fork' : source
-    if (inFlight.current || undo || !sources.some((s) => s.id === chosen)) return
+    if (inFlight.current || undo || !selected) return
     inFlight.current = true; setBusy(true); setError(null); setResult(null); setAnswer(null); setReport(null)
     try {
-      const fixed = await backend.apply(chosen)
+      const fixed = await backend.apply(source)
       setResult(fixed); setUndo(true)
       setStatus('Done. Start the game and check whether it works.')
     } catch (e) {
@@ -91,13 +91,13 @@ export function RepairPanel({ backend, portable = false, initialOnline = false, 
 
   return (
     <section className="grid justify-items-center gap-3 text-center" aria-label="Repair game">
-      {!forAchievements ? <fieldset disabled={busy || undo} className="grid justify-items-center gap-2 disabled:opacity-60">
-        <Segmented value={mode} options={[{ value: 'offline', label: 'Offline' }, { value: 'online', label: 'Online' }]} onChange={changeMode} label="Play mode" />
-        <Dropdown value={source} options={choices.map((s) => ({ value: s.id, label: s.label }))} onChange={setSource} label="Repair source" className="w-56 text-left" />
-      </fieldset> : null}
+      <fieldset disabled={busy || undo} className="grid justify-items-center gap-2 disabled:opacity-60">
+        {!forAchievements ? <Segmented value={mode} options={[{ value: 'offline', label: 'Offline' }, { value: 'online', label: 'Online' }]} onChange={changeMode} label="Play mode" /> : null}
+        <Dropdown value={source} options={choices.map((s) => ({ value: s.id, label: s.label }))} onChange={setSource} label={forAchievements ? 'Achievement emulator' : 'Repair source'} className="w-56 text-left" />
+      </fieldset>
       <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">Close the game first. Changing its source can break a working game. Kryoto backs up the emulator files; use Undo if the game stops working.</p>
-      {forAchievements ? <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">gbe_fork supports achievement tracking, but it cannot provide Kryoto Online multiplayer. Switching does not recover achievements the previous emulator never recorded.</p> : mode === 'online' ? <p className="text-[11px] text-muted-foreground">Kryoto Online needs Steam running and does not work with every game.</p> : null}
-      {forAchievements ? <Button onClick={() => void run()} disabled={busy || undo || !sources.some((s) => s.id === 'gbe_fork')}>{busy ? <Busy className="size-4" /> : null} Switch to gbe_fork</Button> : <button type="button" onClick={() => void run()} disabled={busy || undo || !sources.length} aria-label="Start game repair" className="grid h-24 w-44 place-items-center text-primary transition-opacity hover:opacity-75 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:cursor-default disabled:opacity-50">
+      {forAchievements ? <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">gbe_fork and RUNE support achievement tracking, but they cannot provide Kryoto Online multiplayer. If one does not work, Undo and try another. Switching does not recover achievements the previous emulator never recorded.</p> : mode === 'online' ? <p className="text-[11px] text-muted-foreground">Kryoto Online needs Steam running and does not work with every game.</p> : null}
+      {forAchievements ? <Button onClick={() => void run()} disabled={busy || undo || !selected}>{busy ? <Busy className="size-4" /> : null} Switch to {selected?.label ?? 'emulator'}</Button> : <button type="button" onClick={() => void run()} disabled={busy || undo || !sources.length} aria-label="Start game repair" className="grid h-24 w-44 place-items-center text-primary transition-opacity hover:opacity-75 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:cursor-default disabled:opacity-50">
         {busy ? <Busy className="size-9" /> : <svg viewBox={`0 0 ${MARK_W} ${MARK_H}`} className="w-36" aria-hidden="true"><path d={MARK_PATH} fill="currentColor" /></svg>}
       </button>}
       <p className="min-h-9 max-w-sm text-xs leading-relaxed" role="status" aria-live="polite" aria-atomic="true">{status}</p>

@@ -103,10 +103,10 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
             This game uses <b className="text-foreground">{data.emulator}</b>. Kryoto Desktop cannot track achievements with this emulator.
           </p>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            You can try switching to gbe_fork for achievement tracking. The game may stop working, and Kryoto Online multiplayer will be unavailable. Repair keeps a backup so you can Undo if it breaks.
+            You can try switching to gbe_fork or RUNE for achievement tracking. The game may stop working, and Kryoto Online multiplayer will be unavailable. Repair keeps a backup so you can Undo and try another emulator if it breaks.
           </p>
           <div className="flex flex-wrap gap-2">
-            {game.slug ? <Button size="sm" disabled={running} onClick={() => setRepairOpen(true)}><Wrench className="size-3" aria-hidden /> Try gbe_fork</Button> : null}
+            {game.slug ? <Button size="sm" disabled={running} onClick={() => setRepairOpen(true)}><Wrench className="size-3" aria-hidden /> Try another emulator</Button> : null}
             <Button size="sm" variant="ghost" onClick={ignore}>Ignore for this game</Button>
           </div>
           {running ? <p className="text-[11px] text-muted-foreground">Close the game before switching its emulator.</p> : null}
@@ -137,7 +137,7 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
           ) : null}
         </Card>
       ) : null}
-      {repairOpen ? <Modal title="Try gbe_fork for achievements" onClose={() => setRepairOpen(false)}><GameRepair gameId={game.id} purpose="achievements" /></Modal> : null}
+      {repairOpen ? <Modal title="Switch emulator for achievements" onClose={() => setRepairOpen(false)}><GameRepair gameId={game.id} purpose="achievements" /></Modal> : null}
     </>
   )
 }
