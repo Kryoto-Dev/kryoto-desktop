@@ -790,6 +790,7 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
         }
         Ok(())
     });
+    crate::presence::beat(&app);
     let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None, stopped: false });
     crate::achievements::watch(app.clone(), &game, crate::achievements::roots_for(&plan.env));
     if crate::settings::load(&app).minimize_on_play {
@@ -842,6 +843,7 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
             }
             Ok(())
         });
+        crate::presence::beat(&app);
         let _ = app.emit("game-state", GameEvent { id, running: false, seconds: Some(seconds), code, stopped: session.stopped() });
     });
     Ok(())

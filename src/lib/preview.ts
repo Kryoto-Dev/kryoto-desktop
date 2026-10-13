@@ -559,6 +559,8 @@ let previewPadConfig = {
     '030000005e040000120b00000b050000': { name: 'Xbox Series X|S Controller', family: null, remap: { a: 'b', b: 'a' }, mapping: null, base: null, sdl: null },
   } as Record<string, Record<string, unknown>>,
 }
+const previewRepairs = new Map<string, { source: unknown; online: unknown; report: { game: { title: string; slug: string }; source: string; version: string; warnings: string[] } }>()
+
 Object.assign(HANDLERS, {
   pad_start: () => { previewBus.emit('pad-list', clone(previewPads)); return previewPads },
   pad_stop: () => null,
@@ -585,7 +587,17 @@ Object.assign(HANDLERS, {
     return previewPadConfig
   },
   pad_virtual_driver: () => false,
-  // Repair (src-tauri/src/repair.rs): the shared source list, nothing applied yet.
+  // Achievements and Repair use the same flow as the native app, with sample saves.
+  game_achievements: (a: Record<string, unknown>) => {
+    const g = games.find((g) => g.id === a.id) as Record<string, unknown> | undefined
+    if (!g) throw new Error('That game is no longer in the library.')
+    const unsupported = !!g.online || /kryoto[ _-]*online|kryotoo\b/i.test(String(g.source ?? ''))
+    const list = unsupported ? [] : [
+      { name: 'PREVIEW_FIRST', displayName: 'First steps', description: 'Complete the first chapter.', hidden: false, icon: null, iconGray: null, percent: 75, unlocked: true, unlockedAt: now() - 86400 },
+      { name: 'PREVIEW_SECRET', displayName: 'A hidden discovery', description: 'Find a secret.', hidden: true, icon: null, iconGray: null, percent: 12, unlocked: false, unlockedAt: null },
+    ]
+    return { appid: null, total: list.length, unlocked: list.filter((a) => a.unlocked).length, list, tracking: unsupported ? 'unsupported' : 'supported', emulator: unsupported ? 'Kryoto Online' : 'gbe_fork / Goldberg' }
+  },
   repair_sources: () => [
     { id: 'gbe_fork', label: 'gbe_fork', online: false },
     { id: 'online', label: 'Kryoto Online', online: true },
@@ -593,7 +605,38 @@ Object.assign(HANDLERS, {
     { id: 'rune_steak', label: 'RUNE (Steakclient)', online: false },
     { id: 'rune_steamclient', label: 'RUNE (Steamclient)', online: false },
   ],
-  repair_state: () => ({ undo_available: false, interrupted: false, report: null }),
+  repair_state: (a: Record<string, unknown>) => {
+    const saved = previewRepairs.get(String(a.gameId))
+    return { undo_available: !!saved, interrupted: false, report: saved?.report ?? null }
+  },
+  repair_apply: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined
+    if (!g) throw new Error('That game is no longer in the library.')
+    if (running.has(id)) throw new Error('Close the game before changing its emulator.')
+    if (previewRepairs.has(id)) throw new Error('A previous repair has a backup here. Undo it before applying another source.')
+    const label = ({ gbe_fork: 'gbe_fork', online: 'Kryoto Online', rune: 'RUNE', rune_steak: 'RUNE (Steakclient)', rune_steamclient: 'RUNE (Steamclient)' } as Record<string, string>)[String(a.source)]
+    if (!label) throw new Error('Choose a repair source.')
+    const report = { game: { title: String(g.title), slug: String(g.slug) }, source: label, version: 'preview', warnings: [] }
+    previewRepairs.set(id, { source: g.source, online: g.online, report })
+    g.source = `Steam + ${label}`
+    g.online = a.source === 'online' ? { version: 'preview' } : null
+    previewBus.emit('repair-progress', { gameId: id, text: 'Previous emulator files backed up. New emulator installed.', percent: 100 })
+    previewBus.emit('library-changed', null)
+    return report
+  },
+  repair_undo: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined
+    const saved = previewRepairs.get(id)
+    if (!g || !saved) throw new Error('No repair backup is available.')
+    if (running.has(id)) throw new Error('Close the game before Undo.')
+    g.source = saved.source
+    g.online = saved.online
+    previewRepairs.delete(id)
+    previewBus.emit('library-changed', null)
+    return null
+  },
 })
 
 export function previewCall<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {

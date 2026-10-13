@@ -142,6 +142,62 @@ pub struct GameAchievements {
     pub unlocked: usize,
     /// Unlocked first, newest first; then the rest, most common first.
     pub list: Vec<GameAchievement>,
+    pub tracking: Tracking,
+    pub emulator: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tracking { Supported, Unsupported, Unknown }
+
+fn named_tracking(source: &str) -> (Tracking, Option<String>) {
+    let name: String = source.chars().filter(|c| c.is_ascii_alphanumeric()).flat_map(char::to_lowercase).collect();
+    let emulator = if name.contains("kryotoonline") || name.ends_with("kryotoo") {
+        return (Tracking::Unsupported, Some("Kryoto Online".into()));
+    } else if name.contains("gbefork") || name.contains("goldberg") {
+        "gbe_fork / Goldberg"
+    } else if name.contains("rune") {
+        "RUNE"
+    } else if name.contains("codex") {
+        "CODEX"
+    } else if name.contains("onlinefix") || name == "ofme" {
+        "OnlineFix"
+    } else {
+        return (Tracking::Unknown, None);
+    };
+    (Tracking::Supported, Some(emulator.into()))
+}
+
+fn metadata_tracking(game: &LibraryGame) -> (Tracking, Option<String>) {
+    if let Some(repair) = &game.repair {
+        let known = named_tracking(&repair.source);
+        if known.0 != Tracking::Unknown { return known; }
+    }
+    if game.online.is_some() {
+        return named_tracking("Kryoto Online");
+    }
+    if game.addons.iter().any(|a| {
+        named_tracking(&a.label).0 == Tracking::Unsupported || a.files.iter().any(|f| {
+            f.replace('\\', "/").rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case("kryoto-online.ini"))
+        })
+    }) {
+        return named_tracking("Kryoto Online");
+    }
+    named_tracking(game.source.as_deref().unwrap_or_default())
+}
+
+fn tracking_of(game: &LibraryGame) -> (Tracking, Option<String>) {
+    // Inspect the active Steam DLLs, excluding Repair's backups and SDK copies.
+    // A downloaded Online add-on can replace them without changing the release label.
+    let mut supported = None;
+    for dll in kryoto_repair::crack::find_steam_api_dlls(Path::new(&game.install_dir)) {
+        if let Some(product) = kryoto_repair::peversion::product_name(&dll) {
+            let known = named_tracking(&product);
+            if known.0 == Tracking::Unsupported { return known; }
+            if known.0 == Tracking::Supported { supported = Some(known); }
+        }
+    }
+    supported.unwrap_or_else(|| metadata_tracking(game))
 }
 
 /// The list with what is unlocked. Unlocks the list does not name (a game
@@ -160,15 +216,18 @@ pub fn merge(list: Vec<Achievement>, unlocks: &[Unlock]) -> GameAchievements {
         })
     });
     let unlocked = out.iter().filter(|a| a.unlocked).count();
-    GameAchievements { appid: None, total: out.len(), unlocked, list: out }
+    GameAchievements { appid: None, total: out.len(), unlocked, list: out, tracking: Tracking::Unknown, emulator: None }
 }
 
 #[tauri::command]
 pub async fn game_achievements(app: AppHandle, id: String) -> Result<GameAchievements, String> {
     let game = crate::library::load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
-    let Some(appid) = appid_of(Path::new(&game.install_dir)) else {
-        return Ok(GameAchievements { appid: None, total: 0, unlocked: 0, list: Vec::new() });
-    };
+    let (tracking, emulator) = tracking_of(&game);
+    let appid = appid_of(Path::new(&game.install_dir));
+    if tracking == Tracking::Unsupported || appid.is_none() {
+        return Ok(GameAchievements { appid, total: 0, unlocked: 0, list: Vec::new(), tracking, emulator });
+    }
+    let appid = appid.unwrap();
     let list = schema(&app, &appid).await;
     // Where the game saves: its Wine/Proton prefix on Linux, the PC's own
     // folders on Windows - the same place the watcher reads while it runs.
@@ -176,6 +235,8 @@ pub async fn game_achievements(app: AppHandle, id: String) -> Result<GameAchieve
     let unlocks = ach::read_unlocked(&roots, &appid);
     let mut out = merge(list, &unlocks);
     out.appid = Some(appid);
+    out.tracking = tracking;
+    out.emulator = emulator;
     Ok(out)
 }
 
@@ -224,6 +285,68 @@ pub fn watch<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, roots: Roots) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rune_profiles_and_gbe_are_supported_but_kryoto_online_is_not() {
+        for source in ["Steam + gbe_fork", "GBE-Fork", "Goldberg", "Steam + RUNE", "RUNE (Steakclient)", "RUNE (Steamclient)", "CODEX", "Online-Fix", "OFME"] {
+            assert_eq!(named_tracking(source).0, Tracking::Supported, "{source}");
+        }
+        for source in ["Steam + Kryoto Online", "kryoto-online", "KryotoO"] {
+            assert_eq!(named_tracking(source), (Tracking::Unsupported, Some("Kryoto Online".into())));
+        }
+        for source in ["Steam (DRM-free)", "Kryoto Original release", "unknown repack", "custom", ""] {
+            assert_eq!(named_tracking(source), (Tracking::Unknown, None));
+        }
+    }
+
+    #[test]
+    fn local_changes_override_the_original_release_label() {
+        let mut game = LibraryGame { source: Some("Steam + gbe_fork".into()), ..Default::default() };
+        game.online = Some(Default::default());
+        assert_eq!(metadata_tracking(&game).0, Tracking::Unsupported);
+        game.repair = Some(crate::repair::LocalRepair { source: "gbe_fork".into(), ..Default::default() });
+        assert_eq!(metadata_tracking(&game).0, Tracking::Supported);
+        game.repair = None;
+        game.online = None;
+        game.addons.push(crate::addons::InstalledAddon { files: vec!["Binaries\\kryoto-online.ini".into()], ..Default::default() });
+        assert_eq!(metadata_tracking(&game).0, Tracking::Unsupported);
+    }
+
+    #[test]
+    fn active_dll_identity_overrides_stale_labels_and_ignores_repair_backups() {
+        fn write_dll(path: &Path, product: &str) {
+            let key: Vec<u8> = "ProductName\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+            let value: Vec<u8> = format!("{product}\0").encode_utf16().flat_map(u16::to_le_bytes).collect();
+            let value_at = (6 + key.len() + 3) & !3;
+            let size = value_at + value.len();
+            let mut bytes = vec![0u8; 0x200 + size];
+            bytes[..2].copy_from_slice(b"MZ");
+            bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+            bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+            bytes[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+            bytes[0x98..0x9d].copy_from_slice(b".rsrc");
+            bytes[0xa8..0xac].copy_from_slice(&(size as u32).to_le_bytes());
+            bytes[0xac..0xb0].copy_from_slice(&0x200u32.to_le_bytes());
+            bytes[0x200..0x202].copy_from_slice(&(size as u16).to_le_bytes());
+            bytes[0x202..0x204].copy_from_slice(&(value.len() as u16 / 2).to_le_bytes());
+            bytes[0x204..0x206].copy_from_slice(&1u16.to_le_bytes());
+            bytes[0x206..0x206 + key.len()].copy_from_slice(&key);
+            bytes[0x200 + value_at..].copy_from_slice(&value);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("kry-ach-tracking-{}", std::process::id()));
+        let game = LibraryGame { install_dir: dir.to_string_lossy().into(), source: Some("Steam + RUNE".into()), ..Default::default() };
+        let dll = dir.join("bin/steam_api64.dll");
+        write_dll(&dll, "kryoto-online");
+        assert_eq!(tracking_of(&game).0, Tracking::Unsupported);
+        write_dll(&dll, "gbe_fork");
+        write_dll(&dir.join(".kryoto-repair/backup/steam_api64.dll"), "kryoto-online");
+        assert_eq!(tracking_of(&game).0, Tracking::Supported);
+        std::fs::write(&dll, b"ProductName kryoto-online").unwrap();
+        assert_eq!(tracking_of(&game), named_tracking("RUNE"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn a(name: &str, percent: f32) -> Achievement {
         Achievement {

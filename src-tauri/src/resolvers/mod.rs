@@ -17,6 +17,8 @@
 //! agent, referer) and how many connections the host tolerates.
 
 mod browser;
+#[cfg(windows)]
+mod ublock;
 mod buzzheavier;
 mod gofile;
 mod mediafire;
@@ -102,6 +104,10 @@ pub(crate) fn st0807_file(url: &str) -> bool {
 
 /// Page hosts, by domain, and what stands in the way.
 const PAGE_HOSTS: &[(&str, &str)] = &[
+    #[cfg(windows)]
+    ("vikingfile.com", "VikingFile"),
+    #[cfg(windows)]
+    ("vik1ngfile.site", "VikingFile"),
     ("mocha.my", "Mocha"),
     ("dropdrive.org", "DropDrive"),
     // DropDrive's API and pages while dropdrive.org is suspended.
@@ -252,7 +258,10 @@ mod tests {
             "https://www.vikingfile.com/f/xyz",
             "https://vik1ngfile.site/f/xyz",
         ] {
-            assert_eq!(classify(url), None, "VikingFile must bypass the native resolver and ad blocker");
+            #[cfg(windows)]
+            assert_eq!(classify(url), Some((Kind::Page, "VikingFile")), "Windows mirror pages use uBlock");
+            #[cfg(not(windows))]
+            assert_eq!(classify(url), None, "VikingFile opens externally without extension support");
         }
     }
 

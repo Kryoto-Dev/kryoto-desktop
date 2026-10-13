@@ -18,11 +18,12 @@ export type RepairBackend = {
 }
 
 /** One panel for Desktop and the portable app; source options come from Rust. */
-export function RepairPanel({ backend, portable = false, initialOnline = false }: { backend: RepairBackend; portable?: boolean; initialOnline?: boolean }) {
+export function RepairPanel({ backend, portable = false, initialOnline = false, purpose = 'repair' }: { backend: RepairBackend; portable?: boolean; initialOnline?: boolean; purpose?: 'repair' | 'achievements' }) {
+  const forAchievements = purpose === 'achievements'
   const [sources, setSources] = useState<RepairSource[]>([])
   const [mode, setMode] = useState<'offline' | 'online'>(initialOnline ? 'online' : 'offline')
   const [source, setSource] = useState(initialOnline ? 'online' : 'gbe_fork')
-  const [status, setStatus] = useState('Choose a source, then press the logo to repair.')
+  const [status, setStatus] = useState(forAchievements ? 'Switch to gbe_fork, then start the game to check that it still works.' : 'Choose a source, then press the logo to repair.')
   const [busy, setBusy] = useState(false)
   const [undo, setUndo] = useState(false)
   const [result, setResult] = useState<RepairReport | null>(null)
@@ -41,14 +42,14 @@ export function RepairPanel({ backend, portable = false, initialOnline = false }
       if (state.interrupted) setStatus('A repair was interrupted. Undo it to restore the previous files.')
       else if (state.undo_available && state.report) {
         setResult(state.report)
-        setStatus('Done. Start the game and check whether it works.')
+        setStatus(forAchievements && state.report.source !== 'gbe_fork' ? 'A previous repair has a backup. Undo it before switching to gbe_fork.' : 'Done. Start the game and check whether it works.')
       }
     }).catch((e: unknown) => !cancelled && setError(errorText(e)))
     void backend.listen((progress) => {
       if (!cancelled) setStatus(progress.text + (progress.percent != null ? ` ${progress.percent}%` : ''))
     }).then((fn) => cancelled ? fn() : (stop = fn)).catch((e: unknown) => !cancelled && setError(errorText(e)))
     return () => { cancelled = true; stop?.() }
-  }, [backend])
+  }, [backend, forAchievements])
   useEffect(() => {
     const applied = result && sources.find((s) => s.label === result.source)
     if (applied) { setMode(applied.online ? 'online' : 'offline'); setSource(applied.id) }
@@ -61,10 +62,11 @@ export function RepairPanel({ backend, portable = false, initialOnline = false }
   }
 
   async function run() {
-    if (inFlight.current || undo || !sources.some((s) => s.id === source)) return
+    const chosen = forAchievements ? 'gbe_fork' : source
+    if (inFlight.current || undo || !sources.some((s) => s.id === chosen)) return
     inFlight.current = true; setBusy(true); setError(null); setResult(null); setAnswer(null); setReport(null)
     try {
-      const fixed = await backend.apply(source)
+      const fixed = await backend.apply(chosen)
       setResult(fixed); setUndo(true)
       setStatus('Done. Start the game and check whether it works.')
     } catch (e) {
@@ -89,15 +91,15 @@ export function RepairPanel({ backend, portable = false, initialOnline = false }
 
   return (
     <section className="grid justify-items-center gap-3 text-center" aria-label="Repair game">
-      <fieldset disabled={busy || undo} className="grid justify-items-center gap-2 disabled:opacity-60">
+      {!forAchievements ? <fieldset disabled={busy || undo} className="grid justify-items-center gap-2 disabled:opacity-60">
         <Segmented value={mode} options={[{ value: 'offline', label: 'Offline' }, { value: 'online', label: 'Online' }]} onChange={changeMode} label="Play mode" />
         <Dropdown value={source} options={choices.map((s) => ({ value: s.id, label: s.label }))} onChange={setSource} label="Repair source" className="w-56 text-left" />
-      </fieldset>
+      </fieldset> : null}
       <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">Close the game first. Changing its source can break a working game. Kryoto backs up the emulator files; use Undo if the game stops working.</p>
-      {mode === 'online' ? <p className="text-[11px] text-muted-foreground">Kryoto Online needs Steam running and does not work with every game.</p> : null}
-      <button type="button" onClick={() => void run()} disabled={busy || undo || !sources.length} aria-label="Start game repair" className="grid h-24 w-44 place-items-center text-primary transition-opacity hover:opacity-75 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:cursor-default disabled:opacity-50">
+      {forAchievements ? <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">gbe_fork supports achievement tracking, but it cannot provide Kryoto Online multiplayer. Switching does not recover achievements the previous emulator never recorded.</p> : mode === 'online' ? <p className="text-[11px] text-muted-foreground">Kryoto Online needs Steam running and does not work with every game.</p> : null}
+      {forAchievements ? <Button onClick={() => void run()} disabled={busy || undo || !sources.some((s) => s.id === 'gbe_fork')}>{busy ? <Busy className="size-4" /> : null} Switch to gbe_fork</Button> : <button type="button" onClick={() => void run()} disabled={busy || undo || !sources.length} aria-label="Start game repair" className="grid h-24 w-44 place-items-center text-primary transition-opacity hover:opacity-75 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:cursor-default disabled:opacity-50">
         {busy ? <Busy className="size-9" /> : <svg viewBox={`0 0 ${MARK_W} ${MARK_H}`} className="w-36" aria-hidden="true"><path d={MARK_PATH} fill="currentColor" /></svg>}
-      </button>
+      </button>}
       <p className="min-h-9 max-w-sm text-xs leading-relaxed" role="status" aria-live="polite" aria-atomic="true">{status}</p>
       {result && !answer ? <div className="flex gap-2">
         <Button size="sm" onClick={() => { setAnswer('working'); setStatus(portable ? 'You may delete auto-fixer-gbef.exe.' : 'The game works. Your backup is kept for Undo.') }}><Check className="size-4" aria-hidden="true" /> Working</Button>

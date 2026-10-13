@@ -148,6 +148,11 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
 
+      - name: uBlock in real WebView2 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-ublock.ps1
+
       - name: Shared repair engine tests
         run: cargo test --locked --manifest-path crates/kryoto-repair/Cargo.toml
 

@@ -22,6 +22,7 @@ mod repair;
 mod pad;
 mod placement;
 mod player_name;
+mod presence;
 mod resolvers;
 mod settings;
 mod storage;
@@ -1078,6 +1079,7 @@ pub fn run() {
                 logging::info("display", &how);
             }
             logging::start_reporter(app.handle().clone());
+            presence::start(app.handle().clone());
             // Off the main thread: registry and xdg-mime are not worth a frame.
             std::thread::spawn(links::register);
             downloads::init(app.handle());
@@ -1197,6 +1199,9 @@ pub fn run() {
             if !loading {
                 let kryo = is_kryoto(payload.url(), webview.app_handle());
                 let _ = webview.eval(BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" }));
+                if kryo {
+                    presence::beat(webview.app_handle());
+                }
             }
         })
         .manage(repair::Sessions::default())

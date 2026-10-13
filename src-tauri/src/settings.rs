@@ -294,6 +294,9 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
         .map_err(|e| format!("Cannot use {}: {e}", settings.library_dir))?;
     let before = load(&app);
     write(&app, &settings)?;
+    if before.share_playtime != settings.share_playtime {
+        crate::presence::beat(&app);
+    }
     if before.catalog_endpoint != settings.catalog_endpoint {
         crate::catalog_endpoint_changed(&app, &settings)?;
     }

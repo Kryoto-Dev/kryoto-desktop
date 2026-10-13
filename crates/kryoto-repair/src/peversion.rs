@@ -127,6 +127,40 @@ pub fn file_version(exe: &Path) -> Option<String> {
     None
 }
 
+/// The product named by a DLL's version resource, read on Windows and Linux.
+/// Used to recognise an installed emulator even after an add-on changed it.
+pub fn product_name(exe: &Path) -> Option<String> {
+    product_name_in(&resource_section(exe)?)
+}
+
+fn product_name_in(bytes: &[u8]) -> Option<String> {
+    let key: Vec<u8> = "ProductName\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    for start in (6..bytes.len().saturating_sub(key.len())).step_by(2) {
+        if bytes.get(start..start + key.len()) != Some(key.as_slice()) {
+            continue;
+        }
+        let block = start - 6;
+        let length = usize::from(u16_at(bytes, block)?);
+        let chars = usize::from(u16_at(bytes, block + 2)?);
+        if u16_at(bytes, block + 4) != Some(1) || chars == 0 || chars > 1024 {
+            continue;
+        }
+        let value = (start + key.len() + 3) & !3;
+        let end = value.checked_add(chars * 2)?;
+        if end > block.checked_add(length)? {
+            continue;
+        }
+        let text: Vec<u16> = bytes.get(value..end)?.chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|c| *c != 0).collect();
+        if let Ok(name) = String::from_utf16(&text) {
+            if !name.trim().is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
 /// What to suggest as the release's version.
 ///
 /// Both readings are kept when both exist, because they answer different
@@ -145,6 +179,25 @@ pub fn suggest(exe_version: Option<&str>, build_id: Option<&str>) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_identity_requires_a_valid_string_resource() {
+        let key: Vec<u8> = "ProductName\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let value: Vec<u8> = "kryoto-online\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let value_at = (6 + key.len() + 3) & !3;
+        let mut bytes = vec![0; value_at + value.len()];
+        let length = bytes.len() as u16;
+        bytes[..2].copy_from_slice(&length.to_le_bytes());
+        bytes[2..4].copy_from_slice(&(value.len() as u16 / 2).to_le_bytes());
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        bytes[6..6 + key.len()].copy_from_slice(&key);
+        bytes[value_at..].copy_from_slice(&value);
+        assert_eq!(product_name_in(&bytes).as_deref(), Some("kryoto-online"));
+        assert_eq!(product_name_in(&bytes[..bytes.len() - 4]), None);
+        bytes[4..6].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(product_name_in(&bytes), None);
+        assert_eq!(product_name_in(b"ProductName kryoto-online"), None);
+    }
 
     #[test]
     fn a_version_drops_trailing_zeroes_but_keeps_two_parts() {

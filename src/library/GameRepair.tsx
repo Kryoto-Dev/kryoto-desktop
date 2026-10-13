@@ -3,7 +3,7 @@ import { call, on } from '@/lib/bridge'
 import { openExternal } from '@/lib/window'
 import { RepairPanel, type RepairBackend, type RepairProgress } from './RepairPanel'
 
-export function GameRepair({ gameId, initialOnline = false }: { gameId: string; initialOnline?: boolean }) {
+export function GameRepair({ gameId, initialOnline = false, purpose = 'repair' }: { gameId: string; initialOnline?: boolean; purpose?: 'repair' | 'achievements' }) {
   const backend = useMemo<RepairBackend>(() => ({
     sources: () => call('repair_sources'),
     state: () => call('repair_state', { gameId }),
@@ -13,5 +13,5 @@ export function GameRepair({ gameId, initialOnline = false }: { gameId: string; 
     openSupport: async () => { await openExternal(await call<string>('repair_support_url', { gameId })) },
     listen: (handler) => on<RepairProgress>('repair-progress', (progress) => { if (progress.gameId === gameId) handler(progress) }),
   }), [gameId])
-  return <RepairPanel backend={backend} initialOnline={initialOnline} />
+  return <RepairPanel backend={backend} initialOnline={initialOnline} purpose={purpose} />
 }

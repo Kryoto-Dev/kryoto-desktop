@@ -186,6 +186,7 @@ pub async fn pick_path(
 
 #[tauri::command]
 pub fn app_exit(app: AppHandle) {
+    crate::presence::disconnect(&app);
     crate::logging::info("app", "exit");
     app.exit(0);
 }

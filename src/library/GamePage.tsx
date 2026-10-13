@@ -286,7 +286,7 @@ export function GamePage({
             </Card>
           ) : null}
           <AddonsCard game={game} onGet={onGetUpdate} onChanged={(g) => onGameChanged?.(g)} />
-          <AchievementsCard game={game} />
+          <AchievementsCard game={game} running={running} />
         </div>
         <Card className="grid gap-3">
           <Label>Info</Label>

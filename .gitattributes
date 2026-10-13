@@ -1,0 +1,2 @@
+# Preserve the official extension byte for byte on every platform.
+src-tauri/resources/ublock/** -text
