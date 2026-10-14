@@ -10,6 +10,7 @@ mod remote;
 mod downloads;
 mod handoff;
 mod launch;
+mod proton_script;
 mod library;
 mod links;
 mod lobbies;

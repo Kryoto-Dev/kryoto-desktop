@@ -462,6 +462,24 @@ pub fn upsert_installed<R: Runtime>(app: &AppHandle<R>, mut game: LibraryGame) -
         Ok(game)
     })
     .inspect(write_marker)
+    .inspect(|game| {
+        #[cfg(target_os = "linux")]
+        if let Err(e) = sync_proton_script(app, game) { crate::logging::error("proton-script", &e); }
+        #[cfg(not(target_os = "linux"))]
+        let _ = game;
+    })
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn sync_proton_script<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Result<Option<PathBuf>, String> {
+    if !game.executable.to_ascii_lowercase().ends_with(".exe") { return Ok(None); }
+    let prefix = data_dir(app)?.join("prefixes").join(&game.id);
+    let managed = crate::compat::managed_dir(app);
+    let umu = crate::compat::umu_run(managed.as_deref());
+    let default_plan = plan_for(app, game, None).ok().map(|p| p.0);
+    let env = default_plan.as_ref().map(|p| p.env.as_slice()).unwrap_or(&[]);
+    let args = default_plan.as_ref().map(|p| p.game_args.as_str()).unwrap_or(&game.default_args);
+    crate::proton_script::write(Path::new(&game.install_dir), &game.executable, args, &prefix, env, umu.as_deref()).map(Some)
 }
 
 pub(crate) fn dir_size(path: &Path) -> u64 {
@@ -625,7 +643,13 @@ fn tool_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, settings: &crate
 /// The exact line Play would run, for the Properties window.
 #[tauri::command(async)]
 pub fn game_launch_preview(app: AppHandle, game: LibraryGame, entry: Option<usize>) -> Result<String, String> {
-    Ok(plan_for(&app, &game, entry)?.0.display())
+    let (mut plan, tool) = plan_for(&app, &game, entry)?;
+    if cfg!(target_os = "linux") && tool.as_deref().is_some_and(|p| crate::compat::kind_of(p) == "proton") {
+        if let Some(script) = sync_proton_script(&app, &game)? {
+            crate::proton_script::use_script(&mut plan, &script)?;
+        }
+    }
+    Ok(plan.display())
 }
 
 #[tauri::command]
@@ -745,6 +769,11 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
     // The achievement list gbe_fork needs, into a build made without one.
     crate::achievements::before_launch(&game);
 
+    if cfg!(target_os = "linux") && tool.as_deref().is_some_and(|p| crate::compat::kind_of(p) == "proton") {
+        if let Some(script) = sync_proton_script(&app, &game)? {
+            crate::proton_script::use_script(&mut plan, &script)?;
+        }
+    }
     let mut cmd = launch::command(&plan);
     // Everything the game (and Wine/Proton) prints goes into its log (game_logs.rs).
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
