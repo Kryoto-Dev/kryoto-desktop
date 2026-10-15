@@ -852,6 +852,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
             onStop={() => void lib.stop(selected.id)}
             gearItems={manageMenu(selected)}
             onStorePage={selected.slug ? () => openWeb(`/game/${selected.slug}`) : null}
+            onWeb={openWeb}
             onGetUpdate={() => openWeb(`/game/${selected.slug}?download=1`)}
             onGameChanged={lib.upsert}
             savedStatus={selected.slug ? (saved.find((e) => e.slug === selected.slug)?.status ?? null) : null}
