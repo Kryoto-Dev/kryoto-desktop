@@ -7,6 +7,7 @@ mod compat;
 mod display_env;
 mod game_logs;
 mod remote;
+mod phone;
 mod downloads;
 mod handoff;
 mod launch;
@@ -892,6 +893,14 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
         }
         if let Some(account) = state.account {
             logging::set_account(account.as_ref().map(|a| a.username.clone()));
+            phone::set_account(account.as_ref().map(|a| phone::PhoneProfile {
+                username: a.username.clone(),
+                display_name: a.display_name.clone(),
+                avatar_url: a.avatar_url.clone(),
+                supporter: a.supporter,
+                kryos: a.kryos,
+                counts: Default::default(),
+            }));
             player_name::remember_account(&app, account.as_ref().map(|a| a.username.as_str()));
             let _ = app.emit_to("main", "account-state", account);
         }
@@ -905,6 +914,7 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
             let _ = app.emit_to("main", "news-state", news);
         }
         if let Some(saved) = state.saved {
+            phone::set_saved(&saved);
             let _ = app.emit_to("main", "saved-state", saved);
         }
     }
@@ -1084,6 +1094,7 @@ pub fn run() {
         .manage(menus::Menus::default())
         .manage(PendingDownload::default())
         .manage(chat::ChatState::default())
+        .manage(phone::PhoneState::default())
         .manage(pad::Pads::default())
         .setup(move |app| {
             logging::init(app.handle());
@@ -1104,6 +1115,7 @@ pub fn run() {
             }
             // Chat reconnects on its own if it was turned on here before.
             chat::autostart(app.handle());
+            phone::start_if_enabled(app.handle());
             if let Err(e) = system::build_tray(app.handle()) {
                 logging::error("tray", &e.to_string());
             }
@@ -1235,6 +1247,11 @@ pub fn run() {
             game_logs::game_logs,
             remote::remote_snapshot,
             remote::remote_apply,
+            phone::phone_status,
+            phone::phone_set_lan,
+            phone::phone_new_code,
+            phone::phone_revoke,
+            phone::phone_report_look,
             game_logs::game_log_read,
             game_logs::game_logs_folder,
             library::library_prefix_folder,

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { artSrc } from '@/lib/art'
-import { Bell, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
+import { Bell, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, type Settings } from '@/lib/settings'
@@ -13,6 +13,7 @@ import { chime, setSoundsOn, soundsOn } from '@/lib/sound'
 import { StoragePane } from '@/settings/StoragePane'
 import { CompatPane } from '@/settings/CompatPane'
 import { LogsPane } from '@/settings/LogsPane'
+import { PhonePane } from '@/settings/PhonePane'
 import { ControllerPane } from '@/settings/ControllerPane'
 
 /**
@@ -34,6 +35,7 @@ export type SettingsSection =
   | 'general'
   | 'storage'
   | 'downloads'
+  | 'phone'
   | 'controller'
   | 'compat'
   | 'developer'
@@ -79,6 +81,7 @@ export function SettingsPage({
     { id: 'general', label: 'General', icon: <SlidersHorizontal /> },
     { id: 'storage', label: 'Storage', icon: <HardDrive /> },
     { id: 'downloads', label: 'Downloads', icon: <Download /> },
+    { id: 'phone', label: 'Phone', icon: <Smartphone /> },
     // Behind kryo.to's `controller` feature flag.
     ...(account.controller ? [{ id: 'controller' as const, label: 'Controller', icon: <Gamepad2 /> }] : []),
     ...(isWindowsHost() ? [] : [{ id: 'compat' as const, label: 'Compatibility', icon: <Wrench /> }]),
@@ -338,6 +341,7 @@ function DesktopPane({ section }: { section: SettingsSection }) {
           </Section>
         ) : null}
         {section === 'logs' ? <LogsPane sendReports={s.sendReports} onSendReports={(v) => set('sendReports', v)} /> : null}
+        {section === 'phone' ? <PhonePane /> : null}
       </div>
     </div>
   )

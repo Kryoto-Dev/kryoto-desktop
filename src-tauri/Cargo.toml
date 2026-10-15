@@ -1,6 +1,6 @@
 [package]
 name = "kryoto-desktop"
-version = "0.2.20"
+version = "0.2.21"
 description = "Kryoto's native desktop launcher shell."
 authors = ["Kryoto"]
 license = "MIT"
@@ -26,7 +26,8 @@ tokio = { version = "1", features = ["sync", "fs", "io-util", "time", "net", "ma
 futures-util = "0.3"
 sevenz-rust = "0.6"
 sha2 = "0.10"
-sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+sysinfo = { version = "0.33", default-features = false, features = ["system", "network"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 regex = "1"
 base64 = "0.22"
 percent-encoding = "2"

@@ -14,6 +14,7 @@ export type Settings = {
   startPage: 'store' | 'library'
   defaultCompatTool: string | null
   minimizeOnPlay: boolean
+  phoneLan: boolean
   notifyDownloads: boolean
   palette: Palette
   theme?: Theme

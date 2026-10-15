@@ -74,6 +74,11 @@ export default function App() {
     const apply = () => {
       applyLook(look)
       if (isTauri()) void call('shell_theme', { dark: document.documentElement.classList.contains('dark') }).catch(() => {})
+      // A phone linked to this PC follows the same look.
+      if (isTauri()) {
+        const dark = document.documentElement.classList.contains('dark')
+        void call('phone_report_look', { look: { theme: dark ? 'dark' : 'light', palette: look.palette, radius: look.radius, font: look.font, season: look.season ?? null, reducedMotion: look.reducedMotion === true } }).catch(() => {})
+      }
     }
     apply()
     const system = matchMedia('(prefers-color-scheme: dark)')
