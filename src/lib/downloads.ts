@@ -142,8 +142,8 @@ export function useDownloads() {
 export function formatBytes(n: number | null | undefined): string {
   if (!n || n <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
-  const v = n / 1024 ** i
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1000)))
+  const v = n / 1000 ** i
   return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
 }
 

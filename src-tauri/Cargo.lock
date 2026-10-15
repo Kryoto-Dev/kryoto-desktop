@@ -2613,6 +2613,7 @@ dependencies = [
  "url",
  "vigem-client",
  "walkdir",
+ "webkit2gtk",
  "webview2-com",
  "windows 0.62.2",
  "windows-sys 0.59.0",

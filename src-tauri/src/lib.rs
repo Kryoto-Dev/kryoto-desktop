@@ -16,6 +16,8 @@ mod links;
 mod lobbies;
 #[cfg(target_os = "linux")]
 mod linux_overlay;
+#[cfg(target_os = "linux")]
+mod linux_store_downloads;
 mod logging;
 mod menus;
 mod online;
@@ -31,7 +33,9 @@ mod system;
 
 use serde::{Deserialize, Serialize};
 use tauri::plugin::Builder as PluginBuilder;
-use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder};
+#[cfg(not(target_os = "linux"))]
+use tauri::webview::DownloadEvent;
+use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{Emitter, Manager, Runtime, WebviewUrl};
 
 /// The Store / Community / profile pages: one real web view, kryo.to in it.
@@ -285,6 +289,14 @@ fn block_reason(url: &url::Url) -> String {
         }
         _ => format!("Blocked unsupported address: {}://", url.scheme()),
     }
+}
+
+/// WebKit sends subframe navigations through the Store's policy too.
+/// Turnstile creates these documents for its challenge probes; refusing them
+/// leaves the widget verifying until it fails. This permits those internal
+/// documents without allowing arbitrary about:, data:, file: or script URLs.
+fn is_internal_frame_document(url: &url::Url) -> bool {
+    matches!(url.as_str(), "about:blank" | "about:srcdoc")
 }
 
 fn store<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<tauri::Webview<R>, String> {
@@ -708,9 +720,9 @@ async fn store_mount(
         let ua = if ua.contains("KryotoDesktop/") { ua } else { format!("{ua} KryotoDesktop/{}", env!("CARGO_PKG_VERSION")) };
         builder = builder.user_agent(&ua);
     }
-    let builder = builder
-        .transparent(true)
-        .on_download(|webview, event| match event {
+    let builder = builder.transparent(true);
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.on_download(|webview, event| match event {
             DownloadEvent::Requested { url, .. } => {
                 let settings = settings::load(webview.app_handle());
                 if !downloads::is_ours(&url, &settings) {
@@ -723,8 +735,8 @@ async fn store_mount(
                 false
             }
             _ => true,
-        })
-        .on_new_window(move |url, _features| {
+        });
+    let builder = builder.on_new_window(move |url, _features| {
             let endpoint = settings::catalog_endpoint(&settings::load(&popup_app));
             let url = match map_catalog_url(url.clone(), &endpoint) {
                 Ok(url) => url,
@@ -753,6 +765,8 @@ async fn store_mount(
         });
     let (position, size) = placement::rect(x, y, width, height, scale);
     let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    linux_store_downloads::install(&view)?;
     if visible == Some(false) {
         let _ = view.hide();
     }
@@ -1138,6 +1152,9 @@ pub fn run() {
                     if webview.label() != STORE {
                         return true;
                     }
+                    if is_internal_frame_document(url) {
+                        return true;
+                    }
                     if allowed_browser_url(url) {
                         let settings = settings::load(webview.app_handle());
                         let endpoint = settings::catalog_endpoint(&settings);
@@ -1421,6 +1438,16 @@ mod tests {
         let checked = ["tauri-plugin-updater", "tauri-plugin-process"];
         let unchecked: Vec<&&str> = plugins.iter().filter(|l| !checked.iter().any(|c| l.trim_start().starts_with(c))).collect();
         assert!(unchecked.is_empty(), "check these add no page script, then list them here: {unchecked:?}");
+    }
+
+    #[test]
+    fn challenge_frames_keep_their_internal_documents() {
+        for address in ["about:blank", "about:srcdoc"] {
+            assert!(is_internal_frame_document(&address.parse().unwrap()));
+        }
+        for address in ["about:config", "data:text/html,test", "javascript:alert(1)", "file:///etc/passwd", "https://evil.example/"] {
+            assert!(!is_internal_frame_document(&address.parse().unwrap()));
+        }
     }
 
     #[test]

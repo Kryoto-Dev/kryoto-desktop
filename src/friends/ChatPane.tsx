@@ -117,9 +117,9 @@ function GifView({ gif, auto }: { gif: Gif; auto: boolean }) {
 }
 
 function size(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
+  if (n < 1000) return `${n} B`
+  if (n < 1000 * 1000) return `${(n / 1000).toFixed(0)} KB`
+  return `${(n / 1000 / 1000).toFixed(1)} MB`
 }
 
 /** A file in a message: images show inline (decrypted here), anything can be saved. */
