@@ -10,6 +10,7 @@ import { errorText } from '@/lib/bridge'
 import { cn } from '@/lib/utils'
 import { AddonsCard } from '@/library/AddonsCard'
 import { AchievementsCard } from '@/library/AchievementsCard'
+import { CompatibilityFacts } from '@/library/Compatibility'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
 import { automaticArtwork } from '@/lib/game-artwork'
 
@@ -32,6 +33,7 @@ export function GamePage({
   onStop,
   gearItems,
   onStorePage,
+  onWeb,
   onGetUpdate,
   savedStatus,
   onSetStatus,
@@ -48,6 +50,8 @@ export function GamePage({
   onStop: () => void
   gearItems: MenuEntry[]
   onStorePage: (() => void) | null
+  /** Opens a kryo.to page (a path) in the Store view. */
+  onWeb?: (path: string) => void
   onGetUpdate: () => void
   /** Its status in the account's kryo.to library, when it is a kryo.to game. */
   savedStatus?: SavedStatus | null
@@ -299,6 +303,7 @@ export function GamePage({
             <Fact k="Folder" v={game.installDir} mono />
             {game.launchOptions ? <Fact k="Options" v={game.launchOptions} mono /> : null}
           </dl>
+          {game.slug && onWeb ? <CompatibilityFacts slug={game.slug} onWeb={onWeb} /> : null}
           {/* What Play starts, for when a game will not: there when it is
               wanted, folded away when it is not. The Store page and the ways
               to play are in the bar above (the globe, and Play's own menu). */}

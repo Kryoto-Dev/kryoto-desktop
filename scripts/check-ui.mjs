@@ -301,6 +301,49 @@ try {
       assert.equal(await dialog.count(), 0)
     } finally { await achievements.close() }
   })
+  await check('a game shows its Linux compatibility and setup as text, and an untested game shows none', async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' })
+    const linux = await context.newPage()
+    linux.on('pageerror', e => failures.push(e.message))
+    const stranger = []
+    linux.on('request', r => { if (r.url().includes('evil.example')) stranger.push(r.url()) })
+    const empty = { status: 'untested', reports: 0, older: 0, detail: null }
+    const report = (id, extra) => ({ id, platform: 'linux', outcome: 'setup', version: 'b1', current: true, env: { layer: 'proton_ge', layerVersion: '9-20', osVersion: 'Arch Linux' }, instructions: null, tester: { name: 'Tess', username: 'tess_t' }, testedAt: '2026-10-10T00:00:00Z', ...extra })
+    await linux.route('**/api/games/*/compatibility', route => {
+      if (route.request().url().includes('/hades/')) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ summary: { headline: 'Works on Linux.', platforms: { windows: empty, linux: { ...empty, status: 'works', reports: 1 }, steamdeck: empty, macos: empty }, unspecified: empty }, reports: [report('3', { outcome: 'works', instructions: 'Nothing to change.' })] }) })
+      if (!route.request().url().includes('/hollow-knight/')) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ summary: { headline: 'Nobody has tested it yet.', platforms: { windows: empty, linux: empty, steamdeck: empty, macos: empty }, unspecified: empty }, reports: [] }) })
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        summary: { headline: 'Works on Windows and Linux.', platforms: { windows: { ...empty, status: 'works', reports: 1 }, linux: { ...empty, status: 'setup', reports: 2 }, steamdeck: empty, macos: empty }, unspecified: empty },
+        reports: [
+          report('2', { instructions: 'Set PROTON_USE_WINED3D=1\n![shot](https://evil.example/x.png) <img src="https://evil.example/y.png">', tester: { name: 'Anonymous tester', username: null } }),
+          report('1', { current: false, instructions: 'older steps' }),
+        ],
+      }) })
+    })
+    try {
+      await linux.goto(base)
+      const sidebar = linux.getByRole('complementary', { name: 'Your games' })
+      await sidebar.getByRole('button', { name: 'Hollow Knight', exact: true }).click()
+      const region = linux.getByRole('region', { name: 'Hollow Knight', exact: true })
+      await region.getByText('On Linux', { exact: true }).waitFor()
+      await region.getByText('Working, setup needed', { exact: true }).waitFor()
+      await region.getByText('Works on Windows and Linux.', { exact: true }).waitFor()
+      assert.equal(await region.getByRole('link', { name: '2 reports', exact: true }).getAttribute('href'), 'https://kryo.to/game/hollow-knight#compatibility-linux')
+      await region.getByText(/Set PROTON_USE_WINED3D=1/).waitFor()
+      assert.equal(await region.locator('img[src*="evil.example"]').count(), 0)
+      assert.equal(await region.getByRole('link', { name: 'Anonymous tester' }).count(), 0)
+      await region.getByText(/GE-Proton 9-20, Arch Linux, build b1/).waitFor()
+      assert.deepEqual(stranger, [])
+      await sidebar.getByRole('button', { name: 'Hades', exact: true }).click()
+      const hades = linux.getByRole('region', { name: 'Hades', exact: true })
+      await hades.getByText('Setup that worked').click()
+      assert.equal(await hades.getByRole('link', { name: 'Tess', exact: true }).getAttribute('href'), 'https://kryo.to/user/tess_t')
+      await sidebar.getByRole('button', { name: 'Celeste', exact: true }).click()
+      await linux.getByRole('region', { name: 'Celeste', exact: true }).getByText('Launch command').waitFor()
+      await linux.waitForTimeout(300)
+      assert.equal(await linux.getByText('On Linux', { exact: true }).count(), 0)
+    } finally { await context.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
