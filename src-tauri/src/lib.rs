@@ -89,7 +89,7 @@ struct Account {
     /// Controller support is rolled out to this account (flag `controller`).
     #[serde(default)]
     controller: bool,
-    /// Their Kryos balance (kryo.to's Hatchery coin), when they have a wallet.
+    /// Their Kryos balance (kryo.to's coin for perks and badges).
     #[serde(default)]
     kryos: Option<i64>,
 }
@@ -444,8 +444,9 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   let kryos = null;
   let account = null;
   let savedAt = 0;
-  // The Hatchery moves the balance as it is played (its context sends this
-  // event); pass it on so the coin beside the account keeps up.
+  // The wallet on kryo.to's perks page moves the balance after a claim, an
+  // exchange or a purchase (it sends this event); pass it on so the coin
+  // beside the account keeps up.
   addEventListener('kryo:kryos', (e) => {
     const n = e && typeof e.detail === 'number' ? e.detail : null;
     if (!account || n === null || n === kryos) return;

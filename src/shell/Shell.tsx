@@ -901,7 +901,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         onOpenNotification={openNotification}
         onMarkRead={markAllRead}
         onAllNotifications={() => openWeb('/notifications')}
-        onKryos={() => openWeb('/hatchery')}
+        onKryos={() => openWeb('/perks#kryos')}
       />
       <NavBar
         current={currentTab}

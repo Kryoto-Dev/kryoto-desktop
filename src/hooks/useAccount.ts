@@ -23,8 +23,8 @@ export type Account = {
   /** Controller support is rolled out to this account (kryo.to feature flag). */
   controller?: boolean
   /**
-   * Their Kryos, the coin of kryo.to's Hatchery, when they have a wallet.
-   * Shown beside the account; a click opens the Hatchery (18+) in the Store.
+   * Their Kryos, kryo.to's coin for perks and badges. Shown beside the
+   * account; a click opens the wallet (claims, the shop) in the Store.
    */
   kryos?: number | null
   /** Using the client without an account (see App). */
