@@ -629,6 +629,12 @@ pub fn enqueue_remote<R: Runtime>(app: &AppHandle<R>, command: &str, url: String
     enqueue_item(app, url, slug, title, None, None, Some(format!("remote-{command}")))
 }
 
+/// Queue a download from a link kryo.to minted for this PC, as pressing
+/// Download in the Store does: a game already downloading is not queued twice.
+pub fn enqueue_url<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>, title: Option<String>) -> Result<(), String> {
+    enqueue_item(app, url, slug, title, None, None, None)
+}
+
 pub fn remote_control<R: Runtime>(app: &AppHandle<R>, id: &str, status: Status) -> Result<(), String> {
     if edit(app, id, |d| d.status = status).is_none() { return Err("That download is no longer in the list.".into()); }
     persist_checked(app)?;

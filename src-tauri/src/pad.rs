@@ -135,7 +135,7 @@ impl Default for PadConfig {
         Self {
             enabled: false,
             navigate: true,
-            notify: true,
+            notify: false,
             games: true,
             haptics: true,
             virtual_pad: true,
@@ -1205,7 +1205,7 @@ mod tests {
     #[test]
     fn config_defaults_and_old_files() {
         let c: PadConfig = serde_json::from_str("{}").unwrap();
-        assert!(!c.enabled && c.navigate && c.notify && c.games && c.haptics && c.virtual_pad);
+        assert!(!c.enabled && c.navigate && !c.notify && c.games && c.haptics && c.virtual_pad);
         let c: PadConfig = serde_json::from_str(r#"{"pads":{"abc":{"name":"Pad","family":"nintendo","remap":{"a":"b","b":"a"}}}}"#).unwrap();
         let p = &c.pads["abc"];
         assert_eq!(p.family, Some(Family::Nintendo));

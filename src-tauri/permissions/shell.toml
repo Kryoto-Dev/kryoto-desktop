@@ -20,6 +20,7 @@ commands.allow = [
   "library_prefix_folder",
   "pad_start",
   "shell_theme",
+  "phone_status", "phone_set_lan", "phone_new_code", "phone_revoke", "phone_report_look",
   "pad_stop",
   "pad_list",
   "pad_config_get",

@@ -92,6 +92,7 @@ const settings: Record<string, unknown> = {
   startPage: 'library',
   defaultCompatTool: null,
   minimizeOnPlay: false,
+  phoneLan: false,
   notifyDownloads: true,
   palette: 'monochrome',
   radius: 'pill',
@@ -475,6 +476,10 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   logs_tail: () => LOG.join('\n'),
   logs_folder: () => 'C:\\Users\\you\\AppData\\Roaming\\to.kryo.desktop\\logs',
   logs_send: () => 1,
+  phone_status: () => ({ lan: false, addresses: [], code: null, codeExpiresIn: null, pairUri: null, devices: [] }),
+  phone_set_lan: () => null,
+  phone_new_code: () => '123456',
+  phone_revoke: () => null,
   log_write: () => null,
   shell_ready: () => null,
   download_pause: (a) => {
@@ -549,7 +554,7 @@ const previewPads = [
 let previewPadConfig = {
   enabled: true,
   navigate: true,
-  notify: true,
+  notify: false,
   games: true,
   haptics: true,
   virtualPad: true,

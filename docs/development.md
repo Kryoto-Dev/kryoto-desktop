@@ -82,6 +82,7 @@ Changes are listed in kryo.to's changelog; this app has none of its own.
 | `src-tauri/src/lib.rs` | the Store web view, what kryo.to reports (account, inbox, lists), commands |
 | `src-tauri/src/downloads.rs` | taking over kryo.to downloads, resume, space checks, unpacking, install |
 | `src-tauri/src/launch.rs` | what Play runs: Steam launch entries, launch options, Wine/Proton |
+| `src-tauri/src/phone.rs` | the phone server: pairing, the library, Play/Stop, downloads, achievements for [Kryoto Mobile](https://github.com/Kryoto-Dev/kryoto-mobile) on the same network |
 | `src-tauri/src/library.rs` | `library.json`, play/stop, play time, uninstall |
 | `src-tauri/src/storage.rs` | library folders, drive space, moving games between drives |
 | `src-tauri/src/system.rs` | tray, single instance, start with Windows, window state |

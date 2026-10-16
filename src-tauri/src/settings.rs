@@ -21,6 +21,8 @@ pub struct Settings {
     pub default_compat_tool: Option<String>,
     /// Minimize the client while a game runs.
     pub minimize_on_play: bool,
+    /// Let a paired phone on this network see the library and start games.
+    pub phone_lan: bool,
     /// Show a notification when a download finishes.
     pub notify_downloads: bool,
     /// kryo.to's palette: `monochrome`, `oled`, `amber`, `emerald`, `nord`, `sepia`, `blossom`.
@@ -82,6 +84,7 @@ impl Default for Settings {
             start_page: "library".into(),
             default_compat_tool: None,
             minimize_on_play: false,
+            phone_lan: false,
             notify_downloads: true,
             palette: "monochrome".into(),
             theme: "account".into(),
@@ -293,6 +296,9 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     std::fs::create_dir_all(&settings.library_dir)
         .map_err(|e| format!("Cannot use {}: {e}", settings.library_dir))?;
     let before = load(&app);
+    // The phone switches belong to Settings > Phone's own commands, which also
+    // start and stop the server; saving the whole page must not undo them.
+    settings.phone_lan = before.phone_lan;
     write(&app, &settings)?;
     if before.share_playtime != settings.share_playtime {
         crate::presence::beat(&app);
