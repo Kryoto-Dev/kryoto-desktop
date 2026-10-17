@@ -185,12 +185,29 @@ export function stopPreview() {
 export function startPreview() {
   if (simulation !== undefined) return
   simulation = setInterval(() => {
-  const d = downloadList[0]
-  if (!d || d.status !== 'downloading') return
-  d.received = Math.min(d.total as number, (d.received as number) + (d.speed as number) / 2)
-  d.speed = 30_000_000 + Math.round(Math.random() * 16_000_000)
-  if (d.received === d.total) d.status = 'extracting'
-  previewBus.emit('downloads', downloadList.map((x) => ({ ...x })))
+  let moved = false
+  for (const d of downloadList) {
+    if (d.status === 'downloading') {
+      d.received = Math.min(d.total as number, (d.received as number) + (d.speed as number) / 2)
+      d.speed = 30_000_000 + Math.round(Math.random() * 16_000_000)
+      if (d.received === d.total) {
+        d.status = 'extracting'
+        d.extractTotal = Math.round((d.total as number) * 1.6)
+        d.extracted = 0
+      }
+      moved = true
+    } else if (d.status === 'extracting' && d.extractTotal) {
+      // Unpacks in a few seconds, then it is ready to play.
+      d.extracted = Math.min(d.extractTotal as number, (d.extracted as number) + (d.extractTotal as number) / 12)
+      if (d.extracted === d.extractTotal) {
+        d.status = 'installed'
+        d.finishedAt = now()
+        previewBus.emit('notify', { title: `${(d.meta as { title: string }).title} is ready to play`, body: 'Installed. Press Play.', gameId: d.gameId ?? null })
+      }
+      moved = true
+    }
+  }
+  if (moved) previewBus.emit('downloads', downloadList.map((x) => ({ ...x })))
 }, 500)
 }
 if (import.meta.hot) import.meta.hot.dispose(stopPreview)
@@ -592,6 +609,45 @@ Object.assign(HANDLERS, {
     return previewPadConfig
   },
   pad_virtual_driver: () => false,
+  // The resolvers' table (src-tauri/src/resolvers/mod.rs), for a game's Builds.
+  mirror_hosts: (a: Record<string, unknown>) =>
+    (a.urls as string[]).map((u) => {
+      const host = (() => { try { return new URL(u).hostname.replace(/^www[.]/, '') } catch { return '' } })()
+      const page: Record<string, string> = { 'vikingfile.com': 'VikingFile', 'mocha.my': 'Mocha', 'dropdrive.org': 'DropDrive', 'fileditch.com': 'FileDitch', '1fichier.com': '1fichier' }
+      const api: Record<string, string> = { 'pixeldrain.com': 'Pixeldrain', 'gofile.io': 'Gofile', 'buzzheavier.com': 'Buzzheavier', 'mediafire.com': 'MediaFire' }
+      if (page[host]) return { host: page[host], kind: 'page' }
+      if (api[host]) return { host: api[host], kind: 'api' }
+      if (host === '0807.st') return { host: '0807.st', kind: 'direct' }
+      return null
+    }),
+  // A mirror download: its page is solved in the background, then it comes down like ours.
+  download_mirror: (a: Record<string, unknown>) => {
+    const id = `dl-${Date.now()}`
+    const item = dl({
+      id,
+      slug: a.slug,
+      url: a.url,
+      fileName: `${String(a.title ?? a.slug)} - Kryoto.7z`,
+      status: 'resolving',
+      received: 0,
+      total: 600_000_000,
+      speed: 0,
+      addedAt: now(),
+      mirror: { page: a.url, host: String(a.url).includes('vikingfile') ? 'VikingFile' : 'Mirror' },
+      meta: (() => {
+        const g = games.find((x) => x.slug === a.slug) as Record<string, unknown> | undefined
+        return { ...dl({}).meta, title: String(a.title ?? a.slug), cover: g?.cover ?? null, hero: g?.hero ?? null }
+      })(),
+    })
+    downloadList.unshift(item)
+    previewBus.emit('downloads', downloadList.map((x) => ({ ...x })))
+    setTimeout(() => {
+      item.status = 'downloading'
+      item.speed = 36_000_000
+      previewBus.emit('downloads', downloadList.map((x) => ({ ...x })))
+    }, 1800)
+    return null
+  },
   // Achievements and Repair use the same flow as the native app, with sample saves.
   game_achievements: (a: Record<string, unknown>) => {
     const g = games.find((g) => g.id === a.id) as Record<string, unknown> | undefined

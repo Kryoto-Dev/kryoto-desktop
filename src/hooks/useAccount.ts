@@ -83,7 +83,7 @@ export function useAccount(): Account | null | undefined {
       ? isOnline()
         ? undefined
         : remembered()
-      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, kryos: 12480, chat: true, friends: true, groups: true, room: true, controller: true },
+      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, kryos: null, chat: true, friends: true, groups: true, room: true, controller: true },
   )
   useEffect(() => {
     let stop: (() => void) | undefined
