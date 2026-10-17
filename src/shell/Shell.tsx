@@ -952,6 +952,16 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
             setOverlay(null)
             openWeb(`/game/${slug}?download=1`)
           }}
+          onSave={
+            guest
+              ? null
+              : (game) => {
+                  setOverlay(null)
+                  void setSavedStatus(game.slug, 'plan', { title: game.title, cover: game.cover ?? '' })
+                    .then(() => push({ title: `${game.title} saved`, body: 'It is in your library under All on Kryoto, as Plan to Play.', gameId: null }))
+                    .catch(() => push({ title: 'Could not save it', body: 'kryo.to did not answer. Try again in a moment.', gameId: null }))
+                }
+          }
           onAdded={(game) => {
             lib.upsert(game)
             setOverlay(null)

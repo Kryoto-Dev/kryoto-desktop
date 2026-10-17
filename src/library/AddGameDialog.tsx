@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { pickPath } from '@/lib/pick'
-import { ArrowLeft, Download, FolderOpen, Search } from 'lucide-react'
+import { ArrowLeft, Bookmark, Download, FolderOpen, Search } from 'lucide-react'
 import { AsciiBar, Button, Modal, Section, inputCls } from '@/ui'
 import { errorText, isTauri } from '@/lib/bridge'
 import { fetchCatalogGame, library, slugFrom, type CatalogGame, type LibraryGame } from '@/lib/library'
@@ -20,19 +20,23 @@ async function search(q: string): Promise<Hit[]> {
 }
 
 /**
- * Add a game: find it on kryo.to, then either point at the copy already on
- * this PC or go and download it. A game kryo.to does not have can still be
- * added from its .exe.
+ * Add a game: find it on kryo.to, then point at the copy already on this PC,
+ * go and download it, or just keep it in the library for later (Plan to Play
+ * on kryo.to, listed under All on Kryoto) without downloading anything. A
+ * game kryo.to does not have can still be added from its .exe.
  */
 export function AddGameDialog({
   initialSlug,
   onAdded,
   onDownload,
+  onSave,
   onClose,
 }: {
   initialSlug: string | null
   onAdded: (game: LibraryGame) => void
   onDownload: (slug: string) => void
+  /** Keep it in the library without downloading; null for a guest (it needs an account). */
+  onSave: ((game: CatalogGame) => void) | null
   onClose: () => void
 }) {
   const showAdult = useShowAdult()
@@ -162,9 +166,16 @@ export function AddGameDialog({
               {found.executable ? <span className="text-[11px] text-muted-foreground">Starts {found.executable}</span> : null}
             </div>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-2 sm:grid-cols-3">
             <Choice icon={<FolderOpen />} title="It's on this PC" body={found.executable ? `Point at ${found.executable}.` : 'Point at its .exe.'} disabled={busy} onClick={() => void chooseExe()} />
             <Choice icon={<Download />} title="Download it" body="Opens its page in the store." onClick={() => onDownload(found.slug)} />
+            <Choice
+              icon={<Bookmark />}
+              title="Save it for later"
+              body={onSave ? 'In your library as Plan to Play, under All on Kryoto. Nothing downloads.' : 'Sign in to keep games you have not downloaded.'}
+              disabled={busy || !onSave}
+              onClick={() => onSave?.(found)}
+            />
           </div>
           <Button variant="ghost" size="sm" className="w-fit" onClick={back}>
             <ArrowLeft className="size-3" />

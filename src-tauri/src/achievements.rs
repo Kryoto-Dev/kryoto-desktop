@@ -75,7 +75,9 @@ pub fn roots_for(env: &[(String, String)]) -> Roots {
 }
 
 /// Before the game starts: give its gbe_fork folders the list they lack.
-/// Bounded, because it holds up Play: a slow Steam costs a few seconds once,
+/// Bounded, because it holds up Play: the list and the stats setting are
+/// written here (one quick question to Steam), and the icons are fetched in
+/// the background while the game runs. A slow Steam costs a few seconds once,
 /// and the next start finds the file already there.
 pub fn before_launch(game: &LibraryGame) {
     let dir = PathBuf::from(&game.install_dir);
@@ -84,10 +86,20 @@ pub fn before_launch(game: &LibraryGame) {
         tokio::time::timeout(Duration::from_secs(8), ach::ensure_gbe_schema(&client(), &dir, &appid)).await
     });
     match result {
-        Ok(Ok(n)) if n > 0 => crate::logging::info("achievements", &format!("{}: achievement list added ({n} folder(s))", game.title)),
+        Ok(Ok(fix)) => {
+            if fix.folders > 0 {
+                crate::logging::info("achievements", &format!("{}: achievement list added ({} folder(s))", game.title, fix.folders));
+            }
+            if !fix.icons.is_empty() {
+                let title = game.title.clone();
+                tauri::async_runtime::spawn(async move {
+                    let n = ach::fetch_icons(&client(), fix.icons).await.len();
+                    crate::logging::info("achievements", &format!("{title}: {n} achievement icons fetched"));
+                });
+            }
+        }
         Ok(Err(e)) => crate::logging::warn("achievements", &format!("{}: {e}", game.title)),
         Err(_) => crate::logging::warn("achievements", &format!("{}: Steam was too slow; trying again next start", game.title)),
-        _ => {}
     }
 }
 
@@ -186,7 +198,7 @@ fn metadata_tracking(game: &LibraryGame) -> (Tracking, Option<String>) {
     named_tracking(game.source.as_deref().unwrap_or_default())
 }
 
-fn tracking_of(game: &LibraryGame) -> (Tracking, Option<String>) {
+pub(crate) fn tracking_of(game: &LibraryGame) -> (Tracking, Option<String>) {
     // Inspect the active Steam DLLs, excluding Repair's backups and SDK copies.
     // A downloaded Online add-on can replace them without changing the release label.
     let mut supported = None;
@@ -272,7 +284,7 @@ pub fn watch<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, roots: Roots) {
                         "achievement-unlocked",
                         serde_json::json!({ "gameId": id, "name": u.name, "displayName": name, "icon": a.and_then(|a| a.icon.clone()) }),
                     );
-                    let _ = app.emit("notify", crate::downloads::Notice::new(&format!("Achievement unlocked: {name}"), &body, Some(id.clone())));
+                    let _ = app.emit("notify", crate::downloads::Notice::new(&format!("Achievement unlocked: {name}"), &body, Some(id.clone())).sound("achievement"));
                 }
             }
             if !running {
@@ -380,6 +392,32 @@ mod tests {
         std::fs::write(dir.join("bin/steam_appid.txt"), "\u{feff}620\r\n").unwrap();
         assert_eq!(appid_of(&dir).as_deref(), Some("620"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole path on a real gbe_fork build: the list Desktop gives a game
+    /// before Play, the game unlocking through the emulator, and the unlocks
+    /// read back the way the game page and the watcher read them.
+    ///
+    /// Opt-in, Windows: `KRYOTO_ACH_GAME=<folder with gbe_fork's steam_api64.dll,
+    /// steam_appid.txt and steam_settings/> KRYOTO_ACH_EXE=<a program in it that
+    /// unlocks> KRYOTO_ACH_APPID=620 cargo test achievements_end_to_end -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn achievements_end_to_end() {
+        let game = PathBuf::from(std::env::var("KRYOTO_ACH_GAME").expect("KRYOTO_ACH_GAME"));
+        let exe = std::env::var("KRYOTO_ACH_EXE").expect("KRYOTO_ACH_EXE");
+        let appid = std::env::var("KRYOTO_ACH_APPID").unwrap_or_else(|_| "620".into());
+        assert_eq!(appid_of(&game).as_deref(), Some(appid.as_str()));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let fix = rt.block_on(ach::ensure_gbe_schema(&client(), &game, &appid)).unwrap();
+        println!("list written into {} steam_settings folder(s), {} icons to fetch", fix.folders, fix.icons.len());
+        let roots = Roots::from_env();
+        let before = ach::read_unlocked(&roots, &appid);
+        let out = std::process::Command::new(&exe).current_dir(&game).output().unwrap();
+        println!("{}", String::from_utf8_lossy(&out.stdout));
+        let after = ach::read_unlocked(&roots, &appid);
+        println!("before: {before:?}\nafter: {after:?}");
+        assert!(after.len() > before.len(), "the game's unlocks were not recorded");
     }
 
     #[test]

@@ -162,83 +162,200 @@ pub fn gbe_json(list: &[Achievement], images: bool) -> serde_json::Value {
     )
 }
 
-/// Write `achievements.json` (and its icons) into a gbe_fork `steam_settings`
-/// folder, unless one is already there - a release that shipped its own, or a
-/// game this already ran for, is left exactly as it is.
-///
-/// Returns every path it created, for the caller's record of changes. Empty
-/// when there was nothing to do: the file existed, or the game has no
-/// achievements. A failed icon is skipped - the achievement still unlocks,
-/// it just shows without a picture.
-pub async fn write_gbe_schema(client: &reqwest::Client, settings: &Path, appid: &str) -> Result<Vec<PathBuf>> {
+/// An achievement icon still to be fetched into an `achievement_images` folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IconJob {
+    pub url: String,
+    pub dest: PathBuf,
+}
+
+/// Write `achievements.json` for `list` into a gbe_fork `steam_settings`
+/// folder, pointing its icons into `achievement_images/`, and return the icons
+/// still to fetch. The list goes on disk first: gbe_fork needs it to record a
+/// single unlock, and the pictures only matter for showing them. Returns
+/// None when the folder already has a list (a release that shipped its own,
+/// or a game this already ran for, is left exactly as it is).
+pub fn write_gbe_list(settings: &Path, list: &[Achievement]) -> Result<Option<Vec<IconJob>>> {
     let file = settings.join(GBE_FILE);
-    if file.exists() {
+    if file.exists() || list.is_empty() {
+        return Ok(None);
+    }
+    let images = settings.join(GBE_IMAGES);
+    std::fs::create_dir_all(&images).map_err(|e| Error::Io(format!("creating {}: {e}", images.display())))?;
+    let body = serde_json::to_vec_pretty(&gbe_json(list, true)).map_err(|e| Error::Io(e.to_string()))?;
+    std::fs::write(&file, body).map_err(|e| Error::Io(format!("writing {}: {e}", file.display())))?;
+    let jobs = list
+        .iter()
+        .flat_map(|a| [a.icon.clone(), a.icon_gray.clone()])
+        .flatten()
+        .filter_map(|url| {
+            let dest = images.join(image_name(&url)?);
+            (!dest.exists()).then_some(IconJob { url, dest })
+        })
+        .collect();
+    Ok(Some(jobs))
+}
+
+/// Fetch icons (through kryo.to's Steam image proxy), eight at a time. A
+/// failed icon is skipped: the achievement still unlocks, it just shows
+/// without a picture. Returns the files written.
+pub async fn fetch_icons(client: &reqwest::Client, jobs: Vec<IconJob>) -> Vec<PathBuf> {
+    use futures_util::StreamExt;
+    futures_util::stream::iter(jobs)
+        .map(|job| async move {
+            if job.dest.exists() {
+                return None;
+            }
+            let mut proxy = url::Url::parse("https://kryo.to/api/steam/image.jpg").ok()?;
+            proxy.query_pairs_mut().append_pair("url", &job.url);
+            let res = client.get(proxy).timeout(std::time::Duration::from_secs(20)).send().await.ok()?;
+            if !res.status().is_success() {
+                return None;
+            }
+            let bytes = res.bytes().await.ok()?;
+            std::fs::write(&job.dest, &bytes).ok()?;
+            Some(job.dest)
+        })
+        .buffer_unordered(8)
+        .filter_map(|p| async move { p })
+        .collect()
+        .await
+}
+
+/// Write `achievements.json` and its icons into one gbe_fork `steam_settings`
+/// folder (Forge, for a build it is making). Returns every path it created,
+/// for the caller's record of changes; empty when there was nothing to do.
+pub async fn write_gbe_schema(client: &reqwest::Client, settings: &Path, appid: &str) -> Result<Vec<PathBuf>> {
+    if settings.join(GBE_FILE).exists() {
         return Ok(Vec::new());
     }
     let list = fetch_schema(client, appid, "english").await?;
-    if list.is_empty() {
-        return Ok(Vec::new());
-    }
+    let had_images = settings.join(GBE_IMAGES).exists();
+    let Some(jobs) = write_gbe_list(settings, &list)? else { return Ok(Vec::new()) };
+    let icons = fetch_icons(client, jobs).await;
     let mut created = Vec::new();
-    let images = settings.join(GBE_IMAGES);
-    let had_images = images.exists();
-    std::fs::create_dir_all(&images).map_err(|e| Error::Io(format!("creating {}: {e}", images.display())))?;
-    if !had_images {
-        created.push(images.clone());
-    }
-    let urls: Vec<String> = list.iter().flat_map(|a| [a.icon.clone(), a.icon_gray.clone()]).flatten().collect();
-    use futures_util::StreamExt;
-    let fetched: Vec<Option<PathBuf>> = futures_util::stream::iter(urls)
-        .map(|url| {
-            let images = images.clone();
-            async move {
-                let name = image_name(&url)?;
-                let dest = images.join(&name);
-                if dest.exists() {
-                    return None;
-                }
-                let mut proxy = url::Url::parse("https://kryo.to/api/steam/image.jpg").ok()?;
-                proxy.query_pairs_mut().append_pair("url", &url);
-                let res = client.get(proxy).timeout(std::time::Duration::from_secs(20)).send().await.ok()?;
-                if !res.status().is_success() {
-                    return None;
-                }
-                let bytes = res.bytes().await.ok()?;
-                std::fs::write(&dest, &bytes).ok()?;
-                Some(dest)
-            }
-        })
-        .buffer_unordered(8)
-        .collect()
-        .await;
     if had_images {
-        created.extend(fetched.into_iter().flatten());
+        created.extend(icons);
+    } else {
+        created.push(settings.join(GBE_IMAGES));
     }
-    let body = serde_json::to_vec_pretty(&gbe_json(&list, true)).map_err(|e| Error::Io(e.to_string()))?;
-    std::fs::write(&file, body).map_err(|e| Error::Io(format!("writing {}: {e}", file.display())))?;
-    created.push(file);
+    created.push(settings.join(GBE_FILE));
     Ok(created)
 }
 
-/// For an INSTALLED game: give every gbe_fork `steam_settings` folder in it
-/// the achievement list it lacks. This is how a build made before Forge wrote
-/// the file gets achievements, with nothing re-downloaded. Returns how many
-/// folders gained one.
-pub async fn ensure_gbe_schema(client: &reqwest::Client, game_dir: &Path, appid: &str) -> Result<usize> {
-    let mut done = 0;
-    for entry in walkdir::WalkDir::new(game_dir).max_depth(8).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_dir() || entry.file_name() != "steam_settings" {
-            continue;
-        }
-        // gbe_fork's folder, not a RUNE or Online one: it sits beside a
-        // steam_api dll and has gbe's own config files.
-        let dir = entry.path();
-        let gbe = dir.join("steam_appid.txt").exists() || dir.join("configs.app.ini").exists() || dir.join("steam_interfaces.txt").exists();
-        if gbe && !write_gbe_schema(client, dir, appid).await?.is_empty() {
-            done += 1;
+/// gbe_fork's main config, inside `steam_settings`.
+pub const GBE_MAIN_INI: &str = "configs.main.ini";
+
+/// Let the game keep the stats it uses.
+///
+/// gbe_fork only saves or updates stats listed in `steam_settings/stats.json`
+/// and rejects every other one (`[main::stats] allow_unknown_stats`, off by
+/// default). Steam's keyless API has no stat list, so no Kryoto build had one:
+/// every `SetStat` failed and every `GetStat` came back empty. A game that
+/// counts towards an achievement through a stat ("kill 100 enemies") never
+/// reached the point where it unlocks it, and some games stop asking for
+/// achievements altogether once a stat read fails. Checked against gbe_fork
+/// on 2026-10-16: an undefined stat was refused, and accepted with this on.
+///
+/// Adds `allow_unknown_stats=1` to an existing `configs.main.ini` that does not
+/// set it (a value someone chose is left alone), or writes a new file with
+/// just that. Returns the file when it was created, for the caller's record
+/// of changes; None when nothing was created (an edit, or nothing to do).
+pub fn ensure_gbe_stats_config(settings: &Path) -> Result<Option<PathBuf>> {
+    let file = settings.join(GBE_MAIN_INI);
+    let existing = std::fs::read_to_string(&file).ok();
+    let Some(text) = existing else {
+        std::fs::write(&file, "[main::stats]\nallow_unknown_stats=1\n")
+            .map_err(|e| Error::Io(format!("writing {}: {e}", file.display())))?;
+        return Ok(Some(file));
+    };
+    if text.lines().any(|l| l.trim_start().to_ascii_lowercase().starts_with("allow_unknown_stats")) {
+        return Ok(None);
+    }
+    std::fs::write(&file, with_unknown_stats(&text)).map_err(|e| Error::Io(format!("writing {}: {e}", file.display())))?;
+    Ok(None)
+}
+
+/// `allow_unknown_stats=1` under `[main::stats]`, adding the section if needed. Pure, for tests.
+pub fn with_unknown_stats(text: &str) -> String {
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = String::new();
+    let mut done = false;
+    for line in text.split_inclusive('\n') {
+        out.push_str(line);
+        if !done && line.trim().eq_ignore_ascii_case("[main::stats]") {
+            if !line.ends_with('\n') {
+                out.push_str(nl);
+            }
+            out.push_str("allow_unknown_stats=1");
+            out.push_str(nl);
+            done = true;
         }
     }
-    Ok(done)
+    if !done {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push_str(nl);
+        }
+        out.push_str("[main::stats]");
+        out.push_str(nl);
+        out.push_str("allow_unknown_stats=1");
+        out.push_str(nl);
+    }
+    out
+}
+
+/// What `ensure_gbe_schema` did: how many folders gained something, and the
+/// icons it left for later.
+#[derive(Debug, Default)]
+pub struct GbeFix {
+    pub folders: usize,
+    pub icons: Vec<IconJob>,
+}
+
+/// For an INSTALLED game: give every gbe_fork `steam_settings` folder in it
+/// the achievement list and the stats setting it lacks. This is how a build
+/// made before Forge wrote them gets working achievements, with nothing
+/// re-downloaded.
+///
+/// Fast on purpose, because it runs before Play: Steam is asked for the list
+/// once, and the list and setting are written everywhere straight away; the
+/// icons come back in `icons` to fetch after the game has started. Folders
+/// inside a macOS `.app` bundle come last, so the copy Windows runs is fixed
+/// first. (Cookie Clicker ships both, with 637 achievements: fetching 1,274
+/// icons before writing anything ran out of time on the Mac copy and never
+/// reached the Windows one, so its achievements were still thrown away.)
+pub async fn ensure_gbe_schema(client: &reqwest::Client, game_dir: &Path, appid: &str) -> Result<GbeFix> {
+    let mut dirs: Vec<PathBuf> = walkdir::WalkDir::new(game_dir)
+        .max_depth(8)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_dir() && e.file_name() == "steam_settings")
+        .map(|e| e.into_path())
+        // gbe_fork's folder, not a RUNE or Online one: it has gbe's own config files.
+        .filter(|d| d.join("steam_appid.txt").exists() || d.join("configs.app.ini").exists() || d.join("steam_interfaces.txt").exists())
+        .collect();
+    dirs.sort_by_key(|d| d.components().any(|c| c.as_os_str().to_string_lossy().ends_with(".app")));
+    let mut fix = GbeFix::default();
+    let mut list: Option<Vec<Achievement>> = None;
+    for dir in &dirs {
+        let had_stats_setting = std::fs::read_to_string(dir.join(GBE_MAIN_INI))
+            .is_ok_and(|t| t.to_ascii_lowercase().contains("allow_unknown_stats"));
+        ensure_gbe_stats_config(dir)?;
+        let mut wrote_list = false;
+        if !dir.join(GBE_FILE).exists() {
+            if list.is_none() {
+                list = Some(fetch_schema(client, appid, "english").await?);
+            }
+            if let Some(jobs) = write_gbe_list(dir, list.as_deref().unwrap_or_default())? {
+                wrote_list = true;
+                fix.icons.extend(jobs);
+            }
+        }
+        if wrote_list || !had_stats_setting {
+            fix.folders += 1;
+        }
+    }
+    Ok(fix)
 }
 
 // ---- reading unlocks ---------------------------------------------------------
@@ -409,6 +526,23 @@ mod tests {
     }
 
     #[test]
+    fn the_list_is_written_before_any_icon() {
+        let dir = std::env::temp_dir().join(format!("kry-gbe-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = parse_schema("620", STEAM).unwrap();
+        let jobs = write_gbe_list(&dir, &list).unwrap().expect("a list to write");
+        // On disk at once, icons still to come: gbe_fork can record unlocks already.
+        assert!(dir.join(GBE_FILE).is_file());
+        assert!(dir.join(GBE_IMAGES).is_dir());
+        assert_eq!(jobs.len(), 3, "two icons and one grey icon; the hidden one has no grey");
+        assert!(jobs.iter().all(|j| j.dest.starts_with(dir.join(GBE_IMAGES))));
+        // A folder that has a list is left alone.
+        assert!(write_gbe_list(&dir, &list).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn unlocks_are_read_from_every_emulators_save() {
         let root = std::env::temp_dir().join(format!("kry-ach-{}", std::process::id()));
         let app = root.join("AppData");
@@ -456,6 +590,23 @@ mod tests {
         assert!(images >= 51);
         // A second run leaves it alone.
         assert!(rt.block_on(write_gbe_schema(&client, &dir, "620")).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unknown_stats_are_allowed_without_touching_a_chosen_value() {
+        assert_eq!(with_unknown_stats(""), "[main::stats]\nallow_unknown_stats=1\n");
+        assert_eq!(
+            with_unknown_stats("[main::general]\r\nnew_app_ticket=1\r\n[main::stats]\r\ndisable_leaderboards_create_unknown=0\r\n"),
+            "[main::general]\r\nnew_app_ticket=1\r\n[main::stats]\r\nallow_unknown_stats=1\r\ndisable_leaderboards_create_unknown=0\r\n"
+        );
+        assert_eq!(with_unknown_stats("[main::general]\nx=1"), "[main::general]\nx=1\n[main::stats]\nallow_unknown_stats=1\n");
+        let dir = std::env::temp_dir().join(format!("kry-gbe-main-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(ensure_gbe_stats_config(&dir).unwrap().is_some());
+        std::fs::write(dir.join(GBE_MAIN_INI), "[main::stats]\nallow_unknown_stats=0\n").unwrap();
+        assert!(ensure_gbe_stats_config(&dir).unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(dir.join(GBE_MAIN_INI)).unwrap(), "[main::stats]\nallow_unknown_stats=0\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

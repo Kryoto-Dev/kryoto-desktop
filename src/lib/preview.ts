@@ -247,7 +247,56 @@ function previewSeed() {
   )
 }
 
+// Game runtimes (runtimes.rs): a PC missing a few, and an install played out
+// on timers, so the start-screen prompt and Settings can be clicked through.
+const RUNTIMES = [
+  { id: 'vc2015-x64', name: 'Visual C++ 2015-2022 (64-bit)', group: 'Visual C++', detail: 'Needed by most games made since 2015.', mb: 25, recommended: true, installed: true, cached: false },
+  { id: 'vc2015-x86', name: 'Visual C++ 2015-2022 (32-bit)', group: 'Visual C++', detail: 'The same, for 32-bit games.', mb: 14, recommended: true, installed: true, cached: false },
+  { id: 'vc2013-x86', name: 'Visual C++ 2013 (32-bit)', group: 'Visual C++', detail: 'Games from around 2014, 32-bit.', mb: 7, recommended: true, installed: false, cached: false },
+  { id: 'vc2010-x86', name: 'Visual C++ 2010 (32-bit)', group: 'Visual C++', detail: 'Older games, 32-bit.', mb: 9, recommended: true, installed: false, cached: false },
+  { id: 'directx', name: 'DirectX End-User Runtime (June 2010)', group: 'DirectX', detail: 'The extra DirectX 9, 10 and 11 files (d3dx9, XInput 1.3, XAudio 2.7) older games load. Windows does not include them.', mb: 1, recommended: true, installed: false, cached: false },
+  { id: 'xna40', name: 'XNA Framework 4.0', group: 'XNA', detail: 'Games built with XNA, like Terraria and many indies from 2010 to 2016.', mb: 7, recommended: true, installed: false, cached: false },
+  { id: 'dotnet8-desktop', name: '.NET 8 Desktop Runtime (64-bit)', group: '.NET', detail: 'Newer tools and games built on .NET, and many mod managers.', mb: 56, recommended: false, installed: false, cached: false },
+  { id: 'netfx35', name: '.NET Framework 3.5', group: '.NET', detail: 'Games and launchers from the 2000s. A Windows feature: Windows Update supplies it, which can take a few minutes.', mb: 0, recommended: false, installed: true, cached: true },
+]
+let runtimesJob: Record<string, unknown> | null = null
+let runtimesCancel = false
+function previewRuntimesInstall(ids: string[]) {
+  const chosen = RUNTIMES.filter((r) => ids.includes(r.id))
+  runtimesCancel = false
+  const results: { id: string; name: string; ok: boolean; detail: string }[] = []
+  const emit = (p: Record<string, unknown>) => {
+    runtimesJob = { current: null, step: 0, steps: chosen.length, fraction: 0, message: null, results: [...results], reboot: false, ...p }
+    previewBus.emit('runtimes-progress', runtimesJob)
+  }
+  let t = 0
+  const at = (ms: number, f: () => void) => setTimeout(() => !runtimesCancel && f(), (t += ms))
+  chosen.forEach((r, i) =>
+    [0.2, 0.55, 0.9, 1].forEach((f) => at(260, () => emit({ phase: 'downloading', current: r.name, step: i + 1, fraction: (0.4 * (i + f)) / chosen.length, message: `Downloading ${i + 1} of ${chosen.length}` }))),
+  )
+  at(900, () => emit({ phase: 'permission', fraction: 0.4, message: 'Windows is asking for permission' }))
+  chosen.forEach((r, i) => {
+    at(500, () => emit({ phase: 'installing', current: r.name, step: i + 1, fraction: 0.4 + (0.6 * i) / chosen.length, message: `Installing ${i + 1} of ${chosen.length}` }))
+    at(900, () => {
+      results.push({ id: r.id, name: r.name, ok: true, detail: 'Installed' })
+      r.installed = true
+      emit({ phase: 'installing', current: r.name, step: i + 1, fraction: 0.4 + (0.6 * (i + 1)) / chosen.length, message: `Installing ${i + 1} of ${chosen.length}` })
+    })
+  })
+  at(300, () => emit({ phase: 'done', fraction: 1, message: 'All installed.' }))
+}
+
 const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
+  cloud_achievements_status: () => ({ perk: true, games: 3, lastSync: Math.floor(Date.now() / 1000) - 120 }),
+  runtimes_list: () => RUNTIMES.map((r) => ({ ...r })),
+  runtimes_install: (a) => previewRuntimesInstall(a.ids as string[]),
+  runtimes_progress: () => runtimesJob,
+  runtimes_cancel: () => {
+    runtimesCancel = true
+    runtimesJob = { ...runtimesJob, phase: 'canceled', current: null, message: 'Canceled. Nothing was installed.' }
+    previewBus.emit('runtimes-progress', runtimesJob)
+  },
+  runtimes_clear_cache: () => 64_000_000,
   chat_status: () => previewChat,
   chat_set_context: () => null,
   chat_conversations: () => {

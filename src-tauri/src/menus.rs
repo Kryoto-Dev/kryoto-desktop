@@ -99,6 +99,7 @@ pub async fn menu_open(
         .focused(false);
     let (position, size) = crate::placement::rect(anchor.left, anchor.bottom, 320.0, 480.0, scale);
     let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;
+    crate::display_env::watch_crashes(&view);
     let _ = view.hide();
     Ok(())
 }
@@ -163,8 +164,21 @@ pub fn menu_pick(app: AppHandle, id: String) {
     let _ = app.emit_to("main", "menu-pick", id);
 }
 
+/// Close the menu. With `menu`, only if that menu is the one still open.
+///
+/// Moving from one title bar menu to the next hides the menu view for a moment
+/// while it redraws, and the page in it sees that as losing focus. Its close
+/// used to land on the menu that had just been asked for, so hovering or
+/// clicking from one menu to another shut the second one too. A close that
+/// names a menu which is no longer the open one is that stale close, and is
+/// ignored.
 #[tauri::command]
-pub fn menu_close(app: AppHandle) {
+pub fn menu_close(app: AppHandle, menu: Option<String>) {
+    if let Some(menu) = menu {
+        if open_id(&app).as_deref() != Some(menu.as_str()) {
+            return;
+        }
+    }
     close(&app);
 }
 

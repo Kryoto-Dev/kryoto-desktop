@@ -12,6 +12,8 @@ import type { LibraryGame } from '@/lib/library'
 import { isTauri } from '@/lib/window'
 import { cn } from '@/lib/utils'
 import { gameContext } from '@/library/context'
+import { play } from '@/lib/sound'
+import { BigPictureIntro } from './BigPictureIntro'
 
 /**
  * Big Picture: Kryoto for the couch, made for a controller.
@@ -21,6 +23,8 @@ import { gameContext } from '@/library/context'
  * B goes back (detail, then the grid, then out), the bumpers switch rows,
  * Home leaves. The buttons are named the way the pad in hand prints them, in
  * the bar along the bottom. Works with a mouse and keyboard too (Esc leaves).
+ * It opens with its own short intro (BigPictureIntro.tsx) and every move,
+ * open, back and launch has its sound (lib/sound.ts, Big Picture's own switch).
  */
 
 type Tab = 'library' | 'recent'
@@ -46,12 +50,32 @@ export function BigPicture({
   onProfile?: () => void
   onContext?: (g: LibraryGame, x: number, y: number) => void
 }) {
+  const exit = useRef(onExit)
+  exit.current = () => {
+    play('bpExit', { bigPicture: true })
+    onExit()
+  }
+  const leave = () => exit.current()
   const { pads, config } = usePadStore()
   const pad = pads[0] ?? null
   const family: PadFamily = familyOf(pad, pad ? config?.pads[pad.guid] : null)
   const [tab, setTab] = useState<Tab>('library')
-  const [open, setOpen] = useState<LibraryGame | null>(null)
+  const [open, setOpenState] = useState<LibraryGame | null>(null)
+  const [intro, setIntro] = useState(true)
+  const introOn = useRef(true)
+  introOn.current = intro
   const root = useRef<HTMLDivElement>(null)
+  // Focus that this moves on its own (a new row, the detail) makes no move sound.
+  const quietFocus = useRef(false)
+  const setOpen = (g: LibraryGame | null) => {
+    play(g ? 'bpSelect' : 'bpBack', { bigPicture: true })
+    setOpenState(g)
+  }
+  const switchTab = (t: Tab) => {
+    play('bpTab', { bigPicture: true })
+    setOpenState(null)
+    setTab(t)
+  }
   const clock = useClock()
 
   const recent = useMemo(() => games.filter((g) => g.lastPlayed).sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0)), [games])
@@ -79,33 +103,49 @@ export function BigPicture({
   // The controller starts on something: the open game's Play, else the hero.
   useLayoutEffect(() => {
     const first = root.current?.querySelector<HTMLElement>('[data-bp-first]')
+    quietFocus.current = true
     first?.focus({ preventScroll: true })
+    quietFocus.current = false
     document.documentElement.classList.add('kryo-pad')
   }, [open, tab])
 
-  // B (lib/pad-nav.ts asks first), Esc, the bumpers and Home.
+  // The d-pad or stick moving the focus: a little tick.
+  useEffect(() => {
+    const el = root.current
+    if (!el) return
+    const moved = () => {
+      if (!quietFocus.current && !introOn.current) play('bpMove', { bigPicture: true })
+    }
+    el.addEventListener('focusin', moved)
+    return () => el.removeEventListener('focusin', moved)
+  }, [])
+
+  // B (lib/pad-nav.ts asks first), Esc, the bumpers and Home. While the intro
+  // plays, these only skip it (BigPictureIntro listens for them itself).
   useEffect(() => {
     const back = (e: Event) => {
+      if (introOn.current) return e.preventDefault()
       if (document.activeElement?.closest('[role="menu"], [role="listbox"]')) return
       e.preventDefault()
       if (open) setOpen(null)
-      else onExit()
+      else leave()
     }
     const page = (e: Event) => {
       e.preventDefault()
-      setOpen(null)
-      setTab((t) => (t === 'library' ? 'recent' : 'library'))
+      if (introOn.current) return
+      switchTab(tab === 'library' ? 'recent' : 'library')
     }
     const guide = (e: Event) => {
       e.preventDefault()
-      onExit()
+      if (introOn.current) return
+      leave()
     }
     const key = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
+      if (e.key !== 'Escape' || introOn.current) return
       if (e.target instanceof Element && e.target.closest('[role="menu"], [role="listbox"]')) return
       e.preventDefault()
       if (open) setOpen(null)
-      else onExit()
+      else leave()
     }
     window.addEventListener('kryo-pad-back', back)
     window.addEventListener('kryo-pad-tab', page)
@@ -117,7 +157,9 @@ export function BigPicture({
       window.removeEventListener('kryo-pad-guide', guide)
       window.removeEventListener('keydown', key)
     }
-  }, [open, onExit])
+    // setOpen, switchTab and leave only read refs and setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, tab])
 
   const hint = (c: PadControl, what: string) => (
     <span className="flex items-center gap-2">
@@ -143,8 +185,7 @@ export function BigPicture({
               key={t}
               type="button"
               onClick={() => {
-                setOpen(null)
-                setTab(t)
+                if (t !== tab) switchTab(t)
               }}
               aria-current={tab === t ? 'page' : undefined}
               className={cn(
@@ -167,7 +208,20 @@ export function BigPicture({
 
       <main className="min-h-0 overflow-auto px-12 pb-8 pt-3">
         {open ? (
-          <Detail game={open} running={running.has(open.id)} onPlay={() => onPlay(open)} onStop={() => onStop(open)} family={family} onContext={onContext ? (x, y) => onContext(open, x, y) : undefined} />
+          <Detail
+            game={open}
+            running={running.has(open.id)}
+            onPlay={() => {
+              play('bpLaunch', { bigPicture: true })
+              onPlay(open)
+            }}
+            onStop={() => {
+              play('bpBack', { bigPicture: true })
+              onStop(open)
+            }}
+            family={family}
+            onContext={onContext ? (x, y) => onContext(open, x, y) : undefined}
+          />
         ) : (
           <div className="grid gap-10">
             {hero && tab === 'library' ? (
@@ -233,11 +287,12 @@ export function BigPicture({
           </span>
         )}
         <span className="grow" />
-        <button type="button" onClick={onExit} className="flex items-center gap-2 hover:text-foreground">
+        <button type="button" onClick={leave} className="flex items-center gap-2 hover:text-foreground">
           <PadBadge family={family} control="guide" label={padLabel(family, 'guide').long} className="h-7 min-w-7 text-[11px]" />
           Leave
         </button>
       </footer>
+      {intro ? <BigPictureIntro onDone={() => setIntro(false)} /> : null}
     </div>
   )
 }

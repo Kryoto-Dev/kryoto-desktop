@@ -21,6 +21,8 @@ commands.allow = [
   "pad_start",
   "shell_theme",
   "phone_status", "phone_set_lan", "phone_new_code", "phone_revoke", "phone_report_look",
+  "cloud_achievements_status",
+  "runtimes_list", "runtimes_install", "runtimes_progress", "runtimes_cancel", "runtimes_clear_cache",
   "pad_stop",
   "pad_list",
   "pad_config_get",

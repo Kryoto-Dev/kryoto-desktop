@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, EyeOff, Trophy, Wrench } from 'lucide-react'
+import { ChevronDown, Cloud, EyeOff, Trophy, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Card, Label, Modal } from '@/ui'
 import { call, errorText, on } from '@/lib/bridge'
 import type { LibraryGame } from '@/lib/library'
 import { cn } from '@/lib/utils'
 import { artSrc } from '@/lib/art'
+import { navigateCatalog } from '@/lib/window'
 import { GameRepair } from './GameRepair'
 
 /** One achievement and whether it is yours (achievements.rs, game_achievements). */
@@ -30,6 +31,24 @@ type GameAchievements = {
 
 const SHOWN = 8
 
+/** Achievements saved to the kryo.to account (achievements_cloud.rs). */
+type CloudStatus = { perk: boolean | null; games: number; lastSync: number | null }
+
+function useCloudStatus() {
+  const [s, setS] = useState<CloudStatus | null>(null)
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void call<CloudStatus>('cloud_achievements_status').then((v) => !cancelled && setS(v)).catch(() => {})
+    void on<CloudStatus>('cloud-achievements', (v) => !cancelled && setS(v)).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [])
+  return s
+}
+
 /**
  * A game's achievements: how far along you are, the latest unlocks and the
  * rest, rarest last. Read from the emulator's own save, so it fills in as you
@@ -43,6 +62,7 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
   const [error, setError] = useState<string | null>(null)
   const [repairOpen, setRepairOpen] = useState(false)
   const [ignored, setIgnored] = useState<string | null>(null)
+  const cloud = useCloudStatus()
   const request = useRef(0)
   const ignoreKey = `kryoto.achievements.ignore.${game.id}`
   const notice = `${game.version ?? ''}:${data?.emulator ?? ''}`
@@ -134,6 +154,19 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
               <ChevronDown className={cn('size-3 transition-transform', all && 'rotate-180')} aria-hidden />
               {all ? 'Show fewer' : `Show all ${data.list.length}`}
             </Button>
+          ) : null}
+          {cloud?.perk != null ? (
+            <p className="flex items-center gap-2 border-t border-border pt-3 text-[11px] text-muted-foreground">
+              <Cloud className="size-3.5 shrink-0" aria-hidden />
+              <span className="grow">{cloud.perk ? 'Saved to your kryo.to account, and back on any PC you sign in on.' : 'Supporters keep their achievements on their kryo.to account.'}</span>
+              <button
+                type="button"
+                onClick={() => navigateCatalog(cloud.perk ? '/settings#achievements' : '/donate')}
+                className="shrink-0 font-bold uppercase tracking-wider text-foreground hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                {cloud.perk ? 'Manage' : 'See how'}
+              </button>
+            </p>
           ) : null}
         </Card>
       ) : null}

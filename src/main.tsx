@@ -22,6 +22,9 @@ function windowLabel(): string {
 
 const label = windowLabel()
 document.documentElement.dataset.window = label
+// WebKitGTK (Linux) draws some effects on the CPU that WebView2 draws on the GPU;
+// styles.css trims those under `data-os='linux'`.
+if (/Linux/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent)) document.documentElement.dataset.os = 'linux'
 installErrorLogging(label)
 installWindowDrag()
 // Keep custom app menus; never expose the browser's Back/Forward/Reload menu.

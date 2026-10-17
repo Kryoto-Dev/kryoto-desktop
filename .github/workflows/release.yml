@@ -243,6 +243,12 @@ jobs:
             for sig in "$bundle"/deb/*_"${v}"_amd64.deb.sig; do
               [ -f "$sig" ] && cp "$sig" "out/Kryoto-Desktop_${v}_amd64.deb.sig"
             done
+            # Fedora, openSUSE and friends: the system's own WebKit, which the
+            # AppImage's bundled one can disagree with (see display_env.rs).
+            cp "$bundle"/rpm/*-"${v}"-1.x86_64.rpm "out/Kryoto-Desktop_${v}_x86_64.rpm"
+            for sig in "$bundle"/rpm/*-"${v}"-1.x86_64.rpm.sig; do
+              [ -f "$sig" ] && cp "$sig" "out/Kryoto-Desktop_${v}_x86_64.rpm.sig"
+            done
           fi
           ls -la out
           gh release upload "v$v" out/* --clobber
@@ -275,6 +281,7 @@ jobs:
             const win = entry(`Kryoto-Desktop_${v}_x64-setup.exe`);
             const appimage = entry(`Kryoto-Desktop_${v}_amd64.AppImage`);
             const deb = entry(`Kryoto-Desktop_${v}_amd64.deb`);
+            const rpm = entry(`Kryoto-Desktop_${v}_x86_64.rpm`);
             if (!win || !appimage) {
               console.error("::error::A Windows or AppImage signature is missing from the release; not writing a latest.json that would strand one platform.");
               process.exit(1);
@@ -284,6 +291,7 @@ jobs:
             // Linux, so a .deb install never gets handed an AppImage.
             const platforms = { "windows-x86_64-nsis": win, "windows-x86_64": win, "linux-x86_64-appimage": appimage };
             if (deb) platforms["linux-x86_64-deb"] = deb;
+            if (rpm) platforms["linux-x86_64-rpm"] = rpm;
             const manifest = {
               version: v,
               notes: "What changed is in the kryo.to changelog: https://kryo.to/changelog",

@@ -758,3 +758,15 @@ html.kryo-pad .kryo-bp-tile:focus {
   --ring: #a2d6eb;
   --season-decoration: #a2d6eb;
 }
+
+/* Linux (WebKitGTK): a blur behind a panel is redrawn on the CPU on every
+   frame anything under it changes, and with the window full of moving art it
+   was most of what made the Linux client feel slow. The panels keep their
+   near-solid fill, which is what they mostly showed anyway. */
+html[data-os='linux'] .backdrop-blur,
+html[data-os='linux'] .backdrop-blur-sm,
+html[data-os='linux'] .backdrop-blur-md,
+html[data-os='linux'] .backdrop-blur-lg {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}

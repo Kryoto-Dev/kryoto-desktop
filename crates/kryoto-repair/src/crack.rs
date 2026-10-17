@@ -749,6 +749,16 @@ pub async fn crack_tree(
                 for f in identity_files(identity) {
                     rec.added(&settings.join(f));
                 }
+                // Stats the game uses are kept rather than refused, so games
+                // that count towards an achievement get to unlock it
+                // (achievements.rs, `ensure_gbe_stats_config`).
+                let main_ini = settings.join(crate::achievements::GBE_MAIN_INI);
+                if main_ini.exists() {
+                    rec.stash(&main_ini, Stash::Replaced);
+                }
+                if let Some(created) = crate::achievements::ensure_gbe_stats_config(&settings)? {
+                    rec.added(&created);
+                }
                 // The achievement list. Without it gbe_fork drops every
                 // unlock (see achievements.rs); a release that shipped its own
                 // keeps it. Never fatal: a build without achievements still

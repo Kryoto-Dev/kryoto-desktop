@@ -18,6 +18,9 @@ export function PopupApp() {
   // Focus has reached the view since this menu opened, so losing it means
   // the reader went somewhere else (and not that it never arrived).
   const focused = useRef(false)
+  // Which menu this page is showing, so losing focus closes that one and never
+  // the next one, asked for while this view was hidden to redraw.
+  const showing = useRef<string | null>(null)
 
   useEffect(() => {
     const take = (p: PopupPayload | null) => {
@@ -32,6 +35,7 @@ export function PopupApp() {
       if (p.look.font) html.dataset.font = p.look.font
       else delete html.dataset.font
       focused.current = false
+      showing.current = p.menu
       setPayload(p)
       setSeq((n) => n + 1)
     }
@@ -41,7 +45,7 @@ export function PopupApp() {
     void on<PopupPayload>('menu-show', take).then((fn) => (cancelled ? fn() : (stop = fn)))
     const onFocus = () => (focused.current = true)
     const onBlur = () => {
-      if (focused.current) void call('menu_close')
+      if (focused.current && showing.current) void call('menu_close', { menu: showing.current })
       focused.current = false
     }
     window.addEventListener('focus', onFocus)
@@ -80,7 +84,7 @@ export function PopupApp() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') return void call('menu_close')
+      if (e.key === 'Escape') return void call('menu_close', { menu: showing.current })
       if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
       e.preventDefault()
       const items = [...(box.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])]
@@ -111,7 +115,7 @@ export function PopupApp() {
         const item = (e.target as HTMLElement).closest<HTMLElement>('[role="menuitem"]:not(:disabled)')
         if (item && document.activeElement !== item) item.focus({ preventScroll: true })
       }}
-      className="grid w-max gap-0.5 overflow-hidden border border-border bg-popover p-1 outline-none"
+      className="kryo-square grid w-max gap-0.5 overflow-hidden border border-border bg-popover p-1 outline-none"
       style={payload.kind === 'menu' ? { minWidth: payload.minWidth ?? 200 } : { width: 320 }}
     >
       {payload.kind === 'menu' ? <Items items={payload.items} onSelect={select} /> : <InboxList payload={payload} onSelect={select} />}

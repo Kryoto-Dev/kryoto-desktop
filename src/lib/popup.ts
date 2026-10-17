@@ -134,9 +134,10 @@ export async function openInbox(
 
 export function closeMenu() {
   if (!current) return
-  lastClosed = { menu: current, at: Date.now() }
+  const menu = current
+  lastClosed = { menu, at: Date.now() }
   setCurrent(null)
-  void call('menu_close').catch(() => {})
+  void call('menu_close', { menu }).catch(() => {})
 }
 
 /** Which menu is open, as it changes. */

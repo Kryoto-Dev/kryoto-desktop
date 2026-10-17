@@ -2,9 +2,10 @@ import { useCallback, useEffect, useState } from 'react'
 import { Play } from 'lucide-react'
 import { Matrix } from '@/ui'
 import { on } from '@/lib/bridge'
-import type { Notice } from '@/lib/downloads'
+import type { Download, DownloadStatus, Notice } from '@/lib/downloads'
+import type { ChatMessage } from '@/lib/chat'
 import { notify } from '@/lib/notify'
-import { chime } from '@/lib/sound'
+import { play } from '@/lib/sound'
 
 export type Toast = Notice & { key: number; controllerGuid?: string }
 
@@ -25,15 +26,60 @@ export function useToasts() {
     void on<Notice>('notify', (n) => {
       push(n)
       if (!document.hasFocus()) void notify(n.title, n.body)
-      // In front, a game becoming ready gets the optional sound instead.
-      else if (n.gameId) chime()
+      // In front, the optional sound instead (lib/sound.ts).
+      else play(n.sound ?? 'notify')
     }).then((fn) => (cancelled ? fn() : (stop = fn)))
     return () => {
       cancelled = true
       stop?.()
     }
   }, [push])
+  useDownloadSounds()
+  useChatSound()
   return { toasts, push, dismiss }
+}
+
+/**
+ * A download starting and a download failing, from the live list: each only
+ * the first time a download reaches that state, never for the list as it
+ * stands when the app opens.
+ */
+function useDownloadSounds() {
+  useEffect(() => {
+    let seen: Map<string, DownloadStatus> | null = null
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on<Download[]>('downloads', (list) => {
+      const before = seen
+      seen = new Map(list.map((d) => [d.id, d.status]))
+      if (!before) return
+      for (const d of list) {
+        const was = before.get(d.id)
+        if (was === d.status || d.addon) continue
+        if (d.status === 'downloading' && (was === undefined || was === 'queued' || was === 'resolving')) play('downloadStart')
+        else if (d.status === 'failed') play('downloadFailed')
+      }
+    }).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [])
+}
+
+/** A chat message from somebody else. */
+function useChatSound() {
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on<ChatMessage>('chat-message', (m) => {
+      if (!m.outgoing) play('message')
+    }).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [])
 }
 
 /**

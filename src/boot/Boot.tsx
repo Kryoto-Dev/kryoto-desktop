@@ -6,6 +6,7 @@ import { AsciiBar, Button } from '@/ui'
 import { AsciiArt } from '@/ui/ascii/AsciiArt'
 import { WORDMARK } from '@/ui/ascii/cells'
 import { SplashScene } from '@/boot/SplashScene'
+import { RuntimesPrompt, useStartupRuntimes } from '@/boot/RuntimesPrompt'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { isTauri, exitApp, mountStore, navigateCatalog, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -55,15 +56,25 @@ function Box({ children, className }: { children: ReactNode; className?: string 
 export function Splash({ onRevealed }: { onRevealed: () => void }) {
   // The loading bar and the name come in once the mark has lit up.
   const [lit, setLit] = useState(false)
+  // On Windows, missing game runtimes are offered here first (RuntimesPrompt),
+  // and the splash waits for the answer before moving on.
+  const missing = useStartupRuntimes()
+  const [answered, setAnswered] = useState(false)
+  const prompting = lit && !answered && !!missing?.length
+  const told = useRef(false)
+  useEffect(() => {
+    if (told.current || !lit || missing === null || prompting) return
+    told.current = true
+    onRevealed()
+  }, [lit, missing, prompting, onRevealed])
   return (
     <Box className="bg-black">
-      <SplashScene
-        onRevealed={() => {
-          setLit(true)
-          onRevealed()
-        }}
-      />
-      {lit ? (
+      <SplashScene onRevealed={() => setLit(true)} />
+      {prompting ? (
+        <div className="no-drag kryo-in absolute inset-x-0 bottom-6 grid place-items-center px-6">
+          <RuntimesPrompt missing={missing} onDone={() => setAnswered(true)} />
+        </div>
+      ) : lit ? (
         <>
           <div className="kryo-in pointer-events-none absolute inset-x-0 bottom-20 grid place-items-center">
             <AsciiBar fraction={null} cells={16} showPct={false} className="text-foreground/60" />

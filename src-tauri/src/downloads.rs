@@ -621,7 +621,7 @@ fn base64url(text: &str) -> Option<Vec<u8>> {
 /// Queue a download the Store handed over. `slug` is the game page it came from.
 pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>, title: Option<String>) {
     if let Err(e) = enqueue_item(app, url, slug, title, None, None, None) {
-        let _ = app.emit("notify", Notice::new("Could not queue download", &e, None));
+        let _ = app.emit("notify", Notice::new("Could not queue download", &e, None).sound("error"));
     }
 }
 
@@ -784,11 +784,20 @@ pub struct Notice {
     title: String,
     body: String,
     game_id: Option<String>,
+    /// Which of the app's sounds goes with it (`src/lib/sound-recipes.ts`);
+    /// none means the plain notification one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sound: Option<&'static str>,
 }
 
 impl Notice {
     pub fn new(title: &str, body: &str, game_id: Option<String>) -> Self {
-        Self { title: title.into(), body: body.into(), game_id }
+        Self { title: title.into(), body: body.into(), game_id, sound: None }
+    }
+
+    pub fn sound(mut self, sound: &'static str) -> Self {
+        self.sound = Some(sound);
+        self
     }
 }
 
@@ -2290,12 +2299,13 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let _ = app.emit(
             "notify",
             match &warning {
-                None => Notice::new(&format!("{title} is ready to play"), "Installed and added to your library.", Some(game.id)),
+                None => Notice::new(&format!("{title} is ready to play"), "Installed and added to your library.", Some(game.id)).sound("ready"),
                 Some(_) => Notice::new(
                     &format!("{title} is installed, with a warning"),
                     "7-Zip reported a damaged file. It may still run: open Downloads for details.",
                     Some(game.id),
-                ),
+                )
+                .sound("ready"),
             },
         );
     }

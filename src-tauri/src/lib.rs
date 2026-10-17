@@ -1,4 +1,5 @@
 mod achievements;
+mod achievements_cloud;
 mod addons;
 mod art;
 mod managed_art;
@@ -28,6 +29,7 @@ mod placement;
 mod player_name;
 mod presence;
 mod resolvers;
+mod runtimes;
 mod settings;
 mod storage;
 mod system;
@@ -554,7 +556,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     try {
       const snap = await invoke('remote_snapshot');
       if (!snap || !snap.installId) return;
-      const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: 2 }).catch(() => null);
+      const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: snap.protocol }).catch(() => null);
       let now = snap;
       if (taken && Array.isArray(taken.commands) && taken.commands.length) {
         const results = await invoke('remote_apply', { commands: taken.commands });
@@ -564,7 +566,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         }
         now = (await invoke('remote_snapshot')) || snap;
       }
-      const body = JSON.stringify(now.downloads);
+      // Downloads moving, a game starting or stopping, or the library changing.
+      const body = JSON.stringify([now.downloads, now.running || [], (now.games || []).map((g) => g.id + ':' + (g.lastPlayed || 0))]);
       if (body !== lastReport || Date.now() - lastReportAt > 30000) {
         lastReport = body;
         lastReportAt = Date.now();
@@ -576,6 +579,38 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     }
   };
   setInterval(remote, 4000);
+  // Achievements saved to the account (achievements_cloud.rs, kryo.to
+  // lib/cloud-achievements.ts), a supporter perk: send what is new, fetch
+  // what this PC may lack, and hand kryo.to's answers back.
+  let cloudBusy = false;
+  const cloud = async () => {
+    if (!KRYO || !me || cloudBusy || document.visibilityState === 'prerender') return;
+    cloudBusy = true;
+    try {
+      const pending = await invoke('cloud_achievements_pending', { account: me });
+      if (!pending) return;
+      const report = { perk: null, sent: [], saved: [], fetched: {} };
+      if (pending.games && pending.games.length) {
+        const r = await fetch('/api/achievements/cloud', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ games: pending.games }) });
+        const j = await r.json().catch(() => null);
+        if (j && typeof j.perk === 'boolean') report.perk = j.perk;
+        if (r.ok && j && Array.isArray(j.games)) { report.sent = pending.games; report.saved = j.games; }
+      }
+      if (pending.fetch && pending.fetch.length) {
+        const j = await json('/api/achievements/cloud?appids=' + encodeURIComponent(pending.fetch.join(','))).catch(() => null);
+        if (j && j.games && typeof j.games === 'object') {
+          if (report.perk === null && typeof j.perk === 'boolean') report.perk = j.perk;
+          for (const id of pending.fetch) report.fetched[id] = Array.isArray(j.games[id]) ? j.games[id] : [];
+        }
+      }
+      if (report.perk !== null || report.saved.length || Object.keys(report.fetched).length) await invoke('cloud_achievements_report', { report });
+    } catch (_) {
+    } finally {
+      cloudBusy = false;
+    }
+  };
+  setTimeout(cloud, 8000);
+  setInterval(cloud, 30000);
   // kryo.to names a download right before it starts it (the site's
   // game-downloads.tsx): the download can reach the app without the
   // address's #fragment, so this is the context that holds.
@@ -767,6 +802,7 @@ async fn store_mount(
         });
     let (position, size) = placement::rect(x, y, width, height, scale);
     let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;
+    display_env::watch_crashes(&view);
     #[cfg(target_os = "linux")]
     linux_store_downloads::install(&view)?;
     if visible == Some(false) {
@@ -1121,6 +1157,11 @@ pub fn run() {
                 logging::error("tray", &e.to_string());
             }
             if let Some(main) = app.get_window("main") {
+                // A renderer crash on Linux reloads the view and is noted for
+                // the next start (display_env.rs), instead of a blank window.
+                for view in main.webviews() {
+                    display_env::watch_crashes(&view);
+                }
                 system::round_corners(&main, false);
                 if !to_tray {
                     let _ = main.show();
@@ -1253,6 +1294,14 @@ pub fn run() {
             phone::phone_new_code,
             phone::phone_revoke,
             phone::phone_report_look,
+            achievements_cloud::cloud_achievements_pending,
+            achievements_cloud::cloud_achievements_report,
+            achievements_cloud::cloud_achievements_status,
+            runtimes::runtimes_list,
+            runtimes::runtimes_install,
+            runtimes::runtimes_progress,
+            runtimes::runtimes_cancel,
+            runtimes::runtimes_clear_cache,
             game_logs::game_log_read,
             game_logs::game_logs_folder,
             library::library_prefix_folder,

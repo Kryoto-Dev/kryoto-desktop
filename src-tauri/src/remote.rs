@@ -1,8 +1,11 @@
 //! Kryoto Desktop, run from the website (kryo.to `lib/desktop-remote.ts`).
 //!
 //! A game queued on kryo.to ("Download in Kryoto Desktop") starts here, and
-//! every download's progress shows on kryo.to's Downloads page, from any
-//! device. The Store view's page script does the talking, signed in like any
+//! every download's progress shows on kryo.to/remote, from any device. Since
+//! protocol 3 the library goes along too (the games, which are running), and
+//! kryo.to/remote and Kryoto Mobile away from home can start and stop games,
+//! clear finished downloads and take games off the PC: the same things the
+//! phone does on this network (phone.rs), through kryo.to. The Store view's page script does the talking, signed in like any
 //! browser (BROWSER_STATE_SCRIPT in lib.rs): it takes what kryo.to queued and
 //! hands it to `remote_apply`, and sends `remote_snapshot` back while
 //! something moves. Only a kryo.to page in the Store may call either.
@@ -14,6 +17,12 @@ use std::sync::Mutex;
 use std::io::Write;
 
 use crate::downloads::{self, Downloads};
+use crate::{library, phone};
+
+/// What this build understands from kryo.to. 3: library, play/stop, clear, remove.
+pub const PROTOCOL: u8 = 3;
+/// Games sent along, most recently played first.
+const MAX_GAMES: usize = 150;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,9 +50,11 @@ pub struct Snapshot {
     version: String,
     os: String,
     downloads: Vec<RemoteItem>,
+    games: Vec<phone::PhoneGame>,
+    running: Vec<String>,
 }
 
-fn from_store(app: &AppHandle, webview: &Webview) -> Result<(), String> {
+pub(crate) fn from_store(app: &AppHandle, webview: &Webview) -> Result<(), String> {
     if webview.label() != crate::STORE {
         return Err("Only the Store may ask.".into());
     }
@@ -80,7 +91,9 @@ pub fn remote_snapshot(app: AppHandle, webview: Webview, state: State<'_, Downlo
         })
         .collect();
     Ok(Snapshot {
-        protocol: 2,
+        protocol: PROTOCOL,
+        games: phone::games(&app, Some(MAX_GAMES)),
+        running: library::game_running(app.state::<library::Running>()),
         install_id: crate::logging::install_id(&app),
         name: sysinfo::System::host_name().unwrap_or_else(|| "Kryoto Desktop".into()),
         version: app.package_info().version.to_string(),
@@ -98,6 +111,12 @@ pub struct RemoteCommand {
     slug: Option<String>,
     title: Option<String>,
     download_id: Option<String>,
+    #[serde(default)]
+    game_id: Option<String>,
+}
+
+fn game_id_of(c: &RemoteCommand) -> Result<String, String> {
+    c.game_id.clone().filter(|i| !i.is_empty() && i.len() <= 80).ok_or_else(|| "Invalid game ID.".to_string())
 }
 
 /// Do what kryo.to queued: start a download (from kryo.to's own filehost only),
@@ -150,6 +169,42 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
                     }
                 }
             }
+            // Protocol 3: what the phone does on this network, through kryo.to.
+            "clear" => {
+                let download_id = c.download_id.clone().filter(|i| !i.is_empty() && i.len() <= 80).ok_or("Invalid download ID.")?;
+                phone::control_download(&app, &download_id, "remove")?;
+            }
+            "play" => {
+                let game = game_id_of(&c)?;
+                if !library::load(&app)?.iter().any(|g| g.id == game) {
+                    return Err("That game is no longer in the library.".into());
+                }
+                crate::logging::info("remote", &format!("starting {game} from kryo.to"));
+                let app = app.clone();
+                // Launching can take a while (a first start writes the
+                // achievement list); the command is accepted once it is known
+                // to be a library game, and a failure goes to the log.
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = library::game_launch(app.clone(), app.state::<library::Running>(), game, None, None).await {
+                        crate::logging::error("remote", &format!("could not start it: {e}"));
+                    }
+                });
+            }
+            "stop" => {
+                let game = game_id_of(&c)?;
+                library::game_stop(app.state::<library::Running>(), game)?;
+            }
+            "uninstall" | "unlist" => {
+                let game = game_id_of(&c)?;
+                phone::check_removable(&app, &game)?;
+                let delete_files = c.kind == "uninstall";
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = phone::remove_game(&app, &game, delete_files).await {
+                        crate::logging::error("remote", &format!("could not remove it: {e}"));
+                    }
+                });
+            }
             _ => return Err("Unknown remote action.".into()),
         } Ok(()) });
         let error = accepted.err();
@@ -168,7 +223,8 @@ static APPLY: Mutex<()> = Mutex::new(());
 fn retryable_error(error: &str) -> bool {
     !matches!(error, "Invalid remote command ID." | "Invalid download URL." | "Invalid download ID." |
         "This download does not come from Kryoto." | "That download is no longer in the list." |
-        "That download has already finished transferring." | "Unknown remote action.")
+        "That download has already finished transferring." | "Unknown remote action." |
+        "Invalid game ID." | "That game is no longer in the library." | "Stop the game first." | "Cancel it first.")
 }
 
 fn read_receipts(file: &std::path::Path) -> Result<BTreeMap<String, u64>, String> {

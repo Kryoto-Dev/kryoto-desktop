@@ -63,7 +63,13 @@ export type Download = {
   }
 }
 
-export type Notice = { title: string; body: string; gameId: string | null }
+export type Notice = {
+  title: string
+  body: string
+  gameId: string | null
+  /** The sound that goes with it (lib/sound-recipes.ts); the notification one when absent. */
+  sound?: 'ready' | 'achievement' | 'error' | 'downloadFailed'
+}
 
 export const downloads = {
   list: () => call<Download[]>('downloads_list'),

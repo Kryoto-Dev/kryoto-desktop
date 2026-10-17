@@ -16,9 +16,9 @@ import { cn } from '@/lib/utils'
  * display and the same length on a slow machine as a fast one.
  */
 
-/** One character cell on screen, in CSS pixels (the lettering's 3:5). */
-const CW = 6
-const CH = 10
+/** One character cell on screen, in CSS pixels (the lettering's 3:5), at `cell` 1. */
+const BASE_CW = 6
+const BASE_CH = 10
 
 const MARK = word('K//')
 
@@ -48,7 +48,11 @@ function reducedMotion() {
   return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 }
 
-export function SplashScene({ onRevealed, className }: { onRevealed: () => void; className?: string }) {
+/**
+ * `cell` scales the characters: 1 for the start box, more where the same
+ * scene fills a bigger screen (Big Picture), so it stays crisp, not stretched.
+ */
+export function SplashScene({ onRevealed, className, cell = 1 }: { onRevealed: () => void; className?: string; cell?: number }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useLayoutEffect(() => {
@@ -67,6 +71,8 @@ export function SplashScene({ onRevealed, className }: { onRevealed: () => void;
     }
 
     // ---- The grid -----------------------------------------------------------
+    const CW = BASE_CW * cell
+    const CH = BASE_CH * cell
     const box = canvas.getBoundingClientRect()
     const width = Math.max(1, box.width)
     const height = Math.max(1, box.height)

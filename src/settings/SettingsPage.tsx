@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { artSrc } from '@/lib/art'
-import { Bell, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Wrench } from 'lucide-react'
+import { Bell, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Volume2, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, type Settings } from '@/lib/settings'
@@ -9,7 +9,8 @@ import { browserNavigate, isTauri, mountStore, placeMainStore, STORE_HOME } from
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
-import { chime, setSoundsOn, soundsOn } from '@/lib/sound'
+import { SoundsPane } from '@/settings/SoundsPane'
+import { RuntimesPane } from '@/settings/RuntimesPane'
 import { StoragePane } from '@/settings/StoragePane'
 import { CompatPane } from '@/settings/CompatPane'
 import { LogsPane } from '@/settings/LogsPane'
@@ -35,6 +36,8 @@ export type SettingsSection =
   | 'general'
   | 'storage'
   | 'downloads'
+  | 'sounds'
+  | 'runtimes'
   | 'phone'
   | 'controller'
   | 'compat'
@@ -81,6 +84,8 @@ export function SettingsPage({
     { id: 'general', label: 'General', icon: <SlidersHorizontal /> },
     { id: 'storage', label: 'Storage', icon: <HardDrive /> },
     { id: 'downloads', label: 'Downloads', icon: <Download /> },
+    { id: 'sounds', label: 'Sounds', icon: <Volume2 /> },
+    ...(isWindowsHost() ? [{ id: 'runtimes' as const, label: 'Game runtimes', icon: <Package /> }] : []),
     { id: 'phone', label: 'Phone', icon: <Smartphone /> },
     // Behind kryo.to's `controller` feature flag.
     ...(account.controller ? [{ id: 'controller' as const, label: 'Controller', icon: <Gamepad2 /> }] : []),
@@ -229,6 +234,8 @@ function DesktopPane({ section }: { section: SettingsSection }) {
     general: 'General',
     storage: 'Storage',
     downloads: 'Downloads',
+    sounds: 'Sounds',
+    runtimes: 'Game runtimes',
     controller: 'Controller',
     compat: 'Compatibility',
     logs: 'Logs',
@@ -285,7 +292,6 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             </Section>
             <Check checked={s.deleteArchives} onChange={(v) => set('deleteArchives', v)} label="Delete the archive once a game is installed" />
             <Check checked={s.notifyDownloads} onChange={(v) => set('notifyDownloads', v)} label="Tell me when a game is ready to play" />
-            <SoundCheck />
             <Section title="New games install to" hint="Change it, or add folders on other drives, in Storage.">
               <p className="kryo-ascii-art select-text text-[11px] text-foreground">{s.libraryDir}</p>
             </Section>
@@ -342,6 +348,8 @@ function DesktopPane({ section }: { section: SettingsSection }) {
         ) : null}
         {section === 'logs' ? <LogsPane sendReports={s.sendReports} onSendReports={(v) => set('sendReports', v)} /> : null}
         {section === 'phone' ? <PhonePane /> : null}
+        {section === 'sounds' ? <SoundsPane /> : null}
+        {section === 'runtimes' ? <RuntimesPane /> : null}
       </div>
     </div>
   )
@@ -387,29 +395,10 @@ function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Setti
   )
 }
 
-/**
- * The one sound (lib/sound.ts), off unless asked for. Turning it on plays it
- * once, so the choice is made knowing what it sounds like.
- */
-function SoundCheck() {
-  const [on, setOn] = useState(soundsOn)
-  return (
-    <Check
-      checked={on}
-      onChange={(v) => {
-        setOn(v)
-        setSoundsOn(v)
-        if (v) chime({ force: true })
-      }}
-      label="Play a short sound when a game is ready, while Kryoto Desktop is in front"
-    />
-  )
-}
-
 const DISPLAY_HINT: Record<DisplayMode, string> = {
-  auto: 'Hardware rendering, except where it is known to break: NVIDIA drivers and machines without a GPU render device.',
+  auto: 'Drawn on your graphics card, with the DMA-BUF renderer off: smooth on almost every machine. The renderer made pages stutter as they opened.',
   compatible: 'Draws on anything, a little slower. Use it when pages are blank, flicker or are drawn in the wrong place.',
-  full: 'Hardware rendering everywhere. Only if Automatic picked Compatible and your machine handles the fast path.',
+  full: 'Turns the DMA-BUF renderer on too. Faster on a few machines; on most it makes pages stutter or draw blank.',
 }
 
 /**

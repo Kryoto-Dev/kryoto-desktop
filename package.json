@@ -1,14 +1,14 @@
 {
   "name": "kryoto-desktop",
   "private": true,
-  "version": "0.2.22",
+  "version": "0.2.23",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "app:dev": "tauri dev",
-    "app:dev:plain": "tauri dev -- --no-default-features --features dev-plain-chat-store",
+    "app:dev": "node scripts/dev.mjs",
+    "app:dev:plain": "node scripts/dev.mjs -- --no-default-features --features dev-plain-chat-store",
     "app:build": "node scripts/build.mjs",
     "brand": "node scripts/brand.mjs",
     "web:dev": "vite --config vite.web.config.ts",
