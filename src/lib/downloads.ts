@@ -34,6 +34,8 @@ export type Download = {
   /** kryo.to's SHA-256 for this file, when it lists one. */
   sha256: string | null
   verified: boolean
+  /** The archive failed its checksum and is kept: Install anyway, or Retry. */
+  hashMismatch?: boolean
   /** Set when the file is one of the game's add-ons: its name. */
   addon: string | null
   /** Installed, but the unpacker reported damaged files: what to tell the player. */
@@ -75,6 +77,8 @@ export const downloads = {
   list: () => call<Download[]>('downloads_list'),
   pause: (id: string) => call<void>('download_pause', { id }),
   resume: (id: string) => call<void>('download_resume', { id }),
+  /** Install an archive that failed its checksum, at the player's word. */
+  installAnyway: (id: string) => call<void>('download_install_anyway', { id }),
   cancel: (id: string) => call<void>('download_cancel', { id }),
   remove: (id: string) => call<void>('download_remove', { id }),
   /** Reorder the queue. `now` puts it first and steps the running one aside, like Steam. */

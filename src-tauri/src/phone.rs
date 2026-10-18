@@ -489,7 +489,8 @@ async fn play(AxumState(app): AxumState<AppHandle>, headers: HeaderMap, body: St
         Ok(id) => id,
         Err(r) => return r,
     };
-    match library::game_launch(app.clone(), app.state::<library::Running>(), id, None, None).await {
+    let entry = library::default_entry(&app, &id);
+    match library::game_launch(app.clone(), app.state::<library::Running>(), id, entry, None).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
         Err(e) => fail(StatusCode::CONFLICT, &e),
     }

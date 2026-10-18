@@ -185,7 +185,8 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
                 // achievement list); the command is accepted once it is known
                 // to be a library game, and a failure goes to the log.
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = library::game_launch(app.clone(), app.state::<library::Running>(), game, None, None).await {
+                    let entry = library::default_entry(&app, &game);
+                    if let Err(e) = library::game_launch(app.clone(), app.state::<library::Running>(), game, entry, None).await {
                         crate::logging::error("remote", &format!("could not start it: {e}"));
                     }
                 });

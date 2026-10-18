@@ -39,8 +39,10 @@ pub struct LibraryGame {
     pub entries: Vec<LaunchEntry>,
     /// Release source label, e.g. "Steam + Kryoto Online".
     pub source: Option<String>,
-    /// Which entry Play starts. `None` with several entries means: ask.
+    /// Which entry Play starts. `None` is the game's own exe (`executable`).
     pub preferred_entry: Option<usize>,
+    /// Play asks how to start the game each time, whatever `preferred_entry` says.
+    pub ask_each_time: bool,
     /// The Steam-style LAUNCH OPTIONS line.
     pub launch_options: String,
     /// Wine or Proton, for a non-Windows host.
@@ -582,6 +584,20 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool) -> R
         Ok(())
     })?;
     Ok(deleted)
+}
+
+/// The entry a plain Play starts, for a start with nobody to ask (kryo.to's
+/// remote, the phone): the one picked in Properties, else the game's own exe
+/// (`None`), or Steam's first entry for a game with no exe on record. Matches
+/// `startEntry` in `src/lib/library.ts`.
+pub(crate) fn default_entry<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<usize> {
+    let games = load(app).ok()?;
+    let game = games.iter().find(|g| g.id == id)?;
+    match game.preferred_entry {
+        Some(i) if i < game.entries.len() => Some(i),
+        _ if game.executable.trim().is_empty() && !game.entries.is_empty() => Some(0),
+        _ => None,
+    }
 }
 
 /// The plan, and the compatibility tool it uses (for the game's log).

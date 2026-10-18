@@ -142,6 +142,23 @@ export function setStoreVisible(visible: boolean) {
   return call<void>('store_visible', { visible }).catch(() => {})
 }
 
+/**
+ * Show a kryo.to page in the Store tab from anywhere in the app. The Shell owns
+ * which view is on screen, so it takes this and switches to the Store first:
+ * navigateCatalog alone loads the page behind whatever view is showing, which
+ * is how the achievements card's Manage button seemed to do nothing.
+ */
+export const OPEN_STORE_EVENT = 'kryo:open-store'
+export function openStorePage(path: string) {
+  window.dispatchEvent(new CustomEvent<string>(OPEN_STORE_EVENT, { detail: path }))
+}
+
+/** Open a section of Kryoto Desktop's Settings from anywhere in the app. */
+export const OPEN_SETTINGS_EVENT = 'kryo:open-settings'
+export function openSettingsSection(section: string) {
+  window.dispatchEvent(new CustomEvent<string>(OPEN_SETTINGS_EVENT, { detail: section }))
+}
+
 /** Go to a kryo.to path in the Store. */
 export function navigateCatalog(path: string) {
   if (!isTauri()) return Promise.resolve()

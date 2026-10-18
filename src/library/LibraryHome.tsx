@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { gameContext } from './context'
-import { ChevronDown, Play } from 'lucide-react'
+import { ChevronDown, Play, Square } from 'lucide-react'
 import { Button, Label, MenuButton } from '@/ui'
 import { capsulesFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
@@ -8,8 +8,27 @@ import { usePersisted } from '@/hooks/usePersisted'
 import { useLivePlaytime } from '@/hooks/useLivePlaytime'
 import { Art } from '@/library/Art'
 import { coverFor, heroFor } from '@/lib/game-artwork'
+import { cn } from '@/lib/utils'
 
 export { Art }
+
+/** A small Stop for a game that is running, where a card or row has no room for the big one. */
+export function StopChip({ game, onStop, className }: { game: LibraryGame; onStop: (game: LibraryGame) => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      aria-label={`Stop ${game.title}`}
+      title="Stop"
+      onClick={() => onStop(game)}
+      className={cn(
+        'kryo-pill grid size-7 place-items-center bg-background/80 text-foreground backdrop-blur transition-colors hover:bg-foreground hover:text-background',
+        className,
+      )}
+    >
+      <Square className="size-3 fill-current" />
+    </button>
+  )
+}
 
 /** A game's time played, counting up while it runs. */
 function LivePlaytime({ game, running }: { game: LibraryGame; running: boolean }) {
@@ -36,6 +55,7 @@ export function LibraryHome({
   running,
   onOpen,
   onPlay,
+  onStop,
   onContext,
 }: {
   /** Above everything else (the controller welcome). */
@@ -44,6 +64,7 @@ export function LibraryHome({
   running: Set<string>
   onOpen: (id: string) => void
   onPlay: (game: LibraryGame) => void
+  onStop: (game: LibraryGame) => void
   onContext: (game: LibraryGame, x: number, y: number) => void
 }) {
   const [sort, setSort] = usePersisted<Sort>('kryoto.library.sort', 'alpha', isSort)
@@ -80,10 +101,17 @@ export function LibraryHome({
               <h1 className="max-w-xl text-3xl font-bold leading-tight text-foreground">{last.title}</h1>
             </button>
             <div className="flex items-center gap-3">
-              <Button variant="primary" size="lg" onClick={() => onPlay(last)} disabled={running.has(last.id)}>
-                <Play className="size-4 fill-current" />
-                {running.has(last.id) ? 'Running' : 'Play'}
-              </Button>
+              {running.has(last.id) ? (
+                <Button variant="outline" size="lg" onClick={() => onStop(last)} className="border-foreground text-foreground">
+                  <Square className="size-3.5 fill-current" />
+                  Stop
+                </Button>
+              ) : (
+                <Button variant="primary" size="lg" onClick={() => onPlay(last)}>
+                  <Play className="size-4 fill-current" />
+                  Play
+                </Button>
+              )}
               <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
                 <LivePlaytime game={last} running={running.has(last.id)} /> played
               </span>
@@ -97,13 +125,13 @@ export function LibraryHome({
           <Label>Recent</Label>
           <div className="grid auto-cols-[minmax(260px,1fr)] grid-flow-col gap-3 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {recent.slice(1, 7).map((g) => (
+              <div key={g.id} className="relative">
               <button
-                key={g.id}
                 type="button"
                 onClick={() => onOpen(g.id)}
                 onDoubleClick={() => onPlay(g)}
                 {...ctx(g)}
-                className="kryo-radius group grid overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 hover:-translate-y-0.5 hover:border-foreground/50"
+                className="kryo-radius group grid w-full overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 hover:-translate-y-0.5 hover:border-foreground/50"
               >
                 <Art adult={g.nsfw} src={capsulesFor(g)[0]} fallback={capsulesFor(g).slice(1)} title={g.title} className="aspect-[460/215] w-full object-cover" />
                 <span className="grid gap-0.5 px-3 py-2.5">
@@ -113,6 +141,8 @@ export function LibraryHome({
                   </span>
                 </span>
               </button>
+              {running.has(g.id) ? <StopChip game={g} onStop={onStop} className="absolute right-2 top-2" /> : null}
+              </div>
             ))}
           </div>
         </section>
@@ -150,14 +180,25 @@ export function LibraryHome({
                   Running
                 </span>
               ) : null}
-              <button
-                type="button"
-                aria-label={`Play ${g.title}`}
-                onClick={() => onPlay(g)}
-                className="kryo-pill absolute bottom-3 right-3 grid size-11 min-h-[44px] min-w-[44px] translate-y-2 place-items-center bg-primary text-primary-foreground opacity-0 shadow-lg shadow-black/50 transition-all duration-200 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100 focus-visible:translate-y-0 focus-visible:opacity-100 [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100"
-              >
-                <Play className="size-4 fill-current" />
-              </button>
+              {running.has(g.id) ? (
+                <button
+                  type="button"
+                  aria-label={`Stop ${g.title}`}
+                  onClick={() => onStop(g)}
+                  className="kryo-pill absolute bottom-3 right-3 grid size-11 min-h-[44px] min-w-[44px] place-items-center bg-secondary text-foreground shadow-lg shadow-black/50 transition-colors hover:bg-foreground hover:text-background"
+                >
+                  <Square className="size-3.5 fill-current" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  aria-label={`Play ${g.title}`}
+                  onClick={() => onPlay(g)}
+                  className="kryo-pill absolute bottom-3 right-3 grid size-11 min-h-[44px] min-w-[44px] translate-y-2 place-items-center bg-primary text-primary-foreground opacity-0 shadow-lg shadow-black/50 transition-all duration-200 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100 focus-visible:translate-y-0 focus-visible:opacity-100 [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100"
+                >
+                  <Play className="size-4 fill-current" />
+                </button>
+              )}
             </div>
           ))}
         </div>

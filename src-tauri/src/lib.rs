@@ -1403,6 +1403,7 @@ pub fn run() {
             downloads::downloads_list,
             downloads::download_pause,
             downloads::download_resume,
+            downloads::download_install_anyway,
             downloads::download_move,
             player_name::player_account_name,
             downloads::download_cancel,

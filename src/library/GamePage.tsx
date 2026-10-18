@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { gameContext } from './context'
 import { ChevronDown, Download, FolderOpen, Glasses, Globe, Play, Settings2, Square, X } from 'lucide-react'
 import { Button, Caption, Card, CommandLine, IconButton, Label, MenuList, useDismiss, type MenuEntry } from '@/ui'
-import { entryIsVr, entryLabel, fetchCatalogGame, hasChoice, library, playTarget, type CatalogGame, type LibraryGame } from '@/lib/library'
+import { fetchCatalogGame, hasChoice, library, normalEntry, playTarget, waysToPlay, type CatalogGame, type LibraryGame } from '@/lib/library'
 import { useOnline } from '@/lib/online'
 import { useLivePlaytime } from '@/hooks/useLivePlaytime'
 import { GameBanner } from '@/library/Art'
@@ -47,7 +47,8 @@ export function GamePage({
   onDismissError: () => void
   onRepair: () => void
   onPlay: () => void
-  onPlayEntry: (entry: number) => void
+  /** `entry` null is the game's own exe. */
+  onPlayEntry: (entry: number | null) => void
   onStop: () => void
   gearItems: MenuEntry[]
   onStorePage: (() => void) | null
@@ -113,7 +114,7 @@ export function GamePage({
   const playtime = useLivePlaytime(game, running)
 
   const target = playTarget(game)
-  const previewEntry = typeof target === 'number' ? target : game.entries.length ? 0 : null
+  const previewEntry = target === 'ask' ? normalEntry(game) : target
   useEffect(() => {
     library
       .preview(game, previewEntry)
@@ -122,6 +123,7 @@ export function GamePage({
   }, [game, previewEntry])
 
   const choice = hasChoice(game)
+  const ways = waysToPlay(game)
   // A build kept under Properties > Builds is not offered updates.
   const kept = !!game.pinnedVersion && game.pinnedVersion === game.version
   const updateAvailable = !!latest && !!game.version && latest !== game.version && !kept
@@ -180,11 +182,11 @@ export function GamePage({
                       onDone={() => setModesOpen(false)}
                       items={[
                         { heading: 'Play as' },
-                        ...game.entries.map((e, i) => ({
-                          label: entryLabel(e),
-                          icon: entryIsVr(e) ? <Glasses /> : <Play />,
-                          hint: target === i ? 'default' : e.arguments || undefined,
-                          onSelect: () => onPlayEntry(i),
+                        ...ways.map((w) => ({
+                          label: w.label,
+                          icon: w.vr ? <Glasses /> : <Play />,
+                          hint: target === w.entry ? 'default' : w.args || undefined,
+                          onSelect: () => onPlayEntry(w.entry),
                         })),
                       ]}
                     />
@@ -204,9 +206,7 @@ export function GamePage({
               value={
                 target === 'ask'
                   ? 'Asks each time'
-                  : target != null && game.entries[target]
-                    ? entryLabel(game.entries[target])
-                    : 'Default'
+                  : ways.find((w) => w.entry === target)?.label ?? 'Play'
               }
             />
           ) : null}

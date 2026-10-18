@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FolderOpen, HeartHandshake, Pause, Play, RotateCw, X } from 'lucide-react'
+import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FolderOpen, HeartHandshake, Pause, Play, RotateCw, ShieldAlert, X } from 'lucide-react'
 import { AsciiBar, AsciiSpark, Busy, Button, Caption, IconButton, Label, Matrix, type MatrixState } from '@/ui'
 import { downloads as api, formatBytes, formatEta, formatLeft, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import { Art } from '@/library/Art'
@@ -316,6 +316,14 @@ function Row({
           <Button variant="primary" size="sm" onClick={() => onOpenGame(d.gameId!)}>
             <Play className="size-3 fill-current" />
             Play
+          </Button>
+        ) : null}
+        {/* The checksum failed and the archive is kept: the player may
+            install it anyway. Never done for them - Retry stays the default. */}
+        {d.status === 'failed' && d.hashMismatch ? (
+          <Button size="sm" variant="outline" disabled={Boolean(pending)} onClick={() => run('anyway', () => api.installAnyway(d.id))}>
+            {pending === 'anyway' ? <Spinner /> : <ShieldAlert className="size-3" />}
+            Install anyway
           </Button>
         ) : null}
         {d.status === 'paused' || d.status === 'failed' ? (

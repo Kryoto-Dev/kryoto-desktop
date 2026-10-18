@@ -38,6 +38,8 @@ export type LibraryGame = {
   entries: LaunchEntry[]
   source: string | null
   preferredEntry: number | null
+  /** Play asks how to start the game each time. */
+  askEachTime: boolean
   launchOptions: string
   compatTool: string | null
   applyOverrides: boolean
@@ -188,6 +190,7 @@ export const BLANK_GAME: LibraryGame = {
   entries: [],
   source: null,
   preferredEntry: null,
+  askEachTime: false,
   launchOptions: '',
   compatTool: null,
   applyOverrides: true,
@@ -365,28 +368,71 @@ export function entryIsVr(e: LaunchEntry): boolean {
   return (e.type ?? '').toLowerCase() === 'vr' || /\bvr\b/i.test(entryLabel(e))
 }
 
-/** Whether Play has a question to ask: two ways in, or one needing a flag. */
+const norm = (path: string) => path.replace(/\\/g, '/').toLowerCase()
+
+/**
+ * What a plain Play starts: the game's own exe (`null`), the way it has always
+ * started with nothing picked. A game with no exe on record starts with
+ * Steam's first entry instead.
+ */
+export function normalEntry(game: LibraryGame): number | null {
+  return game.executable.trim() || game.entries.length === 0 ? null : 0
+}
+
+/** One way to start a game. `entry` is what to pass to Play: `null` is the game's own exe. */
+export type Way = { entry: number | null; label: string; detail: string; args: string; vr: boolean; normal: boolean }
+
+/**
+ * Every way to start the game, the plain one first and always there; the
+ * launch entries (a VR mode, a config tool, a flag) are the ones under it.
+ */
+export function waysToPlay(game: LibraryGame): Way[] {
+  const own = normalEntry(game)
+  const same = (e: LaunchEntry) =>
+    own === null && norm(e.executable) === norm(game.executable) && e.arguments.trim() === game.defaultArgs.trim()
+  const ways: Way[] = []
+  if (own === null) {
+    // An entry that starts exactly what plain Play starts is the same way in;
+    // it is not listed twice, but its name ("Play in VR") is kept.
+    const twin = game.entries.find(same)
+    ways.push({
+      entry: null,
+      label: twin ? entryLabel(twin) : 'Play',
+      detail: [game.executable.trim(), game.defaultArgs.trim()].filter(Boolean).join(' '),
+      args: game.defaultArgs.trim(),
+      vr: twin ? entryIsVr(twin) : false,
+      normal: true,
+    })
+  }
+  game.entries.forEach((e, i) => {
+    if (same(e)) return
+    ways.push({
+      entry: i,
+      label: entryLabel(e),
+      detail: [e.executable, e.arguments.trim()].filter(Boolean).join(' '),
+      args: e.arguments.trim(),
+      vr: entryIsVr(e),
+      normal: i === own,
+    })
+  })
+  return ways
+}
+
+/** Whether there is any way to start the game besides the plain one. */
 export function hasChoice(game: LibraryGame): boolean {
-  return game.entries.length > 1 || game.entries.some((e) => e.arguments.trim())
+  return waysToPlay(game).length > 1
 }
 
-/** The entry the release is set up with on kryo.to, else Steam's first. */
-export function releaseDefaultEntry(game: LibraryGame): number | null {
-  if (game.entries.length === 0) return null
-  const exe = game.executable.replace(/\\/g, '/').toLowerCase()
-  const i = game.entries.findIndex(
-    (e) =>
-      e.executable.replace(/\\/g, '/').toLowerCase() === exe &&
-      e.arguments.trim() === game.defaultArgs.trim(),
-  )
-  return i >= 0 ? i : 0
-}
-
-/** What Play starts without asking, or `'ask'`. */
-export function playTarget(game: LibraryGame): number | null | 'ask' {
+/** The entry Play starts with no question: the one picked, else the plain one. */
+export function startEntry(game: LibraryGame): number | null {
   if (game.preferredEntry != null && game.entries[game.preferredEntry]) return game.preferredEntry
-  if (hasChoice(game)) return 'ask'
-  return game.entries.length === 1 ? 0 : null
+  return normalEntry(game)
+}
+
+/** What Play starts, or `'ask'` when the player asked to be asked. */
+export function playTarget(game: LibraryGame): number | null | 'ask' {
+  if (game.askEachTime && hasChoice(game)) return 'ask'
+  return startEntry(game)
 }
 
 /* ── Launch option presets (the Steam non-Steam-game guide) ── */

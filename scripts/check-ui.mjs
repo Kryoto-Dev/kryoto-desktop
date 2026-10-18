@@ -261,8 +261,29 @@ try {
     await recovery.waitForFunction(() => ![...document.querySelectorAll('button')].some(b => b.textContent === 'Use defaults'))
     await recovery.close()
   })
+  await check('Play starts without a launch-choice dialog and alternate modes remain available', async () => {
+    const game = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    game.on('pageerror', e => failures.push(e.message))
+    await game.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await game.goto(base)
+      await game.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Captain Hardcore', exact: true }).click()
+      const region = game.getByRole('region', { name: 'Captain Hardcore', exact: true })
+      await region.getByRole('button', { name: 'Ways to play', exact: true }).click()
+      await game.getByText('Captain Hardcore Desktop Mode', { exact: true }).waitFor()
+      await game.keyboard.press('Escape')
+      await region.getByRole('button', { name: 'Play', exact: true }).click()
+      await region.getByRole('button', { name: 'Stop', exact: true }).waitFor()
+      assert.equal(await game.getByRole('dialog', { name: 'Play Captain Hardcore', exact: true }).count(), 0)
+      await game.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Stop Captain Hardcore', exact: true }).click()
+      await region.getByRole('button', { name: 'Play', exact: true }).waitFor()
+    } finally { await game.close() }
+  })
   await check('achievement repair offers gbe_fork and every RUNE profile with Undo between attempts', async () => {
     const achievements = await browser.newPage({ viewport: { width: 1100, height: 860 } })
+    // This journey starts after startup setup; Windows otherwise waits at the
+    // preview's missing-runtime prompt before the library can open.
+    await achievements.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
     achievements.on('pageerror', e => failures.push(e.message))
     try {
       await achievements.goto(base)

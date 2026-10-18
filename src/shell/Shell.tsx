@@ -59,7 +59,16 @@ import { logError } from '@/lib/log'
 import { flushPlays, isExpectedReportError, reportPlay } from '@/lib/play-reports'
 import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
 import { entryIsVr, entryLabel, gameLogs, isWindowsHost, library, playTarget, type LibraryGame } from '@/lib/library'
-import { exitApp, isTauri, openExternal, setStoreVisible, signOut, toggleFullscreen } from '@/lib/window'
+import {
+  exitApp,
+  isTauri,
+  OPEN_SETTINGS_EVENT,
+  OPEN_STORE_EVENT,
+  openExternal,
+  setStoreVisible,
+  signOut,
+  toggleFullscreen,
+} from '@/lib/window'
 
 type Browser = ReturnType<typeof useBrowserPage>
 
@@ -217,6 +226,21 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     [go, guest],
   )
   const signIn = useCallback(() => openWeb('/login?next=/'), [openWeb])
+  // Pages deep in the app ask for a Store page or a Settings section by event
+  // (lib/window.ts), so the view switches instead of loading behind it.
+  useEffect(() => {
+    const store = (e: Event) => {
+      const path = (e as CustomEvent<string>).detail
+      if (typeof path === 'string' && path.startsWith('/')) openWeb(path)
+    }
+    const settingsSection = (e: Event) => openSettings((e as CustomEvent<string>).detail as SettingsSection)
+    window.addEventListener(OPEN_STORE_EVENT, store)
+    window.addEventListener(OPEN_SETTINGS_EVENT, settingsSection)
+    return () => {
+      window.removeEventListener(OPEN_STORE_EVENT, store)
+      window.removeEventListener(OPEN_SETTINGS_EVENT, settingsSection)
+    }
+  }, [openWeb, openSettings])
   // Leaving Settings: the account may have changed its look or name there.
   const wasSettings = useRef(false)
   useEffect(() => {
@@ -362,7 +386,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     },
     [lib],
   )
-  const playEntry = useCallback((game: LibraryGame, entry: number) => void lib.play(game.id, entry), [lib])
+  const playEntry = useCallback((game: LibraryGame, entry: number | null) => void lib.play(game.id, entry), [lib])
 
   // "Join" on a game invite in chat: start the game (into the host's Steam
   // lobby when the invite has one), ask Steam to join if it is already
@@ -814,6 +838,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           onHome={() => go({ kind: 'home' })}
           onSelect={(id) => go({ kind: 'game', id })}
           onPlay={play}
+          onStop={(game) => void lib.stop(game.id)}
           onContext={(game, x, y) => setCtx({ game, x, y })}
           onSavedContext={(saved, x, y) => setCtx({ saved, x, y })}
           onDownloadContext={(download, x, y) => setCtx({ download, x, y })}
@@ -873,6 +898,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
             running={lib.running}
             onOpen={(id) => go({ kind: 'game', id })}
             onPlay={play}
+            onStop={(game) => void lib.stop(game.id)}
             onContext={(game, x, y) => setCtx({ game, x, y })}
           />
         )}
@@ -978,7 +1004,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
             setOverlay(null)
             if (remember) {
               void library
-                .save({ ...overlayGame, preferredEntry: entry })
+                .save({ ...overlayGame, preferredEntry: entry, askEachTime: false })
                 .then(lib.upsert)
                 .catch((e) => lib.setError(errorText(e)))
             }

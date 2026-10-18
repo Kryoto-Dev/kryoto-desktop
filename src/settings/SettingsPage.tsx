@@ -43,6 +43,8 @@ export type SettingsSection =
   | 'compat'
   | 'developer'
   | 'logs'
+  /** kryo.to's saved achievements, a part of Support (no rail entry of its own). */
+  | 'achievements'
 
 /** kryo.to's settings, by the fragment that opens each category there. */
 const WEB: Partial<Record<SettingsSection, string>> = {
@@ -51,6 +53,7 @@ const WEB: Partial<Record<SettingsSection, string>> = {
   notifications: 'notifications',
   security: 'password',
   support: 'donations',
+  achievements: 'achievements',
 }
 
 export const isWebSection = (s: SettingsSection) => s in WEB
@@ -73,6 +76,7 @@ export function SettingsPage({
   onSignIn: () => void
 }) {
   const guest = !!account.guest
+  const railSection: SettingsSection = section === 'achievements' ? 'support' : section
   const kryo: RailItem[] = [
     { id: 'profile', label: 'Profile', icon: <User /> },
     { id: 'appearance', label: 'Appearance', icon: <Palette /> },
@@ -109,8 +113,8 @@ export function SettingsPage({
             <span className="truncate text-[10px] text-muted-foreground">{guest ? 'No account' : `@${account.username}`}</span>
           </span>
         </div>
-        {guest ? null : <Rail title="kryo.to account" items={kryo} current={section} onSection={onSection} />}
-        <Rail title="Kryoto Desktop" items={desktop} current={section} onSection={onSection} />
+        {guest ? null : <Rail title="kryo.to account" items={kryo} current={railSection} onSection={onSection} />}
+        <Rail title="Kryoto Desktop" items={desktop} current={railSection} onSection={onSection} />
         <div className="mt-auto px-1">
           {guest ? (
             <Button variant="primary" size="sm" className="w-full" onClick={onSignIn}>
@@ -356,39 +360,43 @@ function DesktopPane({ section }: { section: SettingsSection }) {
 }
 
 /**
- * The name you have in games. Ticked: your K// username. Unticked: the name
- * typed here, or - left empty - whatever each build came with. Written into
- * the game's emulator files as it starts (src-tauri player_name.rs).
+ * The name you have in games: your K// username, one typed here, or whatever
+ * each build came with. The same three choices, in the same control, as a
+ * game's Properties (which adds "Same as Settings"). Written into the game's
+ * emulator files as it starts (src-tauri player_name.rs).
  */
 function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Settings>) => void }) {
   const [account, setAccount] = useState<string | null>(null)
   useEffect(() => {
     if (isTauri()) void settingsApi.playerAccountName().then(setAccount).catch(() => {})
   }, [])
-  const useAccount = s.playerNameMode === 'account'
   return (
     <Section
       title="In-game name"
       hint="What games and other players call you, in games built with gbe_fork or RUNE (most of the catalog). Set it per game under Properties. Kryoto Online games use your Steam name."
     >
-      <div className="grid gap-3">
-        <Check
-          checked={useAccount}
-          onChange={(on) => patch({ playerNameMode: on ? 'account' : s.playerName.trim() ? 'custom' : 'build' })}
-          label={account ? `Use my K// username (${account})` : 'Use my K// username (sign in to kryo.to to set it)'}
+      <div className="grid gap-2">
+        <Segmented
+          value={s.playerNameMode}
+          options={[
+            { value: 'account', label: 'K// username' },
+            { value: 'custom', label: 'Custom' },
+            { value: 'build', label: "Game's own" },
+          ]}
+          onChange={(v) => patch({ playerNameMode: v })}
         />
-        {!useAccount ? (
-          <label className="grid gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Custom name
-            <input
-              className={inputCls}
-              value={s.playerName}
-              maxLength={PLAYER_NAME_MAX}
-              placeholder="Empty keeps each game's own name"
-              spellCheck={false}
-              onChange={(e) => patch({ playerName: e.target.value, playerNameMode: e.target.value.trim() ? 'custom' : 'build' })}
-            />
-          </label>
+        {s.playerNameMode === 'custom' ? (
+          <input
+            className={inputCls}
+            value={s.playerName}
+            maxLength={PLAYER_NAME_MAX}
+            placeholder="Your name in games"
+            aria-label="Your name in games"
+            spellCheck={false}
+            onChange={(e) => patch({ playerName: e.target.value })}
+          />
+        ) : s.playerNameMode === 'account' ? (
+          <Caption>{account ? `Games call you ${account}.` : 'Sign in to kryo.to to use your username.'}</Caption>
         ) : null}
       </div>
     </Section>

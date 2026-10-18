@@ -1,14 +1,14 @@
 import { useState } from 'react'
 import { Glasses, Play } from 'lucide-react'
 import { Button, Check, Modal } from '@/ui'
-import { entryIsVr, entryLabel, releaseDefaultEntry, type LibraryGame } from '@/lib/library'
+import { startEntry, waysToPlay, type LibraryGame } from '@/lib/library'
 import { cn } from '@/lib/utils'
 
 /**
- * "How do you want to play?" - Steam's prompt for a game that starts more than
- * one way: a VR game with a flat mode (Captain Hardcore's is the same exe with
- * `-nohmd`), a config tool, a 32- and a 64-bit build. Pre-selects the
- * release's pick on kryo.to. "Don't ask again" saves it; Properties undoes it.
+ * "How do you want to play?" - for a player who chose to be asked each time
+ * (Properties > When you press Play). The plain way to start the game is first;
+ * a VR mode, a config tool or a launch flag are under it. Pre-selects what Play
+ * would start. "Don't ask again" saves the pick; Properties undoes it.
  */
 export function LaunchChooser({
   game,
@@ -16,10 +16,12 @@ export function LaunchChooser({
   onClose,
 }: {
   game: LibraryGame
-  onPlay: (entry: number, remember: boolean) => void
+  /** `entry` null is the game's own exe. */
+  onPlay: (entry: number | null, remember: boolean) => void
   onClose: () => void
 }) {
-  const [picked, setPicked] = useState(game.preferredEntry ?? releaseDefaultEntry(game) ?? 0)
+  const ways = waysToPlay(game)
+  const [picked, setPicked] = useState<number | null>(startEntry(game))
   const [remember, setRemember] = useState(false)
   return (
     <Modal
@@ -42,40 +44,37 @@ export function LaunchChooser({
     >
       <p className="text-xs leading-relaxed text-muted-foreground">This game starts more than one way. Pick how you want to play.</p>
       <div role="radiogroup" aria-label="How to play" className="grid gap-2">
-        {game.entries.map((e, i) => (
+        {ways.map((w) => (
           <button
-            key={`${e.executable}|${e.arguments}`}
+            key={w.entry ?? 'normal'}
             type="button"
             role="radio"
-            aria-checked={picked === i}
-            onClick={() => setPicked(i)}
-            onDoubleClick={() => onPlay(i, remember)}
+            aria-checked={picked === w.entry}
+            onClick={() => setPicked(w.entry)}
+            onDoubleClick={() => onPlay(w.entry, remember)}
             className={cn(
               'flex items-center gap-3 border p-3 text-left transition-colors',
-              picked === i ? 'border-foreground bg-secondary' : 'border-border hover:border-foreground/50',
+              picked === w.entry ? 'border-foreground bg-secondary' : 'border-border hover:border-foreground/50',
             )}
           >
             <span
               className={cn(
                 'kryo-pill grid size-9 shrink-0 place-items-center',
-                picked === i ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground',
+                picked === w.entry ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground',
               )}
             >
-              {entryIsVr(e) ? <Glasses className="size-4" /> : <Play className="size-4" />}
+              {w.vr ? <Glasses className="size-4" /> : <Play className="size-4" />}
             </span>
             <span className="grid min-w-0 gap-0.5">
               <span className="text-sm font-bold text-foreground">
-                {entryLabel(e)}
-                {entryIsVr(e) ? (
+                {w.label}
+                {w.vr ? (
                   <span className="kryo-pill ml-2 border border-border px-1.5 py-px align-middle text-[9px] uppercase tracking-wider text-muted-foreground">
                     headset
                   </span>
                 ) : null}
               </span>
-              <span className="kryo-ascii-art truncate text-[11px] text-muted-foreground">
-                {e.executable}
-                {e.arguments ? <span className="text-foreground"> {e.arguments}</span> : null}
-              </span>
+              <span className="kryo-ascii-art truncate text-[11px] text-muted-foreground">{w.detail}</span>
             </span>
           </button>
         ))}

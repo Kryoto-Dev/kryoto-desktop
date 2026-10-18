@@ -92,6 +92,10 @@ pub struct Download {
     pub sha256: Option<String>,
     /// The archive matched it.
     pub verified: bool,
+    /// The archive did not match the hash. It is kept, so the player can press
+    /// Install anyway (`download_install_anyway`);
+    /// Retry throws it away and downloads it again.
+    pub hash_mismatch: bool,
     /// Set when the file is one of the game's add-ons (a language pack, the
     /// Online add-on): its name, e.g. "Japanese language pack".
     pub addon: Option<String>,
@@ -691,6 +695,26 @@ fn enqueue_item<R: Runtime>(
             return Ok(());
         }
     }
+    // Download pressed again for a game whose download failed with nothing
+    // kept (a damaged archive is deleted): that row starts over with the fresh
+    // link, rather than a second row of the same game failing beside it.
+    if mirror.is_none() && remote_id.is_none() {
+        if let Some(found) = failed_copy(&state, slug.as_deref()) {
+            edit(app, &found, |d| {
+                d.url = url.clone();
+                d.error = None;
+                d.sha256 = None;
+                d.verified = false;
+                if release.is_some() {
+                    d.release = release.clone();
+                }
+            });
+            persist(app);
+            let _ = app.emit("download-started", found.clone());
+            let _ = requeue(app, &found);
+            return Ok(());
+        }
+    }
     // The same page's Download pressed twice while the first is still going.
     if remote_id.is_none() { if let Ok(list) = state.list.lock() {
         if list.iter().any(|d| {
@@ -747,6 +771,18 @@ fn unfinished_copy(state: &Downloads, url: &str, slug: Option<&str>) -> Option<S
         .filter(|d| d.mirror.is_none() && d.received > 0 && !d.archive_path.is_empty())
         .filter(|d| slug.is_none() || d.slug.as_deref() == slug)
         .find(|d| d.file_name.eq_ignore_ascii_case(&name))
+        .map(|d| d.id.clone())
+}
+
+/// A failed download of this game with nothing on disk to carry on from.
+fn failed_copy(state: &Downloads, slug: Option<&str>) -> Option<String> {
+    let slug = slug?;
+    let running = state.controls.lock().ok()?.keys().cloned().collect::<Vec<_>>();
+    let list = state.list.lock().ok()?;
+    list.iter()
+        .filter(|d| d.status == Status::Failed && !running.contains(&d.id))
+        .filter(|d| d.mirror.is_none() && d.received == 0 && d.archive_path.is_empty())
+        .find(|d| d.slug.as_deref() == Some(slug))
         .map(|d| d.id.clone())
 }
 
@@ -1024,47 +1060,34 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
             client = ours;
         }
     }
-    let mut resolved = false;
-    // Set once a mismatched archive has been fetched again, so a hash that is
-    // wrong on kryo.to's side costs one more download, not an endless loop.
-    let mut fetched_again = false;
-    loop {
-        let already_complete = {
-            let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
-            !d.archive_path.is_empty()
-                && d.total.is_some_and(|t| t > 0 && d.received >= t)
-                && d.segments.iter().all(|s| s.done >= s.len())
-        };
-        if !already_complete {
-            if is_mirror && !resolved {
-                match mirror_client(app, id, flag, false, settings.connections).await {
-                    Ok(v) => (client, connections) = v,
-                    Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
-                    Err(e) => return Err(e),
-                }
-                resolved = true;
-            }
-            set_status(app, id, Status::Downloading, None);
-            let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
-            match fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror).await? {
-                true => {}
-                false => return settle_stopped(app, id, flag),
+    let already_complete = {
+        let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+        !d.archive_path.is_empty()
+            && d.total.is_some_and(|t| t > 0 && d.received >= t)
+            && d.segments.iter().all(|s| s.done >= s.len())
+    };
+    if !already_complete {
+        if is_mirror {
+            match mirror_client(app, id, flag, false, settings.connections).await {
+                Ok(v) => (client, connections) = v,
+                Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
+                Err(e) => return Err(e),
             }
         }
-        identify(app, id, &client).await;
-        match verify(app, id, flag).await {
-            Ok(()) => break,
-            Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
-            // A damaged download is usually one bad stretch of a long
-            // transfer. Fetch it again once by itself before asking the player.
-            Err(e) if !fetched_again && flag.load(Ordering::SeqCst) == RUN => {
-                fetched_again = true;
-                crate::logging::warn("download", &format!("{id}: {e}; fetching it again"));
-                edit(app, id, |d| d.notice = Some("The archive did not match kryo.to's checksum. Downloading it again.".into()));
-                emit(app, true);
-            }
-            Err(e) => return Err(e),
+        set_status(app, id, Status::Downloading, None);
+        let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
+        match fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror).await? {
+            true => {}
+            false => return settle_stopped(app, id, flag),
         }
+    }
+    identify(app, id, &client).await;
+    // A mismatch is never downloaded again by itself: a big archive twice is a
+    // lot of bandwidth, and the player chooses between Install anyway and Retry.
+    match verify(app, id, flag).await {
+        Ok(()) => {}
+        Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
+        Err(e) => return Err(e),
     }
     edit(app, id, |d| d.notice = None);
     if edit(app, id, |_| {}).and_then(|d| d.addon).is_some() {
@@ -1211,9 +1234,9 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
     };
     let found = match_file_with(&json, &d.file_name, &hint);
     edit(app, id, |d| {
-        if found.sha.is_some() {
-            d.sha256 = found.sha;
-        }
+        // kryo.to's answer now, whatever an earlier try was told: a hash that
+        // was wrong for this file (another build's) must not outlive a Retry.
+        d.sha256 = found.sha;
         d.addon = found.addon;
         // A build other than the current one, whichever way it was picked:
         // it installs as that build.
@@ -1320,8 +1343,20 @@ pub fn match_file_with(json: &serde_json::Value, file: &str, hint: &FileHint) ->
     if let Some((sha, _, _)) = hashes(json).into_iter().find(|(_, _, n)| *n) {
         return FileMatch { sha: Some(sha), ..Default::default() };
     }
-    if let Some((r, sha, _)) = named.first() {
-        return found(r, sha.clone());
+    // Only an older build has a file of this name. It is that build's file
+    // only when nothing says otherwise: never when the size is another one,
+    // and never while the current build's hash is still being worked out -
+    // a new build under the usual name was checked against the build before
+    // it and always failed (Schedule I, October 2026). No hash then, and the
+    // transfer's own length check stands.
+    let current_pending = releases
+        .iter()
+        .any(|r| r["primary"].as_bool().unwrap_or(false) && hashes(r).is_empty());
+    if let Some((r, sha, b)) = named.first() {
+        if !current_pending && (hint.size.is_none() || b.is_none() || fits(*b)) {
+            return found(r, sha.clone());
+        }
+        return FileMatch::default();
     }
 
     for addon in json["addons"].as_array().into_iter().flatten() {
@@ -1336,8 +1371,8 @@ pub fn match_file_with(json: &serde_json::Value, file: &str, hint: &FileHint) ->
 }
 
 /// Check the archive against the SHA-256 kryo.to lists for it. A mismatch
-/// deletes the archive - it cannot be trusted, and resuming it would only
-/// keep the damage.
+/// keeps the archive and marks it (`hash_mismatch`): Install anyway uses it,
+/// Retry deletes it and downloads it again.
 async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<(), String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let Some(expected) = d.sha256.clone() else { return Ok(()) };
@@ -1388,15 +1423,14 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
     }
     if actual != expected {
         crate::logging::error("download", &format!("{id}: sha256 {actual} is not {expected}"));
-        let _ = std::fs::remove_file(&d.archive_path);
+        // The archive stays: the player decides between installing it anyway
+        // and downloading it again (Retry, which throws this copy away).
         edit(app, id, |d| {
-            d.received = 0;
-            d.segments.clear();
-            d.archive_path.clear();
+            d.hash_mismatch = true;
             d.extracted = 0;
             d.extract_total = None;
         });
-        return Err("Archive doesn't match hash. Please try redownloading or contact support.".into());
+        return Err("The archive doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.".into());
     }
     edit(app, id, |d| {
         d.verified = true;
@@ -1504,6 +1538,16 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
         return if flag.load(Ordering::SeqCst) == 0 { Ok(()) } else { Err("Wait for the download to stop, then try again.".into()) };
     }
     edit(app, id, |d| {
+        // Retry on an archive that failed its check: that copy is thrown away
+        // and the download starts over (Install anyway clears the flag first).
+        if d.hash_mismatch {
+            let _ = std::fs::remove_file(&d.archive_path);
+            d.hash_mismatch = false;
+            d.received = 0;
+            d.segments.clear();
+            d.archive_path.clear();
+            d.verified = false;
+        }
         d.error = None;
         d.status = Status::Queued;
     })
@@ -2817,6 +2861,24 @@ pub fn download_resume(app: AppHandle, id: String) -> Result<(), String> {
     requeue(&app, &id)
 }
 
+/// Install an archive that failed its checksum, at the player's word: the
+/// button beside Retry when the check failed. Logged, because a damaged
+/// or replaced archive is what the check is there to catch.
+#[tauri::command]
+pub fn download_install_anyway(app: AppHandle, id: String) -> Result<(), String> {
+    let d = edit(&app, &id, |_| {}).ok_or("That download is gone.")?;
+    if d.status != Status::Failed || !d.hash_mismatch || !Path::new(&d.archive_path).is_file() {
+        return Err("There is no unchecked archive to install. Retry to download it again.".into());
+    }
+    crate::logging::warn("download", &format!("{id}: installing {} without a matching checksum, at the player's word", d.file_name));
+    edit(&app, &id, |d| {
+        d.hash_mismatch = false;
+        d.verified = true;
+    });
+    persist(&app);
+    requeue(&app, &id)
+}
+
 /// Move a download in the queue: "up", "down", "top", or "now" (to the front,
 /// and the one running steps aside: paused, then queued again right behind
 /// it, as Steam does).
@@ -3010,6 +3072,32 @@ mod tests {
         // A size no build has is still checked, against the current one.
         let m = match_file_with(&json, file, &FileHint { size: Some(5), ..Default::default() });
         assert_eq!(m.sha, Some("a".repeat(64)));
+    }
+
+    /// A new build whose hash is not worked out yet, under the same name as
+    /// the build before it: never checked against the old build's hash.
+    #[test]
+    fn a_new_build_without_a_hash_is_not_checked_against_the_old_one() {
+        let json = serde_json::json!({
+            "hashes": [],
+            "releases": [
+                { "version": "2022.3.62.28864 (b24705572)", "primary": true, "links": [], "hashes": [] },
+                { "version": "V0.4.6f13", "primary": false, "links": [],
+                  "hashes": [{ "name": "Schedule I - Kryoto.7z", "sha256": "b".repeat(64), "bytes": 1848167115u64 }] }
+            ]
+        });
+        let file = "Schedule I - Kryoto.7z";
+        // The new build's size: no hash, and not relabelled as the old build.
+        let m = match_file_with(&json, file, &FileHint { size: Some(2075315145), ..Default::default() });
+        assert_eq!(m, FileMatch::default());
+        // No size yet: still no guess while the current build's hash is pending.
+        assert_eq!(match_file(&json, file), FileMatch::default());
+        // The old build itself (its size, or picked under Versions) keeps its hash.
+        let m = match_file_with(&json, file, &FileHint { size: Some(1848167115), ..Default::default() });
+        assert_eq!(m.sha, Some("b".repeat(64)));
+        assert_eq!(m.release.as_deref(), Some("V0.4.6f13"));
+        let m = match_file_with(&json, file, &FileHint { version: Some("V0.4.6f13"), ..Default::default() });
+        assert_eq!(m.sha, Some("b".repeat(64)));
     }
 
     #[test]

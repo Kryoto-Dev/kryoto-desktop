@@ -51,8 +51,20 @@ function reducedMotion() {
 /**
  * `cell` scales the characters: 1 for the start box, more where the same
  * scene fills a bigger screen (Big Picture), so it stays crisp, not stretched.
+ * `settled` draws the mark as the opening leaves it, at once (Kryoto Mobile's
+ * Welcome after a sign-out).
  */
-export function SplashScene({ onRevealed, className, cell = 1 }: { onRevealed: () => void; className?: string; cell?: number }) {
+export function SplashScene({
+  onRevealed,
+  className,
+  cell = 1,
+  settled = false,
+}: {
+  onRevealed: () => void
+  className?: string
+  cell?: number
+  settled?: boolean
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useLayoutEffect(() => {
@@ -126,7 +138,8 @@ export function SplashScene({ onRevealed, className, cell = 1 }: { onRevealed: (
     let lastLanding = -Infinity
     let burst = false
 
-    const still = reducedMotion()
+    // Settled: the mark as the opening leaves it, at once.
+    const still = settled || reducedMotion()
     const t0 = performance.now()
     let last = t0
     let raf = 0

@@ -8,10 +8,10 @@ import { errorText, isTauri } from '@/lib/bridge'
 import { formatBytes } from '@/lib/downloads'
 import {
   PRESETS,
-  entryIsVr,
-  entryLabel,
   fetchCatalogGame,
   hasChoice,
+  startEntry,
+  waysToPlay,
   isWindowsHost,
   library,
   presetFor,
@@ -75,7 +75,7 @@ export function GameProperties({
   const [link, setLink] = useState(game.slug ? `kryo.to/game/${game.slug}` : '')
   const set = <K extends keyof LibraryGame>(key: K, value: LibraryGame[K]) => setDraft((d) => ({ ...d, [key]: value }))
 
-  const previewEntry = draft.preferredEntry ?? (draft.entries.length ? 0 : null)
+  const previewEntry = startEntry(draft)
   useEffect(() => {
     const t = setTimeout(() => {
       library.preview(draft, previewEntry).then(setPreview).catch((e: unknown) => setPreview(errorText(e)))
@@ -123,6 +123,7 @@ export function GameProperties({
         developer: c.developer ?? d.developer,
         nsfw: c.nsfw,
         preferredEntry: null,
+        askEachTime: false,
       }))
     } catch (e) {
       setError(errorText(e))
@@ -220,27 +221,22 @@ export function GameProperties({
                 ) : null}
               </div>
             </Section>
-            {draft.entries.length > 0 ? (
+            {hasChoice(draft) ? (
               <Section title="When you press Play">
                 <div role="radiogroup" aria-label="When you press Play" className="grid gap-2">
-                  {hasChoice(draft)
-                    ? choiceRow(draft.preferredEntry == null, () => set('preferredEntry', null), 'Ask every time', undefined, 'ask')
-                    : null}
-                  {draft.entries.map((e, i) =>
+                  {waysToPlay(draft).map((w) =>
                     choiceRow(
-                      draft.preferredEntry === i,
-                      () => set('preferredEntry', i),
+                      !draft.askEachTime && startEntry(draft) === w.entry,
+                      () => setDraft((d) => ({ ...d, preferredEntry: w.entry, askEachTime: false })),
                       <span className="flex items-center gap-2">
-                        {entryIsVr(e) ? <Glasses className="size-3.5" /> : <Play className="size-3.5" />}
-                        {entryLabel(e)}
+                        {w.vr ? <Glasses className="size-3.5" /> : <Play className="size-3.5" />}
+                        {w.label}
                       </span>,
-                      <>
-                        {e.executable}
-                        {e.arguments ? <span className="text-foreground"> {e.arguments}</span> : null}
-                      </>,
-                      `${e.executable}|${e.arguments}`,
+                      w.detail,
+                      String(w.entry ?? 'normal'),
                     ),
                   )}
+                  {choiceRow(draft.askEachTime, () => set('askEachTime', true), 'Ask every time', undefined, 'ask')}
                 </div>
               </Section>
             ) : null}

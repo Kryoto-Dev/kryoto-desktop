@@ -182,11 +182,18 @@ pub fn cloud_achievements_report(app: AppHandle, webview: Webview, running: Stat
     let mut restored = 0;
     let games = tracked(&app);
     for (appid, unlocks) in &report.fetched {
-        ledger.fetched.insert(appid.clone(), t);
         ledger.saved.entry(appid.clone()).or_default().extend(unlocks.iter().map(|u| u.name.clone()));
-        let Some((game, _)) = games.iter().find(|(_, a)| a == appid) else { continue };
-        // Never under a running game's feet: it would write over the file.
-        if running.contains(&game.id) || unlocks.is_empty() {
+        let Some((game, _)) = games.iter().find(|(_, a)| a == appid) else {
+            ledger.fetched.insert(appid.clone(), t);
+            continue;
+        };
+        // Never under a running game's feet: it would write over the file. Not
+        // marked as fetched either, so the next round restores them once it stops.
+        if running.contains(&game.id) {
+            continue;
+        }
+        ledger.fetched.insert(appid.clone(), t);
+        if unlocks.is_empty() {
             continue;
         }
         let roots = roots(&app, game);

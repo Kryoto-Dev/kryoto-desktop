@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { artSrc, reportArt } from '@/lib/art'
 import { coverFor } from '@/lib/game-artwork'
 import { usePersisted } from '@/hooks/usePersisted'
-import { Download as DownloadIcon, Home, Search } from 'lucide-react'
+import { Download as DownloadIcon, Home, Search, Square } from 'lucide-react'
 import { asciiTrack, Dropdown } from '@/ui'
 import { isActive, progressOf, type Download } from '@/lib/downloads'
 import type { LibraryGame } from '@/lib/library'
@@ -37,6 +37,7 @@ export function Sidebar({
   onHome,
   onSelect,
   onPlay,
+  onStop,
   onContext,
   onSavedContext,
   onDownloadContext,
@@ -53,6 +54,7 @@ export function Sidebar({
   onHome: () => void
   onSelect: (id: string) => void
   onPlay: (game: LibraryGame) => void
+  onStop: (game: LibraryGame) => void
   onContext: (game: LibraryGame, x: number, y: number) => void
   onSavedContext?: (game: SavedEntry, x: number, y: number) => void
   onDownloadContext?: (download: Download, x: number, y: number) => void
@@ -187,8 +189,8 @@ export function Sidebar({
         ) : null}
         {shelf === 'installed' ? <Group label="All" count={games.length} /> : null}
         {(shelf === 'installed' ? list : []).map((g) => (
+          <div key={g.id} className="relative">
           <button
-            key={g.id}
             type="button"
             aria-current={g.id === selectedId ? 'page' : undefined}
             onClick={() => onSelect(g.id)}
@@ -196,6 +198,7 @@ export function Sidebar({
             {...gameContext((x, y) => onContext(g, x, y))}
             className={cn(
               'kryo-pill flex h-9 w-full items-center gap-2.5 px-2 text-left text-xs transition-colors',
+              running.has(g.id) && 'pr-9',
               g.id === selectedId ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
             )}
           >
@@ -212,6 +215,18 @@ export function Sidebar({
               </span>
             ) : null}
           </button>
+          {running.has(g.id) ? (
+            <button
+              type="button"
+              aria-label={`Stop ${g.title}`}
+              title="Stop"
+              onClick={() => onStop(g)}
+              className="kryo-pill absolute right-1 top-1/2 grid size-7 -translate-y-1/2 place-items-center text-foreground transition-colors hover:bg-foreground hover:text-background"
+            >
+              <Square className="size-3 fill-current" />
+            </button>
+          ) : null}
+          </div>
         ))}
 
         {pending.length ? (

@@ -440,8 +440,9 @@ async fn run(app: &AppHandle, chosen: &[&'static Runtime]) -> Result<(), String>
     let cancel_flag = dir.join("cancel.flag");
     let _ = std::fs::remove_file(&status);
     let _ = std::fs::remove_file(&cancel_flag);
-    let script = dir.join("install.ps1");
-    std::fs::write(&script, script_for(chosen, &dir, &status, &cancel_flag)).map_err(|e| fail(app, &mut p, "failed", format!("Could not write the install script: {e}")))?;
+    // A script left by an older version, which ran it from this folder.
+    let _ = std::fs::remove_file(dir.join("install.ps1"));
+    let script = script_for(chosen, &dir, &status, &cancel_flag);
 
     let mut child = elevate(&script).map_err(|e| fail(app, &mut p, "failed", format!("Could not start the installers: {e}")))?;
     let mut seen = 0usize;
@@ -583,6 +584,16 @@ fn ps(s: &str) -> String {
 
 /// The elevated script: for each runtime, check the signature, run it,
 /// write `start`, then `done <code>` (or `bad`); stop early on the flag.
+///
+/// Nothing it runs as administrator is read from a folder this user can write
+/// to after the check. The installers were downloaded into the user's cache,
+/// where any program running as the user could swap one between the signature
+/// check and the run, and Windows would start the swapped file elevated. So
+/// each is first copied into a new folder under Program Files (writable by
+/// administrators only), and the copy is checked and run. The script itself
+/// never touches the disk: it is handed to PowerShell on the command line
+/// (`elevate`). Only the progress lines and the cancel flag stay in the cache,
+/// and they carry no code.
 fn script_for(chosen: &[&Runtime], dir: &Path, status: &Path, cancel: &Path) -> String {
     let mut s = String::new();
     s.push_str("$ErrorActionPreference = 'Continue'\r\n");
@@ -590,6 +601,12 @@ fn script_for(chosen: &[&Runtime], dir: &Path, status: &Path, cancel: &Path) -> 
     s.push_str("function Say($line) { Add-Content -LiteralPath $status -Value $line -Encoding ASCII }\r\n");
     s.push_str("function Signed($file) { $sig = Get-AuthenticodeSignature -LiteralPath $file; return ($sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -match 'O=Microsoft Corporation') }\r\n");
     s.push_str("function Run($exe, $argv) { try { $p = Start-Process -FilePath $exe -ArgumentList $argv -Wait -PassThru -WindowStyle Hidden; return $p.ExitCode } catch { return -1 } }\r\n");
+    // A fresh name each time, made by this elevated process: nobody can have
+    // put anything there first.
+    s.push_str("$safe = Join-Path $env:ProgramFiles ('Kryoto Runtimes ' + [guid]::NewGuid().ToString('N'))\r\n");
+    s.push_str("New-Item -ItemType Directory -Path $safe -ErrorAction Stop | Out-Null\r\n");
+    s.push_str("function CopyIn($file) { try { $to = Join-Path $safe (Split-Path -Leaf $file); Copy-Item -LiteralPath $file -Destination $to -ErrorAction Stop; return $to } catch { return $null } }\r\n");
+    s.push_str("try {\r\n");
     for r in chosen {
         s.push_str(&format!("if (Test-Path -LiteralPath $cancel) {{ Say 'canceled'; exit 0 }}\r\nSay 'start {}'\r\n", r.id));
         match r.install {
@@ -598,25 +615,37 @@ fn script_for(chosen: &[&Runtime], dir: &Path, status: &Path, cancel: &Path) -> 
             }
             Install::Exe(args) => {
                 let file = ps(&dir.join(r.file).to_string_lossy());
-                s.push_str(&format!("if (Signed {file}) {{ $code = Run {file} {}; Say \"done {} $code\" }} else {{ Say 'bad {}' }}\r\n", ps(args), r.id, r.id));
+                s.push_str(&format!(
+                    "$copy = CopyIn {file}\r\nif ($copy -and (Signed $copy)) {{ $code = Run $copy {}; Say \"done {} $code\" }} else {{ Say 'bad {}' }}\r\n",
+                    ps(args),
+                    r.id,
+                    r.id
+                ));
             }
             Install::Msi => {
-                let path = dir.join(r.file).to_string_lossy().to_string();
-                let file = ps(&path);
-                let args = ps(&format!("/i \"{path}\" /quiet /norestart"));
-                s.push_str(&format!("if (Signed {file}) {{ $code = Run 'msiexec.exe' {args}; Say \"done {} $code\" }} else {{ Say 'bad {}' }}\r\n", r.id, r.id));
+                let file = ps(&dir.join(r.file).to_string_lossy());
+                s.push_str(&format!(
+                    "$copy = CopyIn {file}\r\nif ($copy -and (Signed $copy)) {{ $code = Run 'msiexec.exe' ('/i \"' + $copy + '\" /quiet /norestart'); Say \"done {} $code\" }} else {{ Say 'bad {}' }}\r\n",
+                    r.id, r.id
+                ));
             }
         }
     }
     s.push_str("Say 'end'\r\n");
+    s.push_str("} finally { Remove-Item -LiteralPath $safe -Recurse -Force -ErrorAction SilentlyContinue }\r\n");
     s
 }
 
 /// PowerShell's `Start-Process -Verb RunAs` on the script, waiting for it.
+/// The script goes on the command line (`-EncodedCommand`, UTF-16LE base64),
+/// never into a file another program could rewrite before it runs elevated.
 #[cfg(windows)]
-fn elevate(script: &Path) -> std::io::Result<std::process::Child> {
+fn elevate(script: &str) -> std::io::Result<std::process::Child> {
+    use base64::Engine;
     use std::os::windows::process::CommandExt;
-    let inner = format!("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"", script.to_string_lossy());
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    let inner = format!("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {encoded}");
     let outer = format!(
         "try {{ $p = Start-Process -Verb RunAs -Wait -PassThru -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList {}; exit $p.ExitCode }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1223 }}",
         ps(&inner)
@@ -630,7 +659,7 @@ fn elevate(script: &Path) -> std::io::Result<std::process::Child> {
 }
 
 #[cfg(not(windows))]
-fn elevate(_: &Path) -> std::io::Result<std::process::Child> {
+fn elevate(_: &str) -> std::io::Result<std::process::Child> {
     Err(std::io::Error::other("only on Windows"))
 }
 
@@ -658,12 +687,16 @@ mod tests {
         let s = script_for(&chosen, Path::new(r"C:\Cache\it's"), Path::new(r"C:\Cache\status.txt"), Path::new(r"C:\Cache\cancel.flag"));
         // A quote in the path is doubled, never ends the string.
         let file = Path::new(r"C:\Cache\it's").join("vc_redist_2015_2022.x64.exe").to_string_lossy().replace('\'', "''");
-        assert!(s.contains(&format!("if (Signed '{file}')")), "{s}");
+        // Copied somewhere only administrators can write, then checked and run from there.
+        assert!(s.contains(&format!("$copy = CopyIn '{file}'")), "{s}");
+        assert!(s.contains("if ($copy -and (Signed $copy))"), "{s}");
+        assert!(s.contains("$env:ProgramFiles") && s.contains("Remove-Item -LiteralPath $safe"), "{s}");
+        assert!(!s.contains(&format!("Run '{file}'")), "the cached file itself is never run: {s}");
         assert!(s.contains("msiexec.exe"));
         assert!(s.contains("/FeatureName:NetFx3"));
         assert_eq!(s.matches("Test-Path -LiteralPath $cancel").count(), 3);
         assert!(s.contains("O=Microsoft Corporation"));
-        assert!(s.trim_end().ends_with("Say 'end'"));
+        assert!(s.contains("Say 'end'\r\n} finally {"), "the copies are removed however it ends: {s}");
     }
 
     /// The whole script, for PowerShell's parser:

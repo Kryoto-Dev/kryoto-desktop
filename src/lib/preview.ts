@@ -38,6 +38,7 @@ function game(appid: number, title: string, extra: Record<string, unknown> = {})
     entries: [],
     source: 'Steam + gbe_fork',
     preferredEntry: null,
+    askEachTime: false,
     launchOptions: '',
     compatTool: null,
     applyOverrides: true,
@@ -172,6 +173,23 @@ const downloadList: Record<string, unknown>[] = [
       title: 'Celeste',
       cover: steam(504230, 'library_600x900.jpg'),
       hero: steam(504230, 'library_hero.jpg'),
+    },
+  }),
+  // Its checksum failed; the archive is kept for Install anyway.
+  dl({
+    id: 'dl-2',
+    slug: 'schedule-i',
+    status: 'failed',
+    received: 2_075_315_145,
+    total: 2_075_315_145,
+    speed: 0,
+    hashMismatch: true,
+    error: "The archive doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.",
+    meta: {
+      ...dl({}).meta,
+      title: 'Schedule I',
+      cover: steam(3164500, 'library_600x900.jpg'),
+      hero: steam(3164500, 'library_hero.jpg'),
     },
   }),
 ]
@@ -554,9 +572,15 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     previewBus.emit('downloads', clone(downloadList))
     return null
   },
+  download_install_anyway: (a) => {
+    const d = downloadList.find((x) => x.id === a.id)
+    if (d) Object.assign(d, { status: 'extracting', hashMismatch: false, error: null })
+    previewBus.emit('downloads', clone(downloadList))
+    return null
+  },
   download_resume: (a) => {
     const d = downloadList.find((x) => x.id === a.id)
-    if (d) d.status = 'downloading'
+    if (d) Object.assign(d, d.hashMismatch ? { status: 'downloading', hashMismatch: false, received: 0, error: null } : { status: 'downloading' })
     previewBus.emit('downloads', clone(downloadList))
     return null
   },
