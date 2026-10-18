@@ -329,6 +329,9 @@ fn shell_theme(app: tauri::AppHandle, dark: bool, shell: Option<[u8; 3]>) {
             let shell = shell.unwrap_or([value; 3]);
             system::set_window_fill(&window, shell, if dark { [11, 10, 12] } else { shell });
         }
+        // Only Linux fills the window behind its views.
+        #[cfg(not(target_os = "linux"))]
+        let _ = shell;
         for (label, view) in app.webviews() {
             if label != STORE {
                 let _ = view.set_background_color(Some(color));
