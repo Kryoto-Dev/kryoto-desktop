@@ -5,10 +5,16 @@ import { Button, Label, MenuButton } from '@/ui'
 import { capsulesFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
 import { usePersisted } from '@/hooks/usePersisted'
+import { useLivePlaytime } from '@/hooks/useLivePlaytime'
 import { Art } from '@/library/Art'
 import { coverFor, heroFor } from '@/lib/game-artwork'
 
 export { Art }
+
+/** A game's time played, counting up while it runs. */
+function LivePlaytime({ game, running }: { game: LibraryGame; running: boolean }) {
+  return <>{formatPlaytime(useLivePlaytime(game, running))}</>
+}
 
 type Sort = 'alpha' | 'recent' | 'playtime' | 'added'
 
@@ -79,7 +85,7 @@ export function LibraryHome({
                 {running.has(last.id) ? 'Running' : 'Play'}
               </Button>
               <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                {formatPlaytime(last.playtimeSeconds)} played
+                <LivePlaytime game={last} running={running.has(last.id)} /> played
               </span>
             </div>
           </div>
@@ -103,7 +109,7 @@ export function LibraryHome({
                 <span className="grid gap-0.5 px-3 py-2.5">
                   <span className="truncate text-xs font-bold text-foreground">{g.title}</span>
                   <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                    {running.has(g.id) ? 'Running now' : `${formatLastPlayed(g.lastPlayed)} · ${formatPlaytime(g.playtimeSeconds)}`}
+                    {running.has(g.id) ? <>Running now · <LivePlaytime game={g} running /></> : `${formatLastPlayed(g.lastPlayed)} · ${formatPlaytime(g.playtimeSeconds)}`}
                   </span>
                 </span>
               </button>

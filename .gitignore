@@ -33,3 +33,6 @@ coverage/
 # Tauri generated schemas
 src-tauri/gen/
 dist-web/
+
+# Scratch files for builds (scripts/tauri-env.mjs)
+.tmp/

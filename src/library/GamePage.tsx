@@ -4,6 +4,7 @@ import { ChevronDown, Download, FolderOpen, Glasses, Globe, Play, Settings2, Squ
 import { Button, Caption, Card, CommandLine, IconButton, Label, MenuList, useDismiss, type MenuEntry } from '@/ui'
 import { entryIsVr, entryLabel, fetchCatalogGame, hasChoice, library, playTarget, type CatalogGame, type LibraryGame } from '@/lib/library'
 import { useOnline } from '@/lib/online'
+import { useLivePlaytime } from '@/hooks/useLivePlaytime'
 import { GameBanner } from '@/library/Art'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
 import { errorText } from '@/lib/bridge'
@@ -109,6 +110,8 @@ export function GamePage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.id, game.slug, online])
 
+  const playtime = useLivePlaytime(game, running)
+
   const target = playTarget(game)
   const previewEntry = typeof target === 'number' ? target : game.entries.length ? 0 : null
   useEffect(() => {
@@ -194,7 +197,7 @@ export function GamePage({
 
         <dl className="flex gap-8">
           <Stat label="Last played" value={running ? 'Now' : formatLastPlayed(game.lastPlayed)} />
-          <Stat label="Play time" value={formatPlaytime(game.playtimeSeconds)} />
+          <Stat label="Play time" value={formatPlaytime(playtime)} />
           {choice ? (
             <Stat
               label="Starts as"

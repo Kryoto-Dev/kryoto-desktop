@@ -10,6 +10,7 @@
     "app:dev": "node scripts/dev.mjs",
     "app:dev:plain": "node scripts/dev.mjs -- --no-default-features --features dev-plain-chat-store",
     "app:build": "node scripts/build.mjs",
+    "app:build:local": "node scripts/build.mjs --local",
     "brand": "node scripts/brand.mjs",
     "web:dev": "vite --config vite.web.config.ts",
     "web:build": "vite build --config vite.web.config.ts && node -e \"require('fs').renameSync('dist-web/web.html','dist-web/index.html')\"",

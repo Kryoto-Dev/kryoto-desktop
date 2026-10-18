@@ -1,6 +1,15 @@
 // Build the installer without the build machine in it. OPSEC!!
 //
-//   pnpm app:build            (extra arguments go to `tauri build` and `tauri bundle`)
+//   pnpm app:build            the release build, signed for the updater with
+//                             TAURI_SIGNING_PRIVATE_KEY. If that key is set and
+//                             its password is not, tauri stops to ask for the
+//                             password - which is what a plain run on a machine
+//                             with the key installed does.
+//   pnpm app:build:local      the same build for trying on this PC: no signing,
+//                             no key or password asked for, and the installer is
+//                             copied out of the repository (see below).
+//
+// Extra arguments go to `tauri build` and `tauri bundle`.
 //
 // Rust keeps the source path of every dependency in the binary for its panic
 // messages - `C:\Users\<name>\.cargo\registry\...` - which names the account
@@ -15,12 +24,11 @@
 // command line into the binary, so a path-mapping flag would itself leak.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { tauriEnv, root } from './tauri-env.mjs'
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const home = os.homedir()
 const cargoHome = process.env.CARGO_HOME || path.join(home, '.cargo')
 const rustupHome = process.env.RUSTUP_HOME || path.join(home, '.rustup')
@@ -32,35 +40,24 @@ const remaps = [
   [home, '/home'],
 ]
 const flags = remaps.map(([from, to]) => `--remap-path-prefix=${from}=${to}`).join(' ')
-const env = { ...process.env, RUSTFLAGS: [process.env.RUSTFLAGS, flags].filter(Boolean).join(' ') }
+const env = tauriEnv({ RUSTFLAGS: [process.env.RUSTFLAGS, flags].filter(Boolean).join(' ') })
 
-
-// On Windows the build must not see Git's MSYS tools: in a bash step they
-// sit ahead of everything on PATH, so OpenSSL's Configure finds MSYS perl
-// (missing modules it needs) and the linker resolves to MSYS `link` instead
-// of MSVC's. Drop those directories and put the real toolchain first. This
-// runs for local builds too, where the same shadowing bites Git Bash users.
-if (process.platform === 'win32') {
-  const sep = ';'
-  const parts = (env.PATH || '').split(sep)
-  const shadow = /(^|[\\/])git[\\/](usr|mingw64)[\\/]bin[\\/]?$/i
-  const kept = parts.filter((p) => !shadow.test(p.replace(/\//g, '\\')))
-  const first = []
-  const linker = env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER
-  if (linker && existsSync(linker)) first.push(path.dirname(linker))
-  for (const dir of ['C:\\Strawberry\\perl\\bin', 'C:\\Program Files\\NASM']) {
-    if (existsSync(dir)) first.push(dir)
-  }
-  const seen = new Set()
-  env.PATH = [...first, ...kept].filter((p) => p && !seen.has(p.toLowerCase()) && (seen.add(p.toLowerCase()), true)).join(sep)
+// A local build is never an update anyone receives, so it is not signed and
+// nothing may ask for the signing key's password.
+const local = process.argv.includes('--local')
+if (local) {
+  for (const name of Object.keys(env)) if (name.startsWith('TAURI_SIGNING_PRIVATE_KEY')) delete env[name]
+  mkdirSync(path.join(root, '.tmp'), { recursive: true })
+  writeFileSync(path.join(root, '.tmp', 'local.conf.json'), JSON.stringify({ bundle: { createUpdaterArtifacts: false } }))
 }
 
-const extra = process.argv.slice(2)
+
+const extra = [...process.argv.slice(2).filter((a) => a !== '--local'), ...(local ? ['--config', '.tmp/local.conf.json'] : [])]
 const tauri = (args) => spawnSync(['pnpm tauri', ...args, ...extra].join(' '), { cwd: root, env, stdio: 'inherit', shell: true })
 const built = tauri(['build', '--no-bundle'])
 if (built.status !== 0) process.exit(built.status ?? 1)
 
-const exe = path.join(root, 'src-tauri', 'target', 'release', process.platform === 'win32' ? 'kryoto-desktop.exe' : 'kryoto-desktop')
+const exe = path.join(process.env.CARGO_TARGET_DIR || path.join(root, 'src-tauri', 'target'), 'release', process.platform === 'win32' ? 'kryoto-desktop.exe' : 'kryoto-desktop')
 
 // OpenSSL bakes its Configure --prefix (under Cargo's target/ dir) into its
 // default enginesdir/modulesdir strings. The C compiler never sees RUSTFLAGS,
@@ -141,3 +138,24 @@ console.log('\nNo build-machine paths in the binary.')
 // The installers, from the cleaned executable (and signed, when the key is set).
 const bundled = tauri(['bundle'])
 if (bundled.status !== 0) process.exit(bundled.status ?? 1)
+
+// A local build is for running on this PC. A program started from inside the
+// repository folder can be confined to writing inside it - an installer run from
+// `target/` cannot write the install folder, and the app cannot write its data -
+// so the installer is copied somewhere outside the repository to be run from.
+if (local) {
+  const bundleDir = path.join(process.env.CARGO_TARGET_DIR || path.join(root, 'src-tauri', 'target'), 'release', 'bundle')
+  const kind = process.platform === 'win32' ? ['nsis', '.exe'] : process.platform === 'darwin' ? ['dmg', '.dmg'] : ['appimage', '.AppImage']
+  const dir = path.join(bundleDir, kind[0])
+  const found = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(kind[1])) : []
+  if (found.length === 0) {
+    console.error(`\nNo installer found in ${dir}.`)
+    process.exit(1)
+  }
+  const out =
+    process.env.KRYOTO_LOCAL_OUT ||
+    (process.platform === 'win32' && existsSync('D:/') ? 'D:/kryo-builds/kryoto-desktop' : path.join(home, 'kryoto-builds', 'kryoto-desktop'))
+  mkdirSync(out, { recursive: true })
+  for (const file of found) copyFileSync(path.join(dir, file), path.join(out, file))
+  console.log(`\nLocal build ready (unsigned): ${path.join(out, found[0])}\nRun it from there, not from the repository.`)
+}

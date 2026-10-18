@@ -84,12 +84,20 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
       })
   }, [game.id])
 
+  // A switched game starts blank; a refresh of the same game keeps what is on
+  // screen until the answer arrives, so the card never flashes while it plays.
   useEffect(() => {
     setData(null)
     setAll(false)
+  }, [game.id])
+
+  // The library hands out fresh objects on every reload, so depend on what
+  // changes tracking (emulator, Online, add-ons), not on object identity.
+  const trackingKey = `${game.source ?? ''}|${game.version ?? ''}|${game.online ? 1 : 0}|${(game.addons ?? []).map((a) => `${a.label}:${a.files.join(',')}`).join(';')}`
+  useEffect(() => {
     load()
     return () => { request.current++ }
-  }, [load, game.source, game.online, game.addons, game.version])
+  }, [load, trackingKey])
 
   // A new unlock while the page is open.
   useEffect(() => {

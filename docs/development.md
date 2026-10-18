@@ -8,8 +8,17 @@ The details behind the README's quick start.
 pnpm install
 pnpm app:dev      # the app
 pnpm dev          # the UI alone in a browser, on sample data (http://localhost:1421)
-pnpm app:build    # the installer (NSIS on Windows, AppImage/.deb on Linux)
+pnpm app:build    # the signed release installer (NSIS on Windows, AppImage/.deb on Linux)
+pnpm app:build:local   # an unsigned installer for this PC, copied out of the repo
 ```
+
+`app:build` signs for the updater, so with `TAURI_SIGNING_PRIVATE_KEY` set it asks
+for that key's password (or reads `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). To try a
+build on your own PC use `app:build:local`: no key, no password, and the installer
+is copied to `D:\kryo-builds\kryoto-desktop` (or `~/kryoto-builds/kryoto-desktop`;
+set `KRYOTO_LOCAL_OUT` to change it). Run it from there: a program started from
+inside a workspace folder can be limited to writing inside it, which stops the
+installer and the app from saving anything.
 
 `app:build` remaps the build machine's paths out of the binary and refuses to
 finish if the home folder is still in it.
