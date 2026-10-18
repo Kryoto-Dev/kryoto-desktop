@@ -18,7 +18,21 @@ export type PopupItem =
   | { separator: true }
   | { heading: string }
 
-export type PopupLook = { palette: string; radius: string; font: string | undefined; season?: string; theme: 'light' | 'dark' }
+/** The shell's colours as the menu in the Store's page needs them (that page has its own styles). */
+export type MenuColors = {
+  popover: string
+  foreground: string
+  border: string
+  muted: string
+  primary: string
+  primaryForeground: string
+  destructive: string
+  destructiveForeground: string
+  radius: string
+  font: string
+}
+
+export type PopupLook = { palette: string; radius: string; font: string | undefined; season?: string; theme: 'light' | 'dark'; colors?: MenuColors }
 
 export type PopupPayload =
   | { menu: string; kind: 'menu'; items: PopupItem[]; minWidth?: number; look: PopupLook }
@@ -73,9 +87,26 @@ function wire() {
   })
 }
 
+function menuColors(): MenuColors {
+  const css = getComputedStyle(document.documentElement)
+  const v = (name: string) => css.getPropertyValue(name).trim()
+  return {
+    popover: v('--popover'),
+    foreground: v('--popover-foreground'),
+    border: v('--border'),
+    muted: v('--muted-foreground'),
+    primary: v('--primary'),
+    primaryForeground: v('--primary-foreground'),
+    destructive: v('--destructive'),
+    destructiveForeground: v('--destructive-foreground'),
+    radius: v('--kryo-radius'),
+    font: getComputedStyle(document.body).fontFamily,
+  }
+}
+
 function look(): PopupLook {
   const d = document.documentElement.dataset
-  return { palette: d.palette ?? 'monochrome', radius: d.radius ?? 'pill', font: d.font, season: d.season, theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light' }
+  return { palette: d.palette ?? 'monochrome', radius: d.radius ?? 'pill', font: d.font, season: d.season, theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light', colors: menuColors() }
 }
 
 function iconMarkup(icon: ReactNode): string | undefined {

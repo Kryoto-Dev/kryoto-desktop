@@ -95,7 +95,8 @@ Changes are listed in kryo.to's changelog; this app has none of its own.
 | `src-tauri/src/library.rs` | `library.json`, play/stop, play time, uninstall |
 | `src-tauri/src/storage.rs` | library folders, drive space, moving games between drives |
 | `src-tauri/src/system.rs` | tray, single instance, start with Windows, window state |
-| `src-tauri/src/menus.rs` | the menu view: menus drawn in a web view stacked over the Store, inside the main window |
+| `src-tauri/src/menus.rs` | menus over the Store: drawn inside the Store's own page when a kryo.to page is showing (`__kryoMenu`, in `BROWSER_STATE_SCRIPT`), otherwise in a web view stacked over it |
+| `src-tauri/tauri.linux.conf.json` | Linux: the main window is see-through so the page can round its own corners (`system.rs` fills it behind the views) |
 | `src-tauri/src/linux_overlay.rs` | Linux: laying the Store and the menu view over the shell, and resizing from the window's edges |
 | `src-tauri/src/display_env.rs` | Linux: picking WebKitGTK's renderer per machine, and falling back by itself when a start never draws |
 | `src/lib/history.ts` | the one Back / Forward history for the Library, the Store's pages and everything else |

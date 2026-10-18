@@ -189,6 +189,10 @@
 @keyframes kryo-toast { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 @keyframes kryo-blink { 50% { opacity: 0; } }
 .kryo-in { animation: kryo-in var(--kryo-dur-base) var(--kryo-ease-out) both; }
+/* The page that takes over when you change tab: a fade and a short slide from
+   the side the new tab is on (--tab-dx, set by the shell). */
+@keyframes kryo-tab { from { opacity: 0; transform: translateX(var(--tab-dx, 0px)); } to { opacity: 1; transform: none; } }
+.kryo-tab-in { animation: kryo-tab 260ms var(--kryo-ease-out) both; }
 .kryo-pop { animation: kryo-pop var(--kryo-dur-base) var(--kryo-ease-out) both; }
 .kryo-fade { animation: kryo-fade var(--kryo-dur-fast) ease both; }
 /* Art that is still on its way: a slow sweep, not a stand-in picture. */
@@ -197,6 +201,15 @@
   background-image: linear-gradient(100deg, transparent 30%, color-mix(in oklch, var(--foreground) 6%, transparent) 50%, transparent 70%);
   background-size: 200% 100%;
   animation: kryo-shimmer 1.4s ease-in-out infinite;
+}
+
+/* Linux: the sweep above moves a background, which repaints every placeholder on
+   every frame - a library full of loading covers. An opacity pulse is drawn by
+   the compositor with no repaint. */
+@keyframes kryo-pulse { 50% { opacity: 0.55; } }
+html[data-os='linux'] .kryo-shimmer {
+  background-image: none;
+  animation: kryo-pulse 1.6s ease-in-out infinite;
 }
 .kryo-toast { animation: kryo-toast 260ms var(--kryo-ease-out) both; }
 
@@ -500,6 +513,15 @@ html[data-window='popup'] [role='menuitem'] {
   border-radius: min(var(--kryo-radius), 6px);
 }
 
+/* Linux's menu view is see-through (menus.rs), so the panel can have corners. */
+html[data-os='linux'][data-window='popup'] .kryo-square.border.bg-popover {
+  border-radius: 10px;
+  /* The edge as an inset ring: a real border's anti-aliased pixels outside the
+     arc showed as light specks at each corner of the see-through view. */
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
 /* Moving around with a controller (src/lib/pad-nav.ts): a selection you can
    see from the couch, gone again once the mouse moves. */
 html.kryo-pad :focus {
@@ -763,6 +785,17 @@ html.kryo-pad .kryo-bp-tile:focus {
    frame anything under it changes, and with the window full of moving art it
    was most of what made the Linux client feel slow. The panels keep their
    near-solid fill, which is what they mostly showed anyway. */
+/* Linux: the window is see-through (tauri.linux.conf.json), so the corners are
+   the page's own. Square again once it fills the screen. */
+html[data-os='linux']:not([data-window='popup']):not([data-frame='square']),
+html[data-os='linux']:not([data-window='popup']):not([data-frame='square']) body {
+  background: transparent;
+}
+html[data-os='linux']:not([data-window='popup']):not([data-frame='square']) #root {
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--background);
+}
 html[data-os='linux'] .backdrop-blur,
 html[data-os='linux'] .backdrop-blur-sm,
 html[data-os='linux'] .backdrop-blur-md,

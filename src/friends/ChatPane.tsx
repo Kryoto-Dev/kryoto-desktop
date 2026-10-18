@@ -113,7 +113,7 @@ function GifView({ gif, auto }: { gif: Gif; auto: boolean }) {
       </button>
     )
   }
-  return <img src={artSrc(gif.url) ?? undefined} alt={gif.title || 'GIF'} width={w} height={h} className="kryo-radius object-cover" loading="lazy" />
+  return <img decoding="async" src={artSrc(gif.url) ?? undefined} alt={gif.title || 'GIF'} width={w} height={h} className="kryo-radius object-cover" loading="lazy" />
 }
 
 function size(n: number): string {
@@ -140,7 +140,7 @@ function FileCard({ msgId, file }: { msgId: string; file: FileInfo }) {
   }, [msgId, image])
   return (
     <span className="grid gap-2">
-      {src ? <img src={src} alt={file.name} className="kryo-radius max-h-72 max-w-full object-contain" /> : null}
+      {src ? <img decoding="async" src={src} alt={file.name} className="kryo-radius max-h-72 max-w-full object-contain" /> : null}
       <span className="flex items-center gap-3">
         <span className="grid min-w-0">
           <b className="truncate text-xs">{file.name}</b>
@@ -180,7 +180,7 @@ function InviteCard({
     <span className="grid min-w-52 gap-2">
       <span className="flex items-center gap-3">
         {cover ? (
-          <img src={artSrc(cover) ?? undefined} alt="" className="kryo-radius h-14 w-10 object-cover" />
+          <img decoding="async" src={artSrc(cover) ?? undefined} alt="" className="kryo-radius h-14 w-10 object-cover" />
         ) : (
           <span className="kryo-radius grid h-14 w-10 place-items-center bg-secondary">
             <Gamepad2 className="size-4 text-muted-foreground" aria-hidden />
@@ -883,7 +883,7 @@ function GifPicker({ onClose, onPick }: { onClose: () => void; onPick: (g: Gif) 
       <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
         {gifs.map((g) => (
           <button key={g.id} type="button" onClick={() => onPick(g)} className="kryo-radius overflow-hidden border border-border" title={g.title}>
-            <img src={artSrc(g.url) ?? undefined} alt={g.title || 'GIF'} loading="lazy" className="aspect-square w-full object-cover" />
+            <img decoding="async" src={artSrc(g.url) ?? undefined} alt={g.title || 'GIF'} loading="lazy" className="aspect-square w-full object-cover" />
           </button>
         ))}
       </div>

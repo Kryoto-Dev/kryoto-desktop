@@ -1,10 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowUpRight,
+  Bell as BellIcon,
+  Bookmark,
+  ChartColumn,
   Download as DownloadIcon,
+  FolderHeart,
   FolderOpen,
   Globe,
+  House,
+  LayoutGrid,
   LogOut,
+  MessageCircle,
+  MessageSquarePlus,
+  Newspaper,
   Play,
   Plus,
   Settings as SettingsIcon,
@@ -137,12 +146,15 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   // history already has it one step away, that step is taken (instant, from
   // its cache); anything else is loaded. `pending` is where it was sent, so
   // a redirect on the way replaces the entry instead of adding one.
-  const pending = useRef<{ url: string; at: number } | null>(null)
+  const pending = useRef<{ url: string; from: string; at: number; stale: string[] } | null>(null)
   useEffect(() => {
     if (view.kind !== 'web' || nav.sameUrl(view.url, page.url)) return
     const p = pending.current
     if (p && nav.sameUrl(p.url, view.url) && Date.now() - p.at < 15_000) return
-    pending.current = { url: view.url, at: Date.now() }
+    // Addresses this navigation replaced (the page it left, and any target
+    // that was still on its way): their reports can still arrive, late.
+    const before = pending.current && Date.now() - pending.current.at < 15_000 ? pending.current : null
+    pending.current = { url: view.url, from: page.url, at: Date.now(), stale: [...(before?.stale ?? []), page.url, ...(before ? [before.url] : [])].slice(-8) }
     if (page.back && nav.sameUrl(page.back, view.url)) web.back()
     else if (page.forward && nav.sameUrl(page.forward, view.url)) web.forward()
     else web.navigate(view.url)
@@ -153,6 +165,11 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     () =>
       web.onNav((url, how) => {
         const p = pending.current
+        // The page being left still reports itself for a moment after the Store
+        // was sent elsewhere. That is not where the navigation ended up, and
+        // taking it as such put the old page back in the history (the tab
+        // jumped back and the new page seemed to take forever).
+        if (p && Date.now() - p.at < 15_000 && !nav.sameUrl(url, p.url) && p.stale.some((u) => nav.sameUrl(u, url))) return
         pending.current = null
         setHistory((h) => nav.webMoved(h, url, how, !!p && Date.now() - p.at < 15_000))
       }),
@@ -223,7 +240,9 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     if (wasSettings.current && view.kind !== 'settings') void call('store_refresh_account').catch(() => {})
     wasSettings.current = view.kind === 'settings'
   }, [view.kind])
-  useEffect(() => {
+  // Before the page paints, so the Store is out of the way of the page that
+  // is sliding in over it instead of showing through for a frame.
+  useLayoutEffect(() => {
     void setStoreVisible(storeVisible)
   }, [storeVisible])
 
@@ -606,10 +625,10 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       label: 'Store',
       onOpen: openStore,
       items: [
-        { label: 'Home', onSelect: () => openWeb('/') },
-        { label: 'Browse', onSelect: () => openWeb('/browse') },
-        { label: 'Requests', onSelect: () => openWeb('/requests') },
-        { label: 'Stats', onSelect: () => openWeb('/community?tab=stats') },
+        { label: 'Home', icon: <House />, onSelect: () => openWeb('/') },
+        { label: 'Browse', icon: <LayoutGrid />, onSelect: () => openWeb('/browse') },
+        { label: 'Requests', icon: <MessageSquarePlus />, onSelect: () => openWeb('/requests') },
+        { label: 'Stats', icon: <ChartColumn />, onSelect: () => openWeb('/community?tab=stats') },
       ],
     },
     {
@@ -617,8 +636,8 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       label: 'Library',
       onOpen: () => go({ kind: 'home' }),
       items: [
-        { label: 'Home', onSelect: () => go({ kind: 'home' }) },
-        { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
+        { label: 'Home', icon: <House />, onSelect: () => go({ kind: 'home' }) },
+        { label: 'Downloads', icon: <DownloadIcon />, onSelect: () => go({ kind: 'downloads' }) },
         { label: 'Add a game', icon: <Plus />, onSelect: () => setOverlay({ kind: 'add', slug: null }) },
       ],
     },
@@ -627,10 +646,10 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       label: 'Community',
       onOpen: () => openWeb('/community'),
       items: [
-        { label: 'Statistics', onSelect: () => openWeb('/community?tab=stats') },
-        { label: 'Blog', onSelect: () => openWeb('/blog') },
-        { label: 'Collections', onSelect: () => openWeb('/collections/discover') },
-        { label: 'Requests', onSelect: () => openWeb('/requests') },
+        { label: 'Statistics', icon: <ChartColumn />, onSelect: () => openWeb('/community?tab=stats') },
+        { label: 'Blog', icon: <Newspaper />, onSelect: () => openWeb('/blog') },
+        { label: 'Collections', icon: <Layers />, onSelect: () => openWeb('/collections/discover') },
+        { label: 'Requests', icon: <MessageSquarePlus />, onSelect: () => openWeb('/requests') },
         { separator: true },
         { label: 'Discord', icon: <ArrowUpRight />, onSelect: () => void openExternal(DISCORD_URL) },
         { label: 'Reddit', icon: <ArrowUpRight />, onSelect: () => void openExternal(REDDIT_URL) },
@@ -644,12 +663,12 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           label: account.displayName || account.username,
           onOpen: () => openWeb(`/user/${username}`),
           items: [
-            { label: 'Profile', onSelect: () => openWeb(`/user/${username}`) },
-            { label: 'Saved games', onSelect: () => openWeb('/library') },
-            { label: 'My collections', onSelect: () => openWeb('/library?tab=collections') },
-            { label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) },
-            { label: 'Notifications', onSelect: () => openWeb('/notifications') },
-            { label: 'Settings', onSelect: () => openSettings('profile') },
+            { label: 'Profile', icon: <User />, onSelect: () => openWeb(`/user/${username}`) },
+            { label: 'Saved games', icon: <Bookmark />, onSelect: () => openWeb('/library') },
+            { label: 'My collections', icon: <FolderHeart />, onSelect: () => openWeb('/library?tab=collections') },
+            { label: 'Friends & chat', icon: <MessageCircle />, onSelect: () => go({ kind: 'friends' }) },
+            { label: 'Notifications', icon: <BellIcon />, onSelect: () => openWeb('/notifications') },
+            { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings('profile') },
           ],
         },
   ]
@@ -767,6 +786,17 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   const selectedId = view.kind === 'game' ? view.id : catalogInstalled?.id ?? null
   const selected = selectedId ? gameById(selectedId) : null
   const catalogSlug = view.kind === 'catalog' && !catalogInstalled ? view.slug : null
+
+  // Changing tab slides the new page in from the side that tab is on: right
+  // for a tab further along the row, left for one before it. The Store is a
+  // native view and shows as it is; this is for the client's own pages.
+  const stage = useRef({ key: '', tab: currentTab, dx: 0 })
+  const stageKey = view.kind === 'web' ? 'web' : view.kind === 'settings' ? 'settings' : view.kind === 'friends' ? 'friends' : 'library'
+  if (stage.current.key !== stageKey) {
+    const order: TopTab[] = ['store', 'library', 'community', 'profile']
+    const step = Math.sign(order.indexOf(currentTab) - order.indexOf(stage.current.tab))
+    stage.current = { key: stageKey, tab: currentTab, dx: stage.current.key === '' ? 0 : step * 28 }
+  }
 
   let content: React.ReactNode = null
   if (view.kind === 'settings') {
@@ -923,7 +953,11 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         <div className="absolute inset-0" style={{ visibility: view.kind === 'web' ? 'visible' : 'hidden' }}>
           <WebSlot page={page} onRetry={web.retry} offline={!online} onLibrary={() => go({ kind: 'home' })} />
         </div>
-        {content}
+        {content ? (
+          <div key={stageKey} className="kryo-tab-in absolute inset-0" style={{ '--tab-dx': `${stage.current.dx}px` } as React.CSSProperties}>
+            {content}
+          </div>
+        ) : null}
       </main>
       {padStore.on && padStore.config?.navigate && !bigPicture ? (
         <PadHints family={familyOf(firstPad, firstPad ? padStore.config?.pads[firstPad.guid] : null)} store={storeVisible} />

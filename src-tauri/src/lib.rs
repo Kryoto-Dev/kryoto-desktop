@@ -313,12 +313,22 @@ fn emit_state<R: Runtime>(app: &tauri::AppHandle<R>, state: BrowserState) {
 
 /// Apply the shell's scheme to native window surfaces too.
 #[tauri::command]
-fn shell_theme(app: tauri::AppHandle, dark: bool) {
+fn shell_theme(app: tauri::AppHandle, dark: bool, shell: Option<[u8; 3]>) {
     if let Some(window) = app.get_window("main") {
         let _ = window.set_theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }));
         let value = if dark { 10 } else { 249 };
-        let color = tauri::window::Color(value, value, value, 255);
+        // Linux: see-through, so the page's rounded corners show the desktop
+        // behind them (styles.css, `data-os='linux'`).
+        let alpha = if cfg!(target_os = "linux") { 0 } else { 255 };
+        let color = tauri::window::Color(value, value, value, alpha);
         let _ = window.set_background_color(Some(color));
+        #[cfg(target_os = "linux")]
+        {
+            // The shell's own background, and the Store's: a touch darker in
+            // the dark theme, the same in the light one.
+            let shell = shell.unwrap_or([value; 3]);
+            system::set_window_fill(&window, shell, if dark { [11, 10, 12] } else { shell });
+        }
         for (label, view) in app.webviews() {
             if label != STORE {
                 let _ = view.set_background_color(Some(color));
@@ -457,11 +467,18 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     send({ account });
   });
   const json = (path) => fetch(path, { credentials: 'include' }).then((r) => r.json());
+  // A page shows the site's default palette for a moment before it applies
+  // the reader's own. The shell would flash that default, so while the page is
+  // young a palette that is not the signed-in reader's saved one is not passed on.
+  const loadedAt = Date.now();
+  let wantPalette = null;
   const reportAppearance = () => {
     const root = document.documentElement;
+    const palette = root.dataset.palette || 'monochrome';
+    if (wantPalette && palette !== wantPalette && Date.now() - loadedAt < 6000) return;
     send({ appearance: {
       theme: root.classList.contains('dark') ? 'dark' : 'light',
-      palette: root.dataset.palette || 'monochrome',
+      palette,
       radius: root.dataset.radius || 'pill',
       font: root.dataset.font || 'teletext',
       motion: root.dataset.motion || 'full',
@@ -470,7 +487,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   };
   const who = (full) => {
     if (!KRYO) return;
-    reportAppearance();
+    // Once the reader is known; before that the page's palette is only its default.
+    if (me !== undefined) reportAppearance();
     if (full) json('/api/changelog/latest').then((j) => send({ news: j })).catch(() => {});
     json('/api/auth/me')
       .then((j) => {
@@ -480,6 +498,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         const changed = id !== me || coins !== kryos;
         me = id;
         kryos = coins;
+        wantPalette = u && u.appearancePalette ? u.appearancePalette : null;
+        reportAppearance();
         const nextAccount = u ? {
           username: u.username,
           displayName: u.displayName || null,
@@ -629,8 +649,101 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   const side = (e) => { if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); return true } return false };
   addEventListener('mousedown', side, true);
   addEventListener('mouseup', (e) => { if (side(e)) invoke('store_nav_button', { forward: e.button === 4 }) }, true);
-  // A press anywhere in the page closes an open menu.
-  addEventListener('pointerdown', () => invoke('menu_close'), true);
+  // Linux: WebKitGTK re-blurs whatever is behind a `backdrop-filter` on the CPU
+  // on every frame. kryo.to's landing page has a wall of moving covers behind
+  // seven of them, which kept the page's process near 90% and the page choppy.
+  // The shell drops the same effect for the same reason (styles.css).
+  if (/Linux/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent)) {
+    const lite = document.createElement('style');
+    lite.textContent = '*,*::before,*::after{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}';
+    (document.head || document.documentElement).append(lite);
+  }
+  // The tab and title bar menus, drawn here: the Store is a web view laid over
+  // the shell, so a menu in the shell's page would open underneath it. This
+  // one is part of the page - real rounded corners, no second surface to
+  // flicker - and picks go back through two commands only this page may call.
+  // A plain element under one id, not a shadow root: WebKitGTK did not hit-test
+  // into the closed shadow tree, so the pointer never "entered" the menu. Every
+  // element is reset (`all:unset`) so the page's own styles do not leak in.
+  const menuHost = document.createElement('div');
+  menuHost.id = '__kryo-menu';
+  const closeMenuUi = () => { if (menuHost.isConnected) menuHost.remove(); menuHost.replaceChildren(); };
+  const openMenuUi = (p) => {
+    closeMenuUi();
+    const c = p.colors || {};
+    const r = c.radius || '16px';
+    const style = document.createElement('style');
+    const rules = [
+      ['', 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647'],
+      [' *:not(svg):not(svg *):not(style)', 'all:unset;box-sizing:border-box'],
+      [' .panel', `position:fixed;display:block;min-width:max(208px,${p.minWidth || 0}px);padding:4px 0;overflow:hidden;
+        background:${c.popover};color:${c.foreground};border:1px solid ${c.border};border-radius:${r};
+        box-shadow:0 25px 50px -12px rgba(0,0,0,.6);font:12px/16px ${c.font || 'system-ui,sans-serif'};
+        animation:__kryo-pop .18s cubic-bezier(.2,.8,.2,1) both;user-select:none`],
+      [' .item', `display:flex;align-items:center;gap:10px;width:100%;padding:8px 12px;cursor:pointer;
+        border-radius:${r};transition:color .12s,background-color .12s`],
+      [' .item:hover, #__kryo-menu .item:focus', `background:${c.primary};color:${c.primaryForeground}`],
+      [' .item.danger', `color:${c.destructive}`],
+      [' .item.danger:hover, #__kryo-menu .item.danger:focus', `background:${c.destructive};color:${c.destructiveForeground}`],
+      [' .item[disabled]', 'opacity:.4;pointer-events:none'],
+      [' .ico', 'display:grid;place-items:center;width:14px;height:14px;flex:none'],
+      [' .ico svg', 'width:14px;height:14px'],
+      [' .label', 'display:block;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'],
+      [' .hint', 'display:block;font-size:10px;letter-spacing:.05em;opacity:.6;white-space:nowrap'],
+      [' .sep', `display:block;height:1px;margin:4px 0;background:${c.border}`],
+      [' .head', `display:block;padding:8px 12px 4px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:${c.muted}`],
+    ];
+    style.textContent = rules.map(([sel, decl]) => `#__kryo-menu${sel}{${decl}}`).join('\n')
+      + '\n@keyframes __kryo-pop{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}';
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    panel.setAttribute('role', 'menu');
+    panel.tabIndex = -1;
+    const el = (tag, cls, text) => { const n = document.createElement(tag); n.className = cls; if (text !== undefined) n.textContent = text; return n; };
+    for (const item of p.items || []) {
+      if (item.separator) { panel.append(el('div', 'sep')); continue; }
+      if (item.heading !== undefined) { panel.append(el('div', 'head', String(item.heading))); continue; }
+      const row = el('button', 'item' + (item.danger ? ' danger' : ''));
+      row.type = 'button';
+      row.setAttribute('role', 'menuitem');
+      row.disabled = !!item.disabled;
+      const ico = el('span', 'ico');
+      // The shell's own lucide markup, rendered by the main window.
+      if (item.icon) ico.innerHTML = item.icon;
+      else if (item.checked) ico.textContent = '\u2713';
+      row.append(ico, el('span', 'label', String(item.label)));
+      if (item.hint) row.append(el('span', 'hint', String(item.hint)));
+      row.addEventListener('click', () => { closeMenuUi(); invoke('store_menu_pick', { id: item.id }); });
+      panel.append(row);
+    }
+    panel.addEventListener('pointerenter', () => invoke('store_menu_hover', { inside: true }));
+    panel.addEventListener('pointerleave', () => invoke('store_menu_hover', { inside: false }));
+    panel.addEventListener('keydown', (e) => {
+      const rows = Array.from(panel.querySelectorAll('.item:not([disabled])'));
+      const at = rows.indexOf(document.activeElement);
+      if (e.key === 'Escape') { e.preventDefault(); invoke('menu_close'); }
+      else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const next = e.key === 'ArrowDown' ? (at + 1) % rows.length : (at <= 0 ? rows.length - 1 : at - 1);
+        if (rows[next]) rows[next].focus();
+      }
+    });
+    menuHost.append(style, panel);
+    document.documentElement.append(menuHost);
+    // Under the anchor, kept inside the page.
+    const w = panel.offsetWidth, h = panel.offsetHeight;
+    const left = Math.max(6, Math.min(p.right ? p.anchorRight - w : p.x, innerWidth - w - 6));
+    const top = Math.max(0, Math.min(p.y, innerHeight - h - 6));
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
+    if (p.focus) panel.focus({ preventScroll: true });
+  };
+  window.__kryoMenu = { open: openMenuUi, close: closeMenuUi };
+  // A press anywhere else in the page closes an open menu.
+  addEventListener('pointerdown', (e) => {
+    if (menuHost.contains(e.target)) return;
+    invoke('menu_close');
+  }, true);
   // A plain link that leaves kryo.to (Discord, Reddit, YouTube, a filehost's
   // page) opens in the system browser: window.open goes through the Store's
   // new-window handler, which sends anything not kryo.to out of the app.
@@ -735,6 +848,7 @@ async fn store_mount(
     // The shell's devicePixelRatio; see placement.rs.
     scale: Option<f64>,
 ) -> Result<(), String> {
+    menus::set_store_origin(x, y);
     if let Some(view) = app.get_webview(STORE) {
         placement::place(&view, x, y, width, height, scale)?;
         #[cfg(target_os = "linux")]
@@ -892,6 +1006,27 @@ fn store_expect_download(
     let state = app.state::<PendingDownload>();
     let mut pending = state.0.lock().map_err(|_| "busy".to_string())?;
     *pending = Some(ExpectedDownload { slug, title, at: std::time::Instant::now() });
+    Ok(())
+}
+
+/// A row picked in the menu the Store's own page draws (`menus.rs`). Only a
+/// kryo.to page in the Store may say, and only for the menu that is open.
+#[tauri::command]
+fn store_menu_pick(app: tauri::AppHandle, webview: tauri::Webview, id: String) -> Result<(), String> {
+    if webview.label() != STORE || !webview.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Only kryo.to in the Store draws menus.".into());
+    }
+    menus::menu_pick(app, id);
+    Ok(())
+}
+
+/// The pointer entered or left that menu.
+#[tauri::command]
+fn store_menu_hover(app: tauri::AppHandle, webview: tauri::Webview, inside: bool) -> Result<(), String> {
+    if webview.label() != STORE || !webview.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Only kryo.to in the Store draws menus.".into());
+    }
+    menus::menu_hover(app, inside);
     Ok(())
 }
 
@@ -1436,6 +1571,8 @@ pub fn run() {
             menus::menu_ready,
             menus::menu_pick,
             menus::menu_close,
+            store_menu_pick,
+            store_menu_hover,
             menus::menu_hover
         ])
         .run(tauri::generate_context!())

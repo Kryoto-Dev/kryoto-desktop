@@ -103,7 +103,7 @@ export function RoomPane({ myUsername, onProfile }: { myUsername: string; onProf
             <div key={m.id} className="group flex items-start gap-2.5">
               <button type="button" onClick={() => onProfile(m.user.username)} className="shrink-0" aria-label={`${name}'s profile`}>
                 {m.user.avatarUrl ? (
-                  <img src={artSrc(m.user.avatarUrl) ?? undefined} alt="" className="kryo-pill size-7 object-cover" />
+                  <img decoding="async" src={artSrc(m.user.avatarUrl) ?? undefined} alt="" className="kryo-pill size-7 object-cover" />
                 ) : (
                   <span className="kryo-pill grid size-7 place-items-center bg-secondary text-[10px] font-bold">{name.slice(0, 1).toUpperCase()}</span>
                 )}

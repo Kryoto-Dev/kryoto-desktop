@@ -154,7 +154,7 @@ export function TitleBar({
           trigger={
             <>
               {account.avatarUrl ? (
-                <img src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" />
+                <img decoding="async" src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" />
               ) : (
                 <span className="kryo-pill grid size-6 place-items-center bg-secondary text-[10px] font-bold">{initial}</span>
               )}
