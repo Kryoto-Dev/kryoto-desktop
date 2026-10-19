@@ -202,6 +202,31 @@
 .kryo-tab-in { animation: kryo-tab 260ms var(--kryo-ease-out) both; }
 .kryo-pop { animation: kryo-pop var(--kryo-dur-base) var(--kryo-ease-out) both; }
 .kryo-fade { animation: kryo-fade var(--kryo-dur-fast) ease both; }
+/* A menu opening (popup/PopupApp.tsx): the panel scales out from its top edge, then its rows fade in one after another. The animations exist from the first paint and wait paused (holding their first frame) until the view is shown (`data-shown`), so no frame of finished text shows before they start. The view is exactly the panel's size, so nothing here may grow past 1x or it is clipped. */
+@keyframes kryo-menu-in { from { transform: scale(0.9); } to { transform: none; } }
+@keyframes kryo-menu-row { from { opacity: 0; } to { opacity: 1; } }
+.kryo-menu-in { transform-origin: top; animation: kryo-menu-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both paused; }
+/* Opening a game from the library (library/GamePage.tsx): the page zooms in from slightly large, and its info bar rises into place a beat later. */
+@keyframes kryo-game-in { from { opacity: 0; transform: scale(1.05); } to { opacity: 1; transform: none; } }
+@keyframes kryo-game-bar { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+.kryo-game-in { transform-origin: 50% 30%; animation: kryo-game-in 380ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.kryo-game-bar { animation: kryo-game-bar 420ms cubic-bezier(0.16, 1, 0.3, 1) 120ms both; }
+.kryo-menu-in > * { animation: kryo-menu-row 240ms ease-out both paused; animation-delay: calc(60ms + var(--row, 0) * 35ms); }
+.kryo-menu-in[data-shown], .kryo-menu-in[data-shown] > * { animation-play-state: running; }
+/* A plain menu (title bar, dropdowns): the tabs' dropdown's own pop, a small scale from the top edge (the Store page's `__kryo-pop`). */
+@keyframes kryo-menu-pop { from { transform: scale(0.97); } to { transform: none; } }
+.kryo-menu-pop { transform-origin: top; animation: kryo-menu-pop 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both paused; }
+.kryo-menu-pop[data-shown] { animation-play-state: running; }
+.kryo-menu-in > :nth-child(1) { --row: 0; }
+.kryo-menu-in > :nth-child(2) { --row: 1; }
+.kryo-menu-in > :nth-child(3) { --row: 2; }
+.kryo-menu-in > :nth-child(4) { --row: 3; }
+.kryo-menu-in > :nth-child(5) { --row: 4; }
+.kryo-menu-in > :nth-child(6) { --row: 5; }
+.kryo-menu-in > :nth-child(7) { --row: 6; }
+.kryo-menu-in > :nth-child(8) { --row: 7; }
+.kryo-menu-in > :nth-child(9) { --row: 8; }
+.kryo-menu-in > :nth-child(n+10) { --row: 9; }
 /* Art that is still on its way: a slow sweep, not a stand-in picture. */
 @keyframes kryo-shimmer { from { background-position: 150% 0; } to { background-position: -50% 0; } }
 .kryo-shimmer {
@@ -513,16 +538,18 @@ html[data-window='popup'],
 html[data-window='popup'] body {
   background: transparent;
 }
-/* The menu's view is exactly the menu's size, and a web view cannot be
-   see-through over the Store's (its corners came out black), so the menu is
-   square and only its rows follow the reader's corners. */
+/* A web view cannot be see-through over the Store's (its corners came out black),
+   so on Windows the view is clipped to the panel's rounded shape instead
+   (menus.rs, `raise`). The panel and its rows are as round as the reader chose,
+   like the tabs' dropdown in the Store's page (lib.rs `__kryoMenu`). */
 html[data-window='popup'] [role='menuitem'] {
-  border-radius: min(var(--kryo-radius), 6px);
+  border-radius: var(--kryo-radius);
 }
 
-/* Linux's menu view is see-through (menus.rs), so the panel can have corners. */
-html[data-os='linux'][data-window='popup'] .kryo-square.border.bg-popover {
-  border-radius: 10px;
+/* Linux's menu view is see-through (menus.rs), and on Windows the view is cut to
+   the same rounded shape (menus.rs, `raise`), so the panel can have corners. */
+html[data-window='popup'] .kryo-square.border.bg-popover {
+  border-radius: var(--kryo-radius);
   /* The edge as an inset ring: a real border's anti-aliased pixels outside the
      arc showed as light specks at each corner of the see-through view. */
   border-color: transparent;

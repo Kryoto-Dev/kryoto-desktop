@@ -75,6 +75,7 @@ import {
   OPEN_STORE_EVENT,
   openExternal,
   setStoreVisible,
+  playStoreEnter,
   signOut,
   toggleFullscreen,
 } from '@/lib/window'
@@ -264,11 +265,6 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     if (wasSettings.current && view.kind !== 'settings') void call('store_refresh_account').catch(() => {})
     wasSettings.current = view.kind === 'settings'
   }, [view.kind])
-  // Before the page paints, so the Store is out of the way of the page that
-  // is sliding in over it instead of showing through for a frame.
-  useLayoutEffect(() => {
-    void setStoreVisible(storeVisible)
-  }, [storeVisible])
 
   // Back online: the Store's page (whatever the web view showed while the
   // line was down is an error page), who is signed in, and every download
@@ -850,6 +846,32 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     const step = Math.sign(order.indexOf(currentTab) - order.indexOf(stage.current.tab))
     stage.current = { key: stageKey, tab: currentTab, dx: stage.current.key === '' ? 0 : step * 28 }
   }
+  // The Store's page is a native view the shell cannot animate, so on a change to a
+  // Store tab it is told which side that tab is on and slides in like the client's own
+  // pages do. A page that is not reloaded (coming back from Library, Friends or
+  // Settings) slides now; one that is takes the direction on its load, and is not also
+  // slid on the way out (two slides were the flicker). Before the Store is shown, so
+  // the page is already at its first frame when it appears.
+  const lastStage = useRef(stageKey)
+  const lastTab = useRef(currentTab)
+  useLayoutEffect(() => {
+    const order: TopTab[] = ['store', 'library', 'community', 'profile']
+    const tabChanged = lastTab.current !== currentTab
+    const fromElsewhere = lastStage.current !== 'web'
+    if (stageKey === 'web' && (tabChanged || fromElsewhere)) {
+      const step = tabChanged ? Math.sign(order.indexOf(currentTab) - order.indexOf(lastTab.current)) : 0
+      const loads = view.kind === 'web' && view.url.replace(/#.*$/, '').replace(/\/+$/, '') !== page.url.replace(/#.*$/, '').replace(/\/+$/, '')
+      void playStoreEnter(step * 28, fromElsewhere && !loads)
+    }
+    lastStage.current = stageKey
+    lastTab.current = currentTab
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stageKey, currentTab])
+  // Before the page paints, so the Store is out of the way of the page that
+  // is sliding in over it instead of showing through for a frame.
+  useLayoutEffect(() => {
+    void setStoreVisible(storeVisible)
+  }, [storeVisible])
 
   let content: React.ReactNode = null
   if (view.kind === 'settings') {

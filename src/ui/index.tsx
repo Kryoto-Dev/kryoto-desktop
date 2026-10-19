@@ -204,8 +204,13 @@ export type MenuEntry =
 
 export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry[]; onDone: () => void; autoFocus?: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
-  // A menu opened by pointing at it starts with nothing lit; one opened from the keyboard starts on its first row.
-  useLayoutEffect(() => { if (autoFocus) ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus() }, [autoFocus])
+  // A menu opened by pointing at it starts with nothing lit; one opened from the keyboard starts on its
+  // checked row (a dropdown's value), or else its first.
+  useLayoutEffect(() => {
+    if (!autoFocus) return
+    const rows = ref.current
+    ;(rows?.querySelector<HTMLElement>('[role="menuitem"][data-checked]:not(:disabled)') ?? rows?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)'))?.focus()
+  }, [autoFocus])
   return (
     <div ref={ref} onKeyDown={(e) => {
       if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
@@ -227,6 +232,7 @@ export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry
             key={i}
             type="button"
             role="menuitem"
+            data-checked={item.checked ? '' : undefined}
             disabled={item.disabled}
             onClick={() => {
               onDone()
@@ -239,7 +245,7 @@ export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry
                 : 'text-foreground hover:bg-primary hover:text-primary-foreground focus:bg-primary focus:text-primary-foreground',
             )}
           >
-            {item.icon ? <span className="grid size-3.5 place-items-center [&>svg]:size-3.5">{item.icon}</span> : null}
+            {item.icon ?? item.checked ? <span className="grid size-3.5 place-items-center [&>svg]:size-3.5">{item.icon ?? <CheckIcon />}</span> : null}
             <span className="grow truncate">{item.label}</span>
             {item.hint ? <span className="text-[10px] tracking-wider opacity-60">{item.hint}</span> : null}
           </button>
@@ -285,6 +291,7 @@ export function MenuButton({
   panel,
   native,
   nativeOpen,
+  matchWidth,
 }: {
   trigger: ReactNode
   items?: MenuEntry[]
@@ -295,6 +302,8 @@ export function MenuButton({
   panel?: (close: () => void) => ReactNode
   native?: string
   nativeOpen?: (anchor: DOMRect) => void
+  /** The native menu is at least as wide as the trigger (a dropdown's list). */
+  matchWidth?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -308,7 +317,7 @@ export function MenuButton({
   const openNative = (el: HTMLElement) => {
     const anchor = el.getBoundingClientRect()
     if (nativeOpen) nativeOpen(anchor)
-    else void openMenu(native!, anchor, items ?? [], align)
+    else void openMenu(native!, anchor, items ?? [], align, matchWidth ? anchor.width : undefined)
   }
   return (
     <div ref={ref} className="relative flex">
@@ -477,8 +486,9 @@ export function Segmented<T extends string>({
 }
 
 /**
- * A choice from a list, drawn by the client - never the OS `<select>`.
- * Used inside dialogs, where the Store is already out of the way.
+ * A choice from a list, drawn by the client - never the OS `<select>`. Its list is
+ * the same menu the title bar and the tabs open (`MenuButton`, in the menu view),
+ * as wide as the button, with the chosen row checked.
  */
 export function Dropdown<T extends string>({
   value,
@@ -499,67 +509,29 @@ export function Dropdown<T extends string>({
   /** Drawn bold with a strong border: the value is not the default. */
   emphasis?: boolean
 }) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement | null>(null)
-  const id = useId()
-  useLayoutEffect(() => {
-    if (open) (ref.current?.querySelector<HTMLElement>('[aria-selected="true"]') ?? ref.current?.querySelector<HTMLElement>('[role="option"]'))?.focus()
-  }, [open])
-  const dismiss = () => {
-    setOpen(false)
-    ref.current?.querySelector<HTMLButtonElement>('[aria-haspopup]')?.focus()
-  }
-  useDismiss(open, ref, dismiss)
+  // One menu id per dropdown, without a colon: ids sharing a prefix before it are
+  // "siblings" that open each other on hover (a menu bar), and these are not.
+  const menu = `dropdown-${useId().replace(/\W/g, '')}`
   const current = options.find((o) => o.value === value)
   return (
-    <div ref={ref} className={cn('relative', className)}>
-      <button
-        type="button"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label={label}
-        aria-controls={open ? id : undefined}
-        onKeyDown={(e) => {
-          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setOpen(true) }
-        }}
-        onClick={() => setOpen((o) => !o)}
+    <div className={cn('relative', className)}>
+      <MenuButton
+        native={menu}
+        matchWidth
+        label={label}
+        items={options.map((o) => ({ label: o.label, hint: o.hint, checked: o.value === value, onSelect: () => onChange(o.value) }))}
         className={cn(
           'kryo-pill flex w-full items-center gap-2 border bg-background text-left text-foreground transition-colors hover:border-foreground/60 aria-expanded:border-foreground',
           size === 'sm' ? 'h-7 pl-3 pr-2 text-[11px]' : 'h-9 pl-4 pr-3 text-xs',
           emphasis ? 'border-foreground font-bold' : 'border-border',
         )}
-      >
-        <span className="grow truncate">{current?.label ?? 'Choose'}</span>
-        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-      </button>
-      {open ? (
-        <div id={id} role="listbox" aria-label={label ?? current?.label ?? 'Choose'} onKeyDown={(e) => {
-          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
-          e.preventDefault()
-          const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-          const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement)
-          const index = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (currentIndex + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
-          items[index]?.focus()
-        }} className={cn(MENU_PANEL, 'left-0 right-0 top-[calc(100%+4px)] max-h-64 overflow-auto')}>
-          {options.map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              role="option"
-              aria-selected={o.value === value}
-              onClick={() => {
-                dismiss()
-                onChange(o.value)
-              }}
-              className="kryo-square flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs text-foreground transition-colors hover:bg-primary hover:text-primary-foreground"
-            >
-              <span className="grid size-3.5 place-items-center">{o.value === value ? <CheckIcon className="size-3.5" /> : null}</span>
-              <span className="grow truncate">{o.label}</span>
-              {o.hint ? <span className="text-[10px] opacity-60">{o.hint}</span> : null}
-            </button>
-          ))}
-        </div>
-      ) : null}
+        trigger={
+          <>
+            <span className="grow truncate">{current?.label ?? 'Choose'}</span>
+            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+          </>
+        }
+      />
     </div>
   )
 }

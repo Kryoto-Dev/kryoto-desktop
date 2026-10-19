@@ -147,6 +147,17 @@ export function setStoreVisible(visible: boolean) {
 }
 
 /**
+ * The shell changed to a Store tab: `dx` is the side the tab is on, as the client's own
+ * pages slide in from it. With `play`, for a page that is already loaded (the shell
+ * came back from Library, Friends or Settings), it slides in now; otherwise the load
+ * that follows takes the direction.
+ */
+export function playStoreEnter(dx: number, play: boolean) {
+  if (!isTauri()) return Promise.resolve()
+  return call<void>('store_enter', { dx: Math.round(dx), play }).catch(() => {})
+}
+
+/**
  * Show a kryo.to page in the Store tab from anywhere in the app. The Shell owns
  * which view is on screen, so it takes this and switches to the Store first:
  * navigateCatalog alone loads the page behind whatever view is showing, which

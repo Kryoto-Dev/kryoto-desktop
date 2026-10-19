@@ -14,6 +14,9 @@ import { cn } from '@/lib/utils'
 export function PopupApp() {
   const [payload, setPayload] = useState<PopupPayload | null>(null)
   const [seq, setSeq] = useState(0)
+  // The `seq` whose view has been shown: the opening animation starts then, not
+  // while the view is still hidden being measured.
+  const [shown, setShown] = useState(0)
   const box = useRef<HTMLDivElement | null>(null)
   // Focus has reached the view since this menu opened, so losing it means
   // the reader went somewhere else (and not that it never arrived).
@@ -68,9 +71,12 @@ export function PopupApp() {
       const el = box.current
       if (cancelled || !el) return
       // With this page's own pixel ratio: it can differ from the shell's.
-      void call('menu_ready', { menu: payload.menu, width: el.offsetWidth, height: el.offsetHeight, scale: window.devicePixelRatio })
+      const radius = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0
+      const pop = payload.kind === 'menu' ? { from: 0.97, span: 180 } : { from: 0.9, span: 200 }
+      void call('menu_ready', { menu: payload.menu, width: el.offsetWidth, height: el.offsetHeight, scale: window.devicePixelRatio, pop: { radius, ...pop } })
         .then(() => {
           if (cancelled || !box.current) return
+          setShown(seq)
           if (document.hasFocus()) focused.current = true
           box.current.focus({ preventScroll: true })
         })
@@ -116,7 +122,14 @@ export function PopupApp() {
         const item = (e.target as HTMLElement).closest<HTMLElement>('[role="menuitem"]:not(:disabled)')
         if (item && document.activeElement !== item) item.focus({ preventScroll: true })
       }}
-      className="kryo-square grid w-max gap-0.5 overflow-hidden border border-border bg-popover p-1 outline-none"
+      data-shown={shown === seq ? '' : undefined}
+      className={cn(
+        'kryo-square grid border border-border bg-popover outline-none',
+        // A menu is the tabs' dropdown (the Store page's own, lib.rs `__kryoMenu`): 4px
+        // above and below, rows edge to edge, the panel and its rows as round as the
+        // reader chose, and a small pop. The inbox is its own, bigger, panel.
+        payload.kind === 'menu' ? 'kryo-menu-pop max-h-80 w-max overflow-y-auto py-1' : 'kryo-menu-in gap-0.5 p-1 grid-cols-[minmax(0,1fr)] overflow-hidden',
+      )}
       style={payload.kind === 'menu' ? { minWidth: payload.minWidth ?? 200 } : { width: 320 }}
     >
       {payload.kind === 'menu' ? <Items items={payload.items} onSelect={select} /> : <InboxList payload={payload} onSelect={select} />}
@@ -129,7 +142,7 @@ function Items({ items, onSelect }: { items: PopupItem[]; onSelect: (id: string)
     <>
       {items.map((item, i) =>
         'separator' in item ? (
-          <div key={i} className="mx-2 my-1 h-px bg-border" />
+          <div key={i} className="my-1 h-px bg-border" />
         ) : 'heading' in item ? (
           <div key={i} className="px-3 pb-1 pt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
             {item.heading}
@@ -190,9 +203,9 @@ function InboxList({ payload, onSelect }: { payload: Extract<PopupPayload, { kin
             type="button"
             role="menuitem"
             onClick={() => onSelect(`${menu}:open:${i}`)}
-            className="flex w-full gap-2.5 px-3 py-2 text-left outline-none focus:bg-secondary"
+            className="relative flex w-full px-3 py-2 text-left outline-none focus:bg-secondary"
           >
-            <span className={cn('mt-1.5 size-1.5 shrink-0 rounded-full', n.readAt ? 'bg-transparent' : 'bg-primary')} />
+            <span className={cn('absolute left-[3px] top-[14px] size-1.5 rounded-full', n.readAt ? 'bg-transparent' : 'bg-primary')} />
             <span className="min-w-0">
               <span className="block truncate text-xs text-foreground">{n.title}</span>
               <span className="line-clamp-2 text-[11px] leading-snug text-muted-foreground">{n.body}</span>
