@@ -29,6 +29,8 @@ use crate::error::{Error, Result};
 
 // Kryoto fetches Steam's public schema so a blocked Steam domain cannot prevent
 // achievements.json from being generated, or the Desktop list from loading.
+pub mod local;
+
 const STEAM_API: &str = "https://kryo.to/api/steam/achievements";
 /// Where an icon file name from that answer lives.
 const ICON_BASE: &str = "https://shared.fastly.steamstatic.com/community_assets/images/apps";

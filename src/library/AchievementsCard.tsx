@@ -163,7 +163,7 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
               {all ? 'Show fewer' : `Show all ${data.list.length}`}
             </Button>
           ) : null}
-          {cloud?.perk != null ? (
+          {cloud?.perk != null && data.appid ? (
             <p className="flex items-center gap-2 border-t border-border pt-3 text-[11px] text-muted-foreground">
               <Cloud className="size-3.5 shrink-0" aria-hidden />
               <span className="grow">{cloud.perk ? 'Saved to your kryo.to account, and back on any PC you sign in on.' : 'Supporters keep their achievements on their kryo.to account.'}</span>

@@ -199,6 +199,9 @@ fn metadata_tracking(game: &LibraryGame) -> (Tracking, Option<String>) {
 }
 
 pub(crate) fn tracking_of(game: &LibraryGame) -> (Tracking, Option<String>) {
+    if ach::local::load(Path::new(&game.install_dir)).is_some() {
+        return (Tracking::Supported, Some("Native achievements".into()));
+    }
     // Inspect the active Steam DLLs, excluding Repair's backups and SDK copies.
     // A downloaded Online add-on can replace them without changing the release label.
     let mut supported = None;
@@ -234,6 +237,12 @@ pub fn merge(list: Vec<Achievement>, unlocks: &[Unlock]) -> GameAchievements {
 #[tauri::command]
 pub async fn game_achievements(app: AppHandle, id: String) -> Result<GameAchievements, String> {
     let game = crate::library::load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
+    if let Some(local) = ach::local::load(Path::new(&game.install_dir)) {
+        let mut out = merge(local.list.clone(), &local.unlocks());
+        out.tracking = Tracking::Supported;
+        out.emulator = Some("Native achievements".into());
+        return Ok(out);
+    }
     let (tracking, emulator) = tracking_of(&game);
     let appid = appid_of(Path::new(&game.install_dir));
     if tracking == Tracking::Unsupported || appid.is_none() {
@@ -256,6 +265,10 @@ pub async fn game_achievements(app: AppHandle, id: String) -> Result<GameAchieve
 /// announce each achievement that was not unlocked before. Stops when the game
 /// does.
 pub fn watch<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, roots: Roots) {
+    if let Some(local) = ach::local::load(Path::new(&game.install_dir)) {
+        watch_local(app, game, local);
+        return;
+    }
     let Some(appid) = appid_of(Path::new(&game.install_dir)) else { return };
     let (id, title) = (game.id.clone(), game.title.clone());
     std::thread::spawn(move || {
@@ -290,6 +303,29 @@ pub fn watch<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, roots: Roots) {
             if !running {
                 break;
             }
+        }
+    });
+}
+
+fn watch_local<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, local: ach::local::LocalGame) {
+    let (id, title) = (game.id.clone(), game.title.clone());
+    std::thread::spawn(move || {
+        let mut known: HashSet<String> = local.unlocks().into_iter().map(|u| u.name).collect();
+        loop {
+            std::thread::sleep(POLL);
+            let running = app.try_state::<Running>().is_some_and(|r| r.0.lock().map(|m| m.contains_key(&id)).unwrap_or(false));
+            for u in local.unlocks() {
+                if !known.insert(u.name.clone()) { continue; }
+                let Some(a) = local.list.iter().find(|a| a.name == u.name) else { continue };
+                let _ = app.emit("achievement-unlocked", serde_json::json!({
+                    "gameId": id, "name": u.name, "displayName": a.display_name, "icon": a.icon
+                }));
+                let _ = app.emit("notify", crate::downloads::Notice::new(
+                    &format!("Achievement unlocked: {}", a.display_name),
+                    if a.description.is_empty() { &title } else { &a.description }, Some(id.clone())
+                ).sound("achievement"));
+            }
+            if !running { break; }
         }
     });
 }
@@ -424,5 +460,28 @@ mod tests {
     fn a_proton_prefix_is_where_its_saves_are() {
         let r = roots_for(&[("STEAM_COMPAT_DATA_PATH".into(), "/p".into())]);
         assert_eq!(r.public_documents, Some(PathBuf::from("/p/pfx/drive_c/users/Public/Documents")));
+    }
+
+    /// Runs a native game's own trophy recorder against a private fixture, then
+    /// reads its actual shipped manifest through Desktop's list/progress path.
+    #[test]
+    #[ignore]
+    fn native_achievements_end_to_end() {
+        let manifest = std::env::var("KRYOTO_NATIVE_MANIFEST").expect("manifest path");
+        let recorder = std::env::var("KRYOTO_NATIVE_RECORDER").expect("recorder fixture executable");
+        let dir = std::env::temp_dir().join(format!("kry-native-e2e-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir(dir.join("userdata")).unwrap();
+        std::fs::copy(manifest, dir.join(ach::local::MANIFEST)).unwrap();
+        let game = LibraryGame { install_dir: dir.to_string_lossy().into(), ..Default::default() };
+        assert_eq!(appid_of(&dir), None);
+        assert_eq!(tracking_of(&game).0, Tracking::Supported);
+        let local = ach::local::load(&dir).unwrap();
+        assert_eq!((local.list.len(), local.unlocks().len()), (40, 0));
+        assert!(std::process::Command::new(recorder).arg(dir.join("userdata")).status().unwrap().success());
+        let progress = merge(local.list.clone(), &local.unlocks());
+        assert_eq!((progress.total, progress.unlocked), (40, 35));
+        assert!(progress.list.iter().any(|a| a.achievement.name == "0" && a.unlocked));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
