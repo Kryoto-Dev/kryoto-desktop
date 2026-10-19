@@ -35,20 +35,6 @@ function saveGuest(on: boolean) {
 /** How long the splash waits to hear who is signed in before moving on anyway. */
 const ACCOUNT_WAIT_MS = 6000
 
-/**
- * The client's three stages: the splash box, the welcome screen (where you
- * sign in or continue as a guest), and the client itself.
- *
- * The splash moves on by itself: signed in (or a guest last time) goes
- * straight into the client, otherwise to the welcome screen. The Store's web
- * view is made hidden at the very start, so kryo.to has usually said who is
- * signed in by the time the splash has finished drawing.
- *
- * A guest has the library, downloads they already have and the Store as
- * kryo.to shows it to anyone signed out. Signing in on kryo.to at any point
- * turns the guest into that account; signing out of an account brings the
- * welcome screen back.
- */
 /** The shell's background as [r, g, b]: the window is filled with it behind the menu view's see-through corners. */
 function shellColor(): [number, number, number] | null {
   try {
@@ -65,6 +51,20 @@ function shellColor(): [number, number, number] | null {
   }
 }
 
+/**
+ * The client's three stages: the splash box, the welcome screen (where you
+ * sign in or continue as a guest), and the client itself.
+ *
+ * The splash moves on by itself: signed in (or a guest last time) goes
+ * straight into the client, otherwise to the welcome screen. The Store's web
+ * view is made hidden at the very start, so kryo.to has usually said who is
+ * signed in by the time the splash has finished drawing.
+ *
+ * A guest has the library, downloads they already have and the Store as
+ * kryo.to shows it to anyone signed out. Signing in on kryo.to at any point
+ * turns the guest into that account; signing out of an account brings the
+ * welcome screen back.
+ */
 export default function App() {
   const [recoveryFailure, setRecoveryFailure] = useState<string | null>(null)
   const [phase, setPhase] = useState<Phase>('splash')

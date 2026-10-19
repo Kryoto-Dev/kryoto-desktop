@@ -711,9 +711,9 @@ const BROWSER_STATE_SCRIPT: &str = r#"
       row.setAttribute('role', 'menuitem');
       row.disabled = !!item.disabled;
       const ico = el('span', 'ico');
-      // The shell's own lucide markup, rendered by the main window.
+      // The shell's own lucide markup, rendered by the main window (a checked
+      // row's check included).
       if (item.icon) ico.innerHTML = item.icon;
-      else if (item.checked) ico.textContent = '\u2713';
       row.append(ico, el('span', 'label', String(item.label)));
       if (item.hint) row.append(el('span', 'hint', String(item.hint)));
       row.addEventListener('click', () => { closeMenuUi(); invoke('store_menu_pick', { id: item.id }); });

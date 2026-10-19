@@ -1,5 +1,6 @@
-import { isValidElement, type ReactNode } from 'react'
+import { createElement, isValidElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { Check } from 'lucide-react'
 import { call, isTauri, on } from '@/lib/bridge'
 import type { Inbox } from '@/hooks/useInbox'
 
@@ -138,7 +139,10 @@ export async function openMenu(menu: string, anchor: DOMRect | Anchor, entries: 
     if ('separator' in e || 'heading' in e) return e
     const id = `${menu}:${i}`
     handlers.set(id, e.onSelect)
-    return { id, label: e.label, hint: e.hint, danger: e.danger, disabled: e.disabled, checked: e.checked, icon: iconMarkup(e.icon) }
+    // A checked row without an icon of its own shows a check, in both views
+    // that draw menus (PopupApp, and the Store page's `__kryoMenu`).
+    const icon = e.icon ?? (e.checked ? createElement(Check) : undefined)
+    return { id, label: e.label, hint: e.hint, danger: e.danger, disabled: e.disabled, checked: e.checked, icon: iconMarkup(icon) }
   })
   setCurrent(menu)
   await call('menu_open', { scale: window.devicePixelRatio || null, anchor: anchorOf(anchor), right: align === 'right', payload: { menu, kind: 'menu', items, minWidth, look: look() } }).catch(

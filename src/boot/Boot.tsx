@@ -130,7 +130,8 @@ export function Welcome({
 
   return (
     <Box className="bg-black">
-      <img decoding="async"
+      <img
+        decoding="async"
         src="/brand/og-backdrop.jpg"
         alt=""
         draggable={false}
