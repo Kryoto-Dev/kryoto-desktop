@@ -204,8 +204,13 @@ export type MenuEntry =
 
 export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry[]; onDone: () => void; autoFocus?: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
-  // A menu opened by pointing at it starts with nothing lit; one opened from the keyboard starts on its first row.
-  useLayoutEffect(() => { if (autoFocus) ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus() }, [autoFocus])
+  // A menu opened by pointing at it starts with nothing lit; one opened from the keyboard starts on its
+  // checked row (a dropdown's value), or else its first.
+  useLayoutEffect(() => {
+    if (!autoFocus) return
+    const rows = ref.current
+    ;(rows?.querySelector<HTMLElement>('[role="menuitem"][data-checked]:not(:disabled)') ?? rows?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)'))?.focus()
+  }, [autoFocus])
   return (
     <div ref={ref} onKeyDown={(e) => {
       if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
@@ -227,6 +232,7 @@ export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry
             key={i}
             type="button"
             role="menuitem"
+            data-checked={item.checked ? '' : undefined}
             disabled={item.disabled}
             onClick={() => {
               onDone()

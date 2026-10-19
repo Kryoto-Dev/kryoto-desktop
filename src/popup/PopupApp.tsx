@@ -73,7 +73,7 @@ export function PopupApp() {
       // With this page's own pixel ratio: it can differ from the shell's.
       const radius = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0
       const pop = payload.kind === 'menu' ? { from: 0.97, span: 180 } : { from: 0.9, span: 200 }
-      void call('menu_ready', { menu: payload.menu, width: el.offsetWidth, height: el.offsetHeight, scale: window.devicePixelRatio, radius, ...pop })
+      void call('menu_ready', { menu: payload.menu, width: el.offsetWidth, height: el.offsetHeight, scale: window.devicePixelRatio, pop: { radius, ...pop } })
         .then(() => {
           if (cancelled || !box.current) return
           setShown(seq)

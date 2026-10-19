@@ -33,6 +33,18 @@ pub struct Anchor {
     bottom: f64,
 }
 
+/// How the page's panel looks and opens, for the window clip on Windows
+/// (`raise`): its corner radius in CSS px, the scale it starts from (a fraction)
+/// and how long it takes in ms. Other systems draw the panel in a see-through view
+/// and need none of it.
+#[derive(Clone, Copy, Default, Deserialize)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct Pop {
+    radius: Option<f64>,
+    from: Option<f64>,
+    span: Option<f64>,
+}
+
 #[derive(Default)]
 pub struct Menus {
     /// The menu being shown, as the shell sent it.
@@ -165,16 +177,8 @@ pub fn menu_payload(state: tauri::State<'_, Menus>) -> Option<serde_json::Value>
 /// The menu has drawn itself at this size: place it, kept inside the window,
 /// then show it and give it the keyboard.
 #[tauri::command]
-pub async fn menu_ready(
-    app: AppHandle,
-    menu: String,
-    width: f64,
-    height: f64,
-    scale: Option<f64>,
-    radius: Option<f64>,
-    from: Option<f64>,
-    span: Option<f64>,
-) -> Result<(), String> {
+pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, scale: Option<f64>, pop: Option<Pop>) -> Result<(), String> {
+    let pop = pop.unwrap_or_default();
     let menu_scale = crate::placement::css_scale(scale);
     // Drawn for a menu that has since closed or been replaced.
     if open_id(&app).as_deref() != Some(menu.as_str()) {
@@ -205,7 +209,9 @@ pub async fn menu_ready(
     // Before it is shown, so the view never appears at full size for a frame.
     // The page says how round its panel is (its CSS px), and how it opens.
     #[cfg(windows)]
-    raise(&view, radius.unwrap_or(10.0).max(0.0) * scale, from.unwrap_or(0.9).clamp(0.5, 1.0), span.unwrap_or(200.0).max(1.0));
+    raise(&view, pop.radius.unwrap_or(10.0).max(0.0) * scale, pop.from.unwrap_or(0.9).clamp(0.5, 1.0), pop.span.unwrap_or(200.0).max(1.0));
+    #[cfg(not(windows))]
+    let _ = pop;
     view.show().map_err(|e| e.to_string())?;
     let _ = view.set_focus();
     Ok(())
