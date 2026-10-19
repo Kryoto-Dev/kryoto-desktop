@@ -633,6 +633,20 @@ pub fn enqueue_remote<R: Runtime>(app: &AppHandle<R>, command: &str, url: String
     enqueue_item(app, url, slug, title, None, None, Some(format!("remote-{command}")))
 }
 
+/// A release only on mirrors, sent from kryo.to (Remote, Kryoto Mobile): one of
+/// its mirror pages, downloaded like a mirror picked in the Store.
+pub fn enqueue_remote_mirror<R: Runtime>(
+    app: &AppHandle<R>,
+    command: &str,
+    page: String,
+    slug: Option<String>,
+    title: Option<String>,
+    release: Option<String>,
+) -> Result<(), String> {
+    let (_, host) = crate::resolvers::classify(&page).ok_or("Kryoto can't download from that host yet.")?;
+    enqueue_item(app, page.clone(), slug, title, Some(Mirror { page, host: host.into() }), release, Some(format!("remote-{command}")))
+}
+
 /// Queue a download from a link kryo.to minted for this PC, as pressing
 /// Download in the Store does: a game already downloading is not queued twice.
 pub fn enqueue_url<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>, title: Option<String>) -> Result<(), String> {
@@ -715,8 +729,9 @@ fn enqueue_item<R: Runtime>(
             return Ok(());
         }
     }
-    // The same page's Download pressed twice while the first is still going.
-    if remote_id.is_none() { if let Ok(list) = state.list.lock() {
+    // The same game asked for twice while the first is still going, here or
+    // from kryo.to's "Download in Kryoto Desktop".
+    if let Ok(list) = state.list.lock() {
         if list.iter().any(|d| {
             d.slug.is_some()
                 && d.slug == slug
@@ -725,7 +740,7 @@ fn enqueue_item<R: Runtime>(
             let _ = app.emit("notify", Notice::new("Already downloading", "That game is already in Downloads.", None));
             return Ok(());
         }
-    } }
+    }
     let id = remote_id.unwrap_or_else(|| format!("dl-{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
     // The page's title first; then the name the link itself carries, so a
     // download that arrives with nothing else is still called after its game
@@ -758,6 +773,20 @@ fn enqueue_item<R: Runtime>(
     let _ = app.emit("download-started", id.clone());
     start(app.clone(), id);
     Ok(())
+}
+
+/// The library game this not-yet-started download would install again: the
+/// same kryo.to page at the same build, still on disk.
+fn installed_build<R: Runtime>(app: &AppHandle<R>, d: &Download) -> Option<LibraryGame> {
+    if d.received > 0 || !d.archive_path.is_empty() {
+        return None;
+    }
+    let (slug, version) = (d.slug.as_deref()?, d.meta.version.as_deref()?);
+    crate::library::load(app).ok()?.into_iter().find(|g| {
+        g.slug.as_deref() == Some(slug)
+            && g.version.as_deref() == Some(version)
+            && Path::new(&g.install_dir).is_dir()
+    })
 }
 
 /// A paused or failed download of the same file as `url` (our own, from the
@@ -1037,6 +1066,20 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
                 emit(app, true);
             }
         }
+    }
+
+    // Download pressed for the very build already in the library: point at the
+    // game instead of fetching it a second time. A newer build is an update and
+    // goes ahead.
+    if let Some(game) = edit(app, id, |_| {}).and_then(|d| installed_build(app, &d)) {
+        if let Ok(mut list) = app.state::<Downloads>().list.lock() {
+            list.retain(|d| d.id != id);
+        }
+        persist(app);
+        emit(app, true);
+        let body = format!("{} is already in your Library, on this build.", game.title);
+        let _ = app.emit("notify", Notice::new("Already installed", &body, Some(game.id)));
+        return Ok(());
     }
 
     let Some(_turn) = wait_for_turn(app, id, flag).await else {

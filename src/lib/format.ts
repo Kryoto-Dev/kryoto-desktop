@@ -4,7 +4,7 @@ export function formatPlaytime(seconds: number): string {
   if (seconds <= 0) return 'None'
   if (seconds < 60) return 'Under a minute'
   const minutes = Math.round(seconds / 60)
-  if (minutes < 120) return `${minutes} minutes`
+  if (minutes < 120) return minutes === 1 ? '1 minute' : `${minutes} minutes`
   return `${(seconds / 3600).toFixed(1)} hours`
 }
 

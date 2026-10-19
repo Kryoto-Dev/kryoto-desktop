@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Copy } from 'lucide-react'
+import { Copy, Smartphone } from 'lucide-react'
 import { Button, Caption, Check, Section } from '@/ui'
 import { call, errorText } from '@/lib/bridge'
 import { formatLastPlayed } from '@/lib/format'
 import { QrCode } from '@/settings/QrCode'
+import { openExternal } from '@/lib/window'
+
+const MOBILE_URL = 'https://kryo.to/mobile'
 
 type PhoneStatus = {
   lan: boolean
@@ -44,6 +47,12 @@ export function PhonePane() {
   if (!status) return <Caption>{note ?? 'Loading...'}</Caption>
   return (
     <>
+      <Section title="Kryoto Mobile" hint="The Android app for this PC: its games, Play and Stop, and downloads, at home or away.">
+        <Button size="sm" className="w-fit" onClick={() => void openExternal(MOBILE_URL)}>
+          <Smartphone className="size-3" />
+          Get Kryoto Mobile
+        </Button>
+      </Section>
       <Section
         title="On this network"
         hint="Windows may ask to allow Kryoto on private networks. Anyone on your network with the code can pair, so only use a network you trust."

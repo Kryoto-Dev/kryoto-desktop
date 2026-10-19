@@ -407,6 +407,35 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   )
   const playEntry = useCallback((game: LibraryGame, entry: number | null) => void lib.play(game.id, entry), [lib])
 
+  // Play on a game's own kryo.to page (`store_play`), started the way the
+  // Library's Play starts it. The page follows the library and what is
+  // running, so it shows Play, Running or Download as they change.
+  const playRef = useRef(play)
+  playRef.current = play
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on<string>('store-play', (id) => {
+      const game = gamesRef.current.find((g) => g.id === id)
+      if (game) playRef.current(game)
+    }).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [])
+  // Only what the page shows: which kryo.to games are here, at which build,
+  // and which are running (`lib.running` is a new set on every poll).
+  const storeLibraryKey = [
+    ...lib.games.filter((g) => g.slug).map((g) => `${g.slug}@${g.version ?? ''}`),
+    ...[...lib.running].map((id) => `run:${id}`),
+  ]
+    .sort()
+    .join('|')
+  useEffect(() => {
+    void call('store_library_changed').catch(() => {})
+  }, [storeLibraryKey])
+
   // "Join" on a game invite in chat: start the game (into the host's Steam
   // lobby when the invite has one), ask Steam to join if it is already
   // running, or open its page to install it.

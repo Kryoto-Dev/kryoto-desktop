@@ -128,10 +128,10 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
           <Label>Achievements</Label>
           <p className="text-sm font-bold text-foreground">Achievement tracking is unavailable</p>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            This game uses <b className="text-foreground">{data.emulator}</b>. Kryoto Desktop cannot track achievements with this emulator.
+            This game uses <b className="text-foreground">{data.emulator}</b>. Kryoto Desktop cannot track achievements with it.
           </p>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            You can try switching to gbe_fork or RUNE for achievement tracking. The game may stop working, and Kryoto Online multiplayer will be unavailable. Repair keeps a backup so you can Undo and try another emulator if it breaks.
+            You can switch its Steam emulator to gbe_fork or RUNE for achievement tracking. Only the Steam files change; the rest of the crack stays as it is. The game may stop working, and Kryoto Online multiplayer will be unavailable. Repair keeps a backup so you can Undo and try another emulator if it breaks.
           </p>
           <div className="flex flex-wrap gap-2">
             {game.slug ? <Button size="sm" disabled={running} onClick={() => setRepairOpen(true)}><Wrench className="size-3" aria-hidden /> Try another emulator</Button> : null}

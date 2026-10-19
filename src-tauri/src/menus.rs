@@ -165,7 +165,8 @@ pub fn menu_payload(state: tauri::State<'_, Menus>) -> Option<serde_json::Value>
 /// The menu has drawn itself at this size: place it, kept inside the window,
 /// then show it and give it the keyboard.
 #[tauri::command]
-pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64) -> Result<(), String> {
+pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, scale: Option<f64>) -> Result<(), String> {
+    let menu_scale = crate::placement::css_scale(scale);
     // Drawn for a menu that has since closed or been replaced.
     if open_id(&app).as_deref() != Some(menu.as_str()) {
         return Ok(());
@@ -181,7 +182,11 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64) -
     };
     let inner = window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
     let (anchor, right) = *app.state::<Menus>().anchor.lock().map_err(|_| "menu lock")?;
-    let (width, height) = (width.ceil().max(40.0), height.ceil().max(20.0));
+    // The menu measured itself in its own CSS pixels. Where its ratio differs
+    // from the shell's (a monitor with another scale it has not caught up
+    // with), sized in the shell's units it came out narrow and cut its text.
+    let ratio = menu_scale.map_or(1.0, |menu| menu / scale);
+    let (width, height) = ((width * ratio).ceil().max(40.0), (height * ratio).ceil().max(20.0));
     let x = if right { anchor.right - width } else { anchor.left };
     let x = x.min(inner.width - width - GAP).max(GAP);
     let y = (anchor.bottom + GAP).min(inner.height - height - GAP).max(GAP);

@@ -195,7 +195,20 @@ fn metadata_tracking(game: &LibraryGame) -> (Tracking, Option<String>) {
     }) {
         return named_tracking("Kryoto Online");
     }
-    named_tracking(game.source.as_deref().unwrap_or_default())
+    release_tracking(game.source.as_deref().unwrap_or_default())
+}
+
+/// The release's own label. A named crack the watcher cannot read (a custom one
+/// such as voices38, or none at all for DRM-free) is unsupported, so the page
+/// says so and offers gbe_fork, instead of a list that never unlocks.
+fn release_tracking(source: &str) -> (Tracking, Option<String>) {
+    let known = named_tracking(source);
+    let source = source.trim();
+    if known.0 != Tracking::Unknown || source.is_empty() {
+        return known;
+    }
+    let crack = source.strip_prefix("Steam +").map(str::trim).filter(|s| !s.is_empty()).unwrap_or(source);
+    (Tracking::Unsupported, Some(crack.to_string()))
 }
 
 pub(crate) fn tracking_of(game: &LibraryGame) -> (Tracking, Option<String>) {
@@ -345,6 +358,16 @@ mod tests {
         for source in ["Steam (DRM-free)", "Kryoto Original release", "unknown repack", "custom", ""] {
             assert_eq!(named_tracking(source), (Tracking::Unknown, None));
         }
+    }
+
+    #[test]
+    fn a_crack_the_watcher_cannot_read_is_unsupported_by_its_own_name() {
+        assert_eq!(release_tracking("Steam + voices38"), (Tracking::Unsupported, Some("voices38".into())));
+        assert_eq!(release_tracking("Steam (DRM-free)"), (Tracking::Unsupported, Some("Steam (DRM-free)".into())));
+        assert_eq!(release_tracking("Steam + gbe_fork + Steamless").0, Tracking::Supported);
+        assert_eq!(release_tracking(""), (Tracking::Unknown, None));
+        let game = LibraryGame { source: Some("Steam + voices38".into()), ..Default::default() };
+        assert_eq!(metadata_tracking(&game).0, Tracking::Unsupported);
     }
 
     #[test]

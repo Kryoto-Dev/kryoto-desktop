@@ -21,6 +21,27 @@ use crate::{library, phone};
 
 /// What this build understands from kryo.to. 3: library, play/stop, clear, remove.
 pub const PROTOCOL: u8 = 3;
+
+/// How often the Store page is asked to take what kryo.to queued and report back.
+const BEAT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The Remote loop's beat, kept here rather than in a timer on the Store page.
+/// The Store is hidden whenever the Library, Settings or the tray is showing,
+/// and the browser slows a hidden page's timers down to about one a minute:
+/// a phone's Play then took 15 seconds to arrive and its Stop 30 (presence.rs
+/// is native for the same reason). Running a script in the page is not slowed,
+/// so the page's own `__kryoRemoteTick` does the talking, on this beat.
+pub fn start<R: tauri::Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(BEAT).await;
+            let Ok(view) = crate::store(&app) else { continue };
+            if view.url().is_ok_and(|u| crate::is_kryoto(&u, &app)) {
+                let _ = view.eval("window.__kryoRemoteTick&&window.__kryoRemoteTick()");
+            }
+        }
+    });
+}
 /// Games sent along, most recently played first.
 const MAX_GAMES: usize = 150;
 
@@ -113,6 +134,12 @@ pub struct RemoteCommand {
     download_id: Option<String>,
     #[serde(default)]
     game_id: Option<String>,
+    /// A release only on mirrors: their pages, for a download sent without `url`.
+    #[serde(default)]
+    mirrors: Vec<String>,
+    /// That release's version, so it installs as that build.
+    #[serde(default)]
+    version: Option<String>,
 }
 
 fn game_id_of(c: &RemoteCommand) -> Result<String, String> {
@@ -139,13 +166,21 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
         }
         let accepted = accept_once(&file, &mut receipts, &id, now, || -> Result<(), String> { match c.kind.as_str() {
             "download" => {
+                let slug = c.slug.filter(|s| !s.is_empty() && s.len() <= 160 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+                let title = c.title.map(|t| t.chars().filter(|ch| !ch.is_control()).take(200).collect::<String>()).filter(|t| !t.is_empty());
+                crate::logging::info("remote", &format!("queued from kryo.to: {}", title.as_deref().unwrap_or("a game")));
+                if c.url.is_none() && !c.mirrors.is_empty() {
+                    // Only on mirrors: the first one this app can download
+                    // from, the way its own Store would.
+                    let page = c.mirrors.iter().find(|m| crate::resolvers::classify(m).is_some()).ok_or("None of this game's mirrors can be downloaded from here. Open its page in the Store.")?;
+                    let version = c.version.filter(|v| !v.is_empty() && v.len() <= 120);
+                    downloads::enqueue_remote_mirror(&app, &id, page.clone(), slug, title, version)?;
+                    return Ok(());
+                }
                 let url = c.url.as_deref().and_then(|u| url::Url::parse(u).ok()).ok_or("Invalid download URL.")?;
                 if !downloads::is_ours(&url, &settings) {
                     return Err("This download does not come from Kryoto.".into());
                 }
-                let slug = c.slug.filter(|s| !s.is_empty() && s.len() <= 160 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
-                let title = c.title.map(|t| t.chars().filter(|ch| !ch.is_control()).take(200).collect::<String>()).filter(|t| !t.is_empty());
-                crate::logging::info("remote", &format!("queued from kryo.to: {}", title.as_deref().unwrap_or("a game")));
                 downloads::enqueue_remote(&app, &id, url.to_string(), slug, title)?;
             }
             "pause" | "resume" | "cancel" => {

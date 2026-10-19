@@ -430,6 +430,20 @@ export function startEntry(game: LibraryGame): number | null {
 }
 
 /** What Play starts, or `'ask'` when the player asked to be asked. */
+/**
+ * The game with `picked` (an .exe chosen by hand) as what Play starts: relative
+ * to its folder when it is inside it, otherwise in a folder of its own. A file
+ * chosen by hand wins over a Steam entry and over "Ask every time".
+ */
+export function withExecutable(game: LibraryGame, picked: string): LibraryGame {
+  const norm = picked.replace(/\\/g, '/')
+  const root = game.installDir.replace(/\\/g, '/').replace(/\/+$/, '')
+  const plain = { ...game, preferredEntry: null, askEachTime: false }
+  if (norm.toLowerCase().startsWith(`${root.toLowerCase()}/`)) return { ...plain, executable: norm.slice(root.length + 1) }
+  const cut = norm.lastIndexOf('/')
+  return { ...plain, installDir: picked.slice(0, cut), executable: norm.slice(cut + 1) }
+}
+
 export function playTarget(game: LibraryGame): number | null | 'ask' {
   if (game.askEachTime && hasChoice(game)) return 'ask'
   return startEntry(game)

@@ -104,4 +104,5 @@ commands.allow = [
   "menu_pick",
   "menu_close",
   "menu_hover",
+  "store_library_changed",
 ]

@@ -67,7 +67,8 @@ export function PopupApp() {
     void document.fonts.ready.then(() => {
       const el = box.current
       if (cancelled || !el) return
-      void call('menu_ready', { menu: payload.menu, width: el.offsetWidth, height: el.offsetHeight })
+      // With this page's own pixel ratio: it can differ from the shell's.
+      void call('menu_ready', { menu: payload.menu, width: el.offsetWidth, height: el.offsetHeight, scale: window.devicePixelRatio })
         .then(() => {
           if (cancelled || !box.current) return
           if (document.hasFocus()) focused.current = true

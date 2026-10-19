@@ -579,7 +579,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     try {
       const snap = await invoke('remote_snapshot');
       if (!snap || !snap.installId) return;
-      const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: snap.protocol }).catch(() => null);
+      // `mirrors`: a game only on mirrors may be sent too (remote.rs).
+      const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: snap.protocol, mirrors: true }).catch(() => null);
       let now = snap;
       if (taken && Array.isArray(taken.commands) && taken.commands.length) {
         const results = await invoke('remote_apply', { commands: taken.commands });
@@ -601,7 +602,9 @@ const BROWSER_STATE_SCRIPT: &str = r#"
       remoteBusy = false;
     }
   };
-  setInterval(remote, 4000);
+  // Run on remote.rs's native beat, not a timer here: a hidden Store page's
+  // timers are slowed to about once a minute.
+  window.__kryoRemoteTick = remote;
   // Achievements saved to the account (achievements_cloud.rs, kryo.to
   // lib/cloud-achievements.ts), a supporter perk: send what is new, fetch
   // what this PC may lack, and hand kryo.to's answers back.
@@ -643,7 +646,11 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         expectDownload: (slug, title) => invoke('store_expect_download', {
           slug: String(slug || ''),
           title: title ? String(title) : null
-        })
+        }),
+        // This PC's copy of a game, and Play for it, so its page can offer
+        // Play instead of Download. `kryoto-library` fires when either changes.
+        installed: (slug) => invoke('store_installed', { slug: String(slug || '') }),
+        play: (slug) => invoke('store_play', { slug: String(slug || '') })
       })
     });
   } catch (_) {}
@@ -1012,13 +1019,20 @@ fn store_expect_download(
     Ok(())
 }
 
+/// The call came from kryo.to, showing in the Store: the only page that may
+/// use the Store's own commands.
+fn from_kryoto_store(app: &tauri::AppHandle, webview: &tauri::Webview) -> Result<(), String> {
+    if webview.label() != STORE || !webview.url().map(|u| is_kryoto(&u, app)).unwrap_or(false) {
+        return Err("Only kryo.to in the Store may ask.".into());
+    }
+    Ok(())
+}
+
 /// A row picked in the menu the Store's own page draws (`menus.rs`). Only a
 /// kryo.to page in the Store may say, and only for the menu that is open.
 #[tauri::command]
 fn store_menu_pick(app: tauri::AppHandle, webview: tauri::Webview, id: String) -> Result<(), String> {
-    if webview.label() != STORE || !webview.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
-        return Err("Only kryo.to in the Store draws menus.".into());
-    }
+    from_kryoto_store(&app, &webview)?;
     menus::menu_pick(app, id);
     Ok(())
 }
@@ -1026,11 +1040,59 @@ fn store_menu_pick(app: tauri::AppHandle, webview: tauri::Webview, id: String) -
 /// The pointer entered or left that menu.
 #[tauri::command]
 fn store_menu_hover(app: tauri::AppHandle, webview: tauri::Webview, inside: bool) -> Result<(), String> {
-    if webview.label() != STORE || !webview.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
-        return Err("Only kryo.to in the Store draws menus.".into());
-    }
+    from_kryoto_store(&app, &webview)?;
     menus::menu_hover(app, inside);
     Ok(())
+}
+
+/// This PC's copy of a game, for its kryo.to page: Play instead of Download,
+/// the way Steam's store page shows an installed game
+/// (`kryotoDesktop.installed`, kryo.to's game-downloads.tsx).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledGame {
+    title: String,
+    /// The kryo.to build it has, when it came from a download.
+    version: Option<String>,
+    running: bool,
+}
+
+fn installed_by_slug(app: &tauri::AppHandle, slug: &str) -> Option<library::LibraryGame> {
+    library::load(app)
+        .ok()?
+        .into_iter()
+        .find(|g| g.slug.as_deref() == Some(slug) && std::path::Path::new(&g.install_dir).is_dir())
+}
+
+#[tauri::command]
+fn store_installed(app: tauri::AppHandle, webview: tauri::Webview, slug: String) -> Result<Option<InstalledGame>, String> {
+    from_kryoto_store(&app, &webview)?;
+    let Some(game) = installed_by_slug(&app, &slug) else { return Ok(None) };
+    let running = app
+        .try_state::<library::Running>()
+        .is_some_and(|r| r.0.lock().map(|m| m.contains_key(&game.id)).unwrap_or(false));
+    Ok(Some(InstalledGame { title: game.title, version: game.version, running }))
+}
+
+/// Play pressed on the game's kryo.to page: the shell starts it the way its
+/// own Play does (launch choice, Ask every time).
+#[tauri::command]
+fn store_play(app: tauri::AppHandle, webview: tauri::Webview, slug: String) -> Result<(), String> {
+    from_kryoto_store(&app, &webview)?;
+    let game = installed_by_slug(&app, &slug).ok_or("That game is not installed on this PC.")?;
+    app.emit_to("main", "store-play", game.id).map_err(|e| e.to_string())
+}
+
+/// The library or what is running changed: a kryo.to page showing Play or
+/// Download asks again (`kryoto-library`). Called by the shell, which sees both.
+#[tauri::command]
+fn store_library_changed(app: tauri::AppHandle, webview: tauri::Webview) {
+    if webview.label() != "main" {
+        return;
+    }
+    if let Some(store) = app.get_webview(STORE) {
+        let _ = store.eval("dispatchEvent(new Event('kryoto-library'))");
+    }
 }
 
 /// Kryoto path shortcut (menus, tabs). Path-only, same origin.
@@ -1281,6 +1343,7 @@ pub fn run() {
             }
             logging::start_reporter(app.handle().clone());
             presence::start(app.handle().clone());
+            remote::start(app.handle().clone());
             // Off the main thread: registry and xdg-mime are not worth a frame.
             std::thread::spawn(links::register);
             downloads::init(app.handle());
@@ -1577,6 +1640,9 @@ pub fn run() {
             menus::menu_close,
             store_menu_pick,
             store_menu_hover,
+            store_installed,
+            store_play,
+            store_library_changed,
             menus::menu_hover
         ])
         .run(tauri::generate_context!())
