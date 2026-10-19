@@ -146,7 +146,7 @@ export function GamePage({
   const updateAvailable = !!latest && !!game.version && latest !== game.version && !kept
 
   return (
-    <section aria-label={game.title} className="min-h-0 grow overflow-auto" {...gameContext(onContext)}>
+    <section aria-label={game.title} className="kryo-game-in min-h-0 grow overflow-auto" {...gameContext(onContext)}>
       <GameBanner
         title={game.title}
         adult={game.nsfw}
@@ -157,7 +157,7 @@ export function GamePage({
         logo={game.customHero ? null : catalog ? catalog.logo : game.logo}
       />
 
-      <div className="kryo-radius relative z-10 mx-6 -mt-2 flex flex-wrap items-center gap-6 border border-border bg-card/90 p-4 backdrop-blur">
+      <div className="kryo-game-bar kryo-radius relative z-10 mx-6 -mt-2 flex flex-wrap items-center gap-6 border border-border bg-card/90 p-4 backdrop-blur">
         {running ? (
           <div className="flex items-center gap-3">
             <Button variant="outline" size="lg" onClick={onStop} className="border-foreground text-foreground">

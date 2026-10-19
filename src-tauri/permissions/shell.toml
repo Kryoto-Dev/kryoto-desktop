@@ -39,6 +39,7 @@ commands.allow = [
   "os_notify",
   "pick_path",
   "store_visible",
+  "store_enter",
   "store_sign_out",
   "store_mark_read",
   "store_refresh_account",

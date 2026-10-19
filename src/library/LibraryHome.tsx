@@ -153,6 +153,7 @@ export function LibraryHome({
           <Label>All games · {games.length}</Label>
           <span className="h-px grow bg-border" />
           <MenuButton
+            native="library-sort"
             align="right"
             className="kryo-pill flex h-7 items-center gap-1.5 border border-border px-3 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
             trigger={
@@ -161,7 +162,7 @@ export function LibraryHome({
                 <ChevronDown className="size-3" />
               </>
             }
-            items={(Object.keys(SORTS) as Sort[]).map((s) => ({ label: SORTS[s], onSelect: () => setSort(s) }))}
+            items={(Object.keys(SORTS) as Sort[]).map((s) => ({ label: SORTS[s], checked: s === sort, onSelect: () => setSort(s) }))}
           />
         </div>
         <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">
@@ -169,7 +170,7 @@ export function LibraryHome({
             <div
               key={g.id}
               {...ctx(g)}
-              className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 hover:-translate-y-1 hover:border-foreground/60"
+              className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 hover:-translate-y-1 hover:border-foreground/60 active:translate-y-0 active:scale-95"
             >
               <button type="button" onClick={() => onOpen(g.id)} className="kryo-square absolute inset-0" aria-label={`Open ${g.title}`}>
                 <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />

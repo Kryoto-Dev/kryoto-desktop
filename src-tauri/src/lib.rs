@@ -352,6 +352,120 @@ fn disable_browser_menu(view: &tauri::Webview) {
     });
 }
 
+/// Layout fixes for kryo.to's pages. Browse has a floating search bar (fixed,
+/// centred, 567px) over the page header, and the header's stats pill
+/// ("Downloads served / 100K games handed out", and others it rotates through, up
+/// to 30rem) sits on the same line at the right, so the bar covered the pill in
+/// a window under about 1330px. The pill may now be no wider than the gap between
+/// the bar and the header's right edge (the smaller of 259px and what is left of
+/// the viewport), where its text is already truncated, and it goes away where
+/// the gap is too small to read. Second fix: a press on a link keeps the focus in
+/// a text field, so a page that reflows when the field is blurred does not move the
+/// link out from under the click (see the listener below).
+const PAGE_FIXES_SCRIPT: &str = r#"
+(() => {
+  if (!/^https?:$/.test(location.protocol) || window.__kryoFixes) return;
+  window.__kryoFixes = true;
+  const pill = '.kryo-pill.kryo-fade-up.w-fit';
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(
+    pill + '{max-width:max(0px,min(259px,calc(50vw - 322px)))!important}'
+    + '@media (max-width:879px){' + pill + '{display:none!important}}'
+  );
+  // Adopted: the page's hydration removes head nodes it did not render.
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  // The home page's search box grows a line of suggestions while it has focus, and
+  // takes it away when it loses it. Pressing a link below it blurs the box on the
+  // press, the page shifts up 36px, and the release lands off the link: no click, so
+  // "Explore the whole catalog" only worked from the second press. Keeping the focus
+  // where it is on a link press means nothing moves; the click still goes through.
+  addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const field = document.activeElement;
+    if (!field || !/^(INPUT|TEXTAREA)$/.test(field.tagName)) return;
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (a && !a.contains(field)) e.preventDefault();
+  }, true);
+})();
+"#;
+
+/// Runs in the Store's page before the page's own scripts, on every load: the
+/// page's blocks (its outermost headers, sections and tabs in `main`) and the
+/// cards in its grids rise and fade in one after another. It is a stylesheet on
+/// the document, so an element that arrives later (the page streams in) starts
+/// from its hidden frame with no flash of the finished page first. The rules
+/// hold for the first seconds only: what the page draws after that, a refreshed
+/// list or a switched chart, must not replay it.
+const PAGE_ENTER_SCRIPT: &str = r#"
+(() => {
+  if (!/^https?:$/.test(location.protocol) || window.__kryoEnter) return;
+  window.__kryoEnter = true;
+  const block = 'main :is(header,section,nav,article):not(:is(header,section,nav,article) :is(header,section,nav,article))';
+  const card = 'main [class*="grid-cols"] > *';
+  let css = '@keyframes kryo-el-enter{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}'
+    + '@media (prefers-reduced-motion:no-preference){'
+    + block + '{animation:kryo-el-enter 520ms cubic-bezier(.16,1,.3,1) both;animation-delay:calc(var(--kryo-i,0)*80ms)}'
+    + card + '{animation:kryo-el-enter 480ms cubic-bezier(.16,1,.3,1) both;animation-delay:calc(160ms + var(--kryo-i,0)*60ms)}';
+  for (let i = 1; i <= 12; i++) css += 'main :nth-child(' + i + '){--kryo-i:' + (i - 1) + '}';
+  css += '}';
+  // Switching tabs: the page slides in from the side the tab is on, like the shell's own
+  // pages (`kryo-tab-in`), instead of its elements coming in one by one. Not a stylesheet:
+  // the page streams in, a first `main` (its skeleton) standing in until the real one
+  // replaces it, and a rule would start the slide again on the replacement, which showed
+  // as a flicker. The replacement here carries on from how far the first had got.
+  const SLIDE_MS = 260;
+  let slider = null;
+  const slideMain = (dx) => {
+    if (slider) slider.disconnect();
+    if (matchMedia('(prefers-reduced-motion:reduce)').matches) return;
+    const t0 = performance.now();
+    const apply = () => {
+      for (const m of document.querySelectorAll('main')) {
+        if (m.__kryoSlide === t0) continue;
+        m.__kryoSlide = t0;
+        const done = Math.min(performance.now() - t0, SLIDE_MS);
+        m.animate(
+          [{ opacity: 0, transform: 'translateX(' + dx + 'px)' }, { opacity: 1, transform: 'none' }],
+          { duration: SLIDE_MS, delay: -done, easing: 'cubic-bezier(.16,1,.3,1)', fill: 'backwards' },
+        );
+      }
+    };
+    apply();
+    slider = new MutationObserver(apply);
+    slider.observe(document.documentElement, { childList: true, subtree: true });
+    setTimeout(() => slider === null || slider.disconnect(), 700);
+  };
+  // Adopted, not a <style> in the head or a class on <html>: the page's hydration removes
+  // head nodes and resets the root's class. The sheet is dropped after the first seconds,
+  // so what the page draws later (a refreshed list, a switched chart) does not replay it.
+  let sheet = null;
+  let timer = 0;
+  const play = (dx) => {
+    clearTimeout(timer);
+    if (sheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== sheet);
+    sheet = null;
+    if (typeof dx === 'number') return slideMain(dx);
+    // Styled without the sheet first, so adding it again starts the animations over.
+    if (document.body) void document.body.offsetHeight;
+    sheet = new CSSStyleSheet();
+    sheet.replaceSync(css);
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    timer = setTimeout(() => { document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== sheet); sheet = null; }, 2200);
+  };
+  // The shell calls this when it brings the page back from one of its own.
+  window.__kryoEnterPlay = play;
+  // The shell left a direction (and when) in the session just before it changed tab;
+  // this load is that tab, so it slides. Any other load brings its elements in.
+  let dx;
+  try {
+    const [d, at] = (sessionStorage.getItem('__kryoTabDx') || '').split('|').map(Number);
+    sessionStorage.removeItem('__kryoTabDx');
+    if (Number.isFinite(d) && Date.now() - at < 5000) dx = d;
+  } catch (_) {}
+  play(dx);
+})();
+"#;
+
 /// Page-side reporting, run on every page the Store finishes loading. It only
 /// REPORTS; the shell checks the address against the web view's own.
 ///
@@ -881,7 +995,7 @@ async fn store_mount(
         let ua = if ua.contains("KryotoDesktop/") { ua } else { format!("{ua} KryotoDesktop/{}", env!("CARGO_PKG_VERSION")) };
         builder = builder.user_agent(&ua);
     }
-    let builder = builder.transparent(true);
+    let builder = builder.transparent(true).initialization_script(PAGE_FIXES_SCRIPT).initialization_script(PAGE_ENTER_SCRIPT);
     #[cfg(not(target_os = "linux"))]
     let builder = builder.on_download(|webview, event| match event {
             DownloadEvent::Requested { url, .. } => {
@@ -970,6 +1084,22 @@ fn allow_repeat_downloads(view: &tauri::Webview, settings: settings::Settings) {
         let mut token = Default::default();
         let _ = core.add_PermissionRequested(&handler, &mut token);
     });
+}
+
+/// The shell changed to a tab that is a Store page. `dx` is the side the tab is on
+/// (the shell's own pages slide in from it): it is left in the page's session, where
+/// the load that follows reads it (PAGE_ENTER_SCRIPT), and with `play`, for a page
+/// that is not reloaded (coming back from Library, Friends or Settings), it slides
+/// in now.
+#[tauri::command]
+fn store_enter(app: tauri::AppHandle, dx: i32, play: bool) {
+    if let Some(view) = app.get_webview(STORE) {
+        let mut js = format!("try{{sessionStorage.setItem('__kryoTabDx','{dx}|'+Date.now())}}catch(_){{}};");
+        if play {
+            js.push_str(&format!("window.__kryoEnterPlay&&window.__kryoEnterPlay({dx})"));
+        }
+        let _ = view.eval(js);
+    }
 }
 
 #[tauri::command]
@@ -1571,6 +1701,7 @@ pub fn run() {
             lobbies::steam_join_lobby,
             store_mount,
             store_visible,
+            store_enter,
             store_sign_out,
             store_mark_read,
             store_refresh_account,

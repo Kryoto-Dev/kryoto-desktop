@@ -165,7 +165,16 @@ pub fn menu_payload(state: tauri::State<'_, Menus>) -> Option<serde_json::Value>
 /// The menu has drawn itself at this size: place it, kept inside the window,
 /// then show it and give it the keyboard.
 #[tauri::command]
-pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, scale: Option<f64>) -> Result<(), String> {
+pub async fn menu_ready(
+    app: AppHandle,
+    menu: String,
+    width: f64,
+    height: f64,
+    scale: Option<f64>,
+    radius: Option<f64>,
+    from: Option<f64>,
+    span: Option<f64>,
+) -> Result<(), String> {
     let menu_scale = crate::placement::css_scale(scale);
     // Drawn for a menu that has since closed or been replaced.
     if open_id(&app).as_deref() != Some(menu.as_str()) {
@@ -193,25 +202,77 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, s
     crate::placement::place(&view, x, y, width, height, css)?;
     #[cfg(target_os = "linux")]
     crate::linux_overlay::place(&view, x, y, width, height);
-    view.show().map_err(|e| e.to_string())?;
+    // Before it is shown, so the view never appears at full size for a frame.
+    // The page says how round its panel is (its CSS px), and how it opens.
     #[cfg(windows)]
-    raise(&view);
+    raise(&view, radius.unwrap_or(10.0).max(0.0) * scale, from.unwrap_or(0.9).clamp(0.5, 1.0), span.unwrap_or(200.0).max(1.0));
+    view.show().map_err(|e| e.to_string())?;
     let _ = view.set_focus();
     Ok(())
 }
 
-/// Keep the menu above the Store. A child web view is a child window on
-/// Windows, and one shown again keeps its old place in the stack.
+/// The newest opening, so an animation still running for a menu that has
+/// since closed or been replaced stops.
 #[cfg(windows)]
-fn raise(view: &tauri::Webview) {
-    let _ = view.with_webview(|w| unsafe {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        };
+static OPENING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Keep the menu above the Store, and shape it. A child web view is a child
+/// window on Windows, and one shown again keeps its old place in the stack. It
+/// cannot be see-through over the Store's view (its corners came out black), so
+/// the window itself is cut to the shape the page draws (styles.css), and that
+/// cut is what opens: it grows from `from` (a fraction) to full size, from the top
+/// edge, over `span_ms`, in step with the page's own scale. `radius` is in
+/// physical pixels.
+#[cfg(windows)]
+fn raise(view: &tauri::Webview, radius: f64, from: f64, span_ms: f64) {
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    /// The page starts its animation once the view is up, a few ms after this.
+    const LEAD_MS: u64 = 30;
+    // The shape at scale `s` of the full size, hung from the top edge's middle.
+    unsafe fn shape(hwnd: isize, w: f64, h: f64, radius: f64, s: f64) {
+        let (sw, sh) = ((w * s).round(), (h * s).round());
+        let x = ((w - sw) / 2.0).round();
+        let d = (radius * s * 2.0).round() as i32;
+        // The system owns the region after this call.
+        let rgn = CreateRoundRectRgn(x as i32, 0, (x + sw) as i32 + 1, sh as i32 + 1, d, d);
+        SetWindowRgn(hwnd as _, rgn, 1);
+    }
+    let generation = OPENING.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = view.with_webview(move |w| unsafe {
         let mut hwnd = windows::Win32::Foundation::HWND::default();
-        if w.controller().ParentWindow(&mut hwnd).is_ok() {
-            SetWindowPos(hwnd.0 as _, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+        if w.controller().ParentWindow(&mut hwnd).is_err() {
+            return;
         }
+        let hwnd = hwnd.0 as isize;
+        SetWindowPos(hwnd as _, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+        let mut r: RECT = std::mem::zeroed();
+        if GetWindowRect(hwnd as _, &mut r) == 0 {
+            return;
+        }
+        let (w, h) = ((r.right - r.left) as f64, (r.bottom - r.top) as f64);
+        shape(hwnd, w, h, radius, from);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(LEAD_MS));
+            let start = std::time::Instant::now();
+            loop {
+                if OPENING.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                let t = (start.elapsed().as_secs_f64() * 1000.0 / span_ms).min(1.0);
+                // Ease-out, like the page's own curve.
+                let s = from + (1.0 - from) * (1.0 - (1.0 - t).powi(4));
+                shape(hwnd, w, h, radius, s);
+                if t >= 1.0 {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        });
     });
 }
 
