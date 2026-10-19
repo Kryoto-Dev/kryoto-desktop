@@ -192,7 +192,7 @@ function Row({ a }: { a: GameAchievement }) {
         {secret ? (
           <EyeOff className="size-4 text-muted-foreground" aria-hidden />
         ) : picture ? (
-          <img src={artSrc(picture) ?? undefined} alt="" className={cn('size-full object-cover', !a.unlocked && !a.iconGray && 'grayscale')} />
+          <img decoding="async" src={artSrc(picture) ?? undefined} alt="" className={cn('size-full object-cover', !a.unlocked && !a.iconGray && 'grayscale')} />
         ) : (
           <Trophy className="size-4 text-muted-foreground" aria-hidden />
         )}

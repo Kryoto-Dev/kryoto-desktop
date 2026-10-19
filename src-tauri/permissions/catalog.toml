@@ -1,4 +1,4 @@
 [[permission]]
 identifier = "allow-report-catalog-state"
-description = "Allow the hosted catalog to report navigation state to the desktop shell, to name the download it is about to start, and to close an open menu when the page is clicked."
-commands.allow = ["report_catalog_state", "store_nav_button", "store_expect_download", "remote_snapshot", "remote_apply", "cloud_achievements_pending", "cloud_achievements_report", "menu_close"]
+description = "Allow the hosted catalog to report navigation state to the desktop shell, to name the download it is about to start, to close an open menu when the page is clicked, and to pick from or hover the menu it draws itself."
+commands.allow = ["report_catalog_state", "store_nav_button", "store_expect_download", "remote_snapshot", "remote_apply", "cloud_achievements_pending", "cloud_achievements_report", "menu_close", "store_menu_pick", "store_menu_hover"]

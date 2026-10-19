@@ -153,7 +153,7 @@ export function AddGameDialog({
         <>
           <div className="flex gap-4">
             {found.cover ? (
-              <img
+              <img decoding="async"
                 src={artSrc(found.cover) ?? undefined}
                 alt=""
                 className={cn('w-20 shrink-0 object-cover', adultBlur(found.nsfw, showAdult))}
@@ -228,7 +228,7 @@ export function AddGameDialog({
                     className="kryo-radius flex w-full items-center gap-3 p-2 text-left hover:bg-secondary"
                   >
                     {h.cover_vertical || h.cover ? (
-                      <img
+                      <img decoding="async"
                         src={artSrc(h.cover_vertical || h.cover) ?? undefined}
                         alt=""
                         className={cn('h-12 w-8 shrink-0 object-cover', adultBlur(h.nsfw, showAdult))}

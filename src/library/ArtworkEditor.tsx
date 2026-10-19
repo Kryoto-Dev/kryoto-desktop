@@ -84,7 +84,7 @@ export function ArtworkEditor({ title, value, adult = false, onChange, onBusy }:
       </div>
       {matches?.length ? <ul className="grid gap-1">
         {matches.map((match) => <li key={match.appid}><button type="button" disabled={busy} onClick={() => void run((signal) => useSteam(match, signal))} className="kryo-radius flex w-full items-center gap-3 p-2 text-left text-xs text-foreground hover:bg-secondary disabled:opacity-40">
-          {match.cover ? <img src={artSrc(match.cover) ?? undefined} alt="" className="h-10 w-20 object-cover blur-sm" /> : null}
+          {match.cover ? <img decoding="async" src={artSrc(match.cover) ?? undefined} alt="" className="h-10 w-20 object-cover blur-sm" /> : null}
           <span>{match.title}</span>
         </button></li>)}
       </ul> : null}

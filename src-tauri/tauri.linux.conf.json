@@ -1,0 +1,21 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Kryoto Desktop",
+        "width": 340,
+        "height": 380,
+        "minWidth": 340,
+        "minHeight": 380,
+        "resizable": false,
+        "center": true,
+        "theme": "Dark",
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "visible": false
+      }
+    ]
+  }
+}

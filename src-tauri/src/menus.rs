@@ -55,12 +55,56 @@ fn open_id<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     app.try_state::<Menus>()?.payload.lock().ok().and_then(|p| menu_id(&p))
 }
 
+/// Where the Store's view sits in the main window (logical pixels), so an
+/// anchor in the shell's page can be turned into one in the Store's.
+static STORE_ORIGIN: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+
+pub fn set_store_origin(x: f64, y: f64) {
+    if let Ok(mut o) = STORE_ORIGIN.lock() {
+        *o = (x, y);
+    }
+    #[cfg(target_os = "linux")]
+    crate::system::set_fill_split(y);
+}
+
+/// Draw a plain menu in the Store's own page (BROWSER_STATE_SCRIPT,
+/// `__kryoMenu`), when a kryo.to page is in it. That is a part of the page: a
+/// second web view over the Store could not be see-through on Linux, which is
+/// why its corners were square or grey. False when the page cannot take it
+/// (not loaded, not kryo.to) and the menu view should draw it instead.
+fn draw_in_store<R: Runtime>(app: &AppHandle<R>, payload: &serde_json::Value, anchor: Anchor, right: bool) -> bool {
+    let Some(store) = app.get_webview(crate::STORE) else { return false };
+    if !store.url().map(|u| crate::is_kryoto(&u, app)).unwrap_or(false) {
+        return false;
+    }
+    let (ox, oy) = STORE_ORIGIN.lock().map(|o| *o).unwrap_or((0.0, 0.0));
+    // The page only reaches down from the Store's top edge. A trigger well above
+    // it (the title bar's menus, the account) cannot have its menu drawn next to
+    // it from in here: the menu view does that one.
+    if anchor.bottom + GAP * 4.0 < oy {
+        return false;
+    }
+    let message = serde_json::json!({
+        "items": payload["items"],
+        "minWidth": payload["minWidth"],
+        "colors": payload["look"]["colors"],
+        "x": anchor.left - ox,
+        "anchorRight": anchor.right - ox,
+        "y": (anchor.bottom - oy + GAP).max(0.0),
+        "right": right,
+    });
+    store.eval(format!("window.__kryoMenu&&window.__kryoMenu.open({message})")).is_ok()
+}
+
 /// Hide the menu, if one is showing, and tell the shell.
 pub fn close<R: Runtime>(app: &AppHandle<R>) {
     let Some(state) = app.try_state::<Menus>() else { return };
     let Some(menu) = state.payload.lock().ok().and_then(|mut p| menu_id(&p.take())) else { return };
     if let Some(view) = app.get_webview(LABEL) {
         let _ = view.hide();
+    }
+    if let Some(store) = app.get_webview(crate::STORE) {
+        let _ = store.eval("window.__kryoMenu&&window.__kryoMenu.close()");
     }
     let _ = app.emit_to("main", "menu-closed", Closed { menu: Some(menu) });
 }
@@ -84,6 +128,13 @@ pub async fn menu_open(
     if previous.is_some() {
         let _ = app.emit_to("main", "menu-closed", Closed { menu: previous });
     }
+    if payload["kind"] == "menu" && draw_in_store(&app, &payload, anchor, right) {
+        // A menu from the other kind of view may still be up.
+        if let Some(view) = app.get_webview(LABEL) {
+            let _ = view.hide();
+        }
+        return Ok(());
+    }
     if let Some(view) = app.get_webview(LABEL) {
         // Drawn again, hidden, then shown by `menu_ready` at its new size.
         let _ = view.hide();
@@ -95,7 +146,9 @@ pub async fn menu_open(
     let window = app.get_window("main").ok_or("The main window is gone.")?;
     let builder = WebviewBuilder::new(LABEL, WebviewUrl::default())
         // The shell's own background, for the moment before the menu paints.
-        .background_color(Color(10, 10, 10, 255))
+        // Linux: see-through, so the panel's rounded corners (styles.css) show
+        // the window's fill behind them (system.rs, `round_corners`).
+        .background_color(Color(10, 10, 10, if cfg!(target_os = "linux") { 0 } else { 255 }))
         .focused(false);
     let (position, size) = crate::placement::rect(anchor.left, anchor.bottom, 320.0, 480.0, scale);
     let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;

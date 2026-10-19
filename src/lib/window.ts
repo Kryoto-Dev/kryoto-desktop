@@ -84,6 +84,10 @@ export function useWindowState(): WindowState {
       stop?.()
     }
   }, [])
+  // styles.css squares the Linux window's rounded corners when it fills the screen.
+  useEffect(() => {
+    document.documentElement.dataset.frame = state.maximized || state.fullscreen ? 'square' : 'round'
+  }, [state])
   return state
 }
 

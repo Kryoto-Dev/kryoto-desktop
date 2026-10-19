@@ -87,7 +87,7 @@ export function InvitePicker({
                 className="kryo-radius flex w-full items-center gap-3 px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-secondary disabled:opacity-50"
               >
                 {g.cover ? (
-                  <img src={artSrc(g.cover) ?? undefined} alt="" className="kryo-radius h-10 w-7 shrink-0 object-cover" />
+                  <img decoding="async" src={artSrc(g.cover) ?? undefined} alt="" className="kryo-radius h-10 w-7 shrink-0 object-cover" />
                 ) : (
                   <span className="kryo-radius grid h-10 w-7 shrink-0 place-items-center bg-secondary">
                     <Gamepad2 className="size-3.5 text-muted-foreground" aria-hidden />
