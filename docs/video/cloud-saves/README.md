@@ -20,4 +20,4 @@ node kryo.to/.claude/skills/launch-video/scripts/plan-voice.mjs --work kryoto-de
 
 Keep the selected audio at `.tmp/cloud-saves-video/voice.mp3`, relative to Desktop. The soundtrack can also be extracted from the checked-in MP4 for a later edit. Embed Teletext into the skill's stage with `embed-fonts.mjs`, sample the planned edit with `sample.mjs`, render disjoint frame ranges with `render.mjs` and encode with `encode.mjs --name cloud-saves-guide --small 0`. The skill documents these steps in full.
 
-The 2560x1440, 60 fps MP4 and its transcript/captions live in `kryo.to/public/blog/cloud-saves-0-13-0/`. The blog remains a draft for later manual publication.
+The 2560x1440, 60 fps MP4 lives in `kryo.to/public/blog/cloud-saves-0-13-0/`. The blog remains a draft for later manual publication.
