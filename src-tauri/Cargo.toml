@@ -1,6 +1,6 @@
 [package]
 name = "kryoto-desktop"
-version = "0.2.27"
+version = "0.2.28"
 description = "Kryoto's native desktop launcher shell."
 authors = ["Kryoto"]
 license = "MIT"
@@ -15,6 +15,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 kryoto-repair = { path = "../crates/kryoto-repair" }
+# Cloud saves: finding a game's saves, packing and restoring them (saves/).
+kryoto-saves = { path = "../crates/kryoto-saves" }
+# Watching where a game writes while it runs (saves/tracer.rs).
+notify = { version = "8", default-features = false }
 walkdir = "2"
 tauri = { version = "2", features = ["unstable", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
@@ -75,7 +79,7 @@ dev-plain-chat-store = ["km-store-sqlcipher/plain-sqlite-dev"]
 vigem-client = { version = "0.1", features = ["unstable_xtarget_notification"] }
 webview2-com = "0.39"
 windows = { version = "0.62", default-features = false }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

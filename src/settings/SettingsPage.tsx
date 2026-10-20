@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { artSrc } from '@/lib/art'
-import { Bell, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Volume2, Wrench } from 'lucide-react'
+import { Bell, Cloud, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Volume2, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
-import { browserNavigate, isTauri, mountStore, placeMainStore, STORE_HOME } from '@/lib/window'
+import { browserNavigate, isTauri, mountStore, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
@@ -16,6 +16,7 @@ import { CompatPane } from '@/settings/CompatPane'
 import { LogsPane } from '@/settings/LogsPane'
 import { PhonePane } from '@/settings/PhonePane'
 import { ControllerPane } from '@/settings/ControllerPane'
+import { CloudPane } from '@/settings/CloudPane'
 
 /**
  * Settings: one page for everything you can set.
@@ -43,7 +44,9 @@ export type SettingsSection =
   | 'compat'
   | 'developer'
   | 'logs'
-  /** kryo.to's saved achievements, a part of Support (no rail entry of its own). */
+  /** Achievements and saves on the account, and how this PC syncs them. */
+  | 'cloud'
+  /** The old name of Cloud, still asked for by older links. */
   | 'achievements'
 
 /** kryo.to's settings, by the fragment that opens each category there. */
@@ -53,7 +56,6 @@ const WEB: Partial<Record<SettingsSection, string>> = {
   notifications: 'notifications',
   security: 'password',
   support: 'donations',
-  achievements: 'achievements',
 }
 
 export const isWebSection = (s: SettingsSection) => s in WEB
@@ -76,7 +78,7 @@ export function SettingsPage({
   onSignIn: () => void
 }) {
   const guest = !!account.guest
-  const railSection: SettingsSection = section === 'achievements' ? 'support' : section
+  const railSection: SettingsSection = section === 'achievements' ? 'cloud' : section
   const kryo: RailItem[] = [
     { id: 'profile', label: 'Profile', icon: <User /> },
     { id: 'appearance', label: 'Appearance', icon: <Palette /> },
@@ -88,6 +90,7 @@ export function SettingsPage({
     { id: 'general', label: 'General', icon: <SlidersHorizontal /> },
     { id: 'storage', label: 'Storage', icon: <HardDrive /> },
     { id: 'downloads', label: 'Downloads', icon: <Download /> },
+    ...(guest ? [] : [{ id: 'cloud' as const, label: 'Cloud', icon: <Cloud /> }]),
     { id: 'sounds', label: 'Sounds', icon: <Volume2 /> },
     ...(isWindowsHost() ? [{ id: 'runtimes' as const, label: 'Game runtimes', icon: <Package /> }] : []),
     { id: 'phone', label: 'Phone', icon: <Smartphone /> },
@@ -128,7 +131,7 @@ export function SettingsPage({
           )}
         </div>
       </nav>
-      {WEB[section] && !guest ? <WebPane fragment={WEB[section]!} page={page} /> : <DesktopPane section={section} />}
+      {WEB[section] && !guest ? <WebPane fragment={WEB[section]!} page={page} /> : <DesktopPane section={railSection} />}
     </div>
   )
 }
@@ -238,6 +241,7 @@ function DesktopPane({ section }: { section: SettingsSection }) {
     general: 'General',
     storage: 'Storage',
     downloads: 'Downloads',
+    cloud: 'Cloud',
     sounds: 'Sounds',
     runtimes: 'Game runtimes',
     controller: 'Controller',
@@ -319,6 +323,7 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             <GraphicsSection />
           </>
         ) : null}
+        {section === 'cloud' ? <CloudPane s={s} set={set} onManage={() => openStorePage('/perks#cloud')} /> : null}
         {section === 'controller' ? <ControllerPane /> : null}
         {section === 'compat' ? <CompatPane s={s} set={set} /> : null}
         {section === 'developer' ? (

@@ -4,6 +4,7 @@ import {
   Bell as BellIcon,
   Bookmark,
   ChartColumn,
+  Cloud,
   Download as DownloadIcon,
   FolderHeart,
   FolderOpen,
@@ -17,6 +18,7 @@ import {
   Play,
   Plus,
   Settings as SettingsIcon,
+  Sparkles,
   Square,
   Trash2,
   User,
@@ -37,6 +39,7 @@ import { NavBar, type NavTabSpec, type TopTab } from '@/shell/NavBar'
 import { UrlPill, WebSlot } from '@/shell/WebView'
 import { BottomBar } from '@/shell/BottomBar'
 import { UpdateCheck, UpdatePrompt } from '@/shell/UpdatePrompt'
+import { CloudSavesPrompt } from '@/shell/CloudSavesPrompt'
 import { Toasts, useToasts, type Toast } from '@/shell/Toasts'
 import { Sidebar } from '@/library/Sidebar'
 import { LibraryHome } from '@/library/LibraryHome'
@@ -721,6 +724,8 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
             { label: 'My collections', icon: <FolderHeart />, onSelect: () => openWeb('/library?tab=collections') },
             { label: 'Friends & chat', icon: <MessageCircle />, onSelect: () => go({ kind: 'friends' }) },
             { label: 'Notifications', icon: <BellIcon />, onSelect: () => openWeb('/notifications') },
+            { label: 'Kryos and perks', icon: <Sparkles />, onSelect: () => openWeb('/perks') },
+            { label: account.cloudSaves ? 'Cloud saves & achievements' : 'Cloud achievements', icon: <Cloud />, onSelect: () => openSettings('cloud') },
             { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings('profile') },
           ],
         },
@@ -786,6 +791,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       ]
     : [
         { label: 'View profile', icon: <User />, onSelect: () => openWeb(`/user/${username}`) },
+        { label: 'Kryos and perks', icon: <Sparkles />, onSelect: () => openWeb('/perks') },
         { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings('profile') },
         { separator: true },
         { label: 'Sign out', icon: <LogOut />, onSelect: () => void signOut().catch(() => {}) },
@@ -1106,6 +1112,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           }}
         />
       ) : null}
+      <CloudSavesPrompt />
       <UpdatePrompt
         busy={{
           games: lib.running.size,

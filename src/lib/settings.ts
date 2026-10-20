@@ -47,6 +47,18 @@ export type Settings = {
   /** The name in games: your K// username, `playerName`, or each build's own. */
   playerNameMode: PlayerNameMode
   playerName: string
+  /** Cloud saves (saves/ in src-tauri), where kryo.to has them on. */
+  cloudSaves: boolean
+  /** Back a game's saves up when it closes. */
+  cloudSavesOnExit: boolean
+  /** Newer saves from another PC before Play: put them here, or ask first. */
+  cloudSavesRestore: 'auto' | 'ask'
+  /** Watch where games write, to find their saves. */
+  cloudSavesDetect: boolean
+  /** Tell kryo.to the save folders found, so other players' games find theirs. */
+  cloudSavesShare: boolean
+  /** Local backups of replaced saves kept per game. */
+  cloudSavesKeepLocal: number
 }
 
 /** How a game's in-game name is picked (src-tauri player_name.rs). */

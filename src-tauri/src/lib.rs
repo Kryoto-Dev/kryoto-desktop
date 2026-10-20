@@ -30,6 +30,7 @@ mod player_name;
 mod presence;
 mod resolvers;
 mod runtimes;
+mod saves;
 mod settings;
 mod storage;
 mod system;
@@ -91,6 +92,9 @@ struct Account {
     /// Controller support is rolled out to this account (flag `controller`).
     #[serde(default)]
     controller: bool,
+    /// Cloud saves are rolled out to this account (flag `cloud_saves`).
+    #[serde(default)]
+    cloud_saves: bool,
     /// Their Kryos balance (kryo.to's coin for perks and badges).
     #[serde(default)]
     kryos: Option<i64>,
@@ -514,6 +518,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           room: !!(u.features && u.features.chat_room),
           voice: !!(u.features && u.features.voice),
           controller: !!(u.features && u.features.controller),
+          cloudSaves: !!(u.features && u.features.cloud_saves),
           kryos: coins,
           appearance: {
             theme: u.appearanceTheme || null,
@@ -1139,6 +1144,7 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
                 counts: Default::default(),
             }));
             player_name::remember_account(&app, account.as_ref().map(|a| a.username.as_str()));
+            saves::set_account(&app, account.as_ref().map(|a| a.username.as_str()), account.as_ref().is_some_and(|a| a.cloud_saves));
             let _ = app.emit_to("main", "account-state", account);
         }
         if let Some(friends) = state.friends {
@@ -1498,6 +1504,17 @@ pub fn run() {
             achievements_cloud::cloud_achievements_pending,
             achievements_cloud::cloud_achievements_report,
             achievements_cloud::cloud_achievements_status,
+            saves::cloud_saves_status,
+            saves::cloud_saves_refresh,
+            saves::cloud_saves_game,
+            saves::cloud_saves_location,
+            saves::cloud_saves_add_folder,
+            saves::cloud_saves_backup,
+            saves::cloud_saves_versions,
+            saves::cloud_saves_restore,
+            saves::cloud_saves_restore_local,
+            saves::cloud_saves_answer,
+            saves::cloud_saves_library,
             runtimes::runtimes_list,
             runtimes::runtimes_install,
             runtimes::runtimes_progress,

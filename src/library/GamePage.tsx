@@ -12,6 +12,7 @@ import { errorText, isTauri } from '@/lib/bridge'
 import { cn } from '@/lib/utils'
 import { AddonsCard } from '@/library/AddonsCard'
 import { AchievementsCard } from '@/library/AchievementsCard'
+import { CloudSavesCard } from '@/library/CloudSavesCard'
 import { CompatibilityFacts } from '@/library/Compatibility'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
 import { automaticArtwork } from '@/lib/game-artwork'
@@ -311,6 +312,7 @@ export function GamePage({
           ) : null}
           <AddonsCard game={game} onGet={onGetUpdate} onChanged={(g) => onGameChanged?.(g)} />
           <AchievementsCard game={game} running={running} />
+          <CloudSavesCard game={game} running={running} />
         </div>
         <Card className="grid gap-3">
           <Label>Info</Label>

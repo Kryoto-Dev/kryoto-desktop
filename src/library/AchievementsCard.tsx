@@ -169,7 +169,7 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
               <span className="grow">{cloud.perk ? 'Saved to your kryo.to account, and back on any PC you sign in on.' : 'Supporters keep their achievements on their kryo.to account.'}</span>
               <button
                 type="button"
-                onClick={() => (cloud.perk ? openSettingsSection('achievements') : openStorePage('/donate'))}
+                onClick={() => (cloud.perk ? openSettingsSection('cloud') : openStorePage('/donate'))}
                 className="shrink-0 font-bold uppercase tracking-wider text-foreground hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
               >
                 {cloud.perk ? 'Manage' : 'See how'}
