@@ -10,7 +10,7 @@
 //! which catches whatever the watchers missed. `kryoto_saves::trace` then
 //! picks the game's own folders out of it all.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,8 +33,9 @@ pub struct Tracer {
     stop: Arc<AtomicBool>,
     events: Arc<Mutex<HashSet<PathBuf>>>,
     open: Arc<Mutex<HashSet<PathBuf>>>,
+    // Windows only, so named in full: an import of it is unused elsewhere.
     #[cfg(windows)]
-    registry_before: HashMap<String, u64>,
+    registry_before: std::collections::HashMap<String, u64>,
     _watchers: Vec<notify::RecommendedWatcher>,
     pub roots: SaveRoots,
     ignore: Vec<PathBuf>,
