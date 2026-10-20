@@ -38,19 +38,20 @@ tauri-plugin-process = "2.4"
 # linked in, reads them (the library Steam and most games use, with the
 # SDL_GameControllerDB built in), and kryoto-padmap, our own open-source
 # resolver, says which pad it is, what its buttons are called and how a remap
-# reaches games. Path dependency while the repos sit side by side, like
-# kryoto-messaging; CI checks it out next to this repo.
+# reaches games. Pin the repository revision so a clean checkout does not need
+# a sibling folder or a moving dependency head.
 sdl2 = { version = "0.38", features = ["bundled", "static-link"] }
-padmap = { path = "../../kryoto-padmap", features = ["serde", "sdl-db"] }
+padmap = { git = "https://github.com/Kryoto-Dev/kryoto-padmap.git", rev = "c6af8e19e991721f4fb64c368c351169823df6e1", features = ["serde", "sdl-db"] }
 
 # Chat (FRIENDS-AND-CHAT.md). All cryptography lives in kryoto-messaging; this
-# app only drives it. Path dependencies while the repos sit side by side; CI
-# checks kryoto-messaging out next to this repo.
-km-core = { path = "../../kryoto-messaging/crates/km-core" }
-km-proto = { path = "../../kryoto-messaging/crates/km-proto" }
-km-store-sqlcipher = { path = "../../kryoto-messaging/crates/km-store-sqlcipher", default-features = false }
-# OS secure store: Windows Credential Manager, Linux Secret Service.
-keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
+# app only drives it. Pin the repository revision for reproducible clean builds.
+km-core = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "1faad72e5107936c537659e475fbf22dc4ae2197" }
+km-proto = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "1faad72e5107936c537659e475fbf22dc4ae2197" }
+km-store-sqlcipher = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "1faad72e5107936c537659e475fbf22dc4ae2197", default-features = false }
+# OS secure store: Windows Credential Manager, macOS Keychain, or Linux Secret
+# Service. The passphrase file remains the fallback when a desktop store is
+# unavailable (for example, a headless Linux session).
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
 prost = "0.14"
 zeroize = "1.9"
