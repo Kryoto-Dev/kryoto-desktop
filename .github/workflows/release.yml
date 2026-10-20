@@ -315,9 +315,11 @@ jobs:
             for (let attempt = 0; attempt < 90; attempt++) {
               const { data } = await github.rest.actions.listWorkflowRuns({
                 ...context.repo, workflow_id: 'ci.yml', head_sha: context.sha,
-                event: 'push', per_page: 10,
+                branch: 'main', per_page: 10,
               });
-              const run = data.workflow_runs.find(r => r.head_sha === context.sha);
+              const run = data.workflow_runs.find(r => r.head_sha === context.sha
+                && r.head_branch === 'main'
+                && ['push', 'workflow_dispatch'].includes(r.event));
               if (run?.status === 'completed') {
                 if (run.conclusion !== 'success') {
                   throw new Error(`CI ${run.id} finished with ${run.conclusion}; keeping the release as a draft.`);
