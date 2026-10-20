@@ -461,6 +461,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     previewBus.emit('chat-status', previewChat)
   },
   compat_status: () => ({
+    platform: 'linux',
     tools: [
       { name: 'GE-Proton10-17', path: '/home/you/.local/share/to.kryo.desktop/compat/GE-Proton10-17/proton', kind: 'proton', managed: true },
       { name: 'Proton 9.0 (Beta)', path: '/home/you/.steam/steam/steamapps/common/Proton 9.0 (Beta)/proton', kind: 'proton', managed: false },

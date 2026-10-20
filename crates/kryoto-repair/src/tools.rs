@@ -13,8 +13,8 @@
 //!   DepotDownloader  a .NET dll - run with native `dotnet` on both platforms
 //!   7-Zip            native `7z`/`7zz` exists on Linux
 //!   DIE              ships a native Linux console build
-//!   generate_interfaces  Windows exe -> Wine
-//!   Steamless            .NET Framework Windows app -> Wine (needs dotnet48)
+//!   generate_interfaces  Windows exe -> Wine on Linux, Sikarugir on macOS
+//!   Steamless            .NET Framework Windows app -> Wine/Sikarugir (needs dotnet48)
 //!
 //! Getting that split wrong is not a small mistake: running `dotnet` under Wine
 //! works badly and slowly, and sending a native ELF to Wine simply fails.
@@ -33,8 +33,10 @@ use crate::error::{Error, Result};
 pub enum Launch {
     /// Run it directly.
     Native,
-    /// A Windows .exe on a non-Windows host: prefix with `wine`.
+    /// A Windows .exe on Linux: prefix with `wine`.
     Wine,
+    /// A Windows .exe on macOS: invoke Sikarugir's wrapper CLI.
+    Sikarugir,
     /// A .NET dll: run as `dotnet <dll>`.
     Dotnet,
 }
@@ -47,7 +49,8 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// Build the command, applying the Wine or dotnet prefix as needed.
+    /// Build the command, applying the compatibility runner or dotnet prefix
+    /// as needed.
     pub fn command(&self, wine: &str, dotnet: &str) -> Command {
         let mut cmd = match self.launch {
             Launch::Native => Command::new(&self.path),
@@ -58,6 +61,15 @@ impl Tool {
             }
             Launch::Wine => {
                 let mut c = Command::new(wine);
+                c.arg(&self.path);
+                c
+            }
+            Launch::Sikarugir => {
+                let mut c = Command::new(wine);
+                // Sikarugir's wrapper launcher takes the Windows executable
+                // as its first argument. `wine` is the historical runner
+                // argument to this method; on macOS callers provide the
+                // selected wrapper launcher there.
                 c.arg(&self.path);
                 c
             }
@@ -82,9 +94,39 @@ impl Tool {
 pub fn windows_exe_launch() -> Launch {
     if cfg!(windows) {
         Launch::Native
+    } else if cfg!(target_os = "macos") {
+        Launch::Sikarugir
     } else {
         Launch::Wine
     }
+}
+
+/// Validate the bundle-relative launcher path used by Sikarugir. The desktop
+/// frontend performs the same check while discovering wrappers; keeping this
+/// boundary in the shared crate prevents other repair frontends from silently
+/// falling back to an unrelated executable on macOS.
+pub fn valid_sikarugir_runner(path: &Path) -> bool {
+    let executable = path.file_name().is_some_and(|name| name == "Sikarugir" || name == "launcher")
+        && path.parent().and_then(Path::file_name).is_some_and(|name| name == "MacOS")
+        && path.parent().and_then(Path::parent).and_then(Path::file_name).is_some_and(|name| name == "Contents")
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .is_some_and(|app| app.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("app")))
+        && path.is_file();
+    if !executable {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    true
 }
 
 /// Paths to everything the pipeline shells out to.
@@ -132,9 +174,16 @@ pub struct ToolPaths {
     /// `dotnet` executable. Default: whatever is on PATH.
     #[serde(default)]
     pub dotnet: Option<String>,
-    /// `wine` executable. Default: whatever is on PATH. Ignored on Windows.
+    /// `wine` executable. Default: whatever is on PATH. Used on Linux; on
+    /// macOS use `sikarugir` for the wrapper launcher instead.
     #[serde(default)]
     pub wine: Option<String>,
+    /// Sikarugir's `Contents/MacOS/Sikarugir` or legacy `launcher` binary on
+    /// macOS. The shared repair engine keeps the backend explicit instead of
+    /// falling back to a host `wine` binary that would not own the wrapper's
+    /// prefix or renderers.
+    #[serde(default)]
+    pub sikarugir: Option<PathBuf>,
 }
 
 impl ToolPaths {
@@ -144,6 +193,18 @@ impl ToolPaths {
 
     pub fn wine(&self) -> &str {
         self.wine.as_deref().unwrap_or("wine")
+    }
+
+    /// The runner for downloaded Windows helper executables.
+    pub fn windows_runner(&self) -> String {
+        if cfg!(target_os = "macos") {
+            self.sikarugir
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "sikarugir".into())
+        } else {
+            self.wine().into()
+        }
     }
 
     /// gbe_fork's emulator DLL for the given architecture.
@@ -418,4 +479,31 @@ fn is_ascii_art(line: &str) -> bool {
     }
     let alnum = solid.iter().filter(|c| c.is_alphanumeric()).count();
     alnum * 5 < solid.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sikarugir_commands_pass_the_exe_to_the_wrapper_launcher() {
+        let tool = Tool {
+            name: "helper",
+            path: PathBuf::from("/tmp/repair-helper.exe"),
+            launch: Launch::Sikarugir,
+        };
+        let command = tool.command("/Users/me/Applications/Sikarugir/Helper.app/Contents/MacOS/Sikarugir", "dotnet");
+        assert_eq!(command.as_std().get_program(), "/Users/me/Applications/Sikarugir/Helper.app/Contents/MacOS/Sikarugir");
+        assert_eq!(command.as_std().get_args().collect::<Vec<_>>(), vec!["/tmp/repair-helper.exe"]);
+    }
+
+    #[test]
+    fn the_default_windows_helper_backend_stays_native_or_wine_off_macos() {
+        #[cfg(windows)]
+        assert_eq!(windows_exe_launch(), Launch::Native);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert_eq!(windows_exe_launch(), Launch::Wine);
+        #[cfg(target_os = "macos")]
+        assert_eq!(windows_exe_launch(), Launch::Sikarugir);
+    }
 }

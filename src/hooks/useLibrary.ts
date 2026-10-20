@@ -14,7 +14,7 @@ export function useLibrary() {
    * Pressed Play, process not there yet.
    *
    * Before the game's process exists the client finds its exe, picks the
-   * Proton or Wine to run it with and writes the start of its log; on Linux,
+   * Proton, Wine or a macOS wrapper to run it with and writes the start of its log;
    * with a prefix to set up, that is seconds. The Play button used to sit
    * there until the process appeared, which read as a press that did nothing,
    * so the game counts as running from the press. The process's own

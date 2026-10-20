@@ -7,6 +7,7 @@ import { CompatPicker, type CompatTool } from '@/settings/CompatPicker'
 
 type Status = {
   tools: (CompatTool & { managed?: boolean })[]
+  platform: 'linux' | 'macos' | 'windows'
   umu: string | null
   mangohud: boolean
   gamemode: boolean
@@ -15,10 +16,9 @@ type Status = {
 type Progress = { step: string; fraction: number | null }
 
 /**
- * Settings > Compatibility, for Windows games on Linux. Works like Steam
- * Play: the app gets Proton itself and runs games in Steam's own runtime, so
- * nobody has to install Wine or Proton by hand. Proton from Steam, or Wine
- * from the system, is picked up too.
+ * Settings > Compatibility for Windows games. Linux uses Proton/Wine like
+ * Steam; macOS uses user-created Sikarugir wrapper apps because those wrappers
+ * own the Wine engine, renderer and prefix.
  */
 export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
   const [status, setStatus] = useState<Status | null>(null)
@@ -29,7 +29,7 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
   const refresh = useCallback(() => {
     void call<Status>('compat_status')
       .then(setStatus)
-      .catch(() => setStatus({ tools: [], umu: null, mangohud: false, gamemode: false }))
+      .catch(() => setStatus({ tools: [], platform: 'linux', umu: null, mangohud: false, gamemode: false }))
     setVersion((v) => v + 1)
   }, [])
 
@@ -65,24 +65,28 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
     refresh()
   }
 
-  const protons = status?.tools.filter((t) => t.kind !== 'umu') ?? []
-  const ownProton = protons.some((t) => t.managed && t.kind === 'proton')
+  const macos = status?.platform === 'macos'
+  const backends = status?.tools.filter((t) => (macos ? t.kind === 'sikarugir' : t.kind !== 'umu')) ?? []
+  const ownProton = backends.some((t) => t.managed && t.kind === 'proton')
 
   return (
     <>
-      <Section title="Proton" hint="Proton runs Windows games on Linux. Kryoto gets it for you, like Steam does.">
+      <Section
+        title={macos ? 'Sikarugir wrappers' : 'Proton'}
+        hint={macos ? 'Sikarugir wrappers provide the Wine engine and graphics backend for Windows games on macOS.' : 'Proton runs Windows games on Linux. Kryoto gets it for you, like Steam does.'}
+      >
         <div className="grid gap-3">
-          {protons.length ? (
+          {backends.length ? (
             <ul className="kryo-radius grid gap-px overflow-hidden border border-border bg-border">
-              {protons.map((t) => (
+              {backends.map((t) => (
                 <li key={t.path} className="flex items-center gap-3 bg-card px-3 py-2.5">
                   <span className="grid min-w-0 grow">
                     <b className="truncate text-xs text-foreground">{t.name}</b>
                     <span className="truncate text-[10px] text-muted-foreground">
-                      {t.managed ? 'From Kryoto' : t.kind === 'proton' ? 'From Steam' : 'Installed on this computer'}
+                      {t.managed ? 'From Kryoto' : t.kind === 'sikarugir' ? 'Sikarugir wrapper' : t.kind === 'proton' ? 'From Steam' : 'Installed on this computer'}
                     </span>
                   </span>
-                  {t.managed ? (
+                  {t.managed && t.kind !== 'sikarugir' ? (
                     <Button size="sm" variant="ghost" onClick={() => void remove(t)} disabled={!!busy}>
                       <Trash2 className="size-3" />
                       Remove
@@ -92,10 +96,14 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
               ))}
             </ul>
           ) : status ? (
-            <Caption>No Proton or Wine on this computer yet.</Caption>
+            <Caption>{macos ? 'No Sikarugir wrappers found in ~/Applications/Sikarugir.' : 'No Proton or Wine on this computer yet.'}</Caption>
           ) : null}
 
-          {busy ? (
+          {macos ? (
+            <Caption>
+              Install Sikarugir, create a wrapper for a Wine game, and save the wrapper in <code>~/Applications/Sikarugir</code>. Refresh this page after creating it.
+            </Caption>
+          ) : busy ? (
             <div className="grid gap-1.5">
               <AsciiBar fraction={busy.fraction} cells={28} className="text-foreground" />
               <Caption>{busy.step}</Caption>
@@ -110,7 +118,7 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
             </div>
           )}
           {error ? <p className="text-xs text-destructive">{error}</p> : null}
-          {status ? (
+          {!macos && status ? (
             <Caption>
               {status.umu
                 ? "Games run inside Steam's game runtime, the same way Steam runs them."
@@ -124,27 +132,29 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
         <CompatPicker key={version} value={s.defaultCompatTool} onChange={(v) => set('defaultCompatTool', v)} />
       </Section>
 
-      <Section title="While playing">
-        <div className="grid gap-3">
-          <Check
-            checked={s.linuxMangohud && !!status?.mangohud}
-            disabled={!status?.mangohud}
-            onChange={(v) => set('linuxMangohud', v)}
-            label={status?.mangohud ? 'Show frame rate and load (MangoHud)' : 'Show frame rate and load (install MangoHud first)'}
-          />
-          <Check
-            checked={s.linuxGamemode && !!status?.gamemode}
-            disabled={!status?.gamemode}
-            onChange={(v) => set('linuxGamemode', v)}
-            label={status?.gamemode ? 'Give games full speed (GameMode)' : 'Give games full speed (install GameMode first)'}
-          />
-          <Check
-            checked={s.linuxFsr}
-            onChange={(v) => set('linuxFsr', v)}
-            label="Sharpen games played below your screen's resolution (FSR, Proton-GE only)"
-          />
-        </div>
-      </Section>
+      {!macos ? (
+        <Section title="While playing">
+          <div className="grid gap-3">
+            <Check
+              checked={s.linuxMangohud && !!status?.mangohud}
+              disabled={!status?.mangohud}
+              onChange={(v) => set('linuxMangohud', v)}
+              label={status?.mangohud ? 'Show frame rate and load (MangoHud)' : 'Show frame rate and load (install MangoHud first)'}
+            />
+            <Check
+              checked={s.linuxGamemode && !!status?.gamemode}
+              disabled={!status?.gamemode}
+              onChange={(v) => set('linuxGamemode', v)}
+              label={status?.gamemode ? 'Give games full speed (GameMode)' : 'Give games full speed (install GameMode first)'}
+            />
+            <Check
+              checked={s.linuxFsr}
+              onChange={(v) => set('linuxFsr', v)}
+              label="Sharpen games played below your screen's resolution (FSR, Proton-GE only)"
+            />
+          </div>
+        </Section>
+      ) : null}
     </>
   )
 }

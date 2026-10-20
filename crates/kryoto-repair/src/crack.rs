@@ -50,7 +50,7 @@ use walkdir::WalkDir;
 use crate::error::{Error, Result};
 use crate::hubcap::Dlc;
 use crate::settings::Emulator;
-use crate::tools::{run, windows_exe_launch, Tool, ToolPaths};
+use crate::tools::{run, valid_sikarugir_runner, windows_exe_launch, Tool, ToolPaths};
 
 /// Extension given to the original DLL before it is overwritten.
 const BACKUP_EXT: &str = "kryoto";
@@ -478,6 +478,12 @@ pub async fn crack_tree(
     emulator: Emulator,
     cancel: &impl crate::Cancellation,
 ) -> Result<CrackResult> {
+    let needs_windows_runner = paths.steamless_exe.is_some()
+        || paths.generate_interfaces(true).is_some()
+        || paths.generate_interfaces(false).is_some();
+    if cfg!(target_os = "macos") && needs_windows_runner && !paths.sikarugir.as_deref().is_some_and(valid_sikarugir_runner) {
+        return Err(Error::Config("macOS repair needs a valid Sikarugir wrapper launcher for its Windows helper tools.".into()));
+    }
     let mut warnings = Vec::new();
     let dlls = find_steam_api_dlls(game_dir);
 
@@ -1525,7 +1531,8 @@ async fn generate_interfaces(
         path: gen,
         launch: windows_exe_launch(),
     };
-    let mut cmd = tool.command(paths.wine(), paths.dotnet());
+    let runner = paths.windows_runner();
+    let mut cmd = tool.command(&runner, paths.dotnet());
     // The dll by absolute path, because the working directory is no longer its
     // folder.
     cmd.arg(dll).current_dir(&scratch);
@@ -1590,7 +1597,8 @@ async fn run_steamless_over_tree(
             path: steamless.clone(),
             launch: windows_exe_launch(),
         };
-        let mut cmd = tool.command(paths.wine(), paths.dotnet());
+        let runner = paths.windows_runner();
+        let mut cmd = tool.command(&runner, paths.dotnet());
         cmd.args(["--quiet", "--realign", "--recalcchecksum"])
             .arg(exe);
 

@@ -1,7 +1,7 @@
 import { call, isTauri } from '@/lib/bridge'
 
 /**
- * System notifications - the ones Windows and Linux show in the corner, like a
+ * System notifications - the ones Windows, Linux and macOS show in the corner, like a
  * browser's. Used for kryo.to's own notifications as they arrive and for the
  * app's news (a game ready to play), so nothing is only in the app.
  *

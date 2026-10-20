@@ -41,7 +41,7 @@ const TABS = [
  * A game's Properties, in Steam's places:
  *   General          name, which way Play starts, the LAUNCH OPTIONS line and
  *                    the exact command it adds up to
- *   Compatibility    Linux only: force a Proton or Wine for this game
+ *   Compatibility    Linux: force Proton/Wine; macOS: force a Sikarugir wrapper
  *   Installed files  size, folder, exe, uninstall
  *   Builds           Steam's Betas: every build on kryo.to, from any of its
  *                    sources, and keeping the installed one over updates

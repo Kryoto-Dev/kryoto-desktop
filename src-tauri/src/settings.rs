@@ -17,7 +17,7 @@ pub struct Settings {
     pub delete_archives: bool,
     /// `store` or `library`.
     pub start_page: String,
-    /// Wine or Proton for games that have not picked their own (not Windows).
+    /// Compatibility backend for games that have not picked their own (not Windows).
     pub default_compat_tool: Option<String>,
     /// Minimize the client while a game runs.
     pub minimize_on_play: bool,
@@ -45,7 +45,7 @@ pub struct Settings {
     pub send_reports: bool,
     /// The close button hides the window to the tray instead of quitting.
     pub close_to_tray: bool,
-    /// Start (to the tray) when you sign in to Windows.
+    /// Start (to the tray) when you sign in to the desktop.
     pub start_with_system: bool,
     /// Buttons press in under the pointer, as on kryo.to.
     pub press_effect: bool,
@@ -308,8 +308,8 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     }
     if before.start_with_system != settings.start_with_system {
         if let Err(e) = crate::system::set_autostart(settings.start_with_system) {
-            crate::logging::error("settings", &format!("start with Windows: {e}"));
-            return Err(format!("Saved, but starting with Windows could not be turned {}: {e}", if settings.start_with_system { "on" } else { "off" }));
+            crate::logging::error("settings", &format!("start with the system: {e}"));
+            return Err(format!("Saved, but starting with the system could not be turned {}: {e}", if settings.start_with_system { "on" } else { "off" }));
         }
     }
     Ok(settings)

@@ -264,9 +264,13 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
         for (k, v) in &input.env {
             set_default(&mut env, k, v);
         }
-        let tool = input
-            .compat_tool
-            .ok_or("This is a Windows game. Get Proton in Settings, Compatibility, or pick Wine or Proton under Properties, Compatibility.")?;
+        let tool = input.compat_tool.ok_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "This is a Windows game. Install Sikarugir, create a wrapper, and select it in Settings > Compatibility or Properties > Compatibility.".to_string()
+            } else {
+                "This is a Windows game. Get Proton in Settings, Compatibility, or pick Wine or Proton under Properties, Compatibility.".to_string()
+            }
+        })?;
         let kind = crate::compat::kind_of(tool);
         let through_umu = kind == "proton" && input.umu.is_some();
         if through_umu {
@@ -286,6 +290,17 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
             set_default(&mut env, "GAMEID", "umu-default");
         } else if kind == "proton" {
             return Err("Proton needs its game runtime. Get Proton in Settings > Compatibility to set it up, or pick Wine.".into());
+        } else if kind == "sikarugir" {
+            let prefix = crate::compat::sikarugir_prefix(tool).ok_or("The Sikarugir launcher is not a valid wrapper launcher.")?;
+            if !exe.is_absolute() {
+                return Err("Sikarugir needs an absolute path to the Windows executable.".into());
+            }
+            // Sikarugir's wrapper launcher owns the Wine engine, renderer and
+            // prefix. Its CLI takes the Windows executable as its first
+            // argument; unlike Wine and Proton it must not receive Linux-only
+            // setup variables. Keep the wrapper-owned prefix visible to the
+            // log, achievements and lobby consumers as well.
+            set_default(&mut env, "WINEPREFIX", &prefix.to_string_lossy());
         } else {
             set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
         }
@@ -541,6 +556,42 @@ mod tests {
         assert_eq!(env["WINEPREFIX"], "/data/prefixes/captain-hardcore");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sikarugir_runs_the_exe_through_the_wrapper_prefix() {
+        let root = std::env::temp_dir().join(format!("kryoto-sikarugir-launch-{}", std::process::id()));
+        let launcher = root.join("Captain Hardcore.app/Contents/MacOS/Sikarugir");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "wrapper").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&launcher, permissions).unwrap();
+        }
+        let mut i = input(None, "", false);
+        i.compat_tool = Some(launcher.as_path());
+        let p = plan(&i).unwrap();
+        assert_eq!(p.program, launcher);
+        assert!(p.lead_args[0].ends_with("Captain Hardcore.exe"));
+        assert_eq!(p.cwd, Path::new("/games/Captain Hardcore"));
+        let env: std::collections::HashMap<_, _> = p.env.iter().cloned().collect();
+        assert_eq!(env["WINEPREFIX"], root.join("Captain Hardcore.app/Contents/SharedSupport/prefix").to_string_lossy());
+        assert!(env["WINEDLLOVERRIDES"].contains("kryotoO"));
+        assert!(!env.contains_key("PROTON_PREFER_SDL"));
+        assert!(!env.contains_key("SDL_JOYSTICK_HIDAPI"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn invalid_sikarugir_launcher_is_rejected() {
+        let mut i = input(None, "", false);
+        i.compat_tool = Some(Path::new("/tmp/not-a-wrapper/Sikarugir"));
+        assert!(plan(&i).is_err());
+    }
+
     #[test]
     fn a_users_own_override_wins_and_proton_gets_its_variables() {
         let mut i = input(None, r#"WINEDLLOVERRIDES="winmm=n,b" %command%"#, false);
@@ -577,7 +628,8 @@ mod tests {
     fn linux_without_a_tool_says_what_to_do() {
         let mut i = input(None, "", false);
         i.compat_tool = None;
-        assert!(plan(&i).unwrap_err().contains("Wine or Proton"));
+        let error = plan(&i).unwrap_err();
+        assert!(if cfg!(target_os = "macos") { error.contains("Sikarugir") } else { error.contains("Wine or Proton") });
     }
 
     #[test]

@@ -502,7 +502,7 @@ pub(crate) fn dir_size(path: &Path) -> u64 {
 
 /// Bytes the game's folder takes, for Installed Files.
 /// A game's Wine prefix, for "Browse Wine prefix" in its Manage menu: the
-/// folder Wine or Proton keeps its Windows in (the C: drive, the registry,
+/// folder Wine, Proton or Sikarugir keeps its Windows in (the C: drive, the registry,
 /// most saves and crash dumps). `None` until the game has been started once,
 /// and always on Windows, where there is none.
 #[tauri::command]
@@ -512,6 +512,23 @@ pub fn library_prefix_folder(app: AppHandle, id: String) -> Result<Option<String
     }
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err("Not a game.".into());
+    }
+    if cfg!(target_os = "macos") {
+        // Sikarugir owns the prefix inside its wrapper instead of Kryoto's
+        // per-game data directory. Prefer it even if a legacy Kryoto prefix
+        // happens to remain from an earlier build.
+        if let Ok(games) = load(&app) {
+            if let Some(game) = games.into_iter().find(|game| game.id == id) {
+                let settings = crate::settings::load(&app);
+                if let Some(tool) = tool_for(&app, &game, &settings).ok().flatten() {
+                    if crate::compat::kind_of(&tool) == "sikarugir" {
+                        return Ok(crate::compat::sikarugir_prefix(&tool)
+                            .filter(|prefix| prefix.is_dir())
+                            .map(|prefix| prefix.to_string_lossy().into_owned()));
+                    }
+                }
+            }
+        }
     }
     let root = data_dir(&app)?.join("prefixes").join(&id);
     if !root.is_dir() {
@@ -608,14 +625,15 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
     };
     let prefix = data_dir(app)?.join("prefixes").join(&game.id);
     // The game's own pick, else the one in Settings, else the best one found
-    // on this computer (newest Proton, then umu-run, then Wine).
+    // on this computer (newest Proton, then umu-run, then Wine on Linux;
+    // Sikarugir wrappers on macOS).
     let settings = crate::settings::load(app);
     let managed = crate::compat::managed_dir(app);
     let umu = crate::compat::umu_run(managed.as_deref());
     // Settings > Compatibility's switches, only when the tool is really there.
     let mut wrappers = Vec::new();
     let mut env = Vec::new();
-    if !cfg!(windows) {
+    if cfg!(target_os = "linux") {
         if settings.linux_gamemode {
             wrappers.extend(crate::compat::on_path("gamemoderun").map(|p| p.to_string_lossy().into_owned()));
         }
@@ -625,7 +643,10 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
         if settings.linux_fsr {
             env.push(("WINE_FULLSCREEN_FSR".to_string(), "1".to_string()));
         }
-        // Settings > Controller's remaps, for SDL, Wine and Proton.
+    }
+    if !cfg!(windows) {
+        // Settings > Controller's remaps, for SDL, Wine, Proton and
+        // Sikarugir's Wine process.
         env.extend(crate::pad::game_env(app));
     }
     let tool_path = tool_for(app, game, &settings)?;
@@ -648,12 +669,22 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
     Ok((plan, tool_path))
 }
 
-fn tool_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, settings: &crate::settings::Settings) -> Result<Option<PathBuf>, String> {
+pub(crate) fn tool_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, settings: &crate::settings::Settings) -> Result<Option<PathBuf>, String> {
     if cfg!(windows) {
         return Ok(None);
     }
     let saved = game.compat_tool.as_deref().filter(|t| !t.trim().is_empty()).or(settings.default_compat_tool.as_deref().filter(|t| !t.trim().is_empty()));
-    crate::compat::resolve_tool(saved, &crate::compat::detect_in(crate::compat::managed_dir(app).as_deref()))
+    let detected = crate::compat::detect_in(crate::compat::managed_dir(app).as_deref());
+    let resolved = crate::compat::resolve_tool(saved, &detected);
+    if cfg!(target_os = "macos") {
+        return match resolved {
+            Ok(Some(path)) if crate::compat::kind_of(&path) == "sikarugir" => Ok(Some(path)),
+            Ok(Some(_)) => Err("macOS uses Sikarugir wrappers as its Wine backend. Select a Sikarugir wrapper in Settings > Compatibility.".into()),
+            Ok(None) => Ok(None),
+            Err(_) => Err("No Sikarugir wrapper was found. Install Sikarugir, create a wrapper, and keep it in ~/Applications/Sikarugir.".into()),
+        };
+    }
+    resolved
 }
 
 /// The exact line Play would run, for the Properties window.
@@ -776,8 +807,11 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
     if !plan.cwd.is_dir() {
         plan.cwd = plan.exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(&game.install_dir));
     }
-    if let Some(prefix) = plan.env.iter().find(|(k, _)| k == "WINEPREFIX" || k == "STEAM_COMPAT_DATA_PATH") {
-        std::fs::create_dir_all(&prefix.1).map_err(|e| format!("Could not create the game's compatibility prefix: {e}"))?;
+    let wrapper_owns_prefix = cfg!(target_os = "macos") && tool.as_deref().is_some_and(|p| crate::compat::kind_of(p) == "sikarugir");
+    if !wrapper_owns_prefix {
+        if let Some(prefix) = plan.env.iter().find(|(k, _)| k == "WINEPREFIX" || k == "STEAM_COMPAT_DATA_PATH") {
+            std::fs::create_dir_all(&prefix.1).map_err(|e| format!("Could not create the game's compatibility prefix: {e}"))?;
+        }
     }
 
     // The name the player picked, into the emulator's files, before it reads them.

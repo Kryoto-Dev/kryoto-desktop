@@ -1,5 +1,7 @@
 //! On Linux, the Wine and Proton builds already on this computer, so a game
-//! can be played without anyone typing a path.
+//! can be played without anyone typing a path. On macOS, Windows games use a
+//! Sikarugir wrapper: Sikarugir is a Wineskin-style app bundle whose launcher
+//! owns the Wine engine, renderers and prefix.
 //!
 //! Looked for where Steam, Proton-GE and umu put them, newest Proton first:
 //! Proton runs these games best, umu-run is Proton outside Steam, and plain
@@ -8,7 +10,10 @@
 //! Like Steam, the client can also get them itself: `compat_install` puts the
 //! newest Proton-GE and umu-launcher in the app's own `compat` folder, so a
 //! Linux player never has to install Wine or Proton by hand. Those come first,
-//! and a Proton then runs through umu, inside the Steam Linux Runtime.
+//! and a Proton then runs through umu, inside the Steam Linux Runtime. macOS
+//! does not use Proton or a host `wine` binary: it discovers wrappers in the
+//! standard Sikarugir folder and starts their `Contents/MacOS/Sikarugir` (or
+//! legacy `Contents/MacOS/launcher`) launcher.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -24,7 +29,7 @@ pub struct CompatTool {
     /// What to call it: the folder name for a Proton, else the program.
     pub name: String,
     pub path: String,
-    /// `proton`, `umu` or `wine`.
+    /// `proton`, `umu`, `wine` or `sikarugir`.
     pub kind: String,
     /// Put there by Kryoto Desktop, so Settings > Compatibility can remove it.
     #[serde(default)]
@@ -48,9 +53,10 @@ pub fn on_path(_program: &str) -> Option<PathBuf> {
     None
 }
 
-/// umu-run: the client's own, else one on PATH. Never on Windows.
+/// umu-run: the client's own, else one on PATH. Linux only; macOS uses the
+/// engine and prefix selected by a Sikarugir wrapper.
 pub fn umu_run(managed: Option<&Path>) -> Option<PathBuf> {
-    if cfg!(windows) {
+    if cfg!(any(windows, target_os = "macos")) {
         return None;
     }
     managed
@@ -59,8 +65,126 @@ pub fn umu_run(managed: Option<&Path>) -> Option<PathBuf> {
         .or_else(|| on_path("umu-run"))
 }
 
+/// Sikarugir wrappers in the wild use both names: recent templates call the
+/// executable `Sikarugir`, while the Wineskin-compatible template calls it
+/// `launcher` (the latter is also the name used in Sikarugir's CLI examples).
+const SIKARUGIR_LAUNCHERS: &[&str] = &["Sikarugir", "launcher"];
+
+/// Whether `app` is a Sikarugir/Wineskin wrapper bundle. The launcher is the
+/// contract we can check without opening or modifying the bundle; a prefix is
+/// allowed to be absent because Sikarugir creates it on first use.
+pub fn is_sikarugir_wrapper(app: &Path) -> bool {
+    app.is_dir()
+        && app.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"))
+        && launcher_for_app(app).is_some()
+}
+
+fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn launcher_for_app(app: &Path) -> Option<PathBuf> {
+    let macos = app.join("Contents/MacOS");
+    SIKARUGIR_LAUNCHERS
+        .iter()
+        .map(|name| macos.join(name))
+        .find(|path| executable_file(path))
+}
+
+/// The launcher inside a Sikarugir wrapper. Sikarugir's Homebrew setup keeps
+/// wrappers in `~/Applications/Sikarugir`, while users may also keep them in
+/// `/Applications/Sikarugir` or pass a wrapper path of their own. Both the
+/// current `Sikarugir` launcher name and the older `launcher` name work.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn sikarugir_in(dirs: &[PathBuf]) -> Vec<CompatTool> {
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(read) = std::fs::read_dir(dir) else { continue };
+        for entry in read.flatten() {
+            let app = entry.path();
+            if !is_sikarugir_wrapper(&app) {
+                continue;
+            }
+            let Some(launcher) = launcher_for_app(&app) else { continue };
+            if out.iter().any(|tool: &CompatTool| tool.path == launcher.to_string_lossy()) {
+                continue;
+            }
+            let name = app
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "Sikarugir wrapper".into());
+            out.push(CompatTool {
+                name,
+                path: launcher.to_string_lossy().into_owned(),
+                kind: "sikarugir".into(),
+                managed: false,
+            });
+        }
+    }
+    out.sort_by_key(|tool| tool.name.to_ascii_lowercase());
+    out
+}
+
+#[cfg(target_os = "macos")]
+fn sikarugir_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        out.push(home.join("Applications/Sikarugir"));
+    }
+    out.push(PathBuf::from("/Applications/Sikarugir"));
+    if let Some(custom) = std::env::var_os("KRYOTO_SIKARUGIR_DIR").map(PathBuf::from) {
+        if !out.iter().any(|dir| dir == &custom) {
+            out.push(custom);
+        }
+    }
+    out
+}
+
+/// The wrapper app containing a Sikarugir launcher, if the path is one.
+pub fn sikarugir_wrapper(tool: &Path) -> Option<PathBuf> {
+    let macos = tool.parent()?;
+    if macos.file_name()? != "MacOS" || macos.parent()?.file_name()? != "Contents" {
+        return None;
+    }
+    let app = macos.parent()?.parent()?;
+    if !app.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")) {
+        return None;
+    }
+    (launcher_for_app(app).as_deref() == Some(tool)).then_some(app.to_path_buf())
+}
+
+/// The prefix owned by a Sikarugir wrapper. It is intentionally derived from
+/// the wrapper instead of using Kryoto's Linux-style per-game prefix: the
+/// Sikarugir launcher sets up this prefix and its renderer environment itself.
+pub fn sikarugir_prefix(tool: &Path) -> Option<PathBuf> {
+    sikarugir_wrapper(tool).map(|app| {
+        let shared = app.join("Contents/SharedSupport/prefix");
+        let resources = app.join("Contents/Resources");
+        [shared.clone(), resources.join("wineprefix"), resources.join("prefix")]
+            .into_iter()
+            .find(|prefix| prefix.is_dir())
+            .or_else(|| resources.join("drive_c").is_dir().then_some(resources))
+            .unwrap_or(shared)
+    })
+}
+
 /// Every `<dir>/*/proton` under the folders Steam and Proton-GE use.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(any(not(unix), target_os = "macos"), allow(dead_code))]
 fn protons_in(dirs: &[PathBuf]) -> Vec<CompatTool> {
     let mut out = Vec::new();
     for dir in dirs {
@@ -82,7 +206,7 @@ fn protons_in(dirs: &[PathBuf]) -> Vec<CompatTool> {
 }
 
 /// A sort key that compares the numbers in a name as numbers.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(any(not(unix), target_os = "macos"), allow(dead_code))]
 fn natural_key(s: &str) -> Vec<(u8, u64, String)> {
     let mut out = Vec::new();
     let mut num = String::new();
@@ -110,7 +234,7 @@ fn natural_key(s: &str) -> Vec<(u8, u64, String)> {
     out
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(any(not(unix), target_os = "macos"), allow(dead_code))]
 fn proton_dirs(home: &Path) -> Vec<PathBuf> {
     let steams = steam_roots(home);
     let mut dirs: Vec<PathBuf> = steams.iter().flat_map(|s| [s.join("compatibilitytools.d"), s.join("steamapps/common")]).collect();
@@ -118,6 +242,7 @@ fn proton_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn steam_roots(home: &Path) -> Vec<PathBuf> {
     vec![
         home.join(".steam/steam"),
@@ -156,22 +281,39 @@ pub fn proton_matches_arch(tool: &Path, arch: &str) -> bool {
 pub fn resolve_tool(saved: Option<&str>, tools: &[CompatTool]) -> Result<Option<PathBuf>, String> {
     if let Some(saved) = saved {
         let path = PathBuf::from(saved);
-        let resolved = if path.components().count() == 1 { on_path(saved) } else { path.is_file().then_some(path.clone()) };
+        let resolved = if cfg!(target_os = "macos") {
+            // A macOS selection must be the launcher in a real wrapper, not a
+            // same-named executable copied somewhere else. Sikarugir's prefix
+            // and renderer are relative to that bundle.
+            (path.components().count() != 1 && sikarugir_wrapper(&path).is_some()).then_some(path.clone())
+        } else if path.components().count() == 1 {
+            on_path(saved)
+        } else {
+            path.is_file().then_some(path.clone())
+        };
         if let Some(tool) = resolved {
             if kind_of(&tool) != "proton" || proton_matches_arch(&tool, std::env::consts::ARCH) {
                 return Ok(Some(tool));
             }
         }
         // A valid replacement avoids leaving existing installations broken.
-        if let Some(tool) = tools.first() {
+        if let Some(tool) = tools.iter().find(|tool| {
+            !cfg!(target_os = "macos") || sikarugir_wrapper(Path::new(&tool.path)).is_some()
+        }) {
             return Ok(Some(PathBuf::from(&tool.path)));
+        }
+        if cfg!(target_os = "macos") {
+            return Err(format!("The Sikarugir wrapper {saved} is missing or invalid. Pick a wrapper from ~/Applications/Sikarugir in Settings > Compatibility."));
         }
         return Err(format!("The compatibility tool {saved} is missing or does not match this computer ({}). Get Proton in Settings > Compatibility, or pick an installed Wine tool.", std::env::consts::ARCH));
     }
-    Ok(tools.first().map(|t| PathBuf::from(&t.path)))
+    Ok(tools
+        .iter()
+        .find(|tool| !cfg!(target_os = "macos") || sikarugir_wrapper(Path::new(&tool.path)).is_some())
+        .map(|t| PathBuf::from(&t.path)))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn detect_in(managed: Option<&Path>) -> Vec<CompatTool> {
     let mut out = Vec::new();
     if let Some(m) = managed {
@@ -197,6 +339,11 @@ pub fn detect_in(managed: Option<&Path>) -> Vec<CompatTool> {
     out
 }
 
+#[cfg(target_os = "macos")]
+pub fn detect_in(_managed: Option<&Path>) -> Vec<CompatTool> {
+    sikarugir_in(&sikarugir_dirs())
+}
+
 #[cfg(not(unix))]
 pub fn detect_in(_managed: Option<&Path>) -> Vec<CompatTool> {
     Vec::new()
@@ -212,6 +359,8 @@ pub fn kind_of(tool: &Path) -> &'static str {
     match tool.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()) {
         Some(n) if n == "proton" => "proton",
         Some(n) if n == "umu-run" => "umu",
+        #[cfg(target_os = "macos")]
+        Some(n) if matches!(n.as_str(), "sikarugir" | "launcher") => "sikarugir",
         _ => "wine",
     }
 }
@@ -226,6 +375,9 @@ pub fn compat_tools(app: AppHandle) -> Vec<CompatTool> {
 #[serde(rename_all = "camelCase")]
 pub struct CompatStatus {
     tools: Vec<CompatTool>,
+    /// The native host family, so Settings can explain the right backend even
+    /// when the browser user-agent is reduced or overridden.
+    platform: &'static str,
     /// umu-run, which runs a Proton inside the Steam Linux Runtime.
     umu: Option<String>,
     mangohud: bool,
@@ -237,6 +389,7 @@ pub fn compat_status(app: AppHandle) -> CompatStatus {
     let managed = managed_dir(&app);
     CompatStatus {
         tools: detect_in(managed.as_deref()),
+        platform: if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" },
         umu: umu_run(managed.as_deref()).map(|p| p.to_string_lossy().into_owned()),
         mangohud: on_path("mangohud").is_some(),
         gamemode: on_path("gamemoderun").is_some(),
@@ -350,6 +503,9 @@ fn sha512_of(path: &Path) -> Result<String, String> {
 pub async fn compat_install(app: AppHandle) -> Result<CompatTool, String> {
     if cfg!(windows) {
         return Err("Windows runs these games itself.".into());
+    }
+    if cfg!(target_os = "macos") {
+        return Err("Install Sikarugir separately, create a wrapper, and keep it in ~/Applications/Sikarugir. Kryoto will detect it when you refresh this page.".into());
     }
     let _install = INSTALL.lock().await;
     let dir = managed_dir(&app).ok_or("No app data folder.")?;
@@ -523,11 +679,20 @@ mod tests {
         std::fs::remove_dir_all(home).unwrap();
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn invalid_saved_tool_recovers_to_a_detected_tool_or_explains_the_failure() {
         let tools = vec![CompatTool { name: "working".into(), path: "/working/proton".into(), kind: "proton".into(), managed: true }];
         assert_eq!(resolve_tool(Some("/missing/proton"), &tools).unwrap(), Some(PathBuf::from("/working/proton")));
         assert!(resolve_tool(Some("/missing/proton"), &[]).unwrap_err().contains("Get Proton"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn invalid_saved_wrapper_explains_the_mac_backend() {
+        let error = resolve_tool(Some("/missing/Sikarugir"), &[]).unwrap_err();
+        assert!(error.contains("Sikarugir"));
+        assert!(resolve_tool(None, &[]).unwrap().is_none());
     }
 
     #[test]
@@ -549,6 +714,76 @@ mod tests {
     fn tools_are_known_by_their_file() {
         assert_eq!(kind_of(Path::new("/opt/GE-Proton10-3/proton")), "proton");
         assert_eq!(kind_of(Path::new("/usr/bin/umu-run")), "umu");
+        #[cfg(target_os = "macos")]
+        assert_eq!(kind_of(Path::new("/Users/test/Applications/Sikarugir/Game.app/Contents/MacOS/Sikarugir")), "sikarugir");
+        #[cfg(target_os = "macos")]
+        assert_eq!(kind_of(Path::new("/Users/test/Applications/Sikarugir/Game.app/Contents/MacOS/launcher")), "sikarugir");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(kind_of(Path::new("/Users/test/Applications/Sikarugir/Game.app/Contents/MacOS/Sikarugir")), "wine");
         assert_eq!(kind_of(Path::new("/usr/bin/wine")), "wine");
+    }
+
+    #[test]
+    fn discovers_sikarugir_wrappers_and_their_prefixes() {
+        let root = std::env::temp_dir().join(format!("kryoto-sikarugir-{}", std::process::id()));
+        let app = root.join("Example Game.app");
+        let launcher = app.join("Contents/MacOS/Sikarugir");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "wrapper").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&launcher, permissions).unwrap();
+        }
+
+        let tools = sikarugir_in(std::slice::from_ref(&root));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "Example Game");
+        assert_eq!(tools[0].kind, "sikarugir");
+        assert_eq!(sikarugir_wrapper(Path::new(&tools[0].path)), Some(app.clone()));
+        assert_eq!(sikarugir_prefix(Path::new(&tools[0].path)), Some(app.join("Contents/SharedSupport/prefix")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wrapper_validation_requires_the_real_launcher_location() {
+        let root = std::env::temp_dir().join(format!("kryoto-sikarugir-validation-{}", std::process::id()));
+        let valid = root.join("Valid.app");
+        let launcher = valid.join("Contents/MacOS/Sikarugir");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "wrapper").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&launcher, permissions).unwrap();
+        }
+        assert!(is_sikarugir_wrapper(&valid));
+        assert_eq!(sikarugir_wrapper(&launcher), Some(valid.clone()));
+
+        let legacy = root.join("Legacy.app");
+        let legacy_launcher = legacy.join("Contents/MacOS/launcher");
+        std::fs::create_dir_all(legacy_launcher.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_launcher, "wrapper").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&legacy_launcher).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&legacy_launcher, permissions).unwrap();
+        }
+        assert!(is_sikarugir_wrapper(&legacy));
+        assert_eq!(sikarugir_wrapper(&legacy_launcher), Some(legacy));
+
+        let missing = root.join("Missing.app");
+        std::fs::create_dir_all(missing.join("Contents/MacOS")).unwrap();
+        assert!(!is_sikarugir_wrapper(&missing));
+        assert!(sikarugir_wrapper(&missing.join("Contents/MacOS/Sikarugir")).is_none());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

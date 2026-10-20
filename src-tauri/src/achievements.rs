@@ -425,4 +425,15 @@ mod tests {
         let r = roots_for(&[("STEAM_COMPAT_DATA_PATH".into(), "/p".into())]);
         assert_eq!(r.public_documents, Some(PathBuf::from("/p/pfx/drive_c/users/Public/Documents")));
     }
+
+    #[test]
+    fn a_sikarugir_prefix_is_read_like_any_other_wine_prefix() {
+        let root = std::env::temp_dir().join(format!("kryoto-achievements-sikarugir-{}", std::process::id()));
+        let user = root.join("drive_c/users/steamuser/AppData/Roaming");
+        std::fs::create_dir_all(&user).unwrap();
+        let r = roots_for(&[("WINEPREFIX".into(), root.to_string_lossy().into_owned())]);
+        assert_eq!(r.app_data, Some(user));
+        assert_eq!(r.public_documents, Some(root.join("drive_c/users/Public/Documents")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

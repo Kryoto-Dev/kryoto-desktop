@@ -77,16 +77,34 @@ fn lobby_dirs<R: Runtime>(app: &AppHandle<R>, game_id: &str) -> Vec<LobbyDir> {
     // Wine/Proton: the game's own prefix, any user inside it.
     if let Ok(data) = app.path().app_data_dir() {
         let prefix = data.join("prefixes").join(game_id);
-        for drive in [prefix.join("pfx").join("drive_c"), prefix.join("drive_c")] {
-            if let Ok(users) = std::fs::read_dir(drive.join("users")) {
-                for u in users.flatten() {
-                    let path = u.path().join("AppData").join("Local").join("Kryoto").join("online");
-                    dirs.push(LobbyDir { path, host_pids: false });
+        add_prefix_dirs(&mut dirs, &prefix);
+    }
+    // Sikarugir owns the prefix inside the selected wrapper rather than in
+    // Kryoto's app-data directory. `plan_for` already resolves the selected
+    // wrapper and exposes that prefix for achievements and logs as well.
+    if cfg!(target_os = "macos") {
+        if let Ok(games) = crate::library::load(app) {
+            if let Some(game) = games.into_iter().find(|game| game.id == game_id) {
+                if let Ok((plan, _)) = crate::library::plan_for(app, &game, None) {
+                    if let Some((_, prefix)) = plan.env.iter().find(|(key, _)| key == "WINEPREFIX" || key == "STEAM_COMPAT_DATA_PATH") {
+                        add_prefix_dirs(&mut dirs, Path::new(prefix));
+                    }
                 }
             }
         }
     }
     dirs
+}
+
+fn add_prefix_dirs(dirs: &mut Vec<LobbyDir>, prefix: &Path) {
+    for drive in [prefix.join("pfx").join("drive_c"), prefix.join("drive_c")] {
+        if let Ok(users) = std::fs::read_dir(drive.join("users")) {
+            for u in users.flatten() {
+                let path = u.path().join("AppData").join("Local").join("Kryoto").join("online");
+                dirs.push(LobbyDir { path, host_pids: false });
+            }
+        }
+    }
 }
 
 /// The freshest lobby among files whose process is alive, preferring `pid`.
@@ -198,5 +216,18 @@ mod tests {
         let got = pick(&wine, Some(20), |_| false).map(|l| l.lobby);
         assert!(matches!(got.as_deref(), Some("111" | "555")), "a newest fresh one, whatever its pid: {got:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wrapper_prefix_lobby_files_are_candidates() {
+        let prefix = std::env::temp_dir().join(format!("kryoto-lobbies-sikarugir-{}", std::process::id()));
+        let online = prefix.join("drive_c/users/steamuser/AppData/Local/Kryoto/online");
+        std::fs::create_dir_all(&online).unwrap();
+        let t = now();
+        std::fs::write(online.join("123.json"), format!(r#"{{"pid":123,"lobby":"456","host":"789","updatedAt":{t}}}"#)).unwrap();
+        let mut dirs = Vec::new();
+        add_prefix_dirs(&mut dirs, &prefix);
+        assert_eq!(pick(&dirs, None, |_| false).map(|l| l.lobby).as_deref(), Some("456"));
+        std::fs::remove_dir_all(prefix).unwrap();
     }
 }
