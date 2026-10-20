@@ -1,0 +1,671 @@
+{
+  "text": "Here is how to take your saves to another PC with Kryoto Desktop. Cloud saves are a supporter perk, available as the feature rolls out.\n\nOpen Settings, then Cloud. Keep cloud saves and automatic backups switched on. Play your game, then close it. Desktop backs up the changed saves. Open the game's Saves card to check the last backup.\n\nOn your new PC, sign in to the same Kryoto account and install the game. With automatic restore enabled, newer cloud saves are restored before you play.\n\nIf both PCs have different progress, choose which saves to keep. Need an earlier backup? Open Versions and restore it while the game is closed.",
+  "words": [
+    {
+      "text": "Here",
+      "type": "word",
+      "start": 0.08,
+      "end": 0.24
+    },
+    {
+      "text": "is",
+      "type": "word",
+      "start": 0.32,
+      "end": 0.4
+    },
+    {
+      "text": "how",
+      "type": "word",
+      "start": 0.48,
+      "end": 0.56
+    },
+    {
+      "text": "to",
+      "type": "word",
+      "start": 0.64,
+      "end": 0.72
+    },
+    {
+      "text": "take",
+      "type": "word",
+      "start": 0.84,
+      "end": 0.96
+    },
+    {
+      "text": "your",
+      "type": "word",
+      "start": 1.04,
+      "end": 1.12
+    },
+    {
+      "text": "saves",
+      "type": "word",
+      "start": 1.2,
+      "end": 1.52
+    },
+    {
+      "text": "to",
+      "type": "word",
+      "start": 1.56,
+      "end": 1.6
+    },
+    {
+      "text": "another",
+      "type": "word",
+      "start": 1.68,
+      "end": 2.08
+    },
+    {
+      "text": "PC",
+      "type": "word",
+      "start": 2.16,
+      "end": 2.64
+    },
+    {
+      "text": "with",
+      "type": "word",
+      "start": 2.76,
+      "end": 2.88
+    },
+    {
+      "text": "Kryoto",
+      "type": "word",
+      "start": 2.96,
+      "end": 3.36
+    },
+    {
+      "text": "Desktop.",
+      "type": "word",
+      "start": 3.44,
+      "end": 4.48
+    },
+    {
+      "text": "Cloud",
+      "type": "word",
+      "start": 4.64,
+      "end": 4.8
+    },
+    {
+      "text": "saves",
+      "type": "word",
+      "start": 4.84,
+      "end": 5.2
+    },
+    {
+      "text": "are",
+      "type": "word",
+      "start": 5.24,
+      "end": 5.28
+    },
+    {
+      "text": "a",
+      "type": "word",
+      "start": 5.36,
+      "end": 5.4
+    },
+    {
+      "text": "supporter",
+      "type": "word",
+      "start": 5.44,
+      "end": 5.92
+    },
+    {
+      "text": "perk,",
+      "type": "word",
+      "start": 6,
+      "end": 6.48
+    },
+    {
+      "text": "available",
+      "type": "word",
+      "start": 6.72,
+      "end": 6.96
+    },
+    {
+      "text": "as",
+      "type": "word",
+      "start": 7.04,
+      "end": 7.12
+    },
+    {
+      "text": "the",
+      "type": "word",
+      "start": 7.2,
+      "end": 7.28
+    },
+    {
+      "text": "feature",
+      "type": "word",
+      "start": 7.44,
+      "end": 7.6
+    },
+    {
+      "text": "rolls",
+      "type": "word",
+      "start": 7.72,
+      "end": 7.84
+    },
+    {
+      "text": "out.",
+      "type": "word",
+      "start": 7.92,
+      "end": 8.72
+    },
+    {
+      "text": "Open",
+      "type": "word",
+      "start": 8.88,
+      "end": 9.04
+    },
+    {
+      "text": "Settings,",
+      "type": "word",
+      "start": 9.12,
+      "end": 9.92
+    },
+    {
+      "text": "then",
+      "type": "word",
+      "start": 10.04,
+      "end": 10.16
+    },
+    {
+      "text": "Cloud.",
+      "type": "word",
+      "start": 10.24,
+      "end": 11.12
+    },
+    {
+      "text": "Keep",
+      "type": "word",
+      "start": 11.24,
+      "end": 11.36
+    },
+    {
+      "text": "cloud",
+      "type": "word",
+      "start": 11.44,
+      "end": 11.76
+    },
+    {
+      "text": "saves",
+      "type": "word",
+      "start": 11.84,
+      "end": 12.16
+    },
+    {
+      "text": "and",
+      "type": "word",
+      "start": 12.24,
+      "end": 12.32
+    },
+    {
+      "text": "automatic",
+      "type": "word",
+      "start": 12.6,
+      "end": 12.88
+    },
+    {
+      "text": "backups",
+      "type": "word",
+      "start": 12.96,
+      "end": 13.44
+    },
+    {
+      "text": "switched",
+      "type": "word",
+      "start": 13.52,
+      "end": 13.92
+    },
+    {
+      "text": "on.",
+      "type": "word",
+      "start": 14,
+      "end": 14.72
+    },
+    {
+      "text": "Play",
+      "type": "word",
+      "start": 14.8,
+      "end": 14.88
+    },
+    {
+      "text": "your",
+      "type": "word",
+      "start": 14.96,
+      "end": 15.04
+    },
+    {
+      "text": "game,",
+      "type": "word",
+      "start": 15.12,
+      "end": 15.6
+    },
+    {
+      "text": "then",
+      "type": "word",
+      "start": 15.68,
+      "end": 15.84
+    },
+    {
+      "text": "close",
+      "type": "word",
+      "start": 15.92,
+      "end": 16.16
+    },
+    {
+      "text": "it.",
+      "type": "word",
+      "start": 16.24,
+      "end": 16.8
+    },
+    {
+      "text": "Desktop",
+      "type": "word",
+      "start": 17.08,
+      "end": 17.36
+    },
+    {
+      "text": "backs",
+      "type": "word",
+      "start": 17.48,
+      "end": 17.6
+    },
+    {
+      "text": "up",
+      "type": "word",
+      "start": 17.68,
+      "end": 17.84
+    },
+    {
+      "text": "the",
+      "type": "word",
+      "start": 17.92,
+      "end": 18
+    },
+    {
+      "text": "changed",
+      "type": "word",
+      "start": 18.2,
+      "end": 18.4
+    },
+    {
+      "text": "saves.",
+      "type": "word",
+      "start": 18.48,
+      "end": 19.36
+    },
+    {
+      "text": "Open",
+      "type": "word",
+      "start": 19.44,
+      "end": 19.6
+    },
+    {
+      "text": "the",
+      "type": "word",
+      "start": 19.68,
+      "end": 19.76
+    },
+    {
+      "text": "game's",
+      "type": "word",
+      "start": 19.88,
+      "end": 20.16
+    },
+    {
+      "text": "Saves",
+      "type": "word",
+      "start": 20.2,
+      "end": 20.48
+    },
+    {
+      "text": "card",
+      "type": "word",
+      "start": 20.56,
+      "end": 20.88
+    },
+    {
+      "text": "to",
+      "type": "word",
+      "start": 20.96,
+      "end": 21.12
+    },
+    {
+      "text": "check",
+      "type": "word",
+      "start": 21.24,
+      "end": 21.36
+    },
+    {
+      "text": "the",
+      "type": "word",
+      "start": 21.4,
+      "end": 21.44
+    },
+    {
+      "text": "last",
+      "type": "word",
+      "start": 21.52,
+      "end": 21.76
+    },
+    {
+      "text": "backup.",
+      "type": "word",
+      "start": 21.84,
+      "end": 22.72
+    },
+    {
+      "text": "On",
+      "type": "word",
+      "start": 22.8,
+      "end": 22.88
+    },
+    {
+      "text": "your",
+      "type": "word",
+      "start": 22.96,
+      "end": 23.04
+    },
+    {
+      "text": "new",
+      "type": "word",
+      "start": 23.12,
+      "end": 23.2
+    },
+    {
+      "text": "PC,",
+      "type": "word",
+      "start": 23.28,
+      "end": 24.08
+    },
+    {
+      "text": "sign",
+      "type": "word",
+      "start": 24.2,
+      "end": 24.32
+    },
+    {
+      "text": "in",
+      "type": "word",
+      "start": 24.4,
+      "end": 24.48
+    },
+    {
+      "text": "to",
+      "type": "word",
+      "start": 24.52,
+      "end": 24.56
+    },
+    {
+      "text": "the",
+      "type": "word",
+      "start": 24.64,
+      "end": 24.8
+    },
+    {
+      "text": "same",
+      "type": "word",
+      "start": 24.92,
+      "end": 25.04
+    },
+    {
+      "text": "Kryoto",
+      "type": "word",
+      "start": 25.12,
+      "end": 25.52
+    },
+    {
+      "text": "account",
+      "type": "word",
+      "start": 25.76,
+      "end": 26
+    },
+    {
+      "text": "and",
+      "type": "word",
+      "start": 26.04,
+      "end": 26.08
+    },
+    {
+      "text": "install",
+      "type": "word",
+      "start": 26.16,
+      "end": 26.56
+    },
+    {
+      "text": "the",
+      "type": "word",
+      "start": 26.6,
+      "end": 26.64
+    },
+    {
+      "text": "game.",
+      "type": "word",
+      "start": 26.72,
+      "end": 27.44
+    },
+    {
+      "text": "With",
+      "type": "word",
+      "start": 27.52,
+      "end": 27.6
+    },
+    {
+      "text": "automatic",
+      "type": "word",
+      "start": 27.88,
+      "end": 28.16
+    },
+    {
+      "text": "restore",
+      "type": "word",
+      "start": 28.36,
+      "end": 28.56
+    },
+    {
+      "text": "enabled,",
+      "type": "word",
+      "start": 28.84,
+      "end": 29.36
+    },
+    {
+      "text": "newer",
+      "type": "word",
+      "start": 29.44,
+      "end": 29.76
+    },
+    {
+      "text": "cloud",
+      "type": "word",
+      "start": 29.88,
+      "end": 30
+    },
+    {
+      "text": "saves",
+      "type": "word",
+      "start": 30.08,
+      "end": 30.4
+    },
+    {
+      "text": "are",
+      "type": "word",
+      "start": 30.44,
+      "end": 30.48
+    },
+    {
+      "text": "restored",
+      "type": "word",
+      "start": 30.64,
+      "end": 31.04
+    },
+    {
+      "text": "before",
+      "type": "word",
+      "start": 31.24,
+      "end": 31.44
+    },
+    {
+      "text": "you",
+      "type": "word",
+      "start": 31.52,
+      "end": 31.6
+    },
+    {
+      "text": "play.",
+      "type": "word",
+      "start": 31.76,
+      "end": 32.4
+    },
+    {
+      "text": "If",
+      "type": "word",
+      "start": 32.48,
+      "end": 32.56
+    },
+    {
+      "text": "both",
+      "type": "word",
+      "start": 32.68,
+      "end": 32.8
+    },
+    {
+      "text": "PCs",
+      "type": "word",
+      "start": 32.88,
+      "end": 33.28
+    },
+    {
+      "text": "have",
+      "type": "word",
+      "start": 33.36,
+      "end": 33.52
+    },
+    {
+      "text": "different",
+      "type": "word",
+      "start": 33.68,
+      "end": 33.84
+    },
+    {
+      "text": "progress,",
+      "type": "word",
+      "start": 33.92,
+      "end": 34.72
+    },
+    {
+      "text": "choose",
+      "type": "word",
+      "start": 34.8,
+      "end": 35.04
+    },
+    {
+      "text": "which",
+      "type": "word",
+      "start": 35.12,
+      "end": 35.36
+    },
+    {
+      "text": "saves",
+      "type": "word",
+      "start": 35.467,
+      "end": 35.68
+    },
+    {
+      "text": "to",
+      "type": "word",
+      "start": 35.72,
+      "end": 35.76
+    },
+    {
+      "text": "keep.",
+      "type": "word",
+      "start": 35.84,
+      "end": 36.56
+    },
+    {
+      "text": "Need",
+      "type": "word",
+      "start": 36.68,
+      "end": 36.8
+    },
+    {
+      "text": "an",
+      "type": "word",
+      "start": 36.84,
+      "end": 36.88
+    },
+    {
+      "text": "earlier",
+      "type": "word",
+      "start": 36.96,
+      "end": 37.2
+    },
+    {
+      "text": "backup?",
+      "type": "word",
+      "start": 37.4,
+      "end": 38
+    },
+    {
+      "text": "Open",
+      "type": "word",
+      "start": 38.16,
+      "end": 38.32
+    },
+    {
+      "text": "Versions",
+      "type": "word",
+      "start": 38.4,
+      "end": 38.96
+    },
+    {
+      "text": "and",
+      "type": "word",
+      "start": 39.04,
+      "end": 39.12
+    },
+    {
+      "text": "restore",
+      "type": "word",
+      "start": 39.32,
+      "end": 39.52
+    },
+    {
+      "text": "it",
+      "type": "word",
+      "start": 39.6,
+      "end": 39.76
+    },
+    {
+      "text": "while",
+      "type": "word",
+      "start": 39.84,
+      "end": 39.92
+    },
+    {
+      "text": "the",
+      "type": "word",
+      "start": 39.96,
+      "end": 40
+    },
+    {
+      "text": "game",
+      "type": "word",
+      "start": 40.12,
+      "end": 40.24
+    },
+    {
+      "text": "is",
+      "type": "word",
+      "start": 40.32,
+      "end": 40.4
+    },
+    {
+      "text": "closed.",
+      "type": "word",
+      "start": 40.64,
+      "end": 41.12
+    }
+  ]
+}

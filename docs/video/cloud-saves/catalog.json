@@ -1,0 +1,35 @@
+[
+  {
+    "appid": 367520,
+    "title": "Hollow Knight",
+    "developer": "Team Cherry",
+    "short": "Forge your own path in Hollow Knight! An epic action adventure through a vast ruined kingdom of insects and heroes. Explore twisting caverns, battle tainted creatures and befriend bizarre bugs, all in a classic, hand-drawn 2D style.",
+    "cover": "https://cdn.cloudflare.steamstatic.com/steam/apps/367520/library_600x900.jpg",
+    "hero": "https://cdn.cloudflare.steamstatic.com/steam/apps/367520/library_hero.jpg",
+    "logo": "https://cdn.cloudflare.steamstatic.com/steam/apps/367520/logo.png",
+    "header": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/367520/3c3489495136b26b34f8a9543c7f5645b99d388c/header.jpg?t=1776125684",
+    "sourceUrl": "https://store.steampowered.com/api/appdetails?appids=367520&l=english"
+  },
+  {
+    "appid": 504230,
+    "title": "Celeste",
+    "developer": "Maddy Makes Games Inc., Extremely OK Games, Ltd.",
+    "short": "Help Madeline survive her inner demons on her journey to the top of Celeste Mountain, in this super-tight platformer from the creators of TowerFall. Brave hundreds of hand-crafted challenges, uncover devious secrets, and piece together the mystery of the mountain.",
+    "cover": "https://cdn.cloudflare.steamstatic.com/steam/apps/504230/library_600x900.jpg",
+    "hero": "https://cdn.cloudflare.steamstatic.com/steam/apps/504230/library_hero.jpg",
+    "logo": "https://cdn.cloudflare.steamstatic.com/steam/apps/504230/logo.png",
+    "header": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/504230/header.jpg?t=1714089525",
+    "sourceUrl": "https://store.steampowered.com/api/appdetails?appids=504230&l=english"
+  },
+  {
+    "appid": 413150,
+    "title": "Stardew Valley",
+    "developer": "ConcernedApe",
+    "short": "You've inherited your grandfather's old farm plot in Stardew Valley. Armed with hand-me-down tools and a few coins, you set out to begin your new life. Can you learn to live off the land and turn these overgrown fields into a thriving home?",
+    "cover": "https://cdn.cloudflare.steamstatic.com/steam/apps/413150/library_600x900.jpg",
+    "hero": "https://cdn.cloudflare.steamstatic.com/steam/apps/413150/library_hero.jpg",
+    "logo": "https://cdn.cloudflare.steamstatic.com/steam/apps/413150/logo.png",
+    "header": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/413150/header.jpg?t=1786554168",
+    "sourceUrl": "https://store.steampowered.com/api/appdetails?appids=413150&l=english"
+  }
+]
