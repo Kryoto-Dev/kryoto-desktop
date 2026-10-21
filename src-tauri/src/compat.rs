@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Runtime};
 
+const SIKARUGIR_TAP: &str = "Sikarugir-App/sikarugir";
+const SIKARUGIR_CASK: &str = "Sikarugir-App/sikarugir/sikarugir";
+
 // Several Play presses and Settings can need the same missing runtime.
 // Serialize writes so they cannot unpack over one another's download.
 static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -153,6 +156,99 @@ fn sikarugir_dirs() -> Vec<PathBuf> {
         }
     }
     out
+}
+
+#[cfg(target_os = "macos")]
+fn sikarugir_wrappers_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join("Applications/Sikarugir"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sikarugir_wrappers_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn sikarugir_creator() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(home.join("Applications/Sikarugir Creator.app"));
+    }
+    candidates.push(PathBuf::from("/Applications/Sikarugir Creator.app"));
+    candidates.into_iter().find(|path| path.is_dir())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sikarugir_creator() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn homebrew() -> Option<PathBuf> {
+    on_path("brew").or_else(|| {
+        ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file())
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn homebrew() -> Option<PathBuf> {
+    None
+}
+
+fn run_external(program: &Path, args: &[&str], step: &str) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{step} could not start {}: {e}", program.display()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if detail.is_empty() {
+        Err(format!("{step} failed with {}.", output.status))
+    } else {
+        Err(format!("{step} failed: {detail}"))
+    }
+}
+
+fn run_homebrew(program: &Path, args: &[&str], step: &str) -> Result<(), String> {
+    run_external(program, args, step)
+}
+
+#[cfg(target_os = "macos")]
+fn install_rosetta() -> Result<(), String> {
+    if std::env::consts::ARCH != "aarch64" {
+        return Ok(());
+    }
+    run_external(
+        Path::new("/usr/sbin/softwareupdate"),
+        &["--install-rosetta", "--agree-to-license"],
+        "Installing Rosetta 2",
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_rosetta() -> Result<(), String> {
+    Ok(())
+}
+
+fn homebrew_steps() -> [Vec<&'static str>; 2] {
+    [
+        vec!["trust", SIKARUGIR_TAP],
+        vec!["install", "--cask", SIKARUGIR_CASK],
+    ]
+}
+
+fn install_sikarugir_creator() -> Result<PathBuf, String> {
+    let brew = homebrew().ok_or("Homebrew is required to install Sikarugir Creator. Install Homebrew, then try again.")?;
+    install_rosetta()?;
+    let [trust, install] = homebrew_steps();
+    run_homebrew(&brew, &trust, "Trusting the Sikarugir Homebrew tap")?;
+    run_homebrew(&brew, &install, "Installing Sikarugir Creator")?;
+    sikarugir_creator().ok_or_else(|| "Homebrew finished, but Sikarugir Creator.app was not found in /Applications or ~/Applications.".to_string())
 }
 
 /// The wrapper app containing a Sikarugir launcher, if the path is one.
@@ -375,6 +471,10 @@ pub fn compat_tools(app: AppHandle) -> Vec<CompatTool> {
 #[serde(rename_all = "camelCase")]
 pub struct CompatStatus {
     tools: Vec<CompatTool>,
+    /// Sikarugir Creator, when the macOS GUI installer is present.
+    creator: Option<String>,
+    /// The per-user folder where Creator can save wrappers without admin access.
+    wrappers_dir: Option<String>,
     /// The native host family, so Settings can explain the right backend even
     /// when the browser user-agent is reduced or overridden.
     platform: &'static str,
@@ -389,11 +489,57 @@ pub fn compat_status(app: AppHandle) -> CompatStatus {
     let managed = managed_dir(&app);
     CompatStatus {
         tools: detect_in(managed.as_deref()),
+        creator: sikarugir_creator().map(|path| path.to_string_lossy().into_owned()),
+        wrappers_dir: sikarugir_wrappers_dir().map(|path| path.to_string_lossy().into_owned()),
         platform: if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" },
         umu: umu_run(managed.as_deref()).map(|p| p.to_string_lossy().into_owned()),
         mangohud: on_path("mangohud").is_some(),
         gamemode: on_path("gamemoderun").is_some(),
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SikarugirSetup {
+    pub creator: String,
+    pub wrappers_dir: String,
+}
+
+/// Install the official Sikarugir Creator cask. The command is only exposed on
+/// macOS and is reached from an explicit Settings button, because it can run
+/// Homebrew and, on Apple silicon, install Rosetta 2.
+#[tauri::command]
+pub async fn compat_sikarugir_install(app: AppHandle) -> Result<SikarugirSetup, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("Sikarugir is only available on macOS.".into());
+    }
+    let _install = INSTALL.lock().await;
+    progress(&app, "Preparing Sikarugir Creator", None);
+    let creator = tauri::async_runtime::spawn_blocking(install_sikarugir_creator)
+        .await
+        .map_err(|e| format!("Sikarugir installation stopped: {e}"))??;
+    let wrappers_dir = sikarugir_wrappers_dir().ok_or("Your home folder could not be found.")?;
+    std::fs::create_dir_all(&wrappers_dir).map_err(|e| format!("Could not create {}: {e}", wrappers_dir.display()))?;
+    progress(&app, "Sikarugir Creator is ready", Some(1.0));
+    Ok(SikarugirSetup {
+        creator: creator.to_string_lossy().into_owned(),
+        wrappers_dir: wrappers_dir.to_string_lossy().into_owned(),
+    })
+}
+
+/// Open Creator after installation. Wrapper creation remains in Creator's
+/// documented GUI; no public command-line or IPC API exists to automate it.
+#[tauri::command]
+pub fn compat_sikarugir_open_creator() -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("Sikarugir is only available on macOS.".into());
+    }
+    let creator = sikarugir_creator().ok_or("Sikarugir Creator is not installed yet. Install it from Settings > Compatibility.")?;
+    std::process::Command::new("open")
+        .arg(&creator)
+        .spawn()
+        .map_err(|e| format!("Could not open Sikarugir Creator: {e}"))?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -631,6 +777,13 @@ pub async fn compat_remove(app: AppHandle, path: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sikarugir_install_uses_the_official_tap_and_cask() {
+        let [trust, install] = homebrew_steps();
+        assert_eq!(trust, vec!["trust", SIKARUGIR_TAP]);
+        assert_eq!(install, vec!["install", "--cask", SIKARUGIR_CASK]);
+    }
 
     fn release(names: &[&str]) -> Release {
         Release {

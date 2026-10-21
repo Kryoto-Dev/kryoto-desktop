@@ -53,6 +53,13 @@ side handles Launch Services `Opened` events and keeps the link pending until
 the shell is ready. Compatibility wrappers are discovered in
 `~/Applications/Sikarugir`.
 
+The native Compatibility settings can install the official Sikarugir Creator
+Homebrew cask (and Rosetta on Apple silicon) after the user presses the install
+button. Creator is intentionally opened separately: its public project does not
+document a command-line or IPC interface for creating wrappers. A person must
+select the Windows executable and engine in Creator, save the wrapper to
+`~/Applications/Sikarugir`, and refresh Kryoto before the wrapper is detected.
+
 macOS local builds are intentionally unsigned unless the machine has an Apple
 Developer signing identity. Notarization is a release-owner operation and is
 not attempted by local builds or preview CI.

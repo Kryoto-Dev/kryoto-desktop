@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Download, RefreshCw, Trash2 } from 'lucide-react'
+import { Download, FolderOpen, RefreshCw, Trash2 } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section } from '@/ui'
 import { call, errorText, on } from '@/lib/bridge'
 import type { Settings } from '@/lib/settings'
@@ -7,6 +7,8 @@ import { CompatPicker, type CompatTool } from '@/settings/CompatPicker'
 
 type Status = {
   tools: (CompatTool & { managed?: boolean })[]
+  creator: string | null
+  wrappersDir: string | null
   platform: 'linux' | 'macos' | 'windows'
   umu: string | null
   mangohud: boolean
@@ -29,7 +31,7 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
   const refresh = useCallback(() => {
     void call<Status>('compat_status')
       .then(setStatus)
-      .catch(() => setStatus({ tools: [], platform: 'linux', umu: null, mangohud: false, gamemode: false }))
+      .catch(() => setStatus({ tools: [], creator: null, wrappersDir: null, platform: 'linux', umu: null, mangohud: false, gamemode: false }))
     setVersion((v) => v + 1)
   }, [])
 
@@ -51,6 +53,38 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
     } finally {
       setBusy(null)
       refresh()
+    }
+  }
+
+  const installSikarugir = async () => {
+    setError(null)
+    setBusy({ step: 'Starting', fraction: null })
+    try {
+      await call('compat_sikarugir_install')
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setBusy(null)
+      refresh()
+    }
+  }
+
+  const openCreator = async () => {
+    setError(null)
+    try {
+      await call('compat_sikarugir_open_creator')
+    } catch (e) {
+      setError(errorText(e))
+    }
+  }
+
+  const openWrappers = async () => {
+    if (!status?.wrappersDir) return
+    setError(null)
+    try {
+      await call('open_folder', { path: status.wrappersDir, create: true })
+    } catch (e) {
+      setError(errorText(e))
     }
   }
 
@@ -100,9 +134,39 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
           ) : null}
 
           {macos ? (
-            <Caption>
-              Install Sikarugir, create a wrapper for a Wine game, and save the wrapper in <code>~/Applications/Sikarugir</code>. Refresh this page after creating it.
-            </Caption>
+            busy ? (
+              <div className="grid gap-1.5">
+                <AsciiBar fraction={busy.fraction} cells={28} className="text-foreground" />
+                <Caption>{busy.step}</Caption>
+              </div>
+            ) : (
+              <div className="grid gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {status?.creator ? (
+                    <Button variant="primary" onClick={() => void openCreator()}>
+                      <RefreshCw className="size-3" />
+                      Open Sikarugir Creator
+                    </Button>
+                  ) : (
+                    <Button variant="primary" onClick={() => void installSikarugir()}>
+                      <Download className="size-3" />
+                      Install Sikarugir Creator
+                    </Button>
+                  )}
+                  {status?.wrappersDir ? (
+                    <Button variant="outline" onClick={() => void openWrappers()}>
+                      <FolderOpen className="size-3" />
+                      Open wrapper folder
+                    </Button>
+                  ) : null}
+                </div>
+                <Caption>
+                  {status?.creator
+                    ? <>Use Creator&apos;s GUI to select the Windows executable, choose an engine, and save the wrapper in <code>~/Applications/Sikarugir</code>. Refresh this page after saving it.</>
+                    : 'Kryoto installs the official Homebrew cask and Rosetta on Apple silicon. Creator still needs to make the wrapper in its GUI because it has no supported command-line or IPC interface.'}
+                </Caption>
+              </div>
+            )
           ) : busy ? (
             <div className="grid gap-1.5">
               <AsciiBar fraction={busy.fraction} cells={28} className="text-foreground" />
