@@ -62,6 +62,10 @@ pub struct CatalogMeta {
     pub developer: Option<String>,
     pub size_bytes: Option<u64>,
     pub nsfw: bool,
+    /// The Steam branch the listing builds from: `public`, or a beta listed as
+    /// a game of its own (GoreBox27 is GoreBox's `gb27`). None from a site
+    /// that does not say.
+    pub steam_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -170,28 +174,47 @@ const RANGES_PER_CONNECTION: u64 = 4;
 const WRITE_BUFFER: usize = 4 * 1024 * 1024;
 
 /// A shared speed cap: every connection draws from the same budget.
+///
+/// A budget that cannot be saved up. This used to measure everything sent
+/// against the time since the download started, so every slow stretch (a
+/// busy disk, a dropped connection) banked allowance that was then spent at
+/// full line speed: a 25 MB/s cap ran at 100 MB/s, flooded a hard disk faster
+/// than it could write, crawled at a few KB/s while the disk caught up -
+/// banking more - and went round again.
 pub struct Limiter {
     bytes_per_sec: u64,
-    start: Instant,
-    sent: AtomicU64,
+    /// When the bytes taken so far will have been paid for.
+    paid_until: Mutex<Instant>,
 }
+
+/// How far ahead of the cap a burst may run: a second's worth.
+const LIMIT_BURST: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl Limiter {
     pub fn new(mb_per_sec: u32) -> Self {
-        Self { bytes_per_sec: u64::from(mb_per_sec) * 1024 * 1024, start: Instant::now(), sent: AtomicU64::new(0) }
+        Self { bytes_per_sec: u64::from(mb_per_sec) * 1024 * 1024, paid_until: Mutex::new(Instant::now()) }
     }
 
     async fn take(&self, n: u64) {
         if self.bytes_per_sec == 0 {
             return;
         }
-        let sent = self.sent.fetch_add(n, Ordering::SeqCst) + n;
-        let due = std::time::Duration::from_secs_f64(sent as f64 / self.bytes_per_sec as f64);
-        let elapsed = self.start.elapsed();
-        if due > elapsed {
-            tokio::time::sleep(due - elapsed).await;
+        let wait = {
+            let mut paid = self.paid_until.lock().unwrap_or_else(|p| p.into_inner());
+            limit_wait(&mut paid, Instant::now(), n, self.bytes_per_sec)
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
         }
     }
+}
+
+/// How long to wait after taking `n` bytes at `rate`. Time nobody used is not
+/// carried forward: the bill starts again from now.
+fn limit_wait(paid_until: &mut Instant, now: Instant, n: u64, rate: u64) -> std::time::Duration {
+    let cost = std::time::Duration::from_secs_f64(n as f64 / rate as f64);
+    *paid_until = (*paid_until).max(now) + cost;
+    paid_until.saturating_duration_since(now).saturating_sub(LIMIT_BURST)
 }
 
 /// The longest a transfer waits for data before it looks at Pause and Cancel.
@@ -938,6 +961,7 @@ pub fn meta_from_json(g: &serde_json::Value) -> CatalogMeta {
         short: s("short"),
         developer: s("developer"),
         nsfw: g["nsfw"].as_bool().unwrap_or(false),
+        steam_branch: s("steam_branch"),
         size_bytes: g["download_size_bytes"].as_u64(),
     }
 }
@@ -1168,7 +1192,7 @@ async fn fetch_all<R: Runtime>(
         // stream read the full-size file it had made as "already there" and
         // installed an archive with holes in it.
         let step = if one_stream {
-            transfer(app, id, flag, client, &settings.library_dir).await
+            transfer(app, id, flag, client, &settings.library_dir, limiter).await
         } else {
             transfer_parallel(app, id, flag, client, &settings.library_dir, *connections, limiter).await
         };
@@ -1732,6 +1756,7 @@ async fn transfer<R: Runtime>(
     flag: &AtomicU8,
     client: &reqwest::Client,
     library_dir: &str,
+    limiter: &Limiter,
 ) -> Result<bool, Transfer> {
     let item = edit(app, id, |_| {}).ok_or(Transfer::Fatal("The download is gone.".into()))?;
     let mut on_disk = if item.archive_path.is_empty() {
@@ -1860,6 +1885,8 @@ async fn transfer<R: Runtime>(
             .map_err(|e| Transfer::Fatal(format!("Writing the download failed: {e}")))?;
         received += chunk.len() as u64;
         window_bytes += chunk.len() as u64;
+        // The cap applies on one stream too; it used to be skipped here.
+        limiter.take(chunk.len() as u64).await;
         let elapsed = window_start.elapsed().as_secs_f64();
         if elapsed >= 1.0 {
             let speed = (window_bytes as f64 / elapsed) as u64;
@@ -1929,7 +1956,7 @@ async fn transfer_parallel<R: Runtime>(
     // Started on one stream (the server had no ranges then): carry on there,
     // rather than throw away what is on disk.
     if item.segments.is_empty() && !item.archive_path.is_empty() && on_disk && item.received > 0 {
-        return transfer(app, id, flag, client, library_dir).await;
+        return transfer(app, id, flag, client, library_dir, limiter).await;
     }
     let resumable = !item.segments.is_empty() && !item.archive_path.is_empty() && on_disk;
     if !resumable {
@@ -1938,7 +1965,7 @@ async fn transfer_parallel<R: Runtime>(
         let total = (probe.status().as_u16() == 206).then(|| content_range_of(&probe).and_then(|r| r.total)).flatten();
         let Some(total) = total.filter(|t| *t > 0) else {
             drop(probe);
-            return transfer(app, id, flag, client, library_dir).await;
+            return transfer(app, id, flag, client, library_dir, limiter).await;
         };
         let etag = etag_of(&probe);
         let name = probe
@@ -2069,7 +2096,11 @@ async fn transfer_parallel<R: Runtime>(
         });
         emit(app, false);
         // Saved in the background, so a slow disk never holds up the count.
-        if last_checkpoint.elapsed().as_secs() >= 5 && saving.as_ref().is_none_or(|t| t.is_finished()) {
+        // Not every 5 s, as it was: each save flushes the whole archive to
+        // disk while every connection is still writing into it, and on a hard
+        // disk that flush held the writes up for seconds at a time. A crash
+        // now costs at most this much downloading again.
+        if last_checkpoint.elapsed() >= CHECKPOINT_EVERY && saving.as_ref().is_none_or(|t| t.is_finished()) {
             let (app, id, path, progress) = (app.clone(), id.to_string(), path.clone(), progress.clone());
             saving = Some(tokio::spawn(async move { checkpoint(&app, &id, &path, &progress).await }));
             last_checkpoint = Instant::now();
@@ -2133,6 +2164,9 @@ async fn transfer_parallel<R: Runtime>(
     }
     Ok(true)
 }
+
+/// How often a ranged download saves how far it has got (`checkpoint`).
+const CHECKPOINT_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// What every range must agree with to be part of this download.
 struct Expected {
@@ -2367,6 +2401,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             short: item.meta.short.clone(),
             developer: item.meta.developer.clone(),
             nsfw: item.meta.nsfw,
+            steam_branch: item.meta.steam_branch.clone(),
             ..Default::default()
         },
     )?;
@@ -3019,6 +3054,22 @@ pub fn download_remove(app: AppHandle, state: State<'_, Downloads>, id: String) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_speed_cap_cannot_be_saved_up() {
+        let mb = 1024 * 1024;
+        let t0 = Instant::now();
+        let mut paid = t0;
+        // A second's worth goes straight through, then it waits.
+        assert!(limit_wait(&mut paid, t0, 10 * mb, 10 * mb).is_zero());
+        assert_eq!(limit_wait(&mut paid, t0, 10 * mb, 10 * mb), std::time::Duration::from_secs(1));
+        // A minute of nothing (a busy disk, a dropped connection) banks no
+        // more than the one-second burst: the old cap let all sixty seconds
+        // through at full speed.
+        let later = t0 + std::time::Duration::from_secs(62);
+        assert!(limit_wait(&mut paid, later, 10 * mb, 10 * mb).is_zero());
+        assert_eq!(limit_wait(&mut paid, later, 10 * mb, 10 * mb), std::time::Duration::from_secs(1));
+    }
 
     #[test]
     fn taskbar_follows_the_download_that_is_running() {

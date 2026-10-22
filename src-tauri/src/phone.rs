@@ -872,6 +872,9 @@ pub struct PhoneStatus {
     /// What the QR code on the PC holds: this PC's addresses and the live code.
     pair_uri: Option<String>,
     devices: Vec<PairedPhone>,
+    /// When Kryoto Mobile last reached this PC through kryo.to (Unix ms), not
+    /// over this network. None when no phone has, or kryo.to has not said.
+    remote_seen_at: Option<u64>,
 }
 
 /// A private-network address (10/8, 172.16/12, 192.168/16): where a phone on
@@ -949,6 +952,7 @@ pub fn phone_status(app: AppHandle, state: State<'_, PhoneState>) -> Result<Phon
         code_expires_in: code.as_ref().map(|(_, left)| *left),
         code: code.map(|(c, _)| c),
         devices: devices.into_iter().map(|d| PairedPhone { id: d.id, name: d.name, paired_at: d.paired_at, last_seen: d.last_seen }).collect(),
+        remote_seen_at: *crate::remote::PHONE_SEEN.lock().unwrap_or_else(|e| e.into_inner()),
     })
 }
 

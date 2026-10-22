@@ -16,6 +16,7 @@ import { CloudSavesCard } from '@/library/CloudSavesCard'
 import { CompatibilityFacts } from '@/library/Compatibility'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
 import { automaticArtwork } from '@/lib/game-artwork'
+import { BranchTag } from '@/library/BranchTag'
 
 /**
  * One game. Its art across the top fading into the page, the logo on it, a
@@ -151,6 +152,7 @@ export function GamePage({
       <GameBanner
         title={game.title}
         adult={game.nsfw}
+        caption={game.steamBranch && game.steamBranch !== 'public' ? <BranchTag branch={game.steamBranch} className="justify-self-start" /> : undefined}
         // Art saved before kryo.to resolved it (no header on record) waits for
         // the answer, so the banner does not show a guess and then swap.
         pending={!game.customHero && !asked && game.header === undefined}

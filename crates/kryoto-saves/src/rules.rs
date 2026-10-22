@@ -501,6 +501,12 @@ pub fn merge(lists: &[&[Rule]]) -> Vec<Rule> {
             if out.iter().any(|r| r.contains(rule)) {
                 continue;
             }
+            // What was learned from watching games never widens a location
+            // an exact source already named: the engine's `Saved/SaveGames`
+            // stays that, not the whole project folder around it.
+            if matches!(rule.source, Source::Detected | Source::Community) && out.iter().any(|r| rule.contains(r)) {
+                continue;
+            }
             // A wider location replaces the narrower ones already kept.
             out.retain(|r| !rule.contains(r));
             out.push(rule.clone());
@@ -587,7 +593,13 @@ mod tests {
         let bad = Rule::files(Root::Documents, "", Source::Detected);
         let merged = merge(&[std::slice::from_ref(&b), &[a.clone(), c, d.clone(), bad]]);
         assert_eq!(merged, vec![a, d]);
-        assert_eq!(merge(&[std::slice::from_ref(&b)]), vec![b]);
+        assert_eq!(merge(&[std::slice::from_ref(&b)]), vec![b.clone()]);
+        // A detected folder around an exact one never takes its place.
+        let engine = Rule::files(Root::GameDir, "DiggingGame/Saved/SaveGames", Source::Engine);
+        let project = Rule::files(Root::GameDir, "DiggingGame", Source::Detected);
+        assert_eq!(merge(&[std::slice::from_ref(&engine), std::slice::from_ref(&project)]), vec![engine]);
+        let community = Rule::files(Root::Documents, "My Games", Source::Community);
+        assert_eq!(merge(&[std::slice::from_ref(&b), std::slice::from_ref(&community)]), vec![b]);
     }
 
     #[test]

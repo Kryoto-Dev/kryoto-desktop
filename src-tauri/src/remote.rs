@@ -86,9 +86,23 @@ pub(crate) fn from_store(app: &AppHandle, webview: &Webview) -> Result<(), Strin
     Ok(())
 }
 
+/// When Kryoto Mobile last reached this PC through kryo.to, in Unix ms, as the
+/// site said in its answer to the last report. Shown in Settings > Phone.
+pub static PHONE_SEEN: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// The Store page passing on kryo.to's answer about a phone (see the report in
+/// lib.rs). Only from the Store's own kryo.to page.
+#[tauri::command(async)]
+pub fn remote_phone_seen(app: AppHandle, webview: Webview, seen_at: Option<f64>) -> Result<(), String> {
+    from_store(&app, &webview)?;
+    let seen = seen_at.filter(|t| t.is_finite() && *t > 0.0).map(|t| t as u64);
+    *PHONE_SEEN.lock().unwrap_or_else(|e| e.into_inner()) = seen;
+    Ok(())
+}
+
 /// What the downloads are doing, for kryo.to's Downloads page. Finished ones
 /// are left out after a day, so the list is about now.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_snapshot(app: AppHandle, webview: Webview, state: State<'_, Downloads>) -> Result<Snapshot, String> {
     from_store(&app, &webview)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -148,7 +162,7 @@ fn game_id_of(c: &RemoteCommand) -> Result<String, String> {
 
 /// Do what kryo.to queued: start a download (from kryo.to's own filehost only),
 /// or pause, resume or cancel one. Confirm each durable acceptance separately.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads>, commands: Vec<RemoteCommand>) -> Result<Vec<RemoteResult>, String> {
     from_store(&app, &webview)?;
     let _guard = APPLY.lock().map_err(|_| "remote command lock poisoned")?;

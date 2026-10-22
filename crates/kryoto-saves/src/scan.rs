@@ -9,13 +9,47 @@ use sha2::{Digest, Sha256};
 
 use crate::rules::{expand, relative, wildcard, Kind, Root, Rule, SaveRoots};
 
-/// Never part of a save, wherever a rule points: logs, caches, crash dumps,
-/// screenshots and temporary files. Matched against each name below a save
-/// folder, case-insensitively.
-pub const DEFAULT_EXCLUDES: [&str; 22] = [
-    "*.tmp", "*.temp", "*.dmp", "*.log", "*.lock", "*.crdownload", "logs", "log", "crashes", "crashdumps", "crash reports",
-    "shadercache", "shader cache", "cache", "gpucache", "code cache", "webcache", "dxcache", "glcache", "temp", "screenshots", "Unity",
+/// Never part of a save, wherever a rule points: logs, caches of every name
+/// (`mapcache`, `ShaderCache`...), crash dumps, screenshots, temporary files,
+/// and Steam Workshop downloads (fetched again, and often gigabytes). Matched
+/// against each name below a save folder, case-insensitively.
+pub const DEFAULT_EXCLUDES: [&str; 17] = [
+    "*.tmp", "*.temp", "*.dmp", "*.log", "*.lock", "*.crdownload", "logs", "log", "crashes", "crashdumps", "crash reports", "*cache",
+    "*caches", "temp", "screenshots", "workshop", "Unity",
 ];
+
+/// In the game's own folder: folders that came with the game, not saves.
+pub const SHIPPED_DIRS: &[&str] = &[
+    "steam_settings", "engine", "binaries", "content", "plugins", "mono", "monobleedingedge", "_commonredist", "redist", "redistributables",
+    "__pycache__", "shadercache", "logs", "crashreportclient", "directx", "support", "paks",
+];
+/// In the game's own folder: the kinds of file a game ships, never saves.
+pub const SHIPPED_EXT: &[&str] = &[
+    "exe", "dll", "pak", "ucas", "utoc", "so", "pdb", "sig", "assets", "resource", "ress", "bundle", "pck", "rpa", "rgss3a", "wad", "bik",
+    "bk2", "usm", "awb", "acb", "ogg", "wem", "bnk", "uasset", "umap", "ubulk",
+];
+
+/// Whether a path in the game's own folder (relative to that folder, or to a
+/// save location in it) is what the game shipped with: its programs, packed
+/// data, engine and plugin folders. A location in the game's folder never
+/// backs these up, however wide it is - a game named like its own folder
+/// (Unreal's `DiggingGame`) once took 1.7 GB of `Binaries` along with a 6 MB save.
+pub fn shipped(rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    let Some((name, dirs)) = parts.split_last() else { return false };
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    SHIPPED_EXT.contains(&ext.as_str())
+        || name.starts_with(".kryoto")
+        || name.eq_ignore_ascii_case("steam_appid.txt")
+        || dirs.iter().any(|d| SHIPPED_DIRS.contains(&d.to_ascii_lowercase().as_str()) || d.starts_with(".kryoto"))
+}
+
+/// Why kryo.to would not take this path, or None. Windows never makes a name
+/// that ends in a space or a dot, but a Wine prefix can; one such file is
+/// left out rather than failing the whole backup.
+pub fn unsendable(rel: &str) -> bool {
+    rel.len() > 400 || rel.split('/').any(|s| s.is_empty() || s.len() > 255 || s.ends_with(' ') || s.ends_with('.'))
+}
 
 /// Files a backup never carries, even inside a save folder: programs and
 /// scripts, and video. Saves are never these, and kryo.to refuses them.
@@ -96,10 +130,11 @@ pub fn collect(rules: &[Rule], roots: &SaveRoots, max_files: usize) -> Collected
     for rule in rules.iter().filter(|r| r.kind == Kind::Files && r.problem().is_none()) {
         let Some(root_dir) = roots.get(rule.root) else { continue };
         for base in expand(rule, roots) {
+            let in_game = rule.root == Root::GameDir;
             let walker = walkdir::WalkDir::new(&base).follow_links(false).into_iter().filter_entry(|e| {
                 // Excludes apply below the save folder, not to its own name.
                 let rel = relative(&base, e.path()).unwrap_or_default();
-                rel.is_empty() || !excluded(&rel, &rule.excludes)
+                rel.is_empty() || !(excluded(&rel, &rule.excludes) || (in_game && e.file_type().is_dir() && shipped(&format!("{rel}/x"))))
             });
             for entry in walker.filter_map(|e| e.ok()) {
                 if !entry.file_type().is_file() {
@@ -108,7 +143,8 @@ pub fn collect(rules: &[Rule], roots: &SaveRoots, max_files: usize) -> Collected
                 let name = entry.file_name().to_string_lossy();
                 let Ok(meta) = entry.metadata() else { continue };
                 let Some(rel) = relative(root_dir, entry.path()) else { continue };
-                if blocked(&name) {
+                let in_rule = relative(&base, entry.path()).unwrap_or_default();
+                if blocked(&name) || unsendable(&rel) || crate::rules::path_problem(&rel).is_some() || (in_game && shipped(&in_rule)) {
                     out.skipped += 1;
                     continue;
                 }
@@ -176,6 +212,41 @@ impl HashCache {
 mod tests {
     use super::*;
     use crate::rules::Source;
+
+    #[test]
+    fn caches_of_every_name_and_workshop_downloads_are_not_saves() {
+        assert!(excluded("GB27/mapcache/x.gbmc.tex", &[]));
+        assert!(excluded("Game/ShaderCache/a.bin", &[]));
+        assert!(excluded("Game/workshop/123/map.bin", &[]));
+        assert!(!excluded("GB27/Saves/ [Pillars].gbsave", &[]));
+        assert!(!excluded("Game/cached_state.sav", &[]), "a file whose name only starts with cache is kept");
+    }
+
+    #[test]
+    fn a_wide_location_in_the_game_folder_never_takes_what_shipped() {
+        let dir = std::env::temp_dir().join(format!("kryo-saves-scan-shipped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let game = dir.join("A Game About Digging A Hole");
+        for d in ["DiggingGame/Binaries/Win64", "DiggingGame/Content/Paks", "DiggingGame/Saved/SaveGames", "DiggingGame/Saved/Config/CrashReportClient"] {
+            std::fs::create_dir_all(game.join(d)).unwrap();
+        }
+        std::fs::write(game.join("DiggingGame/Binaries/Win64/DiggingGame-Win64-Shipping.pdb"), vec![0u8; 4096]).unwrap();
+        std::fs::write(game.join("DiggingGame/Content/Paks/pakchunk0.pak"), vec![0u8; 4096]).unwrap();
+        std::fs::write(game.join("DiggingGame/Saved/SaveGames/MainSave.sav"), b"dig").unwrap();
+        std::fs::write(game.join("DiggingGame/Saved/Config/CrashReportClient/x.ini"), b"x").unwrap();
+        let roots = SaveRoots { game_dir: Some(game.clone()), ..Default::default() };
+        let c = collect(&[Rule::files(Root::GameDir, "DiggingGame", Source::Detected)], &roots, MAX_FILES);
+        let paths: Vec<&str> = c.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["DiggingGame/Saved/SaveGames/MainSave.sav"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_leading_space_is_a_real_name_but_a_trailing_one_is_not() {
+        assert!(!unsendable("F2Games/GoreBox/Saves/ [Pillars].gbsave"));
+        assert!(unsendable("Game/saves /a.sav"));
+        assert!(unsendable("Game/a.sav."));
+    }
 
     #[test]
     fn excludes_match_names_and_relative_patterns() {

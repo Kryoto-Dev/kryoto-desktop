@@ -30,6 +30,12 @@ fn safe_name(s: &str) -> Option<String> {
     (!s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', ':']) && s.len() <= 120).then(|| s.to_string())
 }
 
+/// A Unity company or product name as a data folder: anything but letters,
+/// digits, spaces, `-` and `_` becomes `_`.
+pub fn unity_folder_name(name: &str) -> String {
+    name.chars().map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_') { c } else { '_' }).collect()
+}
+
 /// Unity's company and product, from every `*_Data/app.info` near the top.
 pub fn unity_identity(game_dir: &Path) -> Option<(String, String)> {
     let mut dirs = vec![game_dir.to_path_buf()];
@@ -98,7 +104,15 @@ fn renpy_save_directory(game_dir: &Path) -> Option<String> {
 pub fn rules(game_dir: &Path, roots: &SaveRoots, hints: &GameHints) -> Vec<Rule> {
     let mut out = Vec::new();
     if let Some((company, product)) = unity_identity(game_dir) {
-        out.push(Rule::files(Root::LocalLow, format!("{company}/{product}"), Source::Engine).excluding(&["Unity", "Player.log", "Player-prev.log"]));
+        let not_saves = ["Unity", "Player.log", "Player-prev.log"];
+        out.push(Rule::files(Root::LocalLow, format!("{company}/{product}"), Source::Engine).excluding(&not_saves));
+        // Unity writes the log under the names as given, but a game's
+        // persistentDataPath can turn punctuation into `_`: Sort Them Ducks
+        // logs to `Mr.Duck` and saves to `Mr_Duck`. Both are looked at.
+        let (c, p) = (unity_folder_name(&company), unity_folder_name(&product));
+        if (c.as_str(), p.as_str()) != (company.as_str(), product.as_str()) {
+            out.push(Rule::files(Root::LocalLow, format!("{c}/{p}"), Source::Engine).excluding(&not_saves));
+        }
         out.push(Rule::registry(format!("Software/{company}/{product}"), Source::Engine));
     }
     for (project, rel) in unreal_projects(game_dir) {
@@ -163,6 +177,18 @@ mod tests {
         let r = rules(&g, &SaveRoots::default(), &GameHints::default());
         assert!(r.contains(&Rule::files(Root::LocalLow, "Team Cherry/Hollow Knight", Source::Engine).excluding(&["Unity", "Player.log", "Player-prev.log"])));
         assert!(r.contains(&Rule::registry("Software/Team Cherry/Hollow Knight", Source::Engine)));
+        let _ = std::fs::remove_dir_all(&g);
+    }
+
+    #[test]
+    fn unity_also_looks_where_punctuation_became_underscores() {
+        let g = tmp("unity-dot");
+        std::fs::create_dir_all(g.join("Sort Them Ducks_Data")).unwrap();
+        std::fs::write(g.join("Sort Them Ducks_Data/app.info"), "Mr.Duck\nSort Them Ducks\n").unwrap();
+        let r = rules(&g, &SaveRoots::default(), &GameHints::default());
+        let paths: Vec<&str> = r.iter().filter(|r| r.root == Root::LocalLow).map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, ["Mr.Duck/Sort Them Ducks", "Mr_Duck/Sort Them Ducks"]);
+        assert!(r.contains(&Rule::registry("Software/Mr.Duck/Sort Them Ducks", Source::Engine)), "the registry keeps the name as given");
         let _ = std::fs::remove_dir_all(&g);
     }
 

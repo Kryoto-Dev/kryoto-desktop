@@ -602,7 +602,9 @@ const BROWSER_STATE_SCRIPT: &str = r#"
       if (body !== lastReport || Date.now() - lastReportAt > 30000) {
         lastReport = body;
         lastReportAt = Date.now();
-        await post('/api/desktop/remote/report', now).catch(() => null);
+        const answer = await post('/api/desktop/remote/report', now).catch(() => null);
+        // A phone connected through kryo.to, for Settings > Phone (phone.rs).
+        if (answer && 'phoneSeenAt' in answer) invoke('remote_phone_seen', { seenAt: answer.phoneSeenAt ? Date.parse(answer.phoneSeenAt) : null }).catch(() => {});
       }
     } catch (_) {
     } finally {
@@ -1075,7 +1077,7 @@ fn installed_by_slug(app: &tauri::AppHandle, slug: &str) -> Option<library::Libr
         .find(|g| g.slug.as_deref() == Some(slug) && std::path::Path::new(&g.install_dir).is_dir())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn store_installed(app: tauri::AppHandle, webview: tauri::Webview, slug: String) -> Result<Option<InstalledGame>, String> {
     from_kryoto_store(&app, &webview)?;
     let Some(game) = installed_by_slug(&app, &slug) else { return Ok(None) };
@@ -1087,7 +1089,7 @@ fn store_installed(app: tauri::AppHandle, webview: tauri::Webview, slug: String)
 
 /// Play pressed on the game's kryo.to page: the shell starts it the way its
 /// own Play does (launch choice, Ask every time).
-#[tauri::command]
+#[tauri::command(async)]
 fn store_play(app: tauri::AppHandle, webview: tauri::Webview, slug: String) -> Result<(), String> {
     from_kryoto_store(&app, &webview)?;
     let game = installed_by_slug(&app, &slug).ok_or("That game is not installed on this PC.")?;
@@ -1321,6 +1323,11 @@ fn control_catalog(app: tauri::AppHandle, action: String) -> Result<(), String> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Started as administrator to trace a game's file writes (saves/precise.rs):
+    // that, and nothing of the app.
+    if let Some(code) = saves::precise::helper_from_args() {
+        std::process::exit(code);
+    }
     display_env::apply();
     let instance = system::claim_instance();
     if matches!(instance, system::Instance::AlreadyRunning) {
@@ -1359,6 +1366,7 @@ pub fn run() {
             // Off the main thread: registry and xdg-mime are not worth a frame.
             std::thread::spawn(links::register);
             downloads::init(app.handle());
+            library::fill_branches(app.handle());
             art::prune(app.handle(), 512 * 1024 * 1024);
             if let Some(l) = listener.take() {
                 system::serve_instance(app.handle().clone(), l);
@@ -1501,6 +1509,7 @@ pub fn run() {
             display_env::display_rendered,
             game_logs::game_logs,
             remote::remote_snapshot,
+            remote::remote_phone_seen,
             remote::remote_apply,
             phone::phone_status,
             phone::phone_set_lan,
@@ -1514,6 +1523,7 @@ pub fn run() {
             saves::cloud_saves_refresh,
             saves::cloud_saves_game,
             saves::cloud_saves_location,
+            saves::cloud_saves_leave_out,
             saves::cloud_saves_add_folder,
             saves::cloud_saves_backup,
             saves::cloud_saves_versions,
@@ -1521,6 +1531,7 @@ pub fn run() {
             saves::cloud_saves_restore_local,
             saves::cloud_saves_answer,
             saves::cloud_saves_library,
+            saves::cloud_saves_find_precisely,
             runtimes::runtimes_list,
             runtimes::runtimes_install,
             runtimes::runtimes_progress,

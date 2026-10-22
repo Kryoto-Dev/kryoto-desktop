@@ -19,6 +19,7 @@ pub mod decide;
 pub mod emulator;
 pub mod engine;
 pub mod known;
+pub mod mentions;
 pub mod rules;
 pub mod scan;
 pub mod trace;

@@ -223,23 +223,25 @@ impl Api {
         Ok(map.into_iter().map(|(k, list)| (k, list.into_iter().filter_map(|r| serde_json::from_value(r).ok()).collect())).collect())
     }
 
-    pub async fn report_rules(&self, game_key: &str, rules: &[kryoto_saves::Rule]) -> Result<(), ApiError> {
+    /// `traced`: Windows saw the game write these (precise finding).
+    pub async fn report_rules(&self, game_key: &str, rules: &[kryoto_saves::Rule], traced: bool) -> Result<(), ApiError> {
         let rules: Vec<_> = rules.iter().take(20).map(|r| json!({ "kind": r.kind, "root": r.root, "path": r.path, "excludes": r.excludes, "source": "detected" })).collect();
-        self.send(self.http.post(self.url("/api/saves/rules/report")).json(&json!({ "gameKey": game_key, "rules": rules }))).await.map(|_| ())
+        self.send(self.http.post(self.url("/api/saves/rules/report")).json(&json!({ "gameKey": game_key, "rules": rules, "traced": traced }))).await.map(|_| ())
     }
 }
 
 /// PUT a backup to the address kryo.to gave, with exactly the headers it
 /// signed (the MD5 and length), so storage takes these bytes and no others.
-pub async fn upload(url: &str, headers: &HashMap<String, String>, file: &Path, size: u64) -> Result<(), String> {
+pub async fn upload(url: &str, headers: &HashMap<String, String>, file: &Path, size: u64, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<(), String> {
     let client = storage_client();
+    let sent = std::sync::Arc::new(sent);
     let mut last = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_secs(2 * attempt)).await;
         }
         let body = tokio::fs::File::open(file).await.map_err(|e| e.to_string())?;
-        let mut req = client.put(url).body(reqwest::Body::from(body)).header("content-length", size.to_string());
+        let mut req = client.put(url).body(counted(body, sent.clone())).header("content-length", size.to_string());
         for (k, v) in headers {
             if !k.eq_ignore_ascii_case("content-length") {
                 req = req.header(k.as_str(), v.as_str());
@@ -260,8 +262,35 @@ pub async fn upload(url: &str, headers: &HashMap<String, String>, file: &Path, s
     Err(last)
 }
 
+/// A file as an upload body that says how many bytes have gone out.
+fn counted(file: tokio::fs::File, sent: std::sync::Arc<impl Fn(u64) + Send + Sync + 'static>) -> reqwest::Body {
+    use tokio::io::AsyncReadExt;
+    // (file, bytes so far, finished)
+    let stream = futures_util::stream::unfold((file, 0u64, false), move |(mut f, so_far, finished)| {
+        let sent = sent.clone();
+        async move {
+            if finished {
+                return None;
+            }
+            let mut buf = vec![0u8; 256 * 1024];
+            match f.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    let total = so_far + n as u64;
+                    sent(total);
+                    Some((Ok::<Vec<u8>, std::io::Error>(buf), (f, total, false)))
+                }
+                Err(e) => Some((Err(e), (f, so_far, true))),
+            }
+        }
+    });
+    reqwest::Body::wrap_stream(stream)
+}
+
 /// Download a backup to `out`, refusing anything bigger than `max`.
-pub async fn download(url: &str, out: &Path, max: u64) -> Result<(), String> {
+/// `on_got(bytes so far, bytes in all)` follows it.
+pub async fn download(url: &str, out: &Path, max: u64, on_got: impl Fn(u64, u64)) -> Result<(), String> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let res = storage_client().get(url).send().await.map_err(|e| format!("Could not download the backup: {e}"))?;
@@ -269,12 +298,14 @@ pub async fn download(url: &str, out: &Path, max: u64) -> Result<(), String> {
         return Err(format!("Could not download the backup ({}).", res.status()));
     }
     let tmp = out.with_extension("part");
+    let total = res.content_length().unwrap_or(0);
     let mut f = tokio::fs::File::create(&tmp).await.map_err(|e| e.to_string())?;
     let mut got = 0u64;
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("The download stopped: {e}"))?;
         got += chunk.len() as u64;
+        on_got(got, total.max(got));
         if got > max {
             drop(f);
             let _ = tokio::fs::remove_file(&tmp).await;

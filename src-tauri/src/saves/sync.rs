@@ -13,7 +13,7 @@
 //! size and MD5, and that this PC had the newest version as its parent
 //! (otherwise it answers with a conflict rather than overwrite another PC's).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
@@ -58,6 +58,51 @@ impl Drop for Busy {
     fn drop(&mut self) {
         if let Some(set) = BUSY.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             set.remove(&self.0);
+        }
+    }
+}
+
+/// How far a backup or restore is, for the game page (`cloud-saves-progress`):
+/// the phase (`scanning`, `packing`, `uploading`, `checking`, `downloading`,
+/// `restoring`, then `done`) and bytes done of bytes in all, 0 of 0 when it
+/// cannot be counted. A big backup takes minutes; without this it looked stuck.
+/// Sent at most about eight times a second, at once when the phase changes,
+/// and `done` when it is dropped, however the work ended.
+pub(crate) struct Progress<R: Runtime> {
+    app: AppHandle<R>,
+    id: String,
+    last: std::sync::Arc<Mutex<(&'static str, Option<std::time::Instant>)>>,
+    owner: bool,
+}
+
+impl<R: Runtime> Progress<R> {
+    fn new(app: &AppHandle<R>, id: &str) -> Self {
+        Progress { app: app.clone(), id: id.to_string(), last: Default::default(), owner: true }
+    }
+
+    /// A copy to hand to other threads; only the first says `done`.
+    fn share(&self) -> Self {
+        Progress { app: self.app.clone(), id: self.id.clone(), last: self.last.clone(), owner: false }
+    }
+
+    fn report(&self, phase: &'static str, done: u64, total: u64) {
+        let now = std::time::Instant::now();
+        {
+            let Ok(mut last) = self.last.lock() else { return };
+            let due = last.0 != phase || (total > 0 && done >= total) || last.1.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(125));
+            if !due {
+                return;
+            }
+            *last = (phase, Some(now));
+        }
+        let _ = self.app.emit("cloud-saves-progress", json!({ "gameId": self.id, "phase": phase, "done": done, "total": total }));
+    }
+}
+
+impl<R: Runtime> Drop for Progress<R> {
+    fn drop(&mut self) {
+        if self.owner {
+            let _ = self.app.emit("cloud-saves-progress", json!({ "gameId": self.id, "phase": "done", "done": 0, "total": 0 }));
         }
     }
 }
@@ -186,6 +231,8 @@ pub async fn backup<R: Runtime>(app: &AppHandle<R>, id: &str, manual: bool) -> R
     }
     let _busy = Busy::take(id)?;
     let game = game(app, id)?;
+    let progress = Progress::new(app, id);
+    progress.report("scanning", 0, 0);
     let roots = roots(app, &game);
     let app2 = app.clone();
     let game2 = game.clone();
@@ -204,7 +251,7 @@ pub async fn backup<R: Runtime>(app: &AppHandle<R>, id: &str, manual: bool) -> R
     if !manual && state.base_hash.as_deref() == Some(hash.as_str()) && state.base_version.is_some() {
         return Ok("Already backed up.".into());
     }
-    let result = upload(app, &game, &local, &mut state).await;
+    let result = upload(app, &game, &local, &mut state, &progress).await;
     match &result {
         Ok(_) => {
             state.error = None;
@@ -231,7 +278,7 @@ pub async fn backup<R: Runtime>(app: &AppHandle<R>, id: &str, manual: bool) -> R
     }
 }
 
-async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Local, state: &mut GameState) -> Result<(), ApiError> {
+async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Local, state: &mut GameState, progress: &Progress<R>) -> Result<(), ApiError> {
     let api = Api::new(app)?;
     refresh_community(app, game, &api).await;
     let dir = game_data(app, &game.id).ok_or_else(|| ApiError::Other("No app data folder.".into()))?;
@@ -239,8 +286,11 @@ async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Loca
     let tpl = template(game, local, state.base_version.clone());
     let files = local.found.files.clone();
     let out2 = out.clone();
-    let (manifest, written) =
-        tauri::async_runtime::spawn_blocking(move || bundle::write(&tpl, &files, &out2)).await.map_err(|e| ApiError::Other(e.to_string()))?.map_err(ApiError::Other)?;
+    let packing = progress.share();
+    let (manifest, written) = tauri::async_runtime::spawn_blocking(move || bundle::write_with(&tpl, &files, &out2, &mut |done, total| packing.report("packing", done, total)))
+        .await
+        .map_err(|e| ApiError::Other(e.to_string()))?
+        .map_err(ApiError::Other)?;
     let max = account(app).allowance.map(|a| a.max_backup_bytes).filter(|m| *m > 0).unwrap_or(DEFAULT_MAX_BACKUP);
     if written.size > max {
         let _ = std::fs::remove_file(&out);
@@ -263,10 +313,13 @@ async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Loca
         "machine": manifest.machine,
         "parentVersion": state.base_version,
     });
+    progress.report("uploading", 0, written.size);
     let prepared = api.prepare(body).await?;
-    let sent = api::upload(&prepared.url, &prepared.headers, &out, written.size).await;
+    let (uploading, size) = (progress.share(), written.size);
+    let sent = api::upload(&prepared.url, &prepared.headers, &out, written.size, move |done| uploading.report("uploading", done, size)).await;
     let _ = std::fs::remove_file(&out);
     sent.map_err(ApiError::Other)?;
+    progress.report("checking", 0, 0);
     let version = api.claim(&prepared.upload_id).await?;
     state.base_version = Some(version.id.clone());
     state.base_hash = Some(manifest.content_hash.clone());
@@ -314,19 +367,23 @@ fn put_back<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, file: &Path) -> 
 }
 
 /// Download one of the account's backups and put it here.
-async fn fetch_and_put<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, version_id: &str) -> Result<Manifest, String> {
+async fn fetch_and_put<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, version_id: &str, progress: &Progress<R>) -> Result<Manifest, String> {
+    progress.report("downloading", 0, 0);
     let api = Api::new(app).map_err(|e| e.to_string())?;
     let link = api.link(version_id).await.map_err(|e| e.to_string())?;
     let dir = game_data(app, &game.id).ok_or("No app data folder.")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = dir.join("in.ksave");
     let max = account(app).allowance.map(|a| a.max_backup_bytes).filter(|m| *m > 0).unwrap_or(DEFAULT_MAX_BACKUP).max(link.size) + (1 << 20);
-    api::download(&link.url, &file, max).await?;
+    let size = link.size;
+    api::download(&link.url, &file, max, |done, total| progress.report("downloading", done, if size > 0 { size } else { total })).await?;
+    progress.report("checking", 0, 0);
     let got = bundle::digest(&file)?;
     if !link.sha256.is_empty() && got.sha256 != link.sha256 {
         let _ = std::fs::remove_file(&file);
         return Err("The downloaded backup is not the one on your account. Nothing was changed.".into());
     }
+    progress.report("restoring", 0, 0);
     let (app2, game2, file2) = (app.clone(), game.clone(), file.clone());
     let result = tauri::async_runtime::spawn_blocking(move || put_back(&app2, &game2, &file2)).await.map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&file);
@@ -350,7 +407,8 @@ async fn restore_checked<R: Runtime>(app: &AppHandle<R>, id: &str, version_id: &
     if busy {
         return Err("Close the game first.".into());
     }
-    let manifest = fetch_and_put(app, &game, version_id).await?;
+    let progress = Progress::new(app, id);
+    let manifest = fetch_and_put(app, &game, version_id, &progress).await?;
     let mut state = load_state(app, id);
     state.base_version = Some(version_id.to_string());
     state.base_hash = Some(manifest.content_hash);
@@ -374,6 +432,8 @@ pub async fn restore_local<R: Runtime>(app: &AppHandle<R>, id: &str, file: &str)
     if !path.is_file() {
         return Err("That local backup is gone.".into());
     }
+    let progress = Progress::new(app, id);
+    progress.report("restoring", 0, 0);
     // Keep it out of the pruning a restore does, then put it back.
     let keep = path.with_extension("restoring");
     std::fs::copy(&path, &keep).map_err(|e| e.to_string())?;
@@ -559,11 +619,129 @@ async fn check<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Result<Opt
 
 /* ── after a game closes ─────────────────────────────────────────────── */
 
+/// What the game's own files were found to mention, kept so the same folder
+/// names are not searched for again until the game changes.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Mentions {
+    fingerprint: String,
+    found: Vec<String>,
+    missing: Vec<String>,
+}
+
+/// Which of the folder names the session wrote in are named in the game's
+/// own files (kryoto_saves::mentions): what ties a folder to the game when
+/// nothing else does, with no administrator needed.
+fn mentioned<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, names: Vec<String>) -> HashSet<String> {
+    let files = kryoto_saves::mentions::game_files(Path::new(&game.install_dir));
+    let fingerprint = {
+        let newest = files.iter().filter_map(|(p, _)| std::fs::metadata(p).ok()?.modified().ok()).max().map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)).unwrap_or(0);
+        format!("{}:{}:{newest}", files.len(), files.iter().map(|(_, s)| s).sum::<u64>())
+    };
+    let cache_file = super::game_data(app, &game.id).map(|d| d.join("mentions.json"));
+    let mut cache: Mentions = cache_file.as_ref().map(|f| super::read_json(f)).unwrap_or_default();
+    if cache.fingerprint != fingerprint {
+        cache = Mentions { fingerprint, ..Default::default() };
+    }
+    let unknown: Vec<String> = names.iter().filter(|n| !cache.found.contains(n) && !cache.missing.contains(n)).cloned().collect();
+    if !unknown.is_empty() {
+        let found = kryoto_saves::mentions::find(&files, &unknown, Duration::from_secs(25));
+        for n in unknown {
+            if found.contains(&n) {
+                cache.found.push(n);
+            } else {
+                cache.missing.push(n);
+            }
+        }
+        // Bounded: the oldest misses go first.
+        let extra = cache.missing.len().saturating_sub(5_000);
+        cache.missing.drain(..extra);
+        if let Some(f) = &cache_file {
+            let _ = super::write_json(f, &cache);
+        }
+    }
+    let found: Vec<String> = names.into_iter().filter(|n| cache.found.contains(n)).collect();
+    specific(app, game, found).into_iter().collect()
+}
+
+/// For each folder name, which other installed games' files were searched for
+/// it and which of them mention it too. Kept for the PC: a name is looked up
+/// once, not every session.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Baseline {
+    names: BTreeMap<String, Seen>,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Seen {
+    checked: Vec<String>,
+    mentioned_by: Vec<String>,
+}
+
+/// Other games searched per name, and how many of them may mention it before
+/// it is a common word, not one game's folder.
+const CONTROL_GAMES: usize = 8;
+const COMMON_IN: usize = 2;
+
+/// The names that belong to this game: a word other games' files contain
+/// too (`client`, `cache`, `signal`) is in every game and says nothing.
+fn specific<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, names: Vec<String>) -> Vec<String> {
+    if names.is_empty() {
+        return names;
+    }
+    let file = super::base_dir(app).map(|d| d.join("mention-baseline.json"));
+    let mut base: Baseline = file.as_ref().map(|f| super::read_json(f)).unwrap_or_default();
+    let others: Vec<LibraryGame> =
+        crate::library::load(app).unwrap_or_default().into_iter().filter(|g| g.id != game.id && !g.install_dir.is_empty() && Path::new(&g.install_dir).is_dir()).collect();
+    let mut changed = false;
+    for other in others.iter().take(CONTROL_GAMES * 2) {
+        let todo: Vec<String> = names
+            .iter()
+            .filter(|n| base.names.get(*n).is_none_or(|s| s.checked.len() < CONTROL_GAMES && !s.checked.contains(&other.id) && s.mentioned_by.len() < COMMON_IN))
+            .cloned()
+            .collect();
+        if todo.is_empty() {
+            continue;
+        }
+        let files = kryoto_saves::mentions::game_files(Path::new(&other.install_dir));
+        let found = kryoto_saves::mentions::find(&files, &todo, Duration::from_secs(6));
+        for n in todo {
+            let seen = base.names.entry(n.clone()).or_default();
+            seen.checked.push(other.id.clone());
+            if found.contains(&n) {
+                seen.mentioned_by.push(other.id.clone());
+            }
+        }
+        changed = true;
+    }
+    if changed {
+        while base.names.len() > 20_000 {
+            let Some(k) = base.names.keys().next().cloned() else { break };
+            base.names.remove(&k);
+        }
+        if let Some(f) = &file {
+            let _ = super::write_json(f, &base);
+        }
+    }
+    names.into_iter().filter(|n| base.names.get(n).is_none_or(|s| s.mentioned_by.len() < COMMON_IN)).collect()
+}
+
 /// Learn where the game saved from what the tracer saw.
 fn learn<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, obs: &kryoto_saves::trace::Observation, roots: &kryoto_saves::SaveRoots) {
     let ident = identity(game);
     let hints = super::hints(game, ident.appid.clone());
     let ignore = super::ignore_dirs(app, game);
+    let precise = obs.traced.is_some();
+    let mut obs = obs.clone();
+    if !precise {
+        let names = kryoto_saves::trace::names_to_check(&obs, roots, &hints, &ignore);
+        if !names.is_empty() {
+            obs.mentioned = mentioned(app, game, names);
+        }
+    }
+    let obs = &obs;
     let raw = kryoto_saves::trace::candidates(obs, roots, &hints, &ignore, &|_| false);
     let noise_path = super::noise_file(app);
     let mut noise: super::Noise = noise_path.as_ref().map(|p| super::read_json(p)).unwrap_or_default();
@@ -582,12 +760,22 @@ fn learn<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, obs: &kryoto_saves:
     }
     let noisy = |r: &Rule| noise.0.get(&r.key()).is_some_and(|ids| ids.iter().any(|g| *g != game.id));
     let mut stored = load_rules(app, &game.id);
-    stored.detected.retain(|d| !noisy(&d.rule) || d.accepted);
+    // A location Windows saw this game write is its own, whatever other
+    // games did: noise only ever drops what the smart tracer guessed.
+    stored.detected.retain(|d| !noisy(&d.rule) || d.accepted || d.traced);
     let t = now();
-    for c in raw.into_iter().filter(|c| !noisy(&c.rule)) {
+    let kept: Vec<_> = raw.into_iter().filter(|c| (precise && c.rule.kind == kryoto_saves::Kind::Files) || !noisy(&c.rule)).collect();
+    if precise {
+        stored.precise_sessions += 1;
+        stored.precise_next = false;
+        stored.precise_found |= kept.iter().any(|c| c.rule.kind == kryoto_saves::Kind::Files);
+    }
+    for c in kept {
         let reasons: Vec<String> = c.reasons.iter().map(|r| r.to_string()).collect();
+        let traced = precise && c.rule.kind == kryoto_saves::Kind::Files;
         match stored.detected.iter_mut().find(|d| d.rule.key() == c.rule.key()) {
             Some(d) => {
+                d.traced |= traced;
                 d.sessions += 1;
                 // Seen again in another session: more sure each time, up to twice.
                 d.score = d.score.max(c.score) + if d.sessions <= 3 { 10 } else { 0 };
@@ -599,29 +787,39 @@ fn learn<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, obs: &kryoto_saves:
                     }
                 }
             }
-            None => stored.detected.push(super::Detected { rule: c.rule, score: c.score, sessions: 1, files: c.files, last_seen: t, reasons, accepted: false, reported: false }),
+            None => stored.detected.push(super::Detected { rule: c.rule, score: c.score, sessions: 1, files: c.files, last_seen: t, reasons, accepted: false, reported: false, traced }),
         }
     }
-    stored.detected.sort_by_key(|d| std::cmp::Reverse(d.score));
+    stored.detected.sort_by_key(|d| std::cmp::Reverse((d.traced, d.score)));
     stored.detected.truncate(40);
-    let fresh: Vec<Rule> = stored.detected.iter().filter(|d| d.trusted() && !d.reported && kryoto_saves::trace::shareable(&d.rule)).map(|d| d.rule.clone()).collect();
+    let fresh: Vec<(Rule, bool)> =
+        stored.detected.iter().filter(|d| d.trusted() && !d.reported && kryoto_saves::trace::shareable(&d.rule)).map(|d| (d.rule.clone(), d.traced)).collect();
     save_rules(app, &game.id, &stored);
-    crate::logging::info("saves", &format!("{}: {} save location(s) seen this session", game.title, stored.detected.iter().filter(|d| d.last_seen == t).count()));
+    crate::logging::info(
+        "saves",
+        &format!("{}: {} save location(s) seen this session{}", game.title, stored.detected.iter().filter(|d| d.last_seen == t).count(), if precise { " (precise)" } else { "" }),
+    );
     if !fresh.is_empty() && crate::settings::load(app).cloud_saves_share {
         let app2 = app.clone();
         let id = game.id.clone();
         let key = ident.key.clone();
         tauri::async_runtime::spawn(async move {
             let Ok(api) = Api::new(&app2) else { return };
-            if api.report_rules(&key, &fresh).await.is_ok() {
-                let mut stored = load_rules(&app2, &id);
-                for d in stored.detected.iter_mut() {
-                    if fresh.iter().any(|r| r.key() == d.rule.key()) {
-                        d.reported = true;
-                    }
+            // Found precisely counts for more on kryo.to: sent on its own.
+            let mut sent: Vec<String> = Vec::new();
+            for traced in [true, false] {
+                let rules: Vec<Rule> = fresh.iter().filter(|(_, t)| *t == traced).map(|(r, _)| r.clone()).collect();
+                if !rules.is_empty() && api.report_rules(&key, &rules, traced).await.is_ok() {
+                    sent.extend(rules.iter().map(Rule::key));
                 }
-                save_rules(&app2, &id, &stored);
             }
+            let mut stored = load_rules(&app2, &id);
+            for d in stored.detected.iter_mut() {
+                if sent.contains(&d.rule.key()) {
+                    d.reported = true;
+                }
+            }
+            save_rules(&app2, &id, &stored);
         });
     }
 }

@@ -12,6 +12,7 @@
 
 pub mod api;
 mod known;
+pub mod precise;
 mod sync;
 pub mod tracer;
 #[cfg(windows)]
@@ -125,6 +126,49 @@ pub(crate) fn enabled<R: Runtime>(app: &AppHandle<R>) -> bool {
     a.feature && a.username.is_some() && crate::settings::load(app).cloud_saves
 }
 
+/// Save locations are being looked for while games run.
+pub(crate) fn detecting<R: Runtime>(app: &AppHandle<R>) -> bool {
+    enabled(app) && crate::settings::load(app).cloud_saves_detect && account(app).perk != Some(false)
+}
+
+/// A precise session is how many at most, per game, until one finds its saves.
+const PRECISE_TRIES: u32 = 3;
+
+/// Whether this launch should find the game's saves precisely: Settings says
+/// so (or the player asked for it on the game's page), and it has not found
+/// them that way yet, nor been told no.
+fn wants_precise(mode: &str, r: &GameRules) -> bool {
+    r.precise_next || (mode == "precise" && !r.precise_declined && !r.precise_found && r.precise_sessions < PRECISE_TRIES)
+}
+
+/// Before a game starts: when this session should find its saves precisely,
+/// ask Windows for administrator and start the helper (precise.rs). Declined,
+/// or anything going wrong, leaves the smart tracer to it.
+pub fn precise_before_launch<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<precise::Precise> {
+    if !cfg!(windows) || !detecting(app) {
+        return None;
+    }
+    let mut stored = load_rules(app, &game.id);
+    if !wants_precise(&crate::settings::load(app).cloud_saves_find, &stored) {
+        return None;
+    }
+    let dir = game_data(app, &game.id)?.join("trace");
+    match precise::begin(&dir, Path::new(&game.install_dir)) {
+        precise::Begin::Running(p) => Some(p),
+        precise::Begin::Declined => {
+            crate::logging::info("saves", &format!("{}: administrator declined, smart detection instead", game.title));
+            stored.precise_declined = true;
+            stored.precise_next = false;
+            save_rules(app, &game.id, &stored);
+            None
+        }
+        precise::Begin::Failed(e) => {
+            crate::logging::warn("saves", &format!("{}: precise finding did not start: {e}", game.title));
+            None
+        }
+    }
+}
+
 /// The Steam id the emulator uses for this account on every PC, so a game
 /// that ties its saves to the player's id finds them on the next PC too.
 pub(crate) fn steam_id_for(username: &str) -> String {
@@ -225,6 +269,9 @@ pub struct Detected {
     /// Sent to kryo.to's community rules.
     #[serde(default)]
     pub reported: bool,
+    /// Found precisely: Windows saw the game write it.
+    #[serde(default)]
+    pub traced: bool,
 }
 
 impl Detected {
@@ -247,14 +294,44 @@ pub struct GameRules {
     /// Kryoto's community rules, and when they were fetched.
     pub community: Vec<Rule>,
     pub community_at: u64,
+    /// Folders the player left out of a location, by the location's
+    /// [`Rule::key`] (relative patterns, as in [`Rule::excludes`]).
+    pub excludes: BTreeMap<String, Vec<String>>,
+    /// The [`DETECTOR`] that found `detected`.
+    pub detector: u32,
+    /// Precise sessions run (precise.rs), and whether one found saves.
+    pub precise_sessions: u32,
+    pub precise_found: bool,
+    /// The player said no to administrator for this game: smart only.
+    pub precise_declined: bool,
+    /// The player asked for the next session to be precise.
+    pub precise_next: bool,
 }
+
+/// Raised when the tracer's rules change enough that what an older one found
+/// cannot be trusted. 2: a location needs evidence of the game itself (its
+/// open files, its name), never only timing, so a compile or a git checkout
+/// beside the game is no longer a save.
+pub(crate) const DETECTOR: u32 = 2;
 
 pub(crate) fn rules_file<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<PathBuf> {
     Some(game_data(app, id)?.join("rules.json"))
 }
 
 pub(crate) fn load_rules<R: Runtime>(app: &AppHandle<R>, id: &str) -> GameRules {
-    rules_file(app, id).map(|f| read_json(&f)).unwrap_or_default()
+    let Some(file) = rules_file(app, id) else { return GameRules::default() };
+    let mut rules: GameRules = read_json(&file);
+    if rules.detector < DETECTOR {
+        // An older detector's finds are forgotten, unless the player kept
+        // them; the next session finds the real ones again.
+        let before = rules.detected.len();
+        rules.detected.retain(|d| d.accepted);
+        rules.detector = DETECTOR;
+        if rules.detected.len() != before {
+            let _ = write_json(&file, &rules);
+        }
+    }
+    rules
 }
 
 pub(crate) fn save_rules<R: Runtime>(app: &AppHandle<R>, id: &str, rules: &GameRules) {
@@ -266,6 +343,22 @@ pub(crate) fn save_rules<R: Runtime>(app: &AppHandle<R>, id: &str, rules: &GameR
 /// Every save location for a game, most trusted first, with what each one
 /// is; and the detected locations still waiting for the player.
 pub(crate) fn locations<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, roots: &SaveRoots) -> (Vec<Rule>, Vec<Detected>) {
+    let (mut all, stored) = every_location(app, game, roots);
+    all.retain(|r| !stored.ignored.contains(&r.key()));
+    // Nothing is suggested in or around a location already backed up: inside
+    // it is backed up already, and around it is more than the game's saves.
+    let suggestions = stored
+        .detected
+        .iter()
+        .filter(|d| !d.trusted() && !stored.ignored.contains(&d.rule.key()) && !all.iter().any(|r| r.contains(&d.rule) || d.rule.contains(r)))
+        .cloned()
+        .collect();
+    (all, suggestions)
+}
+
+/// Every location from every source, the ones the player took off included,
+/// with the player's left-out folders applied; and the game's stored rules.
+fn every_location<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, roots: &SaveRoots) -> (Vec<Rule>, GameRules) {
     let id = identity(game);
     let stored = load_rules(app, &game.id);
     let dir = Path::new(&game.install_dir);
@@ -274,15 +367,12 @@ pub(crate) fn locations<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, root
     let known = known::rules_for(app, id.appid.as_deref(), &game.title);
     let detected: Vec<Rule> = stored.detected.iter().filter(|d| d.trusted()).map(|d| d.rule.clone()).collect();
     let mut all = merge(&[&stored.player, &emulator, &engine, &known, &stored.carried, &stored.community, &detected]);
-    all.retain(|r| !stored.ignored.contains(&r.key()));
-    // A location only matters if this PC has it, or a backup may need it.
-    let suggestions = stored
-        .detected
-        .iter()
-        .filter(|d| !d.trusted() && !stored.ignored.contains(&d.rule.key()) && !all.iter().any(|r| r.contains(&d.rule)))
-        .cloned()
-        .collect();
-    (all, suggestions)
+    for r in all.iter_mut() {
+        if let Some(extra) = stored.excludes.get(&r.key()) {
+            r.excludes.extend(extra.iter().cloned());
+        }
+    }
+    (all, stored)
 }
 
 /* ── per-game sync state ────────────────────────────────────────────── */
@@ -391,8 +481,40 @@ pub struct Location {
     pub exists: bool,
     pub files: usize,
     pub bytes: u64,
+    /// Registry values under a registry location.
+    pub values: usize,
     pub score: Option<i32>,
     pub reasons: Vec<String>,
+    /// Folders the player left out of it.
+    pub left_out: Vec<String>,
+}
+
+/// A big folder inside a location, offered to leave out when the saves are
+/// too big to back up (downloaded maps, mods, replays).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Heavy {
+    pub location: String,
+    /// The folder, relative to the location (what leaving it out adds).
+    pub folder: String,
+    pub label: String,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+/// How this game's saves are being found, for its page.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Finding {
+    /// Settings: `precise` or `smart`.
+    pub mode: String,
+    /// Precise finding is possible on this PC (Windows).
+    pub can_precise: bool,
+    /// The next session asks for administrator to find them precisely.
+    pub precise_next: bool,
+    pub precise_found: bool,
+    pub precise_declined: bool,
+    pub precise_sessions: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -402,10 +524,17 @@ pub struct GameSaves {
     pub feature: bool,
     pub on: bool,
     pub perk: Option<bool>,
+    pub finding: Finding,
     pub locations: Vec<Location>,
     pub suggestions: Vec<Location>,
+    /// Locations the player took off, to put back.
+    pub ignored: Vec<Location>,
+    /// The biggest folders inside the locations, largest first.
+    pub heavy: Vec<Heavy>,
     pub files: usize,
     pub bytes: u64,
+    /// Registry values among the saves.
+    pub registry_values: usize,
     pub truncated: bool,
     pub state: GameState,
     pub max_backup_bytes: u64,
@@ -428,24 +557,69 @@ pub(crate) fn label_of(rule: &Rule) -> String {
     }
 }
 
-fn location(rule: &Rule, roots: &SaveRoots, per_rule: &HashMap<String, (usize, u64)>, detected: Option<&Detected>) -> Location {
+fn registry_values(rule: &Rule) -> usize {
+    #[cfg(windows)]
+    {
+        if rule.kind == Kind::Registry {
+            return kryoto_saves::registry::read(std::slice::from_ref(rule)).len();
+        }
+    }
+    let _ = rule;
+    0
+}
+
+fn location(rule: &Rule, roots: &SaveRoots, per_rule: &HashMap<String, (usize, u64)>, detected: Option<&Detected>, left_out: &[String]) -> Location {
     let base = (rule.kind == Kind::Files).then(|| rule.base(roots)).flatten();
     let found = kryoto_saves::rules::expand(rule, roots);
     let (files, bytes) = per_rule.get(&rule.key()).copied().unwrap_or_default();
+    let values = registry_values(rule);
     Location {
         key: rule.key(),
         kind: rule.kind,
         root: rule.root.name().into(),
         label: label_of(rule),
         source: rule.source,
-        source_label: rule.source.label(),
+        // Windows saw the game write it: more than "seen while it ran".
+        source_label: if detected.is_some_and(|d| d.traced) { "Precise" } else { rule.source.label() },
         path: found.first().cloned().or(base).map(|p| p.to_string_lossy().to_string()),
-        exists: !found.is_empty(),
+        exists: !found.is_empty() || values > 0,
         files,
         bytes,
+        values,
         score: detected.map(|d| d.score),
         reasons: detected.map(|d| d.reasons.clone()).unwrap_or_default(),
+        left_out: left_out.to_vec(),
     }
+}
+
+/// The biggest top-level folders inside each location, from what a scan found.
+fn heavy_folders(rules: &[Rule], found: &kryoto_saves::scan::Collected) -> Vec<Heavy> {
+    let mut sizes: BTreeMap<(String, String), (usize, u64, String)> = BTreeMap::new();
+    for f in &found.files {
+        let Some(rule) = rules.iter().find(|r| r.key() == f.rule) else { continue };
+        if rule.path.contains('*') || rule.path.contains('<') {
+            continue;
+        }
+        // Compared without changing the bytes: a lowercased name (Cyrillic,
+        // say) need not keep its length.
+        let prefix = format!("{}/", rule.path);
+        let Some(rel) = f.path.get(..prefix.len()).filter(|p| p.eq_ignore_ascii_case(&prefix)).map(|_| &f.path[prefix.len()..]) else { continue };
+        let Some((folder, _)) = rel.split_once('/') else { continue };
+        let e = sizes.entry((rule.key(), folder.to_lowercase())).or_insert((0, 0, folder.to_string()));
+        e.0 += 1;
+        e.1 += f.size;
+    }
+    let mut out: Vec<Heavy> = sizes
+        .into_iter()
+        .filter(|(_, (_, bytes, _))| *bytes >= 1 << 20)
+        .filter_map(|((key, _), (files, bytes, folder))| {
+            let rule = rules.iter().find(|r| r.key() == key)?;
+            Some(Heavy { label: format!("{}\\{}", label_of(rule), folder), location: key, folder, files, bytes })
+        })
+        .collect();
+    out.sort_by_key(|h| std::cmp::Reverse(h.bytes));
+    out.truncate(6);
+    out
 }
 
 pub(crate) fn local_backups<R: Runtime>(app: &AppHandle<R>, id: &str) -> Vec<LocalBackup> {
@@ -477,18 +651,50 @@ pub fn cloud_saves_game(app: AppHandle, id: String) -> Result<GameSaves, String>
     let (rules, suggestions) = locations(&app, &game, &roots);
     let found = kryoto_saves::scan::collect(&rules, &roots, kryoto_saves::scan::MAX_FILES);
     let per_rule = found.per_rule();
-    let stored = load_rules(&app, &id);
+    let (everything, stored) = every_location(&app, &game, &roots);
     let detected = |r: &Rule| stored.detected.iter().find(|d| d.rule.key() == r.key());
+    let left_out = |r: &Rule| stored.excludes.get(&r.key()).cloned().unwrap_or_default();
+    let mut ignored: Vec<Location> = everything
+        .iter()
+        .filter(|r| stored.ignored.contains(&r.key()))
+        .map(|r| location(r, &roots, &HashMap::new(), detected(r), &left_out(r)))
+        .collect();
+    // Suggestions the player dismissed are taken off too.
+    for d in stored.detected.iter().filter(|d| stored.ignored.contains(&d.rule.key())) {
+        if !ignored.iter().any(|l| l.key == d.rule.key()) {
+            ignored.push(location(&d.rule, &roots, &HashMap::new(), Some(d), &[]));
+        }
+    }
+    let locations: Vec<Location> = rules.iter().map(|r| location(r, &roots, &per_rule, detected(r), &left_out(r))).collect();
+    let registry_values = locations.iter().map(|l| l.values).sum();
+    // What each suggestion holds now, so its size can be judged before Add;
+    // one this PC no longer has is not offered.
+    let suggested: Vec<Rule> = suggestions.iter().map(|d| d.rule.clone()).collect();
+    let in_suggested = kryoto_saves::scan::collect(&suggested, &roots, kryoto_saves::scan::MAX_FILES).per_rule();
+    let suggestions: Vec<Location> = suggestions.iter().map(|d| location(&d.rule, &roots, &in_suggested, Some(d), &[])).filter(|l| l.exists).collect();
     let a = account(&app);
+    let settings = crate::settings::load(&app);
+    let finding = Finding {
+        precise_next: wants_precise(&settings.cloud_saves_find, &stored) && cfg!(windows) && settings.cloud_saves_detect,
+        mode: settings.cloud_saves_find.clone(),
+        can_precise: cfg!(windows),
+        precise_found: stored.precise_found,
+        precise_declined: stored.precise_declined,
+        precise_sessions: stored.precise_sessions,
+    };
     Ok(GameSaves {
         identity: identity(&game),
         feature: a.feature,
-        on: crate::settings::load(&app).cloud_saves,
+        on: settings.cloud_saves,
         perk: a.perk,
-        locations: rules.iter().map(|r| location(r, &roots, &per_rule, detected(r))).collect(),
-        suggestions: suggestions.iter().map(|d| location(&d.rule, &roots, &per_rule, Some(d))).collect(),
+        finding,
+        suggestions,
+        heavy: heavy_folders(&rules, &found),
+        locations,
+        ignored,
         files: found.files.len(),
         bytes: found.bytes,
+        registry_values,
         truncated: found.truncated,
         state: load_state(&app, &id),
         max_backup_bytes: a.allowance.as_ref().map(|x| x.max_backup_bytes).filter(|b| *b > 0).unwrap_or(sync::DEFAULT_MAX_BACKUP),
@@ -508,14 +714,63 @@ pub fn cloud_saves_location(app: AppHandle, id: String, key: String, action: Str
             d.accepted = true;
             stored.ignored.retain(|k| *k != key);
         }
+        // Taken off, not forgotten: a folder the player added stays listed
+        // under the taken-off locations, so it can be put back.
         "ignore" => {
-            stored.player.retain(|r| r.key() != key);
             if !stored.ignored.contains(&key) {
                 stored.ignored.push(key);
             }
         }
         "restore" => stored.ignored.retain(|k| *k != key),
         _ => return Err("Unknown action.".into()),
+    }
+    save_rules(&app, &id, &stored);
+    let _ = app.emit("cloud-saves-game", serde_json::json!({ "gameId": game.id }));
+    Ok(())
+}
+
+/// Leave a folder inside a location out of the backup (`on`), or take it back
+/// in. `folder` is relative to the location.
+#[tauri::command(async)]
+pub fn cloud_saves_leave_out(app: AppHandle, id: String, key: String, folder: String, on: bool) -> Result<(), String> {
+    let game = game_by_id(&app, &id)?;
+    let folder = kryoto_saves::rules::normalize(&folder);
+    if kryoto_saves::rules::path_problem(&folder).is_some() {
+        return Err("That folder cannot be left out.".into());
+    }
+    let mut stored = load_rules(&app, &id);
+    let list = stored.excludes.entry(key.clone()).or_default();
+    list.retain(|f| !f.eq_ignore_ascii_case(&folder));
+    if on {
+        list.push(folder);
+    }
+    if list.is_empty() {
+        stored.excludes.remove(&key);
+    }
+    save_rules(&app, &id, &stored);
+    // Too big was about the old size; the next backup says again if it still is.
+    let mut s = load_state(&app, &id);
+    if s.too_big {
+        s.too_big = false;
+        s.error = None;
+        save_state(&app, &id, &s);
+    }
+    let _ = app.emit("cloud-saves-game", serde_json::json!({ "gameId": game.id }));
+    Ok(())
+}
+
+/// Find this game's saves precisely the next time it is played (one
+/// administrator prompt then), or not.
+#[tauri::command(async)]
+pub fn cloud_saves_find_precisely(app: AppHandle, id: String, on: bool) -> Result<(), String> {
+    let game = game_by_id(&app, &id)?;
+    let mut stored = load_rules(&app, &id);
+    stored.precise_next = on;
+    if on {
+        stored.precise_declined = false;
+    } else if crate::settings::load(&app).cloud_saves_find == "precise" && !stored.precise_found {
+        // "Not now" in precise mode means this game stays smart.
+        stored.precise_declined = true;
     }
     save_rules(&app, &id, &stored);
     let _ = app.emit("cloud-saves-game", serde_json::json!({ "gameId": game.id }));
@@ -683,6 +938,33 @@ mod tests {
         g.slug = Some("portal-2".into());
         assert_eq!(identity(&g).key, "slug:portal-2");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What real installed games would back up. Opt-in, read-only:
+    /// `KRYOTO_SAVES_GAMES="<game dir>|<appid>;..." cargo test real_games_saves -- --ignored --nocapture`
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn real_games_saves() {
+        let list = std::env::var("KRYOTO_SAVES_GAMES").expect("KRYOTO_SAVES_GAMES");
+        for spec in list.split(';').filter(|s| !s.is_empty()) {
+            let (dir, appid) = spec.split_once('|').unwrap_or((spec, ""));
+            let dir = Path::new(dir);
+            let roots = win::roots(Some(dir.to_path_buf()));
+            let title = dir.file_name().unwrap().to_string_lossy().to_string();
+            let hints = GameHints { title, ..Default::default() };
+            let appid = (!appid.is_empty()).then_some(appid);
+            let rules = merge(&[&kryoto_saves::emulator::rules(dir, appid), &kryoto_saves::engine::rules(dir, &roots, &hints)]);
+            let found = kryoto_saves::scan::collect(&rules, &roots, kryoto_saves::scan::MAX_FILES);
+            let values = kryoto_saves::registry::read(&rules).len();
+            println!("== {} : {} files, {:.1} MB, {} registry values, {} left out", dir.display(), found.files.len(), found.bytes as f64 / 1048576.0, values, found.skipped);
+            for (key, (n, b)) in found.per_rule() {
+                println!("   {key}: {n} files, {:.1} MB", b as f64 / 1048576.0);
+            }
+            for f in found.files.iter().take(8) {
+                println!("     {}/{}", f.root.name(), f.path);
+            }
+        }
     }
 
     #[test]

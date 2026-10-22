@@ -26,6 +26,8 @@ export type SikarugirRenderer = 'd3dmetal' | 'dxvk' | 'cnc_ddraw' | 'd9vk' | 'dx
 export type LibraryGame = {
   id: string
   title: string
+  /** The Steam branch its kryo.to listing builds from: `public`, or a beta such as GoreBox27's `gb27`. */
+  steamBranch?: string | null
   slug: string | null
   cover: string | null
   hero: string | null
