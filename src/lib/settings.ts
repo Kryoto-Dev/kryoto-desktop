@@ -55,6 +55,9 @@ export type Settings = {
   cloudSavesRestore: 'auto' | 'ask'
   /** Watch where games write, to find their saves. */
   cloudSavesDetect: boolean
+  /** How: `precise` asks for administrator once per game and sees exactly
+   *  which files it writes; `smart` needs no administrator. */
+  cloudSavesFind: 'precise' | 'smart'
   /** Tell kryo.to the save folders found, so other players' games find theirs. */
   cloudSavesShare: boolean
   /** Local backups of replaced saves kept per game. */

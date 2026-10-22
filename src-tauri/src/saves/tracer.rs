@@ -28,8 +28,12 @@ const MAX_EVENTS: usize = 100_000;
 const WALK_BUDGET: Duration = Duration::from_secs(8);
 const WALK_ENTRIES: usize = 400_000;
 
+/// The game's processes, asked again each time.
+type Pids = Arc<dyn Fn() -> Vec<u32> + Send + Sync>;
+
 pub struct Tracer {
     started: SystemTime,
+    pids: Pids,
     stop: Arc<AtomicBool>,
     events: Arc<Mutex<HashSet<PathBuf>>>,
     open: Arc<Mutex<HashSet<PathBuf>>>,
@@ -39,6 +43,9 @@ pub struct Tracer {
     _watchers: Vec<notify::RecommendedWatcher>,
     pub roots: SaveRoots,
     ignore: Vec<PathBuf>,
+    /// Precise mode's helper (precise.rs), when it runs this session: then
+    /// what it saw is the whole truth about the game's files.
+    pub precise: Option<super::precise::Precise>,
 }
 
 fn watch_dirs(roots: &SaveRoots) -> Vec<PathBuf> {
@@ -52,9 +59,10 @@ fn watch_dirs(roots: &SaveRoots) -> Vec<PathBuf> {
     dirs
 }
 
-/// Start watching for one game session. None when detection is off.
-pub fn start<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, session: Arc<crate::handoff::Session>) -> Option<Tracer> {
-    if !super::enabled(app) || !crate::settings::load(app).cloud_saves_detect || super::account(app).perk == Some(false) {
+/// Start watching for one game session (with precise mode's helper, if
+/// [`super::precise_before_launch`] started one). None when detection is off.
+pub fn start<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, session: Arc<crate::handoff::Session>, precise: Option<super::precise::Precise>) -> Option<Tracer> {
+    if !super::detecting(app) {
         return None;
     }
     let dir = PathBuf::from(&game.install_dir);
@@ -66,15 +74,18 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, session: Arc<cr
         #[cfg(not(windows))]
         Vec::new()
     };
-    Some(watch(super::roots(app, game), super::ignore_dirs(app, game), pids))
+    let mut tracer = watch(super::roots(app, game), super::ignore_dirs(app, game), pids);
+    tracer.precise = precise;
+    Some(tracer)
 }
 
 /// Watch these roots until [Tracer::finish]; pids names the game's
 /// processes each time the open files are read.
-pub fn watch(roots: SaveRoots, ignore: Vec<PathBuf>, pids: impl Fn() -> Vec<u32> + Send + 'static) -> Tracer {
+pub fn watch(roots: SaveRoots, ignore: Vec<PathBuf>, pids: impl Fn() -> Vec<u32> + Send + Sync + 'static) -> Tracer {
     #[cfg(windows)]
     let registry_before = kryoto_saves::registry::key_times(3);
     let started = SystemTime::now();
+    let pids: Pids = Arc::new(pids);
     let stop = Arc::new(AtomicBool::new(false));
     let events: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
     let open: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -109,14 +120,14 @@ pub fn watch(roots: SaveRoots, ignore: Vec<PathBuf>, pids: impl Fn() -> Vec<u32>
     // The files the game's processes hold open, every few seconds.
     #[cfg(windows)]
     {
-        let (stop, open) = (stop.clone(), open.clone());
+        let (stop, open, pids) = (stop.clone(), open.clone(), pids.clone());
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 let found = super::win::open_files(&pids());
                 if let Ok(mut set) = open.lock() {
                     set.extend(found);
                 }
-                for _ in 0..15 {
+                for _ in 0..5 {
                     if stop.load(Ordering::SeqCst) {
                         break;
                     }
@@ -125,11 +136,9 @@ pub fn watch(roots: SaveRoots, ignore: Vec<PathBuf>, pids: impl Fn() -> Vec<u32>
             }
         });
     }
-    #[cfg(not(windows))]
-    let _ = pids;
-
     Tracer {
         started,
+        pids,
         stop,
         events,
         open,
@@ -138,6 +147,7 @@ pub fn watch(roots: SaveRoots, ignore: Vec<PathBuf>, pids: impl Fn() -> Vec<u32>
         _watchers: watchers,
         ignore,
         roots,
+        precise: None,
     }
 }
 
@@ -167,27 +177,37 @@ fn secs(t: SystemTime) -> u64 {
 }
 
 impl Tracer {
-    /// Keep watching for `grace` (a game writes its save on the way out),
-    /// then stop and say what was seen.
+    /// Wait (at most `grace`) for whatever of the game still runs from its
+    /// folder (a crash reporter, the real game behind a launcher), then stop
+    /// and say what was written while it ran. Anything written after its last
+    /// process was gone is some other program's, however near it is.
     pub fn finish(self, grace: Duration) -> Observation {
-        std::thread::sleep(grace);
+        let waiting = Instant::now();
+        while waiting.elapsed() < grace && (self.pids)().into_iter().any(crate::handoff::alive) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let ended = SystemTime::now();
+        // Let the last writes land before the watchers stop.
+        std::thread::sleep(Duration::from_secs(1));
         self.stop.store(true, Ordering::SeqCst);
         drop(self._watchers);
-        // A second of slack for coarse timestamps.
-        let since = secs(self.started).saturating_sub(2);
+        let traced = self.precise.and_then(|p| p.finish());
+        // Two seconds of slack either side for coarse timestamps.
+        let window = (secs(self.started).saturating_sub(2), secs(ended) + 2);
+        let in_window = |t: std::io::Result<SystemTime>| t.map(secs).is_ok_and(|t| t >= window.0 && t <= window.1);
         let mut obs = Observation::default();
         let mut files: HashSet<PathBuf> = HashSet::new();
         let events: Vec<PathBuf> = self.events.lock().map(|s| s.iter().cloned().collect()).unwrap_or_default();
         for p in events {
             if let Ok(m) = std::fs::metadata(&p) {
-                if m.is_file() && m.modified().map(secs).unwrap_or(0) >= since {
+                if m.is_file() && in_window(m.modified()) {
                     files.insert(p);
-                } else if m.is_dir() && m.created().map(secs).unwrap_or(0) >= since {
+                } else if m.is_dir() && in_window(m.created()) {
                     obs.new_dirs.insert(p);
                 }
             }
         }
-        walk(&self.roots, &self.ignore, since, &mut files, &mut obs.new_dirs);
+        walk(&self.roots, &self.ignore, window, &mut files, &mut obs.new_dirs);
         obs.files = files.into_iter().collect();
         obs.files.sort();
         obs.open_files = self.open.lock().map(|s| s.clone()).unwrap_or_default();
@@ -196,21 +216,34 @@ impl Tracer {
             let after = kryoto_saves::registry::key_times(3);
             obs.registry_keys = after
                 .into_iter()
-                .filter(|(k, t)| *t >= since && self.registry_before.get(k).is_none_or(|b| t > b))
+                .filter(|(k, t)| *t >= window.0 && *t <= window.1 && self.registry_before.get(k).is_none_or(|b| t > b))
                 .map(|(k, _)| k)
                 .collect();
             obs.registry_keys.sort();
+        }
+        if let Some(t) = traced {
+            crate::logging::info("saves", &format!("precise: {} files written by {} process(es), {} events lost", t.written.len(), t.processes, t.lost));
+            // It never saw the game run (started some other way): the smart
+            // tracer's findings stand.
+            if t.processes == 0 {
+                return obs;
+            }
+            // Folders it made are not files; a temporary file it renamed or
+            // deleted still says which folder it saves in.
+            obs.traced = Some(t.written.into_iter().map(PathBuf::from).filter(|p| !p.is_dir()).collect());
         }
         obs
     }
 }
 
-/// One pass over the save roots for files written (and folders made) since
-/// `since`, skipping the busy folders no game saves in.
-fn walk(roots: &SaveRoots, ignore: &[PathBuf], since: u64, files: &mut HashSet<PathBuf>, new_dirs: &mut HashSet<PathBuf>) {
+/// One pass over the save roots for files written (and folders made) within
+/// `window` (unix seconds, inclusive), skipping the busy folders no game
+/// saves in.
+fn walk(roots: &SaveRoots, ignore: &[PathBuf], window: (u64, u64), files: &mut HashSet<PathBuf>, new_dirs: &mut HashSet<PathBuf>) {
     let started = Instant::now();
     let mut seen = 0usize;
     let ignored = |p: &Path| ignore.iter().any(|i| p.starts_with(i));
+    let in_window = |t: std::io::Result<SystemTime>| t.map(secs).is_ok_and(|t| t >= window.0 && t <= window.1);
     let dirs = [
         (&roots.game_dir, 8),
         (&roots.documents, 7),
@@ -233,10 +266,10 @@ fn walk(roots: &SaveRoots, ignore: &[PathBuf], since: u64, files: &mut HashSet<P
             }
             let Ok(m) = entry.metadata() else { continue };
             if m.is_file() {
-                if m.modified().map(secs).unwrap_or(0) >= since {
+                if in_window(m.modified()) {
                     files.insert(entry.into_path());
                 }
-            } else if m.is_dir() && entry.depth() > 0 && m.created().map(secs).unwrap_or(0) >= since {
+            } else if m.is_dir() && entry.depth() > 0 && in_window(m.created()) {
                 new_dirs.insert(entry.into_path());
             }
         }
@@ -267,6 +300,8 @@ mod tests {
         // Noise: a tool that already exists and keeps writing its state.
         let noise = local.join("KryoNoiseTool");
         std::fs::create_dir_all(&noise).unwrap();
+        // It existed before the game: older than the tracer's slack for coarse clocks.
+        std::thread::sleep(Duration::from_secs(3));
         let script = format!(
             r#"$d='{docs}\My Games\KryoSaveTest'; New-Item -ItemType Directory -Force $d | Out-Null
 $f=[IO.File]::Open("$d\slot1.sav",'Create','ReadWrite','ReadWrite'); $b=[byte[]](1..64); $f.Write($b,0,64); $f.Flush()

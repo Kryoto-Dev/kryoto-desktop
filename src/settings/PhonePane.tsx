@@ -16,7 +16,12 @@ type PhoneStatus = {
   /** What the QR code holds; null without a live code. */
   pairUri: string | null
   devices: { id: string; name: string; pairedAt: number; lastSeen: number }[]
+  /** When Kryoto Mobile last reached this PC through kryo.to (Unix ms). */
+  remoteSeenAt?: number | null
 }
+
+/** A phone reaching this PC through kryo.to counts as connected for this long after it last did. */
+const REMOTE_LIVE_MS = 2 * 60_000
 
 /**
  * Settings > Phone: let Kryoto Mobile see the library and start games, on this
@@ -123,12 +128,24 @@ export function PhonePane() {
         ) : null}
         {note ? <span className="text-[11px] text-muted-foreground">{note}</span> : null}
       </Section>
-      <Section title="Paired phones">
+      <Section title="Phones">
+        {status.remoteSeenAt ? (
+          <div className="flex items-center justify-between gap-3">
+            <div className="grid min-w-0">
+              <span className="truncate text-xs text-foreground">Kryoto Mobile, away from home</span>
+              <Caption>
+                {Date.now() - status.remoteSeenAt < REMOTE_LIVE_MS
+                  ? 'Connected now, through kryo.to'
+                  : `Through kryo.to · last seen ${formatLastPlayed(Math.floor(status.remoteSeenAt / 1000))}`}
+              </Caption>
+            </div>
+          </div>
+        ) : null}
         {status.devices.length ? (
           status.devices.map((d) => (
             <div key={d.id} className="flex items-center justify-between gap-3">
               <div className="grid min-w-0">
-                <span className="truncate text-xs text-foreground">{d.name}</span>
+                <span className="truncate text-xs text-foreground">{d.name}, on this network</span>
                 <Caption>Last seen {formatLastPlayed(d.lastSeen)}</Caption>
               </div>
               <Button size="sm" onClick={() => run('phone_revoke', { id: d.id })}>
@@ -136,8 +153,10 @@ export function PhonePane() {
               </Button>
             </div>
           ))
-        ) : (
-          <span className="text-[11px] text-muted-foreground">No phones paired.</span>
+        ) : status.remoteSeenAt ? null : (
+          <span className="text-[11px] text-muted-foreground">
+            No phones yet. Pair one on this network above, or sign in to the same kryo.to account in Kryoto Mobile.
+          </span>
         )}
       </Section>
     </>

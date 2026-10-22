@@ -82,6 +82,9 @@ pub struct Settings {
     pub cloud_saves_restore: String,
     /// Watch where games write while they run, to find their saves.
     pub cloud_saves_detect: bool,
+    /// How: `precise` asks for administrator once per game so Windows says
+    /// exactly which files it wrote (saves/precise.rs); `smart` needs none.
+    pub cloud_saves_find: String,
     /// Tell kryo.to the save folders found (placeholder paths only), so
     /// other players' games find theirs on first launch.
     pub cloud_saves_share: bool,
@@ -125,6 +128,7 @@ impl Default for Settings {
             cloud_saves_on_exit: true,
             cloud_saves_restore: "auto".into(),
             cloud_saves_detect: true,
+            cloud_saves_find: "precise".into(),
             cloud_saves_share: true,
             cloud_saves_keep_local: 5,
         }
@@ -313,6 +317,9 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     settings.player_name = crate::player_name::clean(&settings.player_name).unwrap_or_default();
     if !matches!(settings.cloud_saves_restore.as_str(), "auto" | "ask") {
         settings.cloud_saves_restore = "auto".into();
+    }
+    if !matches!(settings.cloud_saves_find.as_str(), "precise" | "smart") {
+        settings.cloud_saves_find = "precise".into();
     }
     settings.cloud_saves_keep_local = settings.cloud_saves_keep_local.clamp(1, 20);
     // A choice made in Settings is the player's, never migrated again.

@@ -23,6 +23,8 @@ export type LaunchEntry = {
 export type LibraryGame = {
   id: string
   title: string
+  /** The Steam branch its kryo.to listing builds from: `public`, or a beta such as GoreBox27's `gb27`. */
+  steamBranch?: string | null
   slug: string | null
   cover: string | null
   hero: string | null

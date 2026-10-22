@@ -104,6 +104,14 @@ fn entry_name(root: Root, path: &str) -> String {
 /// moment ago is described as it is in the backup. A file that vanished is
 /// left out. Returns the final manifest and the backup's own hashes.
 pub fn write(template: &Manifest, files: &[Found], out: &Path) -> Result<(Manifest, Written), String> {
+    write_with(template, files, out, &mut |_, _| {})
+}
+
+/// [`write`], saying how far it is: `progress(bytes packed, bytes in all)`.
+pub fn write_with(template: &Manifest, files: &[Found], out: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<(Manifest, Written), String> {
+    let total: u64 = files.iter().map(|f| f.size).sum();
+    let mut done = 0u64;
+    progress(0, total);
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -129,6 +137,8 @@ pub fn write(template: &Manifest, files: &[Found], out: &Path) -> Result<(Manife
             h.update(&buf[..n]);
             zip.write_all(&buf[..n]).map_err(|e| e.to_string())?;
             size += n as u64;
+            done += n as u64;
+            progress(done.min(total), total);
         }
         written.push(BundleFile { root: f.root, path: f.path.clone(), size, sha256: hex(&h.finalize()), mtime: f.mtime, rule: f.rule.clone() });
     }

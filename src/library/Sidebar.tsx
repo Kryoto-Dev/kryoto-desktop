@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils'
 import { adultBlur, useHideAdult, useShowAdult } from '@/lib/adult'
 import { STATUSES, STATUS_LABEL, useAdultFlags, type SavedEntry, type SavedStatus } from '@/hooks/useSaved'
 import { gameContext } from '@/library/context'
+import { BranchTag } from '@/library/BranchTag'
 
 type Shelf = 'installed' | 'saved' | SavedStatus
 
@@ -208,6 +209,7 @@ export function Sidebar({
               <span className="size-6 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
             )}
             <span className="min-w-0 grow truncate">{g.title}</span>
+            <BranchTag branch={g.steamBranch} />
             {running.has(g.id) ? (
               <span className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-success">
                 <span className="kryo-blink size-1.5 rounded-full bg-success" />

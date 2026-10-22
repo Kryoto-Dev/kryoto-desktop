@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Check, Cloud, CloudUpload, FolderOpen, FolderPlus, History, Plus, X } from 'lucide-react'
-import { Button, Caption, Card, IconButton, Label, Modal } from '@/ui'
+import { Check, ChevronDown, Cloud, CloudUpload, FolderOpen, FolderPlus, History, Plus, RotateCcw, ScanSearch, X } from 'lucide-react'
+import { AsciiBar, Button, Caption, Card, IconButton, Label, Modal } from '@/ui'
 import { errorText } from '@/lib/bridge'
-import { cloudSaves, formatAgo, formatBytes, useGameSaves, type SaveLocation, type SaveVersion } from '@/lib/cloud-saves'
+import { PHASE_LABEL, cloudSaves, formatAgo, formatBytes, useGameSaves, useSaveProgress, type SaveFinding, type SaveLocation, type SaveVersion } from '@/lib/cloud-saves'
 import { library, type LibraryGame } from '@/lib/library'
 import { pickPath } from '@/lib/pick'
 import { openSettingsSection, openStorePage } from '@/lib/window'
@@ -16,6 +16,9 @@ import { cn } from '@/lib/utils'
  */
 export function CloudSavesCard({ game, running = false }: { game: LibraryGame; running?: boolean }) {
   const { data, error, reload } = useGameSaves(game.id)
+  // A backup started anywhere (Back up now, a game closing, Play restoring)
+  // shows here as it goes; a big one takes minutes and looked stuck.
+  const progress = useSaveProgress(game.id)
   const [busy, setBusy] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [versionsOpen, setVersionsOpen] = useState(false)
@@ -46,16 +49,39 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
   const s = data.state
   const noPerk = data.perk === false
   const off = !data.on
+  const found = [
+    data.files ? `${data.files} file${data.files === 1 ? '' : 's'} · ${formatBytes(data.bytes)}` : null,
+    data.registryValues ? `${data.registryValues} registry value${data.registryValues === 1 ? '' : 's'}` : null,
+  ].filter(Boolean)
+  const hasSaves = found.length > 0
+  // Places checked but empty here (most emulators' folders, for one game)
+  // fold away; what this PC has, or the player added, stays in sight.
+  const shown = data.locations.filter((l) => l.exists || l.source === 'player')
+  const elsewhere = data.locations.filter((l) => !shown.includes(l))
+  const overCap = s.tooBig || data.bytes > data.maxBackupBytes
+  const leaveOut = (key: string, folder: string, on: boolean) => void run('leave', () => cloudSaves.leaveOut(game.id, key, folder, on))
 
   return (
     <Card className="grid gap-4">
       <div className="flex items-baseline justify-between gap-3">
         <Label>Saves</Label>
         <Caption>
-          {data.files ? `${data.files} file${data.files === 1 ? '' : 's'} · ${formatBytes(data.bytes)}` : 'None found yet'}
+          {hasSaves ? found.join(' · ') : 'None found yet'}
           {s.lastBackupAt ? ` · backed up ${formatAgo(s.lastBackupAt)}` : ''}
         </Caption>
       </div>
+
+      {progress ? (
+        <div className="grid gap-1.5" role="status" aria-live="polite">
+          <div className="flex items-baseline justify-between gap-3 text-[11px]">
+            <span className="font-bold text-foreground">{PHASE_LABEL[progress.phase as keyof typeof PHASE_LABEL]}</span>
+            <span className="tabular-nums text-muted-foreground">
+              {progress.total ? `${formatBytes(progress.done)} of ${formatBytes(progress.total)}` : ''}
+            </span>
+          </div>
+          <AsciiBar fraction={progress.total ? progress.done / progress.total : null} cells={32} showPct={!!progress.total} />
+        </div>
+      ) : null}
 
       {s.conflict && !noPerk ? (
         <div role="alert" className="kryo-radius grid gap-3 border border-foreground/40 p-3">
@@ -73,15 +99,51 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
       ) : null}
 
       <ul className="grid gap-2" aria-label="Save locations">
-        {data.locations.map((l) => (
+        {shown.map((l) => (
           <LocationRow
             key={l.key}
             l={l}
             onRemove={() => void run('loc', () => cloudSaves.location(game.id, l.key, 'ignore'))}
+            onInclude={(folder) => leaveOut(l.key, folder, false)}
           />
         ))}
-        {!data.locations.length ? <li className="text-xs text-muted-foreground">No save location known yet. Play the game and Kryoto Desktop finds where it saves.</li> : null}
+        {!shown.length ? (
+          <li className="text-xs text-muted-foreground">
+            {data.locations.length ? 'Nothing saved in the usual places yet.' : 'No save location known yet.'} Play the game and Kryoto Desktop finds where it saves.
+          </li>
+        ) : null}
       </ul>
+
+      {elsewhere.length ? (
+        <details className="group">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground">
+            <ChevronDown className="size-3 transition-transform group-open:rotate-180" aria-hidden />
+            Also checks {elsewhere.length} more place{elsewhere.length === 1 ? '' : 's'}, empty on this PC
+          </summary>
+          <ul className="mt-2 grid gap-2">
+            {elsewhere.map((l) => (
+              <LocationRow key={l.key} l={l} onRemove={() => void run('loc', () => cloudSaves.location(game.id, l.key, 'ignore'))} />
+            ))}
+          </ul>
+        </details>
+      ) : null}
+
+      {overCap && data.heavy.length ? (
+        <div className="grid gap-2">
+          <Caption>Too big to back up. These folders take the most room; leave out what is not your saves (downloaded maps, mods, replays)</Caption>
+          <ul className="grid gap-2">
+            {data.heavy.map((h) => (
+              <li key={`${h.location}|${h.folder}`} className="grid grid-cols-[1fr_auto] items-center gap-3">
+                <span className="min-w-0">
+                  <span className="kryo-ascii-art block truncate text-[11px] text-foreground" title={h.label}>{h.label}</span>
+                  <span className="block text-[10px] text-muted-foreground">{h.files} file{h.files === 1 ? '' : 's'} · {formatBytes(h.bytes)}</span>
+                </span>
+                <Button size="sm" disabled={!!busy} onClick={() => leaveOut(h.location, h.folder, true)}>Leave out</Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {data.suggestions.length ? (
         <div className="grid gap-2">
@@ -100,6 +162,31 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
         </div>
       ) : null}
 
+      {!noPerk && !off ? <PreciseFinding game={game} finding={data.finding} busy={!!busy} onSet={(on) => void run('precise', () => cloudSaves.findPrecisely(game.id, on))} /> : null}
+
+      {data.ignored.length ? (
+        <details className="group">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground">
+            <ChevronDown className="size-3 transition-transform group-open:rotate-180" aria-hidden />
+            Taken off ({data.ignored.length})
+          </summary>
+          <ul className="mt-2 grid gap-2">
+            {data.ignored.map((l) => (
+              <li key={l.key} className="grid grid-cols-[1fr_auto] items-center gap-3">
+                <span className="min-w-0">
+                  <span className="kryo-ascii-art block truncate text-[11px] text-muted-foreground" title={l.path ?? l.label}>{l.label}</span>
+                  <span className="block text-[10px] text-muted-foreground">{l.sourceLabel}</span>
+                </span>
+                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void run('loc', () => cloudSaves.location(game.id, l.key, 'restore'))}>
+                  <RotateCcw className="size-3" aria-hidden />
+                  Put back
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+
       {noPerk || off ? (
         <p className="flex items-center gap-2 border-t border-border pt-3 text-[11px] text-muted-foreground">
           <Cloud className="size-3.5 shrink-0" aria-hidden />
@@ -114,9 +201,9 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
         </p>
       ) : (
         <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-          <Button size="sm" variant="primary" disabled={running || !!busy || !data.files} onClick={() => void run('backup', () => cloudSaves.backup(game.id))}>
+          <Button size="sm" variant="primary" disabled={running || !!busy || !!progress || !hasSaves} onClick={() => void run('backup', () => cloudSaves.backup(game.id))}>
             <CloudUpload className="size-3" aria-hidden />
-            {busy === 'backup' ? 'Backing up' : 'Back up now'}
+            {busy === 'backup' || progress ? 'Backing up' : 'Back up now'}
           </Button>
           <Button size="sm" disabled={!!busy} onClick={() => setVersionsOpen(true)}>
             <History className="size-3" aria-hidden />
@@ -136,7 +223,7 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
         </div>
       )}
       {running && !noPerk && !off ? <p className="text-[11px] text-muted-foreground">Backed up when the game closes.</p> : null}
-      {s.tooBig ? <p className="text-[11px] text-destructive">These saves are bigger than a backup can be. Take off a location that is not saves.</p> : null}
+      {s.tooBig && !data.heavy.length ? <p className="text-[11px] text-destructive">These saves are bigger than a backup can be. Take off a location that is not saves.</p> : null}
       {message ? <p className="text-[11px] text-muted-foreground">{message}</p> : s.error && !s.conflict ? <p className="text-[11px] text-destructive">{s.error}</p> : null}
 
       {versionsOpen ? <VersionsModal game={game} running={running} localBackups={data.localBackups} baseVersion={s.baseVersion} onClose={() => { setVersionsOpen(false); reload() }} /> : null}
@@ -144,7 +231,59 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
   )
 }
 
-function LocationRow({ l, suggestion = false, onKeep, onRemove }: { l: SaveLocation; suggestion?: boolean; onKeep?: () => void; onRemove: () => void }) {
+/**
+ * Precise finding for this game: that it will ask Windows next time, or the
+ * offer to, when its saves were not found that way (smart mode, or the
+ * player said no before). Nothing once they were.
+ */
+function PreciseFinding({ game, finding, busy, onSet }: { game: LibraryGame; finding: SaveFinding; busy: boolean; onSet: (on: boolean) => void }) {
+  if (!finding.canPrecise || finding.preciseFound) return null
+  if (finding.preciseNext) {
+    return (
+      <p className="flex items-start gap-2 text-[11px] leading-relaxed text-muted-foreground">
+        <ScanSearch className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+        <span className="grow">Next time you play, Windows asks you once to let Kryoto Desktop see exactly which files {game.title} writes.</span>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onSet(false)}
+          className="shrink-0 font-bold uppercase tracking-wider text-foreground hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
+        >
+          Not now
+        </button>
+      </p>
+    )
+  }
+  return (
+    <p className="flex items-start gap-2 text-[11px] leading-relaxed text-muted-foreground">
+      <ScanSearch className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+      <span className="grow">Missing saves? Find them precisely: Windows asks you once, the next time you play, and Kryoto Desktop sees exactly which files the game writes.</span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => onSet(true)}
+        className="shrink-0 font-bold uppercase tracking-wider text-foreground hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
+      >
+        Find precisely
+      </button>
+    </p>
+  )
+}
+
+function LocationRow({
+  l,
+  suggestion = false,
+  onKeep,
+  onRemove,
+  onInclude,
+}: {
+  l: SaveLocation
+  suggestion?: boolean
+  onKeep?: () => void
+  onRemove: () => void
+  /** Take a left-out folder back into backups. */
+  onInclude?: (folder: string) => void
+}) {
   return (
     <li className={cn('grid grid-cols-[1fr_auto] items-center gap-3', suggestion && 'opacity-80')}>
       <span className="min-w-0">
@@ -155,9 +294,32 @@ function LocationRow({ l, suggestion = false, onKeep, onRemove }: { l: SaveLocat
           <span className="kryo-ascii-art truncate text-[11px] text-foreground" title={l.path ?? l.label}>{l.label}</span>
         </span>
         <span className="block text-[10px] text-muted-foreground">
-          {l.kind === 'registry' ? 'Registry values' : l.exists ? `${l.files} file${l.files === 1 ? '' : 's'} · ${formatBytes(l.bytes)}` : 'Not on this PC yet'}
+          {l.kind === 'registry'
+            ? l.values
+              ? `${l.values} registry value${l.values === 1 ? '' : 's'}`
+              : 'Not on this PC yet'
+            : l.exists
+              ? `${l.files} file${l.files === 1 ? '' : 's'} · ${formatBytes(l.bytes)}`
+              : 'Not on this PC yet'}
           {suggestion && l.reasons.length ? ` · ${l.reasons.join(', ')}` : ''}
         </span>
+        {l.leftOut.length && onInclude ? (
+          <span className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10px] text-muted-foreground">
+            Left out:
+            {l.leftOut.map((f) => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => onInclude(f)}
+                title={`Back up ${f} again`}
+                className="inline-flex items-center gap-0.5 underline-offset-2 hover:text-foreground hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                {f}
+                <RotateCcw className="size-2.5" aria-hidden />
+              </button>
+            ))}
+          </span>
+        ) : null}
       </span>
       <span className="flex gap-1">
         {suggestion && onKeep ? (

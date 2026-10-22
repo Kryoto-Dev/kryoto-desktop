@@ -2671,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "kryoto-desktop"
-version = "0.2.28"
+version = "0.2.29"
 dependencies = [
  "argon2",
  "axum",
@@ -2742,6 +2742,7 @@ dependencies = [
 name = "kryoto-saves"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "base64 0.22.1",
  "md-5",
  "serde",

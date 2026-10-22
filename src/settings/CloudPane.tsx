@@ -106,9 +106,23 @@ export function CloudPane({ s, set, onManage }: { s: Settings; set: <K extends k
           </Section>
           <Section
             title="Finding saves"
-            hint="Known locations come from PCGamingWiki (through the Ludusavi project) and the game's emulator and engine. For the rest, Kryoto Desktop watches which folders a game writes to while it runs. Shared locations are folder names only, never your files or your user name."
+            hint="Known locations come from PCGamingWiki (through the Ludusavi project), the game's emulator and engine, and other players. For the rest, Kryoto Desktop watches the game while it runs. Shared locations are folder names only, never your files or your user name."
           >
-            <Check checked={s.cloudSavesDetect} disabled={!s.cloudSaves} onChange={(v) => set('cloudSavesDetect', v)} label="Watch where games write to find their saves" />
+            <Check checked={s.cloudSavesDetect} disabled={!s.cloudSaves} onChange={(v) => set('cloudSavesDetect', v)} label="Watch games while they run to find their saves" />
+            <Segmented
+              label="How to find saves"
+              value={s.cloudSavesFind}
+              options={[
+                { value: 'precise', label: 'Precise' },
+                { value: 'smart', label: 'Smart' },
+              ]}
+              onChange={(v) => set('cloudSavesFind', v)}
+            />
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {s.cloudSavesFind === 'precise'
+                ? 'The first time you play a game, Windows asks you once to let Kryoto Desktop see exactly which files that game writes. Say no and Smart is used for that game.'
+                : 'No administrator needed. A folder counts only when the game had files open in it, or it is named after the game, its developer, or in the game’s own files.'}
+            </p>
             <Check checked={s.cloudSavesShare} disabled={!s.cloudSaves || !s.cloudSavesDetect} onChange={(v) => set('cloudSavesShare', v)} label="Share the save folders found, so other players' games find theirs" />
           </Section>
           <Section title="Backups kept on this PC" hint="Each game keeps this many copies of saves a restore replaced.">

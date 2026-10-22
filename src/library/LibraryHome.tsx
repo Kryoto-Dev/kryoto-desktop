@@ -9,6 +9,7 @@ import { useLivePlaytime } from '@/hooks/useLivePlaytime'
 import { Art } from '@/library/Art'
 import { coverFor, heroFor } from '@/lib/game-artwork'
 import { cn } from '@/lib/utils'
+import { BranchTag } from '@/library/BranchTag'
 
 export { Art }
 
@@ -135,7 +136,10 @@ export function LibraryHome({
               >
                 <Art adult={g.nsfw} src={capsulesFor(g)[0]} fallback={capsulesFor(g).slice(1)} title={g.title} className="aspect-[460/215] w-full object-cover" />
                 <span className="grid gap-0.5 px-3 py-2.5">
-                  <span className="truncate text-xs font-bold text-foreground">{g.title}</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-xs font-bold text-foreground">{g.title}</span>
+                    <BranchTag branch={g.steamBranch} />
+                  </span>
                   <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
                     {running.has(g.id) ? <>Running now · <LivePlaytime game={g} running /></> : `${formatLastPlayed(g.lastPlayed)} · ${formatPlaytime(g.playtimeSeconds)}`}
                   </span>
@@ -174,6 +178,7 @@ export function LibraryHome({
               <button type="button" onClick={() => onOpen(g.id)} className="kryo-square absolute inset-0" aria-label={`Open ${g.title}`}>
                 <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />
               </button>
+              <BranchTag branch={g.steamBranch} className="pointer-events-none absolute right-2 top-2 backdrop-blur" />
               {running.has(g.id) ? (
                 <span className="kryo-pill absolute left-2 top-2 flex items-center gap-1 bg-background/80 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-success backdrop-blur">
                   <span className="kryo-blink size-1.5 rounded-full bg-success" />

@@ -115,7 +115,12 @@ fn roots(app: &AppHandle, game: &LibraryGame) -> Roots {
 }
 
 /// What to send and what to fetch this round. Only the Store's kryo.to page.
-#[tauri::command]
+///
+/// Off the UI thread, like everything the Store page calls on a timer. This
+/// opens files in every tracked game's folder every 30 s; on the window's
+/// thread, a download keeping a hard disk busy turned that into freezes of
+/// several seconds, twice a minute.
+#[tauri::command(async)]
 pub fn cloud_achievements_pending(app: AppHandle, webview: Webview, account: Option<String>) -> Result<Pending, String> {
     crate::remote::from_store(&app, &webview)?;
     let _g = LOCK.lock().map_err(|_| "busy")?;
@@ -164,7 +169,7 @@ pub struct Report {
 }
 
 /// kryo.to's answers: mark what it holds, and put back what this PC lacks.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cloud_achievements_report(app: AppHandle, webview: Webview, running: State<'_, Running>, report: Report) -> Result<usize, String> {
     crate::remote::from_store(&app, &webview)?;
     let _g = LOCK.lock().map_err(|_| "busy")?;
@@ -270,7 +275,7 @@ fn status_of(l: &Ledger) -> Status {
 }
 
 /// For the Library's achievements card.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cloud_achievements_status(app: AppHandle) -> Status {
     status_of(&load(&app))
 }

@@ -18,6 +18,10 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 pub struct LibraryGame {
     pub id: String,
     pub title: String,
+    /// The Steam branch its kryo.to listing builds from (`public`, or a beta
+    /// such as GoreBox27's `gb27`). Two listings of one Steam game share the
+    /// same art, so the Library tags a beta's; None until kryo.to has said.
+    pub steam_branch: Option<String>,
     /// The kryo.to page this is linked to, if any.
     pub slug: Option<String>,
     pub cover: Option<String>,
@@ -314,6 +318,7 @@ async fn relink<R: Runtime>(app: &AppHandle<R>) {
             g.short = meta.short.clone();
             g.developer = meta.developer.clone();
             g.nsfw = meta.nsfw;
+            g.steam_branch = meta.steam_branch.clone();
             g.source = meta.source.clone();
             g.default_args = meta.default_args.clone();
             g.entries = meta.entries.clone();
@@ -329,6 +334,44 @@ async fn relink<R: Runtime>(app: &AppHandle<R>) {
         Ok(())
     });
     let _ = app.emit("library-changed", ());
+}
+
+/// Ask kryo.to once which Steam branch each linked game builds from, for the
+/// games installed before Desktop kept it. Off the main thread, one request
+/// per such game, and only those: a game that has its branch is never asked.
+pub fn fill_branches<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(games) = load(&app) else { return };
+        let missing: Vec<(String, String)> = games
+            .iter()
+            .filter(|g| g.steam_branch.is_none())
+            .filter_map(|g| Some((g.id.clone(), g.slug.clone()?)))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(&app));
+        let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build() else { return };
+        let mut found: Vec<(String, String)> = Vec::new();
+        for (id, slug) in missing {
+            if let Some(branch) = crate::downloads::fetch_meta(&client, &endpoint, &slug).await.and_then(|m| m.steam_branch) {
+                found.push((id, branch));
+            }
+        }
+        if found.is_empty() {
+            return;
+        }
+        let _ = update(&app, |games| {
+            for (id, branch) in &found {
+                if let Some(g) = games.iter_mut().find(|g| &g.id == id) {
+                    g.steam_branch = Some(branch.clone());
+                }
+            }
+            Ok(())
+        });
+        let _ = app.emit("library-changed", ());
+    });
 }
 
 /// Library writes are serialised: a game closing while Properties saves must
@@ -444,6 +487,7 @@ pub fn upsert_installed<R: Runtime>(app: &AppHandle<R>, mut game: LibraryGame) -
                 slot.short = game.short.clone().or(slot.short.take());
                 slot.developer = game.developer.clone().or(slot.developer.take());
                 slot.nsfw = game.nsfw;
+                slot.steam_branch = game.steam_branch.clone().or(slot.steam_branch.take());
                 if slot.preferred_entry.is_some_and(|i| i >= slot.entries.len()) {
                     slot.preferred_entry = None;
                 }
@@ -792,6 +836,12 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
             crate::proton_script::use_script(&mut plan, &script)?;
         }
     }
+    // Finding this game's saves precisely: Windows asks for administrator
+    // once, before the game starts, so its first writes are seen too.
+    let precise = crate::saves::precise_before_launch(&app, &game);
+    if session.stopped() {
+        return Err("Launch cancelled.".into());
+    }
     let mut cmd = launch::command(&plan);
     // Everything the game (and Wine/Proton) prints goes into its log (game_logs.rs).
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
@@ -841,7 +891,7 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
     let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None, stopped: false });
     crate::achievements::watch(app.clone(), &game, crate::achievements::roots_for(&plan.env));
     // Where it writes while it runs, to find its saves (saves/tracer.rs).
-    let tracer = crate::saves::tracer::start(&app, &game, session.clone());
+    let tracer = crate::saves::tracer::start(&app, &game, session.clone(), precise);
     if crate::settings::load(&app).minimize_on_play {
         if let Some(w) = app.get_window("main") {
             let _ = w.minimize();

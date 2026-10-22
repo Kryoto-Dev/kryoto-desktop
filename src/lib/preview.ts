@@ -79,6 +79,9 @@ const games = [
   game(504230, 'Celeste', { playtimeSeconds: 30000, lastPlayed: now() - 86400 * 9 }),
   game(1145360, 'Hades', { playtimeSeconds: 72000, lastPlayed: now() - 86400 * 30, source: 'Steam + Kryoto Online' }),
   game(413150, 'Stardew Valley', { playtimeSeconds: 0 }),
+  // One Steam game, two listings: the public build and the gb27 beta.
+  game(2027330, 'GoreBox', { steamBranch: 'public', playtimeSeconds: 7200, lastPlayed: now() - 86400 * 2 }),
+  game(2027330, 'GoreBox27 (early access)', { steamBranch: 'gb27', playtimeSeconds: 3600, lastPlayed: now() - 86400 }),
   game(105600, 'Terraria', {
     playtimeSeconds: 900,
     lastPlayed: now() - 86400 * 60,
@@ -116,6 +119,7 @@ const settings: Record<string, unknown> = {
   cloudSavesOnExit: true,
   cloudSavesRestore: 'auto',
   cloudSavesDetect: true,
+  cloudSavesFind: 'precise',
   cloudSavesShare: true,
   cloudSavesKeepLocal: 5,
 }
@@ -316,25 +320,54 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   cloud_saves_refresh: () => HANDLERS.cloud_saves_status!({}),
   cloud_saves_library: () => games.slice(0, 4).map((g, i) => ({ id: g.id, title: g.title, lastBackupAt: i === 1 ? null : now() - i * 3600, conflict: i === 1, error: null, tooBig: false })),
   cloud_saves_game: (a) => {
-    const conflict = games.findIndex((g) => g.id === a.id) === 1
-    const loc = (source: string, sourceLabel: string, label: string, files: number, bytes: number, extra: Record<string, unknown> = {}) => ({ key: `${source}:${label}`, kind: 'files', root: 'Documents', label, source, sourceLabel, path: `C:\\Users\\you\\${label}`, exists: files > 0, files, bytes, score: null, reasons: [], ...extra })
+    const index = games.findIndex((g) => g.id === a.id)
+    const conflict = index === 1
+    // The third game is one whose folder holds downloaded maps: too big.
+    const big = index === 2
+    const loc = (source: string, sourceLabel: string, label: string, files: number, bytes: number, extra: Record<string, unknown> = {}) => ({ key: `${source}:${label}`, kind: 'files', root: 'Documents', label, source, sourceLabel, path: `C:\\Users\\you\\${label}`, exists: files > 0, files, bytes, values: 0, score: null, reasons: [], leftOut: [], ...extra })
     return {
       identity: { key: 'steam:367520', aliases: ['steam:367520'], appid: '367520' },
       feature: true, on: true, perk: true,
+      // The first game was found precisely; the second asks next time; the rest offer it.
+      finding: { mode: index === 1 ? 'precise' : 'smart', canPrecise: true, preciseNext: index === 1, preciseFound: index === 0, preciseDeclined: false, preciseSessions: index === 0 ? 1 : 0 },
       locations: [
+        ...(index === 0 ? [loc('detected', 'Precise', 'AppData\\Roaming\\Team Cherry\\Hollow Knight\\profiles', 2, 64_000, { score: 85, reasons: ['the game wrote here', 'named after the game'] })] : []),
         loc('emulator', 'Emulator', 'AppData\\Roaming\\GSE Saves\\367520', 3, 48_000),
-        loc('known', 'Known', 'AppData\\LocalLow\\Team Cherry\\Hollow Knight', 6, 1_900_000),
-        loc('engine', 'Engine', 'HKEY_CURRENT_USER\\Software\\Team Cherry\\Hollow Knight', 0, 0, { kind: 'registry', path: null }),
+        loc('known', 'Known', 'AppData\\LocalLow\\Team Cherry\\Hollow Knight', big ? 480 : 6, big ? 438_000_000 : 1_900_000, big ? {} : { leftOut: ['mapcache'] }),
+        loc('engine', 'Engine', 'HKEY_CURRENT_USER\\Software\\Team Cherry\\Hollow Knight', 0, 0, { kind: 'registry', path: null, values: 35, exists: true }),
+        loc('emulator', 'Emulator', 'AppData\\Roaming\\Goldberg SteamEmu Saves\\367520', 0, 0),
+        loc('emulator', 'Emulator', 'Public Documents\\Steam\\RUNE\\367520', 0, 0),
       ],
-      suggestions: [loc('detected', 'Detected', 'Documents\\My Games\\Hollow Knight', 2, 4_096, { score: 35, reasons: ['made while the game ran', 'save files'] })],
-      files: 9, bytes: 1_948_000, truncated: false, maxBackupBytes: 100 * 1_048_576,
-      state: { baseVersion: 'v3', baseHash: 'x', lastBackupAt: now() - 3600, lastRestoreAt: null, cloudHead: conflict ? { id: 'v4', size: 1_200_000, sha256: '', md5: '', fileCount: 9, machine: 'LIVING-ROOM-PC', createdAt: now() - 7200, parentId: 'v3' } : null, conflict, error: null, tooBig: false },
+      suggestions: [loc('detected', 'Detected', 'Documents\\My Games\\Hollow Knight', 2, 4_096, { score: 35, reasons: ["named in the game's files"] })],
+      ignored: [loc('known', 'Known', 'AppData\\Local\\Hollow Knight', 0, 0)],
+      heavy: big
+        ? [
+            { location: 'known:AppData\\LocalLow\\Team Cherry\\Hollow Knight', folder: 'maps', label: 'AppData\\LocalLow\\Team Cherry\\Hollow Knight\\maps', files: 18, bytes: 390_000_000 },
+            { location: 'known:AppData\\LocalLow\\Team Cherry\\Hollow Knight', folder: 'Saves', label: 'AppData\\LocalLow\\Team Cherry\\Hollow Knight\\Saves', files: 6, bytes: 1_200_000 },
+          ]
+        : [],
+      files: big ? 483 : 9, bytes: big ? 438_048_000 : 1_948_000, registryValues: 35, truncated: false, maxBackupBytes: 100 * 1_048_576,
+      state: { baseVersion: 'v3', baseHash: 'x', lastBackupAt: now() - 3600, lastRestoreAt: null, cloudHead: conflict ? { id: 'v4', size: 1_200_000, sha256: '', md5: '', fileCount: 9, machine: 'LIVING-ROOM-PC', createdAt: now() - 7200, parentId: 'v3' } : null, conflict, error: big ? "This game's saves are 257 MB packed, over the 100 MB a backup can be." : null, tooBig: big },
       localBackups: [{ file: `${now() - 86400}.ksave`, createdAt: now() - 86400, size: 1_700_000 }],
     }
   },
   cloud_saves_location: () => null,
+  cloud_saves_leave_out: () => null,
+  cloud_saves_find_precisely: () => null,
   cloud_saves_add_folder: () => null,
-  cloud_saves_backup: () => 'Backed up.',
+  // Plays a backup's phases on the card, as the native side reports them.
+  cloud_saves_backup: async (a) => {
+    const step = (phase: string, done: number, total: number) => previewBus.emit('cloud-saves-progress', { gameId: a.id, phase, done, total })
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+    step('scanning', 0, 0)
+    await wait(800)
+    for (let i = 0; i <= 10; i++) { step('packing', i * 4_200_000, 42_000_000); await wait(150) }
+    for (let i = 0; i <= 10; i++) { step('uploading', i * 2_600_000, 26_000_000); await wait(250) }
+    step('checking', 0, 0)
+    await wait(600)
+    step('done', 0, 0)
+    return 'Backed up.'
+  },
   cloud_saves_versions: () => [3, 2, 1].map((n) => ({ id: `v${n}`, size: 1_900_000 - n * 1000, sha256: '', md5: '', fileCount: 9, machine: n === 2 ? 'LIVING-ROOM-PC' : 'DESKTOP-MIRA', createdAt: now() - n * 86400, parentId: n > 1 ? `v${n - 1}` : null })),
   cloud_saves_restore: () => 'Saves restored. What was here before is kept under Versions, On this PC.',
   cloud_saves_restore_local: () => 'Saves put back from this PC\'s backup.',
