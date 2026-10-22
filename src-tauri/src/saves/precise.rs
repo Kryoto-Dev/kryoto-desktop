@@ -41,6 +41,8 @@ pub struct Precise {
     done: bool,
 }
 
+// Off Windows `begin` only ever fails.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum Begin {
     Running(Precise),
     /// The player said no to the administrator prompt.
@@ -274,7 +276,7 @@ mod etw {
 
     fn prop_str(rec: &EVENT_RECORD, name: &[u16]) -> Option<String> {
         let b = prop(rec, name)?;
-        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+        let units: Vec<u16> = b.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).take_while(|&u| u != 0).collect();
         (!units.is_empty()).then(|| String::from_utf16_lossy(&units))
     }
 
