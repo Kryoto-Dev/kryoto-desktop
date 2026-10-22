@@ -8,7 +8,8 @@
 //! The scheme is registered for the current user at start (no admin rights).
 //! Windows starts a new copy of the app for every link; that copy hands the
 //! link to the one already running over the single-instance port (see
-//! `system::claim_instance`) and exits. A link that started the app is kept
+//! `system::claim_instance`) and exits. macOS delivers links to the running
+//! app through Tauri's `RunEvent::Opened`. A link that starts the app is kept
 //! until the shell is ready to ask for it (`take_pending_link`).
 
 use serde::Serialize;
@@ -125,7 +126,7 @@ fn register_os() -> Result<(), String> {
     set(&format!(r"{base}\shell\open\command"), None, &format!("\"{}\" \"%1\"", exe.display()))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn register_os() -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "No home folder.".to_string())?;
     let dir = std::path::Path::new(&home).join(".local/share/applications");
@@ -149,6 +150,30 @@ fn register_os() -> Result<(), String> {
         .args(["default", name, &format!("x-scheme-handler/{SCHEME}")])
         .status();
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn register_os() -> Result<(), String> {
+    // Packaged apps declare the scheme in src-tauri/Info.plist. Register the
+    // bundle explicitly as well so a locally built .app becomes the handler
+    // without requiring the user to open it once from Finder.
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let Some(bundle) = exe
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("app")))
+    else {
+        // `tauri dev` runs the binary directly, without an app bundle. The
+        // release bundle's Info.plist is the authoritative registration.
+        return Ok(());
+    };
+    let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    let status = std::process::Command::new(lsregister).args(["-f", bundle.to_string_lossy().as_ref()]).status().map_err(|e| e.to_string())?;
+    status.success().then_some(()).ok_or_else(|| format!("Launch Services refused {}", bundle.display()))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn register_os() -> Result<(), String> {
+    Err("kryoto:// links are not supported on this operating system.".into())
 }
 
 #[cfg(test)]

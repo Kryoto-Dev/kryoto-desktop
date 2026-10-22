@@ -7,14 +7,16 @@
 // to the pixel. Writes:
 //
 //   src-tauri/icons/   icon.png, 32x32.png, 128x128.png, 128x128@2x.png,
-//                      icon.ico (16-256, a simpler mark below 64px)
+//                      icon.ico (16-256, a simpler mark below 64px), and
+//                      icon.icns on macOS
 //   src-tauri/installer/   header.bmp (150x57), sidebar.bmp (164x314)
 //   docs/logo.png          the mark for the README
 //
 // Deterministic: same code in, same pixels out.
 
 import sharp from 'sharp'
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { asciiSvg, gridSize, WORDMARK } from '../src/ui/ascii/cells.ts'
@@ -169,6 +171,17 @@ write(path.join(icons, '128x128@2x.png'), await icon(256))
 const layers = []
 for (const size of [16, 20, 24, 32, 40, 48, 64, 128, 256]) layers.push({ size, png: await icon(size) })
 write(path.join(icons, 'icon.ico'), ico(layers))
+if (process.platform === 'darwin') {
+  const iconset = path.join(icons, 'icon.iconset')
+  mkdirSync(iconset, { recursive: true })
+  for (const size of [16, 32, 128, 256, 512]) {
+    writeFileSync(path.join(iconset, `icon_${size}x${size}.png`), await icon(size))
+    writeFileSync(path.join(iconset, `icon_${size}x${size}@2x.png`), await icon(size * 2))
+  }
+  const result = spawnSync('iconutil', ['-c', 'icns', iconset, '-o', path.join(icons, 'icon.icns')], { stdio: 'inherit' })
+  rmSync(iconset, { recursive: true, force: true })
+  if (result.status !== 0) throw new Error('iconutil could not create src-tauri/icons/icon.icns')
+}
 write(path.join(docs, 'logo.png'), await icon(256))
 
 /* ── Installer pictures ── */

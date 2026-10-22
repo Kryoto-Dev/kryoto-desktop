@@ -3,7 +3,8 @@
 //! the game (and Wine or Proton) printed, then how it ended.
 //!
 //! When a game does not start, this is the first thing staff ask for, and
-//! on Linux the Wine/Proton output is the only clue there is. One file per
+//! on a compatibility host the Wine/Proton/wrapper output is the only clue
+//! there is. One file per
 //! launch under the app's logs folder (`games/<game id>/<when>.log`), the
 //! last KEEP kept, readable in the game's Properties > Logs and copyable.
 //!

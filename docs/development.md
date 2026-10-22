@@ -4,13 +4,66 @@ The details behind the README's quick start.
 
 ## Running and building
 
+The supported build toolchain is pinned in the repository: Node `22.14.0`
+(`.nvmrc`), pnpm `10.28.0` (`package.json`), and Rust `1.97.1`
+(`rust-toolchain.toml`). `pnpm-lock.yaml` and `src-tauri/Cargo.lock` are part
+of the source of truth; do not replace them with an unlocked install.
+
 ```text
-pnpm install
+pnpm install --frozen-lockfile
 pnpm app:dev      # the app
 pnpm dev          # the UI alone in a browser, on sample data (http://localhost:1421)
-pnpm app:build    # the signed release installer (NSIS on Windows, AppImage/.deb on Linux)
+pnpm build        # typecheck + build the UI
+pnpm preview      # serve dist/ after pnpm build (http://localhost:4173)
+pnpm app:build    # release bundle for the current OS
 pnpm app:build:local   # an unsigned installer for this PC, copied out of the repo
+pnpm app:build:mac     # macOS only: explicitly build the app and DMG targets
 ```
+
+The native crate pins the `kryoto-messaging` and `kryoto-padmap` git revisions
+in `Cargo.toml`, so a clean checkout no longer needs sibling repositories.
+
+### Linux prerequisites
+
+Ubuntu 22.04/24.04 needs the Tauri/WebKitGTK and native build packages used by
+CI and the Dockerfile:
+
+Run the following as a system administrator, or use the Dockerfile for a
+non-host installation:
+
+```bash
+apt-get update
+apt-get install -y build-essential pkg-config perl \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev libssl-dev libsqlite3-dev libxdo-dev libdbus-1-dev
+```
+
+The exact package names vary by distribution. A headless build/test run that
+does not need a display is reproducible with `docker build -t kryoto-desktop .`
+followed by `docker run --rm kryoto-desktop`.
+
+### macOS
+
+Build on macOS with Xcode Command Line Tools, Node/pnpm and the pinned Rust
+toolchain. The Sikarugir backend requires macOS 14.6 or newer; Apple silicon
+also needs Rosetta 2. `pnpm app:build:mac` merges `src-tauri/tauri.macos.conf.json`, which
+selects the `.app` and `.dmg` targets, bundles uBlock resources and sets the
+minimum system version. `src-tauri/Info.plist` declares `kryoto://`; the native
+side handles Launch Services `Opened` events and keeps the link pending until
+the shell is ready. Existing compatibility wrappers are discovered in
+`~/Applications/Sikarugir`; the managed Sikarugir Wine engine lives under the
+app data `compat/sikarugir` folder.
+
+The native Compatibility settings download the first entry from the official
+Sikarugir engine catalog, match it to the latest GitHub release asset, verify
+the asset's SHA-256 digest, and unpack its `wswine.bundle` into Kryoto's managed
+compatibility directory. The engine's `bin/wine` is then selected directly for
+macOS Windows-game launches; no full Sikarugir app or Creator installation is
+needed. Existing wrappers in `~/Applications/Sikarugir` remain supported.
+
+macOS local builds are intentionally unsigned unless the machine has an Apple
+Developer signing identity. Notarization is a release-owner operation and is
+not attempted by local builds or preview CI.
 
 `app:build` signs for the updater, so with `TAURI_SIGNING_PRIVATE_KEY` set it asks
 for that key's password (or reads `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). To try a
@@ -26,21 +79,29 @@ finish if the home folder is still in it.
 Debug builds run as `to.kryo.desktop.dev`, next to an installed copy without
 sharing its data, and never send error reports.
 
-Native tests run with `cargo test --locked --manifest-path src-tauri/Cargo.toml` and keep SQLCipher enabled. On Windows GNU builds, OpenSSL needs a complete GNU-compatible Perl and GNU make. Browser checks use `test/ui.html` and `test/bridge.html` through the dev server: with Playwright and Chromium available, run `node scripts/check-ui.mjs`. Set `DESKTOP_TEST_URL` for a different dev port or `PLAYWRIGHT_BROWSER_CHANNEL=msedge` to use installed Edge.
+`pnpm test` is the single offline-friendly project test entry point: it builds
+the UI and runs the desktop and shared repair-engine suites with locked
+dependencies and SQLCipher enabled. On Windows GNU builds, OpenSSL needs a complete
+GNU-compatible Perl and GNU make. Browser checks use `test/ui.html` and
+`test/bridge.html` through the dev server: with Playwright and Chromium
+available, run `node scripts/check-ui.mjs`. Set `DESKTOP_TEST_URL` for a
+different dev port or `PLAYWRIGHT_BROWSER_CHANNEL=msedge` to use installed
+Edge.
 
 Website-triggered downloads require the matching website command-delivery migration and protocol 2 endpoints; see [the delivery contract](../kryo.to/docs/desktop-delivery.md). Older clients leave actions waiting for an update.
 
 ## Tests
 
 ```text
-pnpm build                   # typecheck + build the UI
-cd src-tauri && cargo test
-cd src-tauri && cargo clippy --all-targets -- -D warnings
+pnpm test                    # UI build + desktop + repair-engine tests
+cd src-tauri && cargo clippy --locked --all-targets -- -D warnings
+pnpm preview --host 127.0.0.1 # preview the production UI after pnpm test
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of that on every push and pull
-request, on Ubuntu and on Windows, and checks that the three version fields
-agree.
+CI (`.github/workflows/ci.yml`) runs the UI/browser checks on Ubuntu and native
+tests/clippy on Ubuntu, Windows and macOS for every push and pull request. It
+also starts `pnpm preview` and verifies that the production UI responds. The
+workflow checks that the three version fields agree.
 
 ## Linux graphics
 
@@ -57,9 +118,9 @@ you set them yourself, always win.
 Bump the version in `package.json`, `src-tauri/Cargo.toml` and
 `src-tauri/tauri.conf.json` together, add the entry to kryo.to's changelog,
 and push to main. `.github/workflows/release.yml` sees the new version, builds
-the Windows installer, the AppImage and the .deb with `pnpm app:build`, and
-publishes them as release `v<version>`. kryo.to/desktop offers the newest
-release by itself.
+the Windows installer, Linux AppImage/.deb/.rpm, and the macOS app/DMG with
+`pnpm app:build`, and publishes them as release `v<version>`. kryo.to/desktop
+offers the newest release by itself.
 
 The same release carries the updater's files: a `.sig` beside each installer
 and `latest.json`, which every installed copy reads from
@@ -74,6 +135,13 @@ Keep the private key and its password somewhere besides the repository
 secrets (GitHub never shows a secret again). Losing it means a new key pair,
 and copies installed with the old public key cannot update past that point:
 they need one manual reinstall.
+
+The macOS release job runs on `macos-14` and can produce unsigned artifacts
+without any Apple credentials. To ship a Gatekeeper-friendly build, the
+release runner must also have an Apple Developer signing identity in its
+keychain and a separate notarization step with organization-owned credentials.
+Those credentials are deliberately not present in this repository or its
+workflows.
 
 Keep `@tauri-apps/api` and `@tauri-apps/cli` on the same minor version as the
 `tauri` crate in `Cargo.lock`: `tauri build` stops on a mismatch.
@@ -94,9 +162,10 @@ Changes are listed in kryo.to's changelog; this app has none of its own.
 | `src-tauri/src/phone.rs` | the phone server: pairing, the library, Play/Stop, downloads, achievements for [Kryoto Mobile](https://github.com/Kryoto-Dev/kryoto-mobile) on the same network |
 | `src-tauri/src/library.rs` | `library.json`, play/stop, play time, uninstall |
 | `src-tauri/src/storage.rs` | library folders, drive space, moving games between drives |
-| `src-tauri/src/system.rs` | tray, single instance, start with Windows, window state |
+| `src-tauri/src/system.rs` | tray, single instance, desktop autostart/start with Windows, window state |
 | `src-tauri/src/menus.rs` | menus over the Store: drawn inside the Store's own page when a kryo.to page is showing (`__kryoMenu`, in `BROWSER_STATE_SCRIPT`), otherwise in a web view stacked over it |
 | `src-tauri/tauri.linux.conf.json` | Linux: the main window is see-through so the page can round its own corners (`system.rs` fills it behind the views) |
+| `src-tauri/tauri.macos.conf.json` | macOS: app/DMG packaging, minimum system version and bundled resources |
 | `src-tauri/src/linux_overlay.rs` | Linux: laying the Store and the menu view over the shell, and resizing from the window's edges |
 | `src-tauri/src/display_env.rs` | Linux: picking WebKitGTK's renderer per machine, and falling back by itself when a start never draws |
 | `src/lib/history.ts` | the one Back / Forward history for the Library, the Store's pages and everything else |

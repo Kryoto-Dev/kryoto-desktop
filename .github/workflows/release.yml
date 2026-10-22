@@ -11,7 +11,7 @@ name: Release
 #
 # The installers land on a GitHub release, which is where kryo.to/desktop's
 # download buttons get them (kryo.to's lib/desktop-release.ts): Windows
-# (NSIS setup), Linux (AppImage and .deb).
+# (NSIS setup), Linux (AppImage and .deb), and macOS (DMG).
 #
 # The same release carries the in-app updater's files: a minisign signature
 # (.sig) beside each installer, and latest.json, which every installed copy
@@ -25,6 +25,12 @@ on:
     branches: [main]
     paths:
       - 'src-tauri/tauri.conf.json'
+      - 'src-tauri/tauri.macos.conf.json'
+      - 'src-tauri/Info.plist'
+      - 'src-tauri/Cargo.toml'
+      - 'src-tauri/Cargo.lock'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/release.yml'
   workflow_dispatch:
 
@@ -94,7 +100,7 @@ jobs:
               tag_name: tag,
               target_commitish: context.sha,
               name: `Kryoto Desktop ${version}`,
-              body: `Kryoto Desktop ${version} for Windows and Linux.\n\nWhat changed is in the kryo.to changelog: https://kryo.to/changelog`,
+              body: `Kryoto Desktop ${version} for Windows, Linux and macOS.\n\nWhat changed is in the kryo.to changelog: https://kryo.to/changelog`,
               draft: true,
               prerelease: false,
             });
@@ -113,27 +119,20 @@ jobs:
           # glibc the AppImage and .deb should still run on.
           - os: ubuntu-22.04
             platform: linux
+          - os: macos-14
+            platform: macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      # Chat's cryptography (Cargo path dependency ../kryoto-messaging).
-      # Goes away once the dependency becomes a pinned git revision.
-      - name: Fetch kryoto-messaging
-        shell: bash
-        run: git clone --depth 1 https://github.com/Kryoto-Dev/kryoto-messaging.git ../kryoto-messaging
-      # The controller resolver (Cargo path dependency ../kryoto-padmap).
-      - name: Fetch kryoto-padmap
-        shell: bash
-        run: git clone --depth 1 https://github.com/Kryoto-Dev/kryoto-padmap.git ../kryoto-padmap
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 10.28.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
@@ -157,6 +156,7 @@ jobs:
           export PATH="/c/Strawberry/perl/bin:$PATH"
           which perl; which nasm
       - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
 
       - name: Linux dependencies
         if: runner.os == 'Linux'
@@ -180,20 +180,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Fail the release rather than ship something that does not pass. PowerShell
-      # on purpose: in a bash step Git's MSYS perl shadows Strawberry's and
-      # OpenSSL's Configure fails (build.mjs only sanitizes PATH for the build
-      # itself, below). Same reason CI's test steps use the default shell.
+      # Fail the release rather than ship something that does not pass. The
+      # pinned project test entry point is platform-neutral; the build script
+      # sanitizes PATH for the Windows OpenSSL toolchain below.
       - name: Check
-        shell: pwsh
+        shell: bash
         run: |
-          pnpm build
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cd src-tauri
-          cargo test --locked
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --locked --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test
+          (cd src-tauri && cargo clippy --locked --all-targets -- -D warnings)
 
       # `app:build` is `tauri build` with the build machine's paths remapped out
       # of the binary, and it fails if any are still in it (scripts/build.mjs).
@@ -234,7 +228,7 @@ jobs:
           if [ "${{ matrix.platform }}" = "windows" ]; then
             cp "$bundle"/nsis/*_"${v}"_x64-setup.exe "out/Kryoto-Desktop_${v}_x64-setup.exe"
             cp "$bundle"/nsis/*_"${v}"_x64-setup.exe.sig "out/Kryoto-Desktop_${v}_x64-setup.exe.sig"
-          else
+          elif [ "${{ matrix.platform }}" = "linux" ]; then
             cp "$bundle"/appimage/*_"${v}"_amd64.AppImage "out/Kryoto-Desktop_${v}_amd64.AppImage"
             cp "$bundle"/appimage/*_"${v}"_amd64.AppImage.sig "out/Kryoto-Desktop_${v}_amd64.AppImage.sig"
             cp "$bundle"/deb/*_"${v}"_amd64.deb "out/Kryoto-Desktop_${v}_amd64.deb"
@@ -249,12 +243,23 @@ jobs:
             for sig in "$bundle"/rpm/*-"${v}"-1.x86_64.rpm.sig; do
               [ -f "$sig" ] && cp "$sig" "out/Kryoto-Desktop_${v}_x86_64.rpm.sig"
             done
+          else
+            # macOS-14 is Apple Silicon. Keep a stable public name even
+            # though Tauri includes the target triple in its source name.
+            dmg=$(find "$bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)
+            [ -f "$dmg" ] && cp "$dmg" "out/Kryoto-Desktop_${v}_aarch64.dmg"
+            [ -f "${dmg}.sig" ] && cp "${dmg}.sig" "out/Kryoto-Desktop_${v}_aarch64.dmg.sig"
+            app=$(find "$bundle/macos" -maxdepth 1 -name '*.app.tar.gz' -print -quit)
+            if [ -f "$app" ]; then
+              cp "$app" "out/Kryoto-Desktop_${v}_aarch64.app.tar.gz"
+              [ -f "${app}.sig" ] && cp "${app}.sig" "out/Kryoto-Desktop_${v}_aarch64.app.tar.gz.sig"
+            fi
           fi
           ls -la out
           gh release upload "v$v" out/* --clobber
 
   # latest.json: what every installed copy reads to learn there is a new
-  # version. Written once both platforms are up, from the signatures on the
+  # version. Written once every desktop platform is up, from the signatures on the
   # release, so it can never name a file that is not there.
   manifest:
     needs: [check, create-release, build]
@@ -282,16 +287,19 @@ jobs:
             const appimage = entry(`Kryoto-Desktop_${v}_amd64.AppImage`);
             const deb = entry(`Kryoto-Desktop_${v}_amd64.deb`);
             const rpm = entry(`Kryoto-Desktop_${v}_x86_64.rpm`);
-            if (!win || !appimage) {
-              console.error("::error::A Windows or AppImage signature is missing from the release; not writing a latest.json that would strand one platform.");
+            const mac = entry(`Kryoto-Desktop_${v}_aarch64.app.tar.gz`);
+            if (!win || !appimage || !mac) {
+              console.error("::error::A Windows, AppImage or macOS updater signature is missing from the release; not writing a latest.json that would strand one platform.");
               process.exit(1);
             }
             // The updater looks for {os}-{arch}-{installer} first. The plain
             // windows key is the fallback for older copies; there is none for
-            // Linux, so a .deb install never gets handed an AppImage.
+            // Linux or macOS, so each package keeps its own updater target.
             const platforms = { "windows-x86_64-nsis": win, "windows-x86_64": win, "linux-x86_64-appimage": appimage };
             if (deb) platforms["linux-x86_64-deb"] = deb;
             if (rpm) platforms["linux-x86_64-rpm"] = rpm;
+            platforms["darwin-aarch64-app"] = mac;
+            platforms["darwin-aarch64"] = mac;
             const manifest = {
               version: v,
               notes: "What changed is in the kryo.to changelog: https://kryo.to/changelog",

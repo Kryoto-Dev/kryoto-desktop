@@ -34,6 +34,8 @@ mod saves;
 mod settings;
 mod storage;
 mod system;
+#[cfg(unix)]
+mod wine_session;
 
 use serde::{Deserialize, Serialize};
 use tauri::plugin::Builder as PluginBuilder;
@@ -888,6 +890,10 @@ async fn store_mount(
         let ua = if ua.contains("KryotoDesktop/") { ua } else { format!("{ua} KryotoDesktop/{}", env!("CARGO_PKG_VERSION")) };
         builder = builder.user_agent(&ua);
     }
+    // Tauri exposes WebView transparency on macOS only with its private API
+    // feature. The main window is opaque, so keep the child webview opaque on
+    // macOS rather than enabling that private API just for this overlay.
+    #[cfg(not(target_os = "macos"))]
     let builder = builder.transparent(true);
     #[cfg(not(target_os = "linux"))]
     let builder = builder.on_download(|webview, event| match event {
@@ -1673,8 +1679,26 @@ pub fn run() {
             store_library_changed,
             menus::menu_hover
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Kryoto Desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Kryoto Desktop")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            match event {
+                // Launch Services sends URLs to an already-running app through
+                // this event rather than starting a second process with argv.
+                tauri::RunEvent::Opened { urls } => {
+                    for url in urls {
+                        if url.scheme() == links::SCHEME {
+                            links::deliver(app, url.as_str());
+                        }
+                    }
+                }
+                tauri::RunEvent::Reopen { .. } => system::show_main(app),
+                _ => {}
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 #[cfg(test)]

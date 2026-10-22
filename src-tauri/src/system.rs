@@ -107,7 +107,7 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
 /// hiding a sign-in screen in the tray would only look like it failed to close.
 pub static SHELL_READY: AtomicBool = AtomicBool::new(false);
 
-/// Whether the tray icon exists. Without one (a Linux desktop with no tray),
+/// Whether the tray icon exists. Without one (a desktop with no tray),
 /// closing must quit: a hidden window with no icon to bring it back is lost.
 pub static TRAY_OK: AtomicBool = AtomicBool::new(false);
 
@@ -192,8 +192,8 @@ pub fn app_exit(app: AppHandle) {
 }
 
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    // First, because on Linux the tray only opens its menu - a click on the
-    // icon itself is not delivered there.
+    // First, because some desktop shells only open the menu from a tray click;
+    // the icon click handler below makes the window return everywhere else.
     let open = MenuItem::with_id(app, "tray-open", "Open Kryoto", true, None::<&str>)?;
     let store = MenuItem::with_id(app, "tray-store", "Store", true, None::<&str>)?;
     let library = MenuItem::with_id(app, "tray-library", "Library", true, None::<&str>)?;
@@ -289,8 +289,8 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
                 app.exit(0);
             }
         }
-        // Only a real move or resize: Linux window managers send the same
-        // geometry again on focus and stacking changes.
+        // Only a real move or resize: desktop window managers can send the
+        // same geometry again on focus and stacking changes.
         WindowEvent::Moved(p) if changed(&LAST_POS, (p.x, p.y)) => crate::menus::close(app),
         WindowEvent::Resized(s) if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) => {
             crate::menus::close(app);
@@ -483,7 +483,7 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn set_autostart(on: bool) -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "No home folder.".to_string())?;
     let dir = std::path::Path::new(&home).join(".config/autostart");
@@ -506,4 +506,43 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
             _ => Ok(()),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_autostart(on: bool) -> Result<(), String> {
+    let home = std::env::var_os("HOME").ok_or("No home folder.")?;
+    let dir = std::path::PathBuf::from(home).join("Library/LaunchAgents");
+    let label = if cfg!(debug_assertions) {
+        "to.kryo.desktop.dev"
+    } else {
+        "to.kryo.desktop"
+    };
+    let file = dir.join(format!("{label}.plist"));
+    if !on {
+        return match std::fs::remove_file(file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        };
+    }
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let xml = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    };
+    let plist = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{label}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>--tray</string></array>\n<key>RunAtLoad</key><true/>\n<key>LimitLoadToSessionType</key><string>Aqua</string>\n</dict></plist>\n",
+        xml(&exe.to_string_lossy())
+    );
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(file, plist).map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub fn set_autostart(_: bool) -> Result<(), String> {
+    Err("Starting with the system is not supported on this operating system.".into())
 }

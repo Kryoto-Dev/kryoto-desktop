@@ -7,7 +7,8 @@ name: Preview build
 # to the workflow run as artifacts - nothing goes on a GitHub release and no
 # latest.json is written, so no installed copy is offered this build. The
 # version stays whatever the branch has; the real release still happens on the
-# version bump (release.yml).
+# version bump (release.yml). macOS previews include the DMG; they are unsigned
+# unless the runner has a configured Apple signing identity.
 #
 # Running by hand needs this file on the default branch first (GitHub only
 # lists workflows from there). The label works on any PR that carries it.
@@ -34,27 +35,20 @@ jobs:
             platform: windows
           - os: ubuntu-22.04
             platform: linux
+          - os: macos-14
+            platform: macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      # Chat's cryptography (Cargo path dependency ../kryoto-messaging).
-      # Goes away once the dependency becomes a pinned git revision.
-      - name: Fetch kryoto-messaging
-        shell: bash
-        run: git clone --depth 1 https://github.com/Kryoto-Dev/kryoto-messaging.git ../kryoto-messaging
-      # The controller resolver (Cargo path dependency ../kryoto-padmap).
-      - name: Fetch kryoto-padmap
-        shell: bash
-        run: git clone --depth 1 https://github.com/Kryoto-Dev/kryoto-padmap.git ../kryoto-padmap
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 10.28.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
@@ -78,6 +72,7 @@ jobs:
           export PATH="/c/Strawberry/perl/bin:$PATH"
           which perl; which nasm
       - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
 
       - name: Linux dependencies
         if: runner.os == 'Linux'
@@ -105,8 +100,14 @@ jobs:
           mkdir -p out
           if [ "${{ matrix.platform }}" = "windows" ]; then
             cp "$bundle"/nsis/*-setup.exe out/
-          else
+          elif [ "${{ matrix.platform }}" = "linux" ]; then
             cp "$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb out/
+          else
+            cp "$bundle"/dmg/*.dmg out/
+            app=$(find "$bundle/macos" -maxdepth 1 -name '*.app' -print -quit)
+            if [ -n "$app" ]; then
+              ditto -c -k --sequesterRsrc --keepParent "$app" out/Kryoto-Desktop-macos.app.zip
+            fi
           fi
           ls -la out
 

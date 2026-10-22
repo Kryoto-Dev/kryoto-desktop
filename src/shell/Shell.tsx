@@ -528,7 +528,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       onSelect: () => void library.openFolder(g.installDir).catch((e) => lib.setError(errorText(e))),
     },
     // Where Wine or Proton keeps this game's Windows: saves, settings, crash
-    // dumps. Linux only; Windows runs the game itself.
+    // dumps. Compatibility hosts use their selected backend; Windows runs the game itself.
     ...(!isWindowsHost()
       ? [
           {

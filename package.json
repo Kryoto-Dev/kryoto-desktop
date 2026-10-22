@@ -4,14 +4,21 @@
   "version": "0.2.29",
   "license": "MIT",
   "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.14.0 <23"
+  },
   "scripts": {
     "dev": "vite",
+    "preview": "vite preview",
     "build": "tsc --noEmit && vite build",
+    "test": "pnpm build && cargo test --locked --manifest-path src-tauri/Cargo.toml && cargo test --locked --manifest-path crates/kryoto-repair/Cargo.toml",
     "app:dev": "node scripts/dev.mjs",
     "app:dev:plain": "node scripts/dev.mjs -- --no-default-features --features dev-plain-chat-store",
     "app:build": "node scripts/build.mjs",
     "app:build:local": "node scripts/build.mjs --local",
-    "brand": "node scripts/brand.mjs",
+    "app:build:mac": "node scripts/build.mjs --bundles app,dmg",
+    "brand": "node --experimental-strip-types scripts/brand.mjs",
     "web:dev": "vite --config vite.web.config.ts",
     "web:build": "vite build --config vite.web.config.ts && node -e \"require('fs').renameSync('dist-web/web.html','dist-web/index.html')\"",
     "web:wasm": "cd ../kryoto-messaging && cargo build -p km-wasm --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir ../kryoto-desktop/src/web/pkg target/wasm32-unknown-unknown/release/km_wasm.wasm"

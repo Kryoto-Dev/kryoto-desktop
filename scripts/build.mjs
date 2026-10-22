@@ -4,10 +4,12 @@
 //                             TAURI_SIGNING_PRIVATE_KEY. If that key is set and
 //                             its password is not, tauri stops to ask for the
 //                             password - which is what a plain run on a machine
-//                             with the key installed does.
+//                             with the key installed does. On macOS the merged
+//                             config produces an app and a DMG.
 //   pnpm app:build:local      the same build for trying on this PC: no signing,
 //                             no key or password asked for, and the installer is
 //                             copied out of the repository (see below).
+//   pnpm app:build:mac        macOS app + DMG targets explicitly (run on macOS).
 //
 // Extra arguments go to `tauri build` and `tauri bundle`.
 //
