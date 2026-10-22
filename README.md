@@ -31,14 +31,15 @@ also needs Rosetta 2, as required by Sikarugir. A packaged macOS app declares
 the `kryoto://` URL scheme; the first launch registers that bundle with Launch
 Services.
 
-On macOS, open **Settings > Compatibility** and choose **Install Sikarugir
-Creator**. Kryoto runs the official Homebrew cask and installs Rosetta on
-Apple silicon when needed. Once Creator is ready, choose **Open Sikarugir
-Creator**, select the game's Windows executable and an engine in Creator, and
-save the wrapper under `~/Applications/Sikarugir`. Return to Kryoto and refresh
-Compatibility; the wrapper will then appear in the compatibility picker. Creator
-is a GUI-only tool with no supported command-line or IPC interface, so wrapper
-creation itself cannot be automated safely by Kryoto.
+On macOS, open **Settings > Compatibility** and choose **Get Sikarugir Wine**.
+Kryoto downloads the latest official Sikarugir Wine engine, verifies its
+SHA-256 digest, downloads the matching official Template runtime (native
+libraries and renderers), stores both in the app's managed compatibility
+folder, and selects it for Windows games. Properties > Compatibility can choose
+D3DMetal, DXVK, CNC-DDRAW, D9VK, DXMT, or WineD3D per game. On Apple silicon,
+macOS may also ask to install Rosetta 2, which the engine requires. Existing Sikarugir wrappers in
+`~/Applications/Sikarugir` remain available, but Kryoto does not install the
+full Sikarugir app or Creator.
 
 Debug builds run as `to.kryo.desktop.dev`, beside an installed copy, without sharing its data.
 

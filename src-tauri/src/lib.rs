@@ -1417,8 +1417,6 @@ pub fn run() {
             compat::compat_tools,
             compat::compat_status,
             compat::compat_install,
-            compat::compat_sikarugir_install,
-            compat::compat_sikarugir_open_creator,
             compat::compat_remove,
             addons::addon_undo,
             online::online_check,

@@ -482,7 +482,7 @@ pub async fn crack_tree(
         || paths.generate_interfaces(true).is_some()
         || paths.generate_interfaces(false).is_some();
     if cfg!(target_os = "macos") && needs_windows_runner && !paths.sikarugir.as_deref().is_some_and(valid_sikarugir_runner) {
-        return Err(Error::Config("macOS repair needs a valid Sikarugir wrapper launcher for its Windows helper tools.".into()));
+        return Err(Error::Config("macOS repair needs a valid Sikarugir Wine engine or wrapper launcher for its Windows helper tools.".into()));
     }
     let mut warnings = Vec::new();
     let dlls = find_steam_api_dlls(game_dir);

@@ -35,7 +35,7 @@ pub enum Launch {
     Native,
     /// A Windows .exe on Linux: prefix with `wine`.
     Wine,
-    /// A Windows .exe on macOS: invoke Sikarugir's wrapper CLI.
+    /// A Windows .exe on macOS: invoke Sikarugir's wrapper or Wine engine.
     Sikarugir,
     /// A .NET dll: run as `dotnet <dll>`.
     Dotnet,
@@ -66,14 +66,18 @@ impl Tool {
             }
             Launch::Sikarugir => {
                 let mut c = Command::new(wine);
-                // Sikarugir's wrapper launcher takes the Windows executable
-                // as its first argument. `wine` is the historical runner
-                // argument to this method; on macOS callers provide the
-                // selected wrapper launcher there.
+                // Both Sikarugir's wrapper launcher and its Wine engine take
+                // the Windows executable as their first argument. `wine` is
+                // the historical runner argument to this method; on macOS
+                // callers provide the selected Sikarugir backend there.
                 c.arg(&self.path);
                 c
             }
         };
+        #[cfg(target_os = "macos")]
+        if matches!(self.launch, Launch::Sikarugir) {
+            apply_sikarugir_engine_environment(&mut cmd, Path::new(wine));
+        }
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
@@ -90,6 +94,53 @@ impl Tool {
     }
 }
 
+/// A managed Sikarugir engine is distributed separately from the official
+/// Template that supplies its native macOS libraries. Repair helpers bypass
+/// the desktop launch planner, so apply the same minimal runtime environment
+/// here before starting generate_interfaces or Steamless.
+#[cfg(target_os = "macos")]
+fn apply_sikarugir_engine_environment(cmd: &mut Command, runner: &Path) {
+    let Some(bundle) = runner.parent().and_then(Path::parent) else { return };
+    let Some(engine) = bundle.parent() else { return };
+    let runtime = engine.join("runtime");
+    let Ok(entries) = std::fs::read_dir(runtime) else { return };
+    let Some(frameworks) = entries
+        .flatten()
+        .map(|entry| entry.path().join("Contents/Frameworks"))
+        .find(|path| path.join("libinotify.0.dylib").is_file())
+    else {
+        return;
+    };
+    let windows64 = bundle.join("lib/wine/x86_64-windows");
+    let windows32 = bundle.join("lib/wine/i386-windows");
+    let unix = bundle.join("lib/wine/x86_64-unix");
+    let lib = bundle.join("lib/wine");
+    let mut dyld_fallback = vec![lib.clone(), lib.join("lib64"), frameworks.clone()];
+    let gstreamer = frameworks.join("GStreamer.framework/Libraries");
+    if gstreamer.is_dir() {
+        dyld_fallback.push(gstreamer);
+    }
+    dyld_fallback.extend([PathBuf::from("/opt/wine/lib"), PathBuf::from("/usr/lib"), PathBuf::from("/usr/libexec"), PathBuf::from("/usr/lib/system")]);
+    let dyld_fallback = dyld_fallback
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(":");
+    cmd.env_remove("DYLD_LIBRARY_PATH")
+        .env("DYLD_FALLBACK_LIBRARY_PATH", &dyld_fallback)
+        .env("WINESERVER", bundle.join("bin/wineserver"))
+        .env("WINELOADER", unix.join("wine"))
+        .env("WINEDLLPATH", format!("{}:{}:{}", windows64.display(), windows32.display(), unix.display()))
+        .env("WINEDATADIR", bundle.join("share/wine"))
+        .env("WINEDLLDIR0", &windows64)
+        .env("WINEDLLDIR1", &windows32)
+        .env("WINEDLLDIR2", &unix)
+        .env("WINEBOOT_HIDE_DIALOG", "1")
+        .env("WINEMSYNC", "1")
+        .env("SikarugirAppWine11", "1")
+        .env("CX_ROOT", bundle);
+}
+
 /// Decide how a Windows .exe should be launched on this host.
 pub fn windows_exe_launch() -> Launch {
     if cfg!(windows) {
@@ -101,12 +152,12 @@ pub fn windows_exe_launch() -> Launch {
     }
 }
 
-/// Validate the bundle-relative launcher path used by Sikarugir. The desktop
-/// frontend performs the same check while discovering wrappers; keeping this
-/// boundary in the shared crate prevents other repair frontends from silently
-/// falling back to an unrelated executable on macOS.
+/// Validate a Sikarugir wrapper launcher or managed Wine engine path. The
+/// desktop frontend performs the same check while discovering compatibility
+/// tools; keeping this boundary in the shared crate prevents other repair
+/// frontends from silently falling back to an unrelated executable on macOS.
 pub fn valid_sikarugir_runner(path: &Path) -> bool {
-    let executable = path.file_name().is_some_and(|name| name == "Sikarugir" || name == "launcher")
+    let wrapper = path.file_name().is_some_and(|name| name == "Sikarugir" || name == "launcher")
         && path.parent().and_then(Path::file_name).is_some_and(|name| name == "MacOS")
         && path.parent().and_then(Path::parent).and_then(Path::file_name).is_some_and(|name| name == "Contents")
         && path
@@ -115,7 +166,18 @@ pub fn valid_sikarugir_runner(path: &Path) -> bool {
             .and_then(Path::parent)
             .is_some_and(|app| app.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("app")))
         && path.is_file();
-    if !executable {
+    let engine = path.file_name().is_some_and(|name| name == "wine")
+        && path.parent().and_then(Path::file_name).is_some_and(|name| name == "bin")
+        && path.parent().and_then(Path::parent).and_then(Path::file_name).is_some_and(|name| name == "wswine.bundle")
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "sikarugir")
+        && path.is_file();
+    if !wrapper && !engine {
         return false;
     }
     #[cfg(unix)]
@@ -175,13 +237,12 @@ pub struct ToolPaths {
     #[serde(default)]
     pub dotnet: Option<String>,
     /// `wine` executable. Default: whatever is on PATH. Used on Linux; on
-    /// macOS use `sikarugir` for the wrapper launcher instead.
+    /// macOS use `sikarugir` for a wrapper launcher or managed Wine engine.
     #[serde(default)]
     pub wine: Option<String>,
-    /// Sikarugir's `Contents/MacOS/Sikarugir` or legacy `launcher` binary on
-    /// macOS. The shared repair engine keeps the backend explicit instead of
-    /// falling back to a host `wine` binary that would not own the wrapper's
-    /// prefix or renderers.
+    /// Sikarugir's `Contents/MacOS/Sikarugir`, legacy `launcher`, or managed
+    /// `wswine.bundle/bin/wine` on macOS. The shared repair engine keeps the
+    /// backend explicit instead of falling back to a host `wine` binary.
     #[serde(default)]
     pub sikarugir: Option<PathBuf>,
 }
@@ -495,6 +556,21 @@ mod tests {
         let command = tool.command("/Users/me/Applications/Sikarugir/Helper.app/Contents/MacOS/Sikarugir", "dotnet");
         assert_eq!(command.as_std().get_program(), "/Users/me/Applications/Sikarugir/Helper.app/Contents/MacOS/Sikarugir");
         assert_eq!(command.as_std().get_args().collect::<Vec<_>>(), vec!["/tmp/repair-helper.exe"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sikarugir_engine_is_a_valid_windows_runner() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("kryoto-repair-sikarugir-engine-{}", std::process::id()));
+        let wine = root.join("sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/bin/wine");
+        std::fs::create_dir_all(wine.parent().unwrap()).unwrap();
+        std::fs::write(&wine, "engine").unwrap();
+        let mut permissions = std::fs::metadata(&wine).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wine, permissions).unwrap();
+        assert!(valid_sikarugir_runner(&wine));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -20,7 +20,7 @@ export function useCompatTools() {
 
 /**
  * Steam's compatibility-tool list: the Proton and Wine builds on Linux, or
- * the Sikarugir wrappers on macOS, newest first, or a path of your own.
+ * Sikarugir Wine and wrappers on macOS, newest first, or a path of your own.
  * "Automatic" uses the first one found.
  */
 export function CompatPicker({
@@ -67,7 +67,7 @@ export function CompatPicker({
         <input
           className={inputCls}
           value={value ?? ''}
-          placeholder="/path/to/proton, /usr/bin/wine, or a Sikarugir launcher"
+          placeholder="/path/to/proton, /usr/bin/wine, Sikarugir Wine, or a wrapper launcher"
           onChange={(e) => onChange(e.target.value || null)}
         />
       ) : null}

@@ -152,10 +152,10 @@ pub async fn repair_apply(
     let settings = crate::settings::load(&app);
     let windows_runner = if cfg!(target_os = "macos") {
         let tool = library::tool_for(&app, &before, &settings)?.ok_or(
-            "Install Sikarugir, create a wrapper, and select it in Settings > Compatibility before repairing this game.",
+            "Get Sikarugir Wine and select it in Settings > Compatibility before repairing this game.",
         )?;
-        if crate::compat::kind_of(&tool) != "sikarugir" {
-            return Err("macOS repair uses a selected Sikarugir wrapper to run its Windows helper tools.".into());
+        if crate::compat::kind_of(&tool) != "sikarugir" && !crate::compat::is_sikarugir_engine(&tool) {
+            return Err("macOS repair uses selected Sikarugir Wine to run its Windows helper tools.".into());
         }
         Some(tool)
     } else {

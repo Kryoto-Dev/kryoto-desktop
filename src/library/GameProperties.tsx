@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { pickPath } from '@/lib/pick'
 import { FolderOpen, Glasses, Play, Trash2 } from 'lucide-react'
-import { Button, Check, CommandLine, Modal, Panes, Section, Segmented, inputCls } from '@/ui'
+import { Button, Check, CommandLine, Dropdown, Modal, Panes, Section, Segmented, inputCls } from '@/ui'
 import { PLAYER_NAME_MAX } from '@/lib/settings'
 import { CompatPicker } from '@/settings/CompatPicker'
 import { errorText, isTauri } from '@/lib/bridge'
@@ -10,6 +10,7 @@ import {
   PRESETS,
   fetchCatalogGame,
   hasChoice,
+  isMacHost,
   startEntry,
   waysToPlay,
   isWindowsHost,
@@ -17,6 +18,7 @@ import {
   presetFor,
   slugFrom,
   type LibraryGame,
+  type SikarugirRenderer,
 } from '@/lib/library'
 import { cn } from '@/lib/utils'
 import { VersionsList, type GetOurs } from '@/library/Versions'
@@ -25,6 +27,16 @@ import { GameLogs } from '@/library/GameLogs'
 import { ArtworkEditor } from '@/library/ArtworkEditor'
 
 type Tab = 'general' | 'artwork' | 'compat' | 'files' | 'versions' | 'kryoto' | 'logs' | 'repair'
+
+const RENDERERS: { value: 'auto' | SikarugirRenderer; label: string; hint: string }[] = [
+  { value: 'auto', label: 'Automatic (WineD3D)', hint: 'Use the engine default' },
+  { value: 'd3dmetal', label: 'D3DMetal', hint: 'DirectX 11/12 through Metal' },
+  { value: 'dxvk', label: 'DXVK', hint: 'DirectX 10/11 through Vulkan' },
+  { value: 'cnc_ddraw', label: 'CNC-DDRAW', hint: 'Classic 2D DirectDraw games' },
+  { value: 'd9vk', label: 'D9VK', hint: 'DirectX 8/9 through Vulkan' },
+  { value: 'dxmt', label: 'DXMT', hint: 'DirectX 10/11 through Metal' },
+  { value: 'wined3d', label: 'WineD3D', hint: 'DirectX 7 and older' },
+]
 
 const TABS = [
   ['general', 'General'],
@@ -41,7 +53,7 @@ const TABS = [
  * A game's Properties, in Steam's places:
  *   General          name, which way Play starts, the LAUNCH OPTIONS line and
  *                    the exact command it adds up to
- *   Compatibility    Linux: force Proton/Wine; macOS: force a Sikarugir wrapper
+ *   Compatibility    Linux: force Proton/Wine; macOS: force Sikarugir Wine or a wrapper, and choose its renderer
  *   Installed files  size, folder, exe, uninstall
  *   Builds           Steam's Betas: every build on kryo.to, from any of its
  *                    sources, and keeping the installed one over updates
@@ -146,6 +158,7 @@ export function GameProperties({
   }
 
   const windows = isWindowsHost()
+  const mac = isMacHost()
   const preset = presetFor(draft.source)
 
   const choiceRow = (selected: boolean, onClick: () => void, title: React.ReactNode, sub?: React.ReactNode, key?: string) => (
@@ -291,6 +304,19 @@ export function GameProperties({
             ) : (
               <p className="text-xs text-muted-foreground">Uses the one in Settings, Compatibility.</p>
             )}
+            {mac ? (
+              <Section
+                title="Wine renderer"
+                hint="Used by Kryoto's managed Sikarugir Wine engine. A Sikarugir wrapper keeps the renderer configured in that wrapper."
+              >
+                <Dropdown
+                  label="Wine renderer"
+                  value={draft.renderer ?? 'auto'}
+                  options={RENDERERS}
+                  onChange={(v) => set('renderer', v === 'auto' ? null : v)}
+                />
+              </Section>
+            ) : null}
             <Check
               checked={draft.applyOverrides}
               onChange={(v) => set('applyOverrides', v)}

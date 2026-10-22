@@ -81,8 +81,6 @@ commands.allow = [
   "compat_tools",
   "compat_status",
   "compat_install",
-  "compat_sikarugir_install",
-  "compat_sikarugir_open_creator",
   "compat_remove",
   "addon_undo",
   "online_check",

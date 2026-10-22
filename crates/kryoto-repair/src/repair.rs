@@ -253,8 +253,8 @@ pub async fn apply<F: Fn(&str, Option<u8>) + Send + Sync>(
 
 /// Apply a repair, selecting the host's runner for the downloaded Windows
 /// helper executables. On macOS that runner must be a validated Sikarugir
-/// wrapper launcher; falling back to a host `wine` command would bypass the
-/// wrapper's engine, renderer and prefix.
+/// wrapper launcher or Wine engine; falling back to a host `wine` command would
+/// bypass the selected Sikarugir backend.
 pub async fn apply_with_backend<F: Fn(&str, Option<u8>) + Send + Sync>(
     root: &Path,
     cache: &Path,
@@ -266,10 +266,10 @@ pub async fn apply_with_backend<F: Fn(&str, Option<u8>) + Send + Sync>(
 ) -> Result<RepairReport, String> {
     if cfg!(target_os = "macos") {
         let Some(runner) = windows_runner else {
-            return Err("macOS repair needs a selected Sikarugir wrapper to run its Windows helper tools.".into());
+            return Err("macOS repair needs selected Sikarugir Wine to run its Windows helper tools.".into());
         };
         if !valid_sikarugir_runner(runner) {
-            return Err("The selected Sikarugir wrapper launcher is missing or invalid.".into());
+            return Err("The selected Sikarugir Wine engine or wrapper launcher is missing or invalid.".into());
         }
     }
     progress("Checking if I am inside a game folder", None);

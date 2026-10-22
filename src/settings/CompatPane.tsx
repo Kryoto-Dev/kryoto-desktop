@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Download, FolderOpen, RefreshCw, Trash2 } from 'lucide-react'
+import { Download, RefreshCw, Trash2 } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section } from '@/ui'
 import { call, errorText, on } from '@/lib/bridge'
 import type { Settings } from '@/lib/settings'
@@ -7,8 +7,6 @@ import { CompatPicker, type CompatTool } from '@/settings/CompatPicker'
 
 type Status = {
   tools: (CompatTool & { managed?: boolean })[]
-  creator: string | null
-  wrappersDir: string | null
   platform: 'linux' | 'macos' | 'windows'
   umu: string | null
   mangohud: boolean
@@ -19,8 +17,8 @@ type Progress = { step: string; fraction: number | null }
 
 /**
  * Settings > Compatibility for Windows games. Linux uses Proton/Wine like
- * Steam; macOS uses user-created Sikarugir wrapper apps because those wrappers
- * own the Wine engine, renderer and prefix.
+ * Steam; macOS downloads the Sikarugir Wine engine into Kryoto's managed
+ * compatibility folder and can also use user-created wrapper apps.
  */
 export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
   const [status, setStatus] = useState<Status | null>(null)
@@ -31,7 +29,7 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
   const refresh = useCallback(() => {
     void call<Status>('compat_status')
       .then(setStatus)
-      .catch(() => setStatus({ tools: [], creator: null, wrappersDir: null, platform: 'linux', umu: null, mangohud: false, gamemode: false }))
+      .catch(() => setStatus({ tools: [], platform: 'linux', umu: null, mangohud: false, gamemode: false }))
     setVersion((v) => v + 1)
   }, [])
 
@@ -47,44 +45,12 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
     setBusy({ step: 'Starting', fraction: null })
     try {
       const tool = await call<CompatTool>('compat_install')
-      if (!s.defaultCompatTool || !status?.tools.some((t) => t.path === s.defaultCompatTool)) set('defaultCompatTool', tool.path)
+      if (status?.platform === 'macos' || !s.defaultCompatTool || !status?.tools.some((t) => t.path === s.defaultCompatTool)) set('defaultCompatTool', tool.path)
     } catch (e) {
       setError(errorText(e))
     } finally {
       setBusy(null)
       refresh()
-    }
-  }
-
-  const installSikarugir = async () => {
-    setError(null)
-    setBusy({ step: 'Starting', fraction: null })
-    try {
-      await call('compat_sikarugir_install')
-    } catch (e) {
-      setError(errorText(e))
-    } finally {
-      setBusy(null)
-      refresh()
-    }
-  }
-
-  const openCreator = async () => {
-    setError(null)
-    try {
-      await call('compat_sikarugir_open_creator')
-    } catch (e) {
-      setError(errorText(e))
-    }
-  }
-
-  const openWrappers = async () => {
-    if (!status?.wrappersDir) return
-    setError(null)
-    try {
-      await call('open_folder', { path: status.wrappersDir, create: true })
-    } catch (e) {
-      setError(errorText(e))
     }
   }
 
@@ -100,14 +66,15 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
   }
 
   const macos = status?.platform === 'macos'
-  const backends = status?.tools.filter((t) => (macos ? t.kind === 'sikarugir' : t.kind !== 'umu')) ?? []
+  const backends = status?.tools.filter((t) => (macos ? t.kind === 'sikarugir' || (t.kind === 'wine' && t.managed) : t.kind !== 'umu')) ?? []
   const ownProton = backends.some((t) => t.managed && t.kind === 'proton')
+  const ownMacWine = backends.some((t) => t.managed && t.kind === 'wine')
 
   return (
     <>
       <Section
-        title={macos ? 'Sikarugir wrappers' : 'Proton'}
-        hint={macos ? 'Sikarugir wrappers provide the Wine engine and graphics backend for Windows games on macOS.' : 'Proton runs Windows games on Linux. Kryoto gets it for you, like Steam does.'}
+        title={macos ? 'Sikarugir Wine' : 'Proton'}
+        hint={macos ? 'Kryoto downloads the official Sikarugir Wine engine and uses it directly. Existing Sikarugir wrappers are also supported.' : 'Proton runs Windows games on Linux. Kryoto gets it for you, like Steam does.'}
       >
         <div className="grid gap-3">
           {backends.length ? (
@@ -117,7 +84,7 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
                   <span className="grid min-w-0 grow">
                     <b className="truncate text-xs text-foreground">{t.name}</b>
                     <span className="truncate text-[10px] text-muted-foreground">
-                      {t.managed ? 'From Kryoto' : t.kind === 'sikarugir' ? 'Sikarugir wrapper' : t.kind === 'proton' ? 'From Steam' : 'Installed on this computer'}
+                      {t.managed && macos && t.kind === 'wine' ? 'Sikarugir Wine engine · From Kryoto' : t.managed ? 'From Kryoto' : t.kind === 'sikarugir' ? 'Sikarugir wrapper' : t.kind === 'proton' ? 'From Steam' : 'Installed on this computer'}
                     </span>
                   </span>
                   {t.managed && t.kind !== 'sikarugir' ? (
@@ -130,7 +97,7 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
               ))}
             </ul>
           ) : status ? (
-            <Caption>{macos ? 'No Sikarugir wrappers found in ~/Applications/Sikarugir.' : 'No Proton or Wine on this computer yet.'}</Caption>
+            <Caption>{macos ? 'No Sikarugir Wine engine or wrappers found yet.' : 'No Proton or Wine on this computer yet.'}</Caption>
           ) : null}
 
           {macos ? (
@@ -140,31 +107,12 @@ export function CompatPane({ s, set }: { s: Settings; set: <K extends keyof Sett
                 <Caption>{busy.step}</Caption>
               </div>
             ) : (
-              <div className="grid gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  {status?.creator ? (
-                    <Button variant="primary" onClick={() => void openCreator()}>
-                      <RefreshCw className="size-3" />
-                      Open Sikarugir Creator
-                    </Button>
-                  ) : (
-                    <Button variant="primary" onClick={() => void installSikarugir()}>
-                      <Download className="size-3" />
-                      Install Sikarugir Creator
-                    </Button>
-                  )}
-                  {status?.wrappersDir ? (
-                    <Button variant="outline" onClick={() => void openWrappers()}>
-                      <FolderOpen className="size-3" />
-                      Open wrapper folder
-                    </Button>
-                  ) : null}
-                </div>
-                <Caption>
-                  {status?.creator
-                    ? <>Use Creator&apos;s GUI to select the Windows executable, choose an engine, and save the wrapper in <code>~/Applications/Sikarugir</code>. Refresh this page after saving it.</>
-                    : 'Kryoto installs the official Homebrew cask and Rosetta on Apple silicon. Creator still needs to make the wrapper in its GUI because it has no supported command-line or IPC interface.'}
-                </Caption>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant={ownMacWine ? 'outline' : 'primary'} onClick={() => void install()}>
+                  {ownMacWine ? <RefreshCw className="size-3" /> : <Download className="size-3" />}
+                  {ownMacWine ? 'Get the latest Sikarugir Wine' : 'Get Sikarugir Wine'}
+                </Button>
+                 <Caption>About 270 MB, once. Apple silicon may also ask for Rosetta 2.</Caption>
               </div>
             )
           ) : busy ? (

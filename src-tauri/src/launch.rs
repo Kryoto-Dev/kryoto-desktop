@@ -217,6 +217,8 @@ pub struct PlanInput<'a> {
     pub compat_tool: Option<&'a Path>,
     /// Where this game's Wine prefix lives.
     pub prefix_dir: &'a Path,
+    /// macOS Sikarugir renderer id. Ignored by other compatibility tools.
+    pub renderer: Option<&'a str>,
     pub source: Option<&'a str>,
     pub apply_overrides: bool,
     pub windows_host: bool,
@@ -266,7 +268,7 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
         }
         let tool = input.compat_tool.ok_or_else(|| {
             if cfg!(target_os = "macos") {
-                "This is a Windows game. Install Sikarugir, create a wrapper, and select it in Settings > Compatibility or Properties > Compatibility.".to_string()
+                "This is a Windows game. Get Sikarugir Wine in Settings > Compatibility, or select a Sikarugir wrapper in Settings > Compatibility or Properties > Compatibility.".to_string()
             } else {
                 "This is a Windows game. Get Proton in Settings, Compatibility, or pick Wine or Proton under Properties, Compatibility.".to_string()
             }
@@ -302,6 +304,11 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
             // log, achievements and lobby consumers as well.
             set_default(&mut env, "WINEPREFIX", &prefix.to_string_lossy());
         } else {
+            if cfg!(target_os = "macos") && crate::compat::is_sikarugir_engine(tool) {
+                for (key, value) in crate::compat::sikarugir_engine_environment(tool, input.renderer)? {
+                    set_default(&mut env, &key, &value);
+                }
+            }
             set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
         }
         if input.apply_overrides {
@@ -344,6 +351,16 @@ pub fn command(plan: &LaunchPlan) -> std::process::Command {
         }
     }
     cmd.envs(plan.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    // An inherited DYLD_LIBRARY_PATH can make the child x86_64 wineserver
+    // resolve the wrong @rpath library. The official Sikarugir launcher does
+    // not pass it; keep an explicit launch-option override intact, but remove
+    // the ambient value for managed engine launches.
+    if cfg!(target_os = "macos")
+        && crate::compat::is_sikarugir_engine(&plan.program)
+        && !plan.env.iter().any(|(key, _)| key == "DYLD_LIBRARY_PATH")
+    {
+        cmd.env_remove("DYLD_LIBRARY_PATH");
+    }
     cmd.current_dir(&plan.cwd);
     // Its own process group, so Stop ends Wine/Proton and everything they
     // started, not just the wrapper.
@@ -428,6 +445,7 @@ mod tests {
             launch_options: line,
             compat_tool: if windows { None } else { Some(Path::new("/usr/bin/wine")) },
             prefix_dir: Path::new("/data/prefixes/captain-hardcore"),
+            renderer: None,
             source: Some("Steam + Kryoto Online"),
             apply_overrides: true,
             windows_host: windows,
@@ -586,6 +604,79 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn managed_sikarugir_wine_runs_the_exe_with_kryoto_prefix() {
+        let root = std::env::temp_dir().join(format!("kryoto-managed-sikarugir-launch-{}", std::process::id()));
+        let wine = root.join("sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/bin/wine");
+        std::fs::create_dir_all(wine.parent().unwrap()).unwrap();
+        std::fs::write(&wine, "engine").unwrap();
+        let runtime = root.join("sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app");
+        std::fs::create_dir_all(runtime.join("Contents/Frameworks")).unwrap();
+        std::fs::write(runtime.join("Contents/Frameworks/libinotify.0.dylib"), "runtime").unwrap();
+        std::fs::create_dir_all(runtime.join("Contents/SharedSupport/renderer/dxvk/wine")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&wine).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&wine, permissions).unwrap();
+        }
+        let mut i = input(None, "", false);
+        i.compat_tool = Some(wine.as_path());
+        let p = plan(&i).unwrap();
+        assert_eq!(p.program, wine);
+        assert!(p.lead_args[0].ends_with("Captain Hardcore.exe"));
+        let env: std::collections::HashMap<_, _> = p.env.iter().cloned().collect();
+        assert_eq!(env["WINEPREFIX"], "/data/prefixes/captain-hardcore");
+        assert!(!env.contains_key("DYLD_LIBRARY_PATH"));
+        assert!(env["WINEDLLPATH"].contains("lib/wine/x86_64-windows"));
+        assert!(env["WINEDLLPATH"].contains("lib/wine/i386-windows"));
+        assert!(env["WINEDLLPATH"].contains("lib/wine/x86_64-unix"));
+        assert_eq!(env["WINEDLLDIR0"], wine.parent().unwrap().parent().unwrap().join("lib/wine/x86_64-windows").to_string_lossy());
+        assert_eq!(env["WINEDLLDIR1"], wine.parent().unwrap().parent().unwrap().join("lib/wine/i386-windows").to_string_lossy());
+        assert_eq!(env["WINEDLLDIR2"], wine.parent().unwrap().parent().unwrap().join("lib/wine/x86_64-unix").to_string_lossy());
+        assert!(env["DYLD_FALLBACK_LIBRARY_PATH"].contains("Template-1.0.24.app/Contents/Frameworks"));
+        assert!(env["DYLD_FALLBACK_LIBRARY_PATH"].contains("/usr/libexec"));
+        assert_eq!(env["WINEBOOT_HIDE_DIALOG"], "1");
+        assert_eq!(env["WINEMSYNC"], "1");
+        assert_eq!(env["SikarugirAppWine11"], "1");
+        assert!(env["CX_ROOT"].ends_with("wswine.bundle"));
+        assert!(env["WINEDLLOVERRIDES"].contains("kryotoO"));
+        assert!(command(&p)
+            .get_envs()
+            .any(|(key, value)| key == std::ffi::OsStr::new("DYLD_LIBRARY_PATH") && value.is_none()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn managed_sikarugir_wine_can_select_a_renderer() {
+        let root = std::env::temp_dir().join(format!("kryoto-managed-sikarugir-renderer-{}", std::process::id()));
+        let wine = root.join("sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/bin/wine");
+        std::fs::create_dir_all(wine.parent().unwrap()).unwrap();
+        std::fs::write(&wine, "engine").unwrap();
+        let runtime = root.join("sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app");
+        std::fs::create_dir_all(runtime.join("Contents/Frameworks")).unwrap();
+        std::fs::write(runtime.join("Contents/Frameworks/libinotify.0.dylib"), "runtime").unwrap();
+        let renderer = runtime.join("Contents/SharedSupport/renderer/dxvk/wine");
+        std::fs::create_dir_all(&renderer).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&wine).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&wine, permissions).unwrap();
+        }
+        let mut i = input(None, "", false);
+        i.compat_tool = Some(wine.as_path());
+        i.renderer = Some("dxvk");
+        let env: std::collections::HashMap<_, _> = plan(&i).unwrap().env.into_iter().collect();
+        assert_eq!(env["WINEDLLPATH_DXVK"], renderer.to_string_lossy());
+        assert_eq!(env["WINEDLLPATH_PREPEND"], renderer.to_string_lossy());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn invalid_sikarugir_launcher_is_rejected() {
         let mut i = input(None, "", false);
         i.compat_tool = Some(Path::new("/tmp/not-a-wrapper/Sikarugir"));
@@ -717,6 +808,7 @@ mod tests {
                 launch_options: line,
                 compat_tool: None,
                 prefix_dir: Path::new("unused"),
+                renderer: None,
                 source: Some("Steam (DRM-free)"),
                 apply_overrides: true,
                 windows_host: cfg!(windows),

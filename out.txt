@@ -1,0 +1,599 @@
+trace:virtual:virtual_init host addr space limit: 0x7fffffff0000
+trace:virtual:NtAllocateVirtualMemory 0xffffffffffffffff 0x7ffe0000 00001000 3000 00000002
+trace:virtual_ranges:free_ranges_insert_view 0x7ffe0000 - 0x7ffe1000, aligned 0x7ffe0000 - 0x7fff0000.
+trace:virtual_ranges:dump_free_ranges 0x0 - 0x7ffe0000.
+trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0xffffffffffffffff.
+trace:virtual:dump_view View: 0x7ffe0000 - 0x7ffe0fff c-r-- (valloc)
+trace:virtual:dump_view       0x7ffe0000 - 0x7ffe0fff c-r--
+trace:virtual:NtAllocateVirtualMemory 0xffffffffffffffff 0x0 00200000 102000 00000004
+trace:virtual:alloc_free_area limit 0x110000-0x80000000, size 0x200000, top_down 0x100000.
+trace:virtual:alloc_free_area range 0x7fff0000-0xffffffffffffffff.
+trace:virtual:alloc_free_area range 0x0-0x7ffe0000.
+trace:virtual:alloc_free_area_in_range range 0x110000-0x7ffe0000.
+trace:virtual_ranges:free_ranges_insert_view 0x7fde0000 - 0x7ffe0000, aligned 0x7fde0000 - 0x7ffe0000.
+trace:virtual_ranges:dump_free_ranges 0x0 - 0x7fde0000.
+trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0xffffffffffffffff.
+trace:virtual:dump_view View: 0x7fde0000 - 0x7ffdffff --rw- (valloc)
+trace:virtual:dump_view       0x7fde0000 - 0x7ffdffff --rw-
+trace:virtual:NtAllocateVirtualMemory 0xffffffffffffffff 0x7ffc0000 00020000 1000 00000004
+trace:virtual:dump_view View: 0x7fde0000 - 0x7ffdffff --rw- (valloc)
+trace:virtual:dump_view       0x7fde0000 - 0x7ffbffff --rw-
+trace:virtual:dump_view       0x7ffc0000 - 0x7ffdffff c-rw-
+sock_init: shutdown() causes POLLHUP
+wineserver: starting (pid=30367)
+0020: *fd* 03a3 -> 23
+0024: *fd* 7 <- 23
+0024: *fd* 9 <- 24
+0024: init_first_thread( unix_pid=30365, unix_tid=8707, debug_level=1, reply_fd=7, wait_fd=9 )
+0024: init_first_thread() = 0 { pid=0020, tid=0024, server_start=1dd613192faccc0 (-0.0006050), session_id=00000001, inproc_device=0000, info_size=0, machines={8664,014c} }
+0024: get_inproc_alert_fd( )
+0024: get_inproc_alert_fd() = INVALID_PARAMETER { handle=0000 }
+0024: open_mapping( access=000f001f, attributes=00000000, rootdir=0000, name=L"\\KernelObjects\\__wine_user_shared_data" )
+0024: open_mapping() = 0 { handle=0004 }
+0024: get_handle_fd( handle=0004 )
+0024: *fd* 0004 -> 19
+0024: get_handle_fd() = 0 { type=1, cacheable=1, access=000f001f, options=00000020 }
+0024: close_handle( handle=0004 )
+0024: close_handle() = 0
+26363.891:0020:0024:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff206476c00,80,0x7ff206476da4)
+0024: get_token_sid( handle=fffffffa, which_sid=00000001 )
+0024: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.891:0020:0024:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine",<null>,0,f003f,0x7ff206476e88)
+0024: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine"}, class=L"" )
+0024: create_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.891:0020:0024:trace:reg:NtCreateKey <- 0x0
+26363.891:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Environment",20019,0x7ff206476898)
+0024: open_key( parent=0000, access=00020019, attributes=00000040, name=L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Environment" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.892:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.892:0020:0024:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff206476670,80,0x7ff206476814)
+0024: get_token_sid( handle=fffffffa, which_sid=00000001 )
+0024: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.892:0020:0024:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Environment",<null>,0,f003f,0x7ff206476898)
+0024: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Environment"}, class=L"" )
+0024: create_key() = OBJECT_NAME_EXISTS { hkey=0004 }
+26363.892:0020:0024:trace:reg:NtCreateKey <- 0x4
+26363.892:0020:0024:trace:reg:NtEnumerateValueKey (0x4,0,1,0x7ff206475fe0,2066)
+0024: enum_key_value( hkey=0004, index=0, info_class=1 )
+0024: enum_key_value() = NO_MORE_ENTRIES { type=0, total=0, namelen=0, name=L"", data={} }
+0024: close_handle( handle=0004 )
+0024: close_handle() = 0
+26363.892:0020:0024:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff206476670,80,0x7ff206476814)
+0024: get_token_sid( handle=fffffffa, which_sid=00000001 )
+0024: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.892:0020:0024:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Volatile Environment",<null>,0,f003f,0x7ff206476898)
+0024: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Volatile Environment"}, class=L"" )
+0024: create_key() = OBJECT_NAME_EXISTS { hkey=0004 }
+26363.892:0020:0024:trace:reg:NtCreateKey <- 0x4
+26363.892:0020:0024:trace:reg:NtEnumerateValueKey (0x4,0,1,0x7ff206475fe0,2066)
+0024: enum_key_value( hkey=0004, index=0, info_class=1 )
+0024: enum_key_value() = NO_MORE_ENTRIES { type=0, total=0, namelen=0, name=L"", data={} }
+0024: close_handle( handle=0004 )
+0024: close_handle() = 0
+26363.892:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",20019,0x7ff206476898)
+0024: open_key( parent=0000, access=00020019, attributes=00000040, name=L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.892:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.892:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion",20119,0x7ff206476898)
+0024: open_key( parent=0000, access=00020119, attributes=00000040, name=L"\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.892:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.892:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ComputerName\\ActiveComputerName",20019,0x7ff206476898)
+0024: open_key( parent=0000, access=00020019, attributes=00000040, name=L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ComputerName\\ActiveComputerName" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.892:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.892:0020:0024:trace:sync:NtCreateEvent access 0x1f0003, name L"\\KernelObjects\\__wineboot_event", type 0, state 0
+0024: create_event( access=001f0003, manual_reset=1, initial_state=0, objattr={rootdir=0000,attributes=00000080,sd={},name=L"\\KernelObjects\\__wineboot_event"} )
+0024: create_event() = 0 { handle=0004 }
+0024: open_mapping( access=000f001f, attributes=00000000, rootdir=0000, name=L"\\KernelObjects\\__wine_user_shared_data" )
+0024: open_mapping() = 0 { handle=0008 }
+0024: get_handle_fd( handle=0008 )
+0024: *fd* 0008 -> 19
+0024: get_handle_fd() = 0 { type=1, cacheable=1, access=000f001f, options=00000020 }
+0024: close_handle( handle=0008 )
+0024: close_handle() = 0
+0024: *fd* 2 <- 25
+0024: alloc_file_handle( access=40100000, attributes=00000002, fd=2 )
+0024: alloc_file_handle() = 0 { handle=0008 }
+26363.892:0020:0024:trace:process:NtCreateUserProcess L"\\??\\C:\\windows\\system32\\wineboot.exe" image L"C:\\windows\\system32\\wineboot.exe" cmdline L"\"C:\\windows\\system32\\wineboot.exe\" --init" parent 0x0 machine 0
+26363.892:0020:0024:trace:file:get_nt_and_unix_names L"\\??\\C:\\windows\\system32\\" -> ret 0 nt L"\\??\\C:\\windows\\system32" unix "/Users/cqhc/Library/Application Support/to.kryo.desktop/prefixes/tiny-pasture/dosdevices/c:/windows/system32/"
+0024: create_file( access=00100020, sharing=00000005, create=1, options=00000020, attrs=00000000, objattr={rootdir=0000,attributes=00000040,sd={},name=L"\\??\\C:\\windows\\system32"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/prefixes/tiny-pasture/dosdevices/c:/windows/system32/" )
+0024: create_file() = 0 { handle=000c }
+0024: get_handle_fd( handle=000c )
+0024: *fd* 000c -> 26
+0024: get_handle_fd() = 0 { type=2, cacheable=1, access=00100020, options=00000020 }
+0024: close_handle( handle=000c )
+0024: close_handle() = 0
+26363.893:0020:0024:trace:file:get_nt_and_unix_names L"\\??\\C:\\windows\\system32\\wineboot.exe" -> ret c0000034
+26363.893:0020:0024:trace:process:get_pe_file_info assuming 8664 builtin for L"\\??\\C:\\windows\\system32\\wineboot.exe"
+0024: *fd* 11 <- 26
+0024: new_process( token=0000, debug=0000, parent_process=0000, flags=00000000, socket_fd=11, access=001fffff, machine=8664, info_size=354, handles_size=0, jobs_size=0, objattr={rootdir=0000,attributes=00000000,sd={},name=L""}, handles={}, jobs={}, info={debug_flags=0,console_flags=0,console=0000,hstdin=0000,hstdout=0000,hstderr=0000,x=0,y=0,xsize=0,ysize=0,xchars=0,ychars=0,attribute=00,flags=0,show=0,process_group_id=0,curdir=L"C:\\windows\\system32\\",dllpath=L"",imagepath=L"\\??\\C:\\windows\\system32\\wineboot.exe",cmdline=L"\"C:\\windows\\system32\\wineboot.exe\" --init",title=L"C:\\windows\\system32\\wineboot.exe",desktop=L"",shellinfo=L"",runtime=L""}, env=L"WINE_HOST_TMPDIR=/var/folders/x_/t0q_dllj4978n9g4ffn9s1pr0000gp/T/\0__CFBundleIdentifier=com.apple.Terminal\0XPC_FLAGS=0x0\0TERM=xterm-256color\0SSH_AUTH_SOCK=/var/run/com.apple.launchd.5h2vgkznJO/Listeners\0XPC_SERVICE_NAME=0\0TERM_PROGRAM=Apple_Terminal\0COLORTERM=truecolor\0OSLogRateLimit=64\0TERM_PROGRAM_VERSION=488\0TERM_SESSION_ID=2EBC2F45-5268-4719-B01D-E487A050B1A8\0SHELL=/bin/zsh\0WINE_HOST_HOME=/Users/cqhc\0LOGNAME=cqhc\0USER=cqhc\0WINE_HOST_PATH=/Users/cqhc/.cargo/bin:/Users/cqhc/Coding/androidsdk/cmdline-tools/latest/bin:/Users/cqhc/Coding/androidsdk/emulator:/Users/cqhc/.local/bin:/Users/cqhc/bin/cosmocc/bin:/Users/cqhc/bin:/opt/anaconda3/envs/main/bin:/opt/anaconda3/condabin:/Library/Frameworks/Python.framework/Versions/2.7/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/opt/X11/bin:/Library/Apple/usr/bin:/Applications/VMware Fusion.app/Contents/Public:/usr/local/share/dotnet:~/.dotnet/tools:/Users/cqhc/Library/Application Support/JetBrains/Toolbox/scripts:/Applications/CMake.app/Contents/bin:/Users/cqhc/go/bin:/Users/cqhc/.filen-cli/bin\0SHLVL=1\0WINE_HOST_PWD=/Users/cqhc/Coding/Github/kryoto-desktop-beta\0OLDPWD=/Users/cqhc\0OPENAI_API_BASE=http://localhost:20128/v1\0OPENAI_API_KEY=sk-859fdb6ee81a6b6a-a4ec15-d4c342c7\0HOMEBREW_PREFIX=/opt/homebrew\0HOMEBREW_CELLAR=/opt/homebrew/Cellar\0HOMEBREW_REPOSITORY=/opt/homebrew\0FPATH=/opt/homebrew/share/zsh/site-functions:/usr/local/share/zsh/site-functions:/usr/share/zsh/site-functions:/usr/share/zsh/5.9/functions\0INFOPATH=/opt/homebrew/share/info:\0CONDA_EXE=/opt/anaconda3/bin/conda\0_CONDA_EXE=/opt/anaconda3/bin/conda\0_CE_M=\0_CE_CONDA=\0CONDA_PYTHON_EXE=/opt/anaconda3/bin/python\0_CONDA_ROOT=/opt/anaconda3\0CONDA_SHLVL=2\0CONDA_PREFIX=/opt/anaconda3/envs/main\0CONDA_DEFAULT_ENV=main\0CONDA_PROMPT_MODIFIER=(main) \0jdk8path=/Library/Java/JavaVirtualMachines/temurin-8.jdk/contents/Home/bin\0jdkStablePath=/Library/Java/JavaVirtualMachines/temurin-25.jdk/contents/Home/bin\0ANDROID_SDK_ROOT=/Users/cqhc/Coding/androidsdk\0LFS=/Volumes/LinuxRoot\0CONDA_PREFIX_1=/opt/anaconda3\0GOPATH=/Users/cqhc/go\0LANG=en_SG.UTF-8\0WINEDEBUG=+all\0DYLD_LIBRARY_PATH=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/Frameworks:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-unix:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine\0DYLD_FALLBACK_LIBRARY_PATH=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/Frameworks:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-unix:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine\0WINESERVER=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/bin/wineserver\0WINEDLLPATH=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-unix:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine\0WINEDLLPATH_PREPEND=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/SharedSupport/renderer/dxvk/wine\0WINEDLLPATH_DXVK=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/SharedSupport/renderer/dxvk/wine\0WINEPREFIX=/Users/cqhc/Library/Application Support/to.kryo.desktop/prefixes/tiny-pasture\0_=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/bin/wine\0__CF_USER_TEXT_ENCODING=0x1F6:0x0:0x0\0WINEDATADIR=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\share\\wine\0WINEHOMEDIR=\\??\\Z:\\Users\\cqhc\0WINECONFIGDIR=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\prefixes\\tiny-pasture\0WINELOADER=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\lib\\wine\\x86_64-unix\\wine\0WINEDLLDIR0=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\runtime\\Template-1.0.24.app\\Contents\\SharedSupport\\renderer\\dxvk\\wine\0WINEDLLDIR1=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\lib\\wine\0WINEDLLDIR2=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\lib\\wine\\x86_64-unix\0WINEDLLDIR3=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\lib\\wine\0WINEUSERNAME=cqhc\0WINEUSERLOCALE=en-SG\0SystemDrive=C:\0SystemRoot=C:\\windows\0WINEBOOTSTRAPMODE=1\0\0" )
+0024: new_process() = 0 { info=000c, pid=0028, handle=0010 }
+0024: new_thread( process=0010, access=001fffff, flags=00000001, request_fd=-1, objattr={} )
+0024: *fd* 03a3 -> 28
+0024: new_thread() = 0 { tid=002c, handle=0014 }
+0024: get_handle_fd( handle=0000 )
+0024: get_handle_fd() = INVALID_HANDLE { type=0, cacheable=0, access=00000000, options=00000000 }
+26363.893:0020:0024:trace:file:NtDeviceIoControlFile (0x0,0x0,0x0,0x0,0x7ff206476578,0x00500008,0x0,0x00000000,0x0,0x00000000)
+0024: ioctl( code=00500008, async={handle=0000,event=0000,iosb=7ff206476578,user=600003008360,apc=00000000,apc_context=00000000}, in_data={} )
+0024: ioctl() = INVALID_HANDLE { wait=0000, options=00000000, out_data={} }
+0024: get_handle_fd( handle=0000 )
+0024: get_handle_fd() = INVALID_HANDLE { type=0, cacheable=0, access=00000000, options=00000000 }
+26363.893:0020:0024:trace:sync:NtWaitForSingleObject handle 0xc, alertable 0, timeout (infinite)
+0024: select( flags=2, cookie=7ff2064763ec, timeout=infinite, size=8, prev_apc=0000, result={}, data={WAIT,handles={000c}}, contexts={} )
+0024: select() = PENDING { apc_handle=0000, signaled=0, call={}, contexts={} }
+trace:virtual:virtual_init host addr space limit: 0x7fffffff0000
+trace:virtual:NtAllocateVirtualMemory 0xffffffffffffffff 0x7ffe0000 00001000 3000 00000002
+trace:virtual_ranges:free_ranges_insert_view 0x7ffe0000 - 0x7ffe1000, aligned 0x7ffe0000 - 0x7fff0000.
+trace:virtual_ranges:dump_free_ranges 0x0 - 0x7ffe0000.
+trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0xffffffffffffffff.
+trace:virtual:dump_view View: 0x7ffe0000 - 0x7ffe0fff c-r-- (valloc)
+trace:virtual:dump_view       0x7ffe0000 - 0x7ffe0fff c-r--
+trace:virtual:NtAllocateVirtualMemory 0xffffffffffffffff 0x0 00200000 102000 00000004
+trace:virtual:alloc_free_area limit 0x110000-0x80000000, size 0x200000, top_down 0x100000.
+trace:virtual:alloc_free_area range 0x7fff0000-0xffffffffffffffff.
+trace:virtual:alloc_free_area range 0x0-0x7ffe0000.
+trace:virtual:alloc_free_area_in_range range 0x110000-0x7ffe0000.
+trace:virtual_ranges:free_ranges_insert_view 0x7fde0000 - 0x7ffe0000, aligned 0x7fde0000 - 0x7ffe0000.
+trace:virtual_ranges:dump_free_ranges 0x0 - 0x7fde0000.
+trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0xffffffffffffffff.
+trace:virtual:dump_view View: 0x7fde0000 - 0x7ffdffff --rw- (valloc)
+trace:virtual:dump_view       0x7fde0000 - 0x7ffdffff --rw-
+trace:virtual:NtAllocateVirtualMemory 0xffffffffffffffff 0x7ffc0000 00020000 1000 00000004
+trace:virtual:dump_view View: 0x7fde0000 - 0x7ffdffff --rw- (valloc)
+trace:virtual:dump_view       0x7fde0000 - 0x7ffbffff --rw-
+trace:virtual:dump_view       0x7ffc0000 - 0x7ffdffff c-rw-
+002c: *fd* 5 <- 28
+002c: init_first_thread( unix_pid=30369, unix_tid=8451, debug_level=1, reply_fd=5, wait_fd=8 )
+002c: *fd* 8 <- 29
+002c: init_first_thread() = 0 { pid=0028, tid=002c, server_start=1dd613192faccc0 (-0.0476200), session_id=00000001, inproc_device=0000, info_size=11126, machines={8664,014c} }
+002c: get_inproc_alert_fd( )
+002c: get_inproc_alert_fd() = INVALID_PARAMETER { handle=0000 }
+002c: open_mapping( access=000f001f, attributes=00000000, rootdir=0000, name=L"\\KernelObjects\\__wine_user_shared_data" )
+002c: open_mapping() = 0 { handle=0004 }
+002c: get_handle_fd( handle=0004 )
+002c: *fd* 0004 -> 19
+002c: get_handle_fd() = 0 { type=1, cacheable=1, access=000f001f, options=00000020 }
+002c: close_handle( handle=0004 )
+002c: close_handle() = 0
+26363.937:0028:002c:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff20623fc00,80,0x7ff20623fda4)
+002c: get_token_sid( handle=fffffffa, which_sid=00000001 )
+002c: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.937:0028:002c:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine",<null>,0,f003f,0x7ff20623fe88)
+002c: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine"}, class=L"" )
+002c: create_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.937:0028:002c:trace:reg:NtCreateKey <- 0x0
+002c: get_startup_info( )
+002c: get_startup_info() = 0 { info_size=354, machine=8664, info={debug_flags=0,console_flags=0,console=0000,hstdin=0000,hstdout=0000,hstderr=0000,x=0,y=0,xsize=0,ysize=0,xchars=0,ychars=0,attribute=00,flags=0,show=0,process_group_id=40,curdir=L"C:\\windows\\system32\\",dllpath=L"",imagepath=L"\\??\\C:\\windows\\system32\\wineboot.exe",cmdline=L"\"C:\\windows\\system32\\wineboot.exe\" --init",title=L"C:\\windows\\system32\\wineboot.exe",desktop=L"",shellinfo=L"",runtime=L""}, env=L"WINE_HOST_TMPDIR=/var/folders/x_/t0q_dllj4978n9g4ffn9s1pr0000gp/T/\0__CFBundleIdentifier=com.apple.Terminal\0XPC_FLAGS=0x0\0TERM=xterm-256color\0SSH_AUTH_SOCK=/var/run/com.apple.launchd.5h2vgkznJO/Listeners\0XPC_SERVICE_NAME=0\0TERM_PROGRAM=Apple_Terminal\0COLORTERM=truecolor\0OSLogRateLimit=64\0TERM_PROGRAM_VERSION=488\0TERM_SESSION_ID=2EBC2F45-5268-4719-B01D-E487A050B1A8\0SHELL=/bin/zsh\0WINE_HOST_HOME=/Users/cqhc\0LOGNAME=cqhc\0USER=cqhc\0WINE_HOST_PATH=/Users/cqhc/.cargo/bin:/Users/cqhc/Coding/androidsdk/cmdline-tools/latest/bin:/Users/cqhc/Coding/androidsdk/emulator:/Users/cqhc/.local/bin:/Users/cqhc/bin/cosmocc/bin:/Users/cqhc/bin:/opt/anaconda3/envs/main/bin:/opt/anaconda3/condabin:/Library/Frameworks/Python.framework/Versions/2.7/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/opt/X11/bin:/Library/Apple/usr/bin:/Applications/VMware Fusion.app/Contents/Public:/usr/local/share/dotnet:~/.dotnet/tools:/Users/cqhc/Library/Application Support/JetBrains/Toolbox/scripts:/Applications/CMake.app/Contents/bin:/Users/cqhc/go/bin:/Users/cqhc/.filen-cli/bin\0SHLVL=1\0WINE_HOST_PWD=/Users/cqhc/Coding/Github/kryoto-desktop-beta\0OLDPWD=/Users/cqhc\0OPENAI_API_BASE=http://localhost:20128/v1\0OPENAI_API_KEY=sk-859fdb6ee81a6b6a-a4ec15-d4c342c7\0HOMEBREW_PREFIX=/opt/homebrew\0HOMEBREW_CELLAR=/opt/homebrew/Cellar\0HOMEBREW_REPOSITORY=/opt/homebrew\0FPATH=/opt/homebrew/share/zsh/site-functions:/usr/local/share/zsh/site-functions:/usr/share/zsh/site-functions:/usr/share/zsh/5.9/functions\0INFOPATH=/opt/homebrew/share/info:\0CONDA_EXE=/opt/anaconda3/bin/conda\0_CONDA_EXE=/opt/anaconda3/bin/conda\0_CE_M=\0_CE_CONDA=\0CONDA_PYTHON_EXE=/opt/anaconda3/bin/python\0_CONDA_ROOT=/opt/anaconda3\0CONDA_SHLVL=2\0CONDA_PREFIX=/opt/anaconda3/envs/main\0CONDA_DEFAULT_ENV=main\0CONDA_PROMPT_MODIFIER=(main) \0jdk8path=/Library/Java/JavaVirtualMachines/temurin-8.jdk/contents/Home/bin\0jdkStablePath=/Library/Java/JavaVirtualMachines/temurin-25.jdk/contents/Home/bin\0ANDROID_SDK_ROOT=/Users/cqhc/Coding/androidsdk\0LFS=/Volumes/LinuxRoot\0CONDA_PREFIX_1=/opt/anaconda3\0GOPATH=/Users/cqhc/go\0LANG=en_SG.UTF-8\0WINEDEBUG=+all\0DYLD_LIBRARY_PATH=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/Frameworks:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-unix:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine\0DYLD_FALLBACK_LIBRARY_PATH=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/Frameworks:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-unix:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine\0WINESERVER=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/bin/wineserver\0WINEDLLPATH=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-unix:/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine\0WINEDLLPATH_PREPEND=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/SharedSupport/renderer/dxvk/wine\0WINEDLLPATH_DXVK=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/SharedSupport/renderer/dxvk/wine\0WINEPREFIX=/Users/cqhc/Library/Application Support/to.kryo.desktop/prefixes/tiny-pasture\0_=/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/bin/wine\0__CF_USER_TEXT_ENCODING=0x1F6:0x0:0x0\0WINEDATADIR=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\share\\wine\0WINEHOMEDIR=\\??\\Z:\\Users\\cqhc\0WINECONFIGDIR=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\prefixes\\tiny-pasture\0WINELOADER=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\lib\\wine\\x86_64-unix\\wine\0WINEDLLDIR0=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\runtime\\Template-1.0.24.app\\Contents\\SharedSupport\\renderer\\dxvk\\wine\0WINEDLLDIR1=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\lib\\wine\0WINEDLLDIR2=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\lib\\wine\\x86_64-unix\0WINEDLLDIR3=\\??\\Z:\\Users\\cqhc\\Library\\Application Support\\to.kryo.desktop\\compat\\sikarugir\\WS12WineSikarugir11.0_1\\wswine.bundle\\lib\\wine\0WINEUSERNAME=cqhc\0WINEUSERLOCALE=en-SG\0SystemDrive=C:\0SystemRoot=C:\\windows\0WINEBOOTSTRAPMODE=1\0\0" }
+26363.937:0028:002c:trace:virtual:NtAllocateVirtualMemory 0xffffffffffffffff 0x0 00003114 1000 00000004
+26363.937:0028:002c:trace:virtual:alloc_free_area limit 0x110000-0x7fffffff0000, size 0x4000, top_down 0.
+26363.937:0028:002c:trace:virtual:alloc_free_area range 0x0-0x7fde0000.
+26363.937:0028:002c:trace:virtual:alloc_free_area_in_range range 0x110000-0x7fde0000.
+26363.937:0028:002c:trace:virtual_ranges:free_ranges_insert_view 0x110000 - 0x114000, aligned 0x110000 - 0x120000.
+26363.937:0028:002c:trace:virtual_ranges:dump_free_ranges 0x0 - 0x110000.
+26363.937:0028:002c:trace:virtual_ranges:dump_free_ranges 0x120000 - 0x7fde0000.
+26363.937:0028:002c:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0xffffffffffffffff.
+26363.937:0028:002c:trace:virtual:dump_view View: 0x110000 - 0x113fff c-rw- (valloc)
+26363.937:0028:002c:trace:virtual:dump_view       0x110000 - 0x113fff c-rw-
+26363.937:0028:002c:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff20623f580,80,0x7ff20623f724)
+002c: get_token_sid( handle=fffffffa, which_sid=00000001 )
+002c: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.938:0028:002c:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine\\DllOverrides",<null>,0,f003f,0x2087385b8)
+002c: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine\\DllOverrides"}, class=L"" )
+002c: create_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.938:0028:002c:trace:reg:NtCreateKey <- 0x0
+26363.938:0028:002c:trace:module:get_load_order got hardcoded default for L"\\??\\C:\\windows\\system32\\wineboot.exe"
+26363.938:0028:002c:trace:file:get_nt_and_unix_names L"\\??\\C:\\windows\\system32\\wineboot.exe" -> ret c0000034
+26363.938:0028:002c:trace:module:find_builtin_dll looking for "wineboot.exe" for file L"\\??\\C:\\windows\\system32\\wineboot.exe"
+002c: create_file( access=80100000, sharing=00000005, create=1, options=00000060, attrs=00000000, objattr={rootdir=0000,attributes=00000000,sd={},name=L"\\??\\C:\\windows\\system32\\wineboot.exe"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/SharedSupport/renderer/dxvk/wine/x86_64-windows/wineboot.exe" )
+002c: create_file() = NO_SUCH_FILE { handle=0000 }
+002c: create_file( access=80100000, sharing=00000005, create=1, options=00000060, attrs=00000000, objattr={rootdir=0000,attributes=00000000,sd={},name=L"\\??\\C:\\windows\\system32\\wineboot.exe"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/runtime/Template-1.0.24.app/Contents/SharedSupport/renderer/dxvk/wine/wineboot.exe" )
+002c: create_file() = NO_SUCH_FILE { handle=0000 }
+002c: create_file( access=80100000, sharing=00000005, create=1, options=00000060, attrs=00000000, objattr={rootdir=0000,attributes=00000000,sd={},name=L"\\??\\C:\\windows\\system32\\wineboot.exe"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-windows/wineboot.exe" )
+002c: create_file() = 0 { handle=0004 }
+002c: create_mapping( access=000f000d, flags=01000000, file_access=00000001, size=00000000, file_handle=0004, objattr={} )
+002c: create_mapping() = 0 { handle=0008 }
+002c: close_handle( handle=0004 )
+002c: close_handle() = 0
+002c: get_mapping_info( handle=0008, access=00000004 )
+002c: get_mapping_info() = 0 { size=00025000, flags=01800000, shared_file=0000, name_len=72, total=168, image={base=140000000,stack_size=00100000,stack_commit=00001000,entry_point=00007d70,map_size=00025000,zerobits=00000000,subsystem=00000003,subsystem_minor=0000,subsystem_major=0006,osversion_major=0006,osversion_minor=0000,image_charact=0022,dll_charact=8160,machine=8664,contains_code=1,image_flags=04,loader_flags=00000000,header_size=00001000,file_size=00025000,checksum=00000000}, name=L"\\??\\C:\\windows\\system32\\wineboot.exe", exp_name="" }
+002c: get_handle_fd( handle=0008 )
+002c: *fd* 0008 -> 31
+002c: get_handle_fd() = 0 { type=1, cacheable=1, access=000f000d, options=00000020 }
+26363.939:0028:002c:trace:virtual_ranges:free_ranges_insert_view 0x140000000 - 0x140025000, aligned 0x140000000 - 0x140030000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x0 - 0x110000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x120000 - 0x7fde0000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x140000000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x140030000 - 0xffffffffffffffff.
+26363.939:0028:002c:trace:module:map_image_into_view mapping PE file L"\\??\\C:\\windows\\system32\\wineboot.exe" at 0x140000000-0x140025000
+26363.939:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\wineboot.exe" section .text at 0x140001000 off 1000 size 8000 virt 7ee2 flags 60000020
+26363.939:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\wineboot.exe" section .rdata at 0x140009000 off 9000 size 11000 virt 10d6c flags 40000040
+26363.939:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\wineboot.exe" section .data at 0x14001a000 off 1a000 size 1000 virt 7d4 flags c0000040
+26363.939:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\wineboot.exe" section .pdata at 0x14001b000 off 1b000 size 1000 virt 234 flags 40000040
+26363.939:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\wineboot.exe" section .rsrc at 0x14001c000 off 1c000 size 8000 virt 7eef flags 40000040
+26363.939:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\wineboot.exe" section .reloc at 0x140024000 off 24000 size 1000 virt 98 flags 42000040
+002c: map_image_view( mapping=0008, base=140000000, size=00025000, offset=00000000, entry=00007d70, machine=8664 )
+002c: map_image_view() = 0
+26363.939:0028:002c:trace:virtual:dump_view View: 0x140000000 - 0x140024fff c-rWx (image)
+26363.939:0028:002c:trace:virtual:dump_view       0x140000000 - 0x140000fff c-r--
+26363.939:0028:002c:trace:virtual:dump_view       0x140001000 - 0x140008fff c-r-x
+26363.939:0028:002c:trace:virtual:dump_view       0x140009000 - 0x140019fff c-r--
+26363.939:0028:002c:trace:virtual:dump_view       0x14001a000 - 0x14001afff c-rW-
+26363.939:0028:002c:trace:virtual:dump_view       0x14001b000 - 0x140024fff c-r--
+002c: close_handle( handle=0008 )
+002c: close_handle() = 0
+26363.939:0028:002c:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager",1,0x7ff20623f898)
+002c: open_key( parent=0000, access=00000001, attributes=00000040, name=L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager" )
+002c: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.939:0028:002c:trace:reg:NtOpenKeyEx <- 0x0
+26363.939:0028:002c:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",1,0x7ff20623f898)
+002c: open_key( parent=0000, access=00000001, attributes=00000040, name=L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options" )
+002c: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.939:0028:002c:trace:reg:NtOpenKeyEx <- 0x0
+26363.939:0028:002c:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff20623fc50,80,0x7ff20623fdf4)
+002c: get_token_sid( handle=fffffffa, which_sid=00000001 )
+002c: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.939:0028:002c:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine\\AppDefaults",<null>,0,f003f,0x7ff20623fe78)
+002c: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine\\AppDefaults"}, class=L"" )
+002c: create_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.939:0028:002c:trace:reg:NtCreateKey <- 0x0
+26363.939:0028:002c:trace:virtual:alloc_free_area limit 0x100000000-0x7fffffff0000, size 0x100000, top_down 0.
+26363.939:0028:002c:trace:virtual:alloc_free_area range 0x0-0x110000.
+26363.939:0028:002c:trace:virtual:alloc_free_area range 0x120000-0x7fde0000.
+26363.939:0028:002c:trace:virtual:alloc_free_area range 0x7fff0000-0x140000000.
+26363.939:0028:002c:trace:virtual:alloc_free_area_in_range range 0x100000000-0x140000000.
+26363.939:0028:002c:trace:virtual_ranges:free_ranges_insert_view 0x100000000 - 0x100100000, aligned 0x100000000 - 0x100100000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x0 - 0x110000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x120000 - 0x7fde0000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x100000000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x100100000 - 0x140000000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x140030000 - 0xffffffffffffffff.
+26363.939:0028:002c:trace:virtual:dump_view View: 0x100000000 - 0x1000fffff c-rw- (valloc)
+26363.939:0028:002c:trace:virtual:dump_view       0x100000000 - 0x1000fffff c-rw-
+26363.939:0028:002c:trace:virtual:alloc_free_area limit 0x10000-0x7fffffff0000, size 0x100000, top_down 0.
+26363.939:0028:002c:trace:virtual:alloc_free_area range 0x0-0x110000.
+26363.939:0028:002c:trace:virtual:alloc_free_area_in_range range 0x10000-0x110000.
+26363.939:0028:002c:trace:virtual_ranges:free_ranges_insert_view 0x10000 - 0x110000, aligned 0x10000 - 0x110000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x0 - 0x10000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x120000 - 0x7fde0000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x100000000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x100100000 - 0x140000000.
+26363.939:0028:002c:trace:virtual_ranges:dump_free_ranges 0x140030000 - 0xffffffffffffffff.
+26363.939:0028:002c:trace:virtual:dump_view View: 0x10000 - 0x10ffff c-rw- (valloc)
+26363.939:0028:002c:trace:virtual:dump_view       0x10000 - 0x10fff -----
+26363.939:0028:002c:trace:virtual:dump_view       0x11000 - 0x11fff cgrw-
+26363.939:0028:002c:trace:virtual:dump_view       0x12000 - 0x10ffff c-rw-
+26363.939:0028:002c:trace:sync:NtCreateKeyedEvent access 0xc0000000, name (null), flags 0
+002c: create_keyed_event( access=c0000000, objattr={} )
+002c: create_keyed_event() = 0 { handle=0004 }
+002c: create_file( access=80100000, sharing=00000005, create=1, options=00000060, attrs=00000000, objattr={rootdir=0000,attributes=00000000,sd={},name=L"\\??\\C:\\windows\\system32\\ntdll.dll"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-windows/ntdll.dll" )
+002c: create_file() = 0 { handle=0008 }
+002c: create_mapping( access=000f000d, flags=01000000, file_access=00000001, size=00000000, file_handle=0008, objattr={} )
+002c: create_mapping() = 0 { handle=000c }
+002c: close_handle( handle=0008 )
+002c: close_handle() = 0
+002c: get_mapping_info( handle=000c, access=00000004 )
+002c: get_mapping_info() = 0 { size=000ab000, flags=01800000, shared_file=0000, name_len=66, total=171, image={base=170000000,stack_size=00100000,stack_commit=00001000,entry_point=00070480,map_size=000ab000,zerobits=00000000,subsystem=00000003,subsystem_minor=0000,subsystem_major=0006,osversion_major=0006,osversion_minor=0000,image_charact=2022,dll_charact=0160,machine=8664,contains_code=1,image_flags=04,loader_flags=00000000,header_size=00001000,file_size=000a7000,checksum=00000000}, name=L"\\??\\C:\\windows\\system32\\ntdll.dll", exp_name="ntdll.dll" }
+002c: get_handle_fd( handle=000c )
+002c: *fd* 000c -> 32
+002c: get_handle_fd() = 0 { type=1, cacheable=1, access=000f000d, options=00000020 }
+002c: get_image_map_address( handle=000c )
+002c: get_image_map_address() = 0 { addr=6ffffff40000 }
+26363.940:0028:002c:trace:virtual_ranges:free_ranges_insert_view 0x6ffffff40000 - 0x6ffffffeb000, aligned 0x6ffffff40000 - 0x6fffffff0000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x0 - 0x10000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x120000 - 0x7fde0000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x100000000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x100100000 - 0x140000000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x140030000 - 0x6ffffff40000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x6fffffff0000 - 0xffffffffffffffff.
+26363.940:0028:002c:trace:module:map_image_into_view mapping PE file L"\\??\\C:\\windows\\system32\\ntdll.dll" at 0x6ffffff40000-0x6ffffffeb000
+26363.940:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .text at 0x6ffffff41000 off 1000 size 70000 virt 6f485 flags 60000020
+26363.940:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .rdata at 0x6ffffffb1000 off 71000 size 2a000 virt 29078 flags 40000040
+26363.940:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .data at 0x6ffffffdb000 off 9b000 size 1000 virt 439c flags c0000040
+26363.940:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .pdata at 0x6ffffffe0000 off 9c000 size 8000 virt 7c98 flags 40000040
+26363.940:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .eh_fram at 0x6ffffffe8000 off a4000 size 1000 virt c18 flags 40000040
+26363.940:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .rsrc at 0x6ffffffe9000 off a5000 size 1000 virt 3ac flags 40000040
+26363.940:0028:002c:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .reloc at 0x6ffffffea000 off a6000 size 1000 virt 294 flags 42000040
+26363.940:0028:002c:trace:module:map_image_into_view relocating L"\\??\\C:\\windows\\system32\\ntdll.dll" dynamic base 170000000 -> 6ffffff40000 mapped at 0x6ffffff40000
+002c: map_image_view( mapping=000c, base=6ffffff40000, size=000ab000, offset=00000000, entry=00070480, machine=8664 )
+002c: map_image_view() = 0
+26363.940:0028:002c:trace:virtual:dump_view View: 0x6ffffff40000 - 0x6ffffffeafff c-rWx (image)
+26363.940:0028:002c:trace:virtual:dump_view       0x6ffffff40000 - 0x6ffffff40fff c-r--
+26363.940:0028:002c:trace:virtual:dump_view       0x6ffffff41000 - 0x6ffffffb0fff c-r-x
+26363.940:0028:002c:trace:virtual:dump_view       0x6ffffffb1000 - 0x6ffffffdafff c-r--
+26363.940:0028:002c:trace:virtual:dump_view       0x6ffffffdb000 - 0x6ffffffdffff c-rW-
+26363.940:0028:002c:trace:virtual:dump_view       0x6ffffffe0000 - 0x6ffffffeafff c-r--
+002c: close_handle( handle=000c )
+002c: close_handle() = 0
+002c: create_file( access=80100000, sharing=00000005, create=1, options=00000060, attrs=00000000, objattr={rootdir=0000,attributes=00000000,sd={},name=L"\\??\\C:\\windows\\system32\\apisetschema.dll"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-windows/apisetschema.dll" )
+002c: create_file() = 0 { handle=0008 }
+002c: create_mapping( access=000f0005, flags=08000000, file_access=00000001, size=00000000, file_handle=0008, objattr={} )
+002c: create_mapping() = 0 { handle=000c }
+002c: close_handle( handle=0008 )
+002c: close_handle() = 0
+26363.940:0028:002c:trace:virtual:NtMapViewOfSection handle=0xc process=0xffffffffffffffff addr=0x0 off=0 size=0x0 alloc_type=0x0 access=0x2
+002c: get_mapping_info( handle=000c, access=00000004 )
+002c: get_mapping_info() = 0 { size=00016000, flags=00800000, shared_file=0000, name_len=0, total=0, image={}, name=L"", exp_name="" }
+002c: get_handle_fd( handle=000c )
+002c: *fd* 000c -> 33
+002c: get_handle_fd() = 0 { type=1, cacheable=1, access=000f0005, options=00000020 }
+26363.940:0028:002c:trace:virtual:alloc_free_area limit 0x10000-0x7fffffff0000, size 0x16000, top_down 0.
+26363.940:0028:002c:trace:virtual:alloc_free_area range 0x0-0x10000.
+26363.940:0028:002c:trace:virtual:alloc_free_area range 0x120000-0x7fde0000.
+26363.940:0028:002c:trace:virtual:alloc_free_area_in_range range 0x120000-0x7fde0000.
+26363.940:0028:002c:trace:virtual_ranges:free_ranges_insert_view 0x120000 - 0x136000, aligned 0x120000 - 0x140000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x0 - 0x10000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x140000 - 0x7fde0000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x100000000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x100100000 - 0x140000000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x140030000 - 0x6ffffff40000.
+26363.940:0028:002c:trace:virtual_ranges:dump_free_ranges 0x6fffffff0000 - 0xffffffffffffffff.
+26363.940:0028:002c:trace:virtual:virtual_map_section handle=0xc size=16000 offset=0
+002c: map_view( mapping=000c, access=00000004, base=00120000, size=00016000, start=00000000 )
+002c: map_view() = 0
+26363.940:0028:002c:trace:virtual:dump_view View: 0x120000 - 0x135fff c-r-- (file)
+26363.940:0028:002c:trace:virtual:dump_view       0x120000 - 0x135fff c-r--
+26363.940:0028:002c:trace:virtual:virtual_map_section status 0.
+002c: close_handle( handle=000c )
+002c: close_handle() = 0
+26363.940:0028:002c:trace:module:load_apiset_dll loaded L"\\??\\C:\\windows\\system32\\apisetschema.dll" apiset at 0x121000
+002c: *killed* exit_code=1
+0024: *wakeup* signaled=0
+26363.942:0020:0024:trace:sync:NtWaitForSingleObject -> 0
+0024: get_new_process_info( info=000c )
+0024: get_new_process_info() = 0 { success=0, exit_code=1 }
+0024: close_handle( handle=000c )
+0024: close_handle() = 0
+0024: close_handle( handle=0010 )
+0024: close_handle() = 0
+0024: close_handle( handle=0014 )
+0024: close_handle() = 0
+0024: close_handle( handle=0008 )
+0024: close_handle() = 0
+26363.942:0020:0024:err:environ:run_wineboot failed to start wineboot 1
+0024: close_handle( handle=0004 )
+0024: close_handle() = 0
+26363.942:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Environment",20019,0x7ff206476898)
+0024: open_key( parent=0000, access=00020019, attributes=00000040, name=L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Environment" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.942:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.942:0020:0024:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff206476670,80,0x7ff206476814)
+0024: get_token_sid( handle=fffffffa, which_sid=00000001 )
+0024: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.942:0020:0024:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Environment",<null>,0,f003f,0x7ff206476898)
+0024: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Environment"}, class=L"" )
+0024: create_key() = OBJECT_NAME_EXISTS { hkey=0004 }
+26363.942:0020:0024:trace:reg:NtCreateKey <- 0x4
+26363.942:0020:0024:trace:reg:NtEnumerateValueKey (0x4,0,1,0x7ff206475fe0,2066)
+0024: enum_key_value( hkey=0004, index=0, info_class=1 )
+0024: enum_key_value() = NO_MORE_ENTRIES { type=0, total=0, namelen=0, name=L"", data={} }
+0024: close_handle( handle=0004 )
+0024: close_handle() = 0
+26363.943:0020:0024:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff206476670,80,0x7ff206476814)
+0024: get_token_sid( handle=fffffffa, which_sid=00000001 )
+0024: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.943:0020:0024:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Volatile Environment",<null>,0,f003f,0x7ff206476898)
+0024: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Volatile Environment"}, class=L"" )
+0024: create_key() = OBJECT_NAME_EXISTS { hkey=0004 }
+26363.943:0020:0024:trace:reg:NtCreateKey <- 0x4
+26363.943:0020:0024:trace:reg:NtEnumerateValueKey (0x4,0,1,0x7ff206475fe0,2066)
+0024: enum_key_value( hkey=0004, index=0, info_class=1 )
+0024: enum_key_value() = NO_MORE_ENTRIES { type=0, total=0, namelen=0, name=L"", data={} }
+0024: close_handle( handle=0004 )
+0024: close_handle() = 0
+26363.943:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",20019,0x7ff206476898)
+0024: open_key( parent=0000, access=00020019, attributes=00000040, name=L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.943:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.943:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion",20119,0x7ff206476898)
+0024: open_key( parent=0000, access=00020119, attributes=00000040, name=L"\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.943:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.943:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ComputerName\\ActiveComputerName",20019,0x7ff206476898)
+0024: open_key( parent=0000, access=00020019, attributes=00000040, name=L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ComputerName\\ActiveComputerName" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.943:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.943:0020:0024:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff206476580,80,0x7ff206476724)
+0024: get_token_sid( handle=fffffffa, which_sid=00000001 )
+0024: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.943:0020:0024:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine\\DllOverrides",<null>,0,f003f,0x2087385b8)
+0024: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine\\DllOverrides"}, class=L"" )
+0024: create_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.943:0020:0024:trace:reg:NtCreateKey <- 0x0
+26363.943:0020:0024:trace:module:get_load_order got main exe default n,b for L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe"
+26363.943:0020:0024:trace:file:get_nt_and_unix_names L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" -> ret 0 nt L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" unix "/Users/cqhc/Library/Application Support/to.kryo.desktop/prefixes/tiny-pasture/dosdevices/z:/Users/cqhc/Kryoto Games/Tiny Pasture/TinyPasture.exe"
+0024: create_file( access=80100000, sharing=00000005, create=1, options=00000060, attrs=00000000, objattr={rootdir=0000,attributes=00000040,sd={},name=L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/prefixes/tiny-pasture/dosdevices/z:/Users/cqhc/Kryoto Games/Tiny Pasture/TinyPasture.exe" )
+0024: create_file() = 0 { handle=0004 }
+0024: create_mapping( access=000f000d, flags=01000000, file_access=00000001, size=00000000, file_handle=0004, objattr={} )
+0024: create_mapping() = 0 { handle=0008 }
+0024: close_handle( handle=0004 )
+0024: close_handle() = 0
+0024: get_mapping_info( handle=0008, access=00000004 )
+0024: get_mapping_info() = 0 { size=0521a000, flags=01800000, shared_file=0000, name_len=118, total=214, image={base=140000000,stack_size=00800000,stack_commit=00001000,entry_point=000013d0,map_size=0521a000,zerobits=00000000,subsystem=00000002,subsystem_minor=0002,subsystem_major=0005,osversion_major=0004,osversion_minor=0000,image_charact=022e,dll_charact=0160,machine=8664,contains_code=1,image_flags=04,loader_flags=00000000,header_size=00000400,file_size=05047e00,checksum=0505c246}, name=L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe", exp_name="" }
+26363.943:0020:0024:trace:module:get_load_order got main exe default n,b for L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe"
+0024: get_handle_fd( handle=0008 )
+0024: *fd* 0008 -> 26
+0024: get_handle_fd() = 0 { type=1, cacheable=1, access=000f000d, options=00000020 }
+26363.943:0020:0024:trace:virtual_ranges:free_ranges_insert_view 0x140000000 - 0x14521a000, aligned 0x140000000 - 0x145220000.
+26363.943:0020:0024:trace:virtual_ranges:dump_free_ranges 0x0 - 0x7fde0000.
+26363.943:0020:0024:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x140000000.
+26363.943:0020:0024:trace:virtual_ranges:dump_free_ranges 0x145220000 - 0xffffffffffffffff.
+26363.943:0020:0024:trace:module:map_image_into_view mapping PE file L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" at 0x140000000-0x14521a000
+26363.943:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .text at 0x140001000 off 400 size 3f3b800 virt 3f3b7c0 flags 60000060
+0028: *process killed*
+26363.959:0020:0024:trace:module:map_image_into_view clearing 0x143f3c800 - 0x143f3d000
+26363.959:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .data at 0x143f3d000 off 3f3bc00 size 4a600 virt 4a5e0 flags c0000040
+26363.959:0020:0024:trace:module:map_image_into_view clearing 0x143f87600 - 0x143f88000
+26363.959:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .rdata at 0x143f88000 off 3f86200 size d5be00 virt d5bca0 flags 40000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x144ce3e00 - 0x144ce4000
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section pck at 0x144ce4000 off 4ce2000 size 200 virt 8 flags 40000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x144ce4200 - 0x144ce5000
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .pdata at 0x144ce5000 off 4ce2200 size 147200 virt 1470f0 flags 40000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x144e2c200 - 0x144e2d000
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .xdata at 0x144e2d000 off 4e29400 size 1a6200 virt 1a6138 flags 40000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x144fd3200 - 0x144fd4000
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .bss at 0x144fd4000 off 0 size 0 virt 1c93c0 flags c0000080
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .edata at 0x14519e000 off 4fcf600 size 200 virt 9f flags 40000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x14519e200 - 0x14519f000
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .idata at 0x14519f000 off 4fcf800 size 5800 virt 57f4 flags c0000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x1451a4800 - 0x1451a5000
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .CRT at 0x1451a5000 off 4fd5000 size 200 virt 70 flags c0000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x1451a5200 - 0x1451a6000
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .tls at 0x1451a6000 off 4fd5200 size 200 virt 10 flags c0000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x1451a6200 - 0x1451a7000
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .rsrc at 0x1451a7000 off 4fd5400 size 1b000 virt 1aeec flags 40000040
+26363.976:0020:0024:trace:module:map_image_into_view mapping L"\\??\\Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" section .reloc at 0x1451c2000 off 4ff0400 size 57a00 virt 578d8 flags 42000040
+26363.976:0020:0024:trace:module:map_image_into_view clearing 0x145219a00 - 0x14521a000
+0024: map_image_view( mapping=0008, base=140000000, size=0521a000, offset=00000000, entry=000013d0, machine=8664 )
+0024: map_image_view() = 0
+26363.985:0020:0024:trace:virtual:dump_view View: 0x140000000 - 0x145219fff c-rWx (image)
+26363.985:0020:0024:trace:virtual:dump_view       0x140000000 - 0x140000fff c-r--
+26363.985:0020:0024:trace:virtual:dump_view       0x140001000 - 0x143f3cfff c-r-x
+26363.985:0020:0024:trace:virtual:dump_view       0x143f3d000 - 0x143f87fff c-rW-
+26363.985:0020:0024:trace:virtual:dump_view       0x143f88000 - 0x144fd3fff c-r--
+26363.985:0020:0024:trace:virtual:dump_view       0x144fd4000 - 0x14519dfff c-rW-
+26363.985:0020:0024:trace:virtual:dump_view       0x14519e000 - 0x14519efff c-r--
+26363.985:0020:0024:trace:virtual:dump_view       0x14519f000 - 0x1451a6fff c-rW-
+26363.985:0020:0024:trace:virtual:dump_view       0x1451a7000 - 0x145219fff c-r--
+0024: close_handle( handle=0008 )
+0024: close_handle() = 0
+26363.985:0020:0024:trace:environ:build_initial_params image L"Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe" cmdline L"\"Z:\\Users\\cqhc\\Kryoto Games\\Tiny Pasture\\TinyPasture.exe\"" dir L"\\??\\Z:\\Users\\cqhc\\Coding\\Github\\kryoto-desktop-beta\\"
+26363.985:0020:0024:trace:virtual:NtAllocateVirtualMemory 0xffffffffffffffff 0x0 00003158 1000 00000004
+26363.985:0020:0024:trace:virtual:alloc_free_area limit 0x110000-0x7fffffff0000, size 0x4000, top_down 0.
+26363.985:0020:0024:trace:virtual:alloc_free_area range 0x0-0x7fde0000.
+26363.985:0020:0024:trace:virtual:alloc_free_area_in_range range 0x110000-0x7fde0000.
+26363.985:0020:0024:trace:virtual_ranges:free_ranges_insert_view 0x110000 - 0x114000, aligned 0x110000 - 0x120000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x0 - 0x110000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x120000 - 0x7fde0000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x140000000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x145220000 - 0xffffffffffffffff.
+26363.985:0020:0024:trace:virtual:dump_view View: 0x110000 - 0x113fff c-rw- (valloc)
+26363.985:0020:0024:trace:virtual:dump_view       0x110000 - 0x113fff c-rw-
+0024: *fd* 0 <- 25
+0024: alloc_file_handle( access=80100000, attributes=00000002, fd=0 )
+0024: alloc_file_handle() = 0 { handle=0004 }
+0024: *fd* 1 <- 27
+0024: alloc_file_handle( access=40100000, attributes=00000002, fd=1 )
+0024: alloc_file_handle() = 0 { handle=0008 }
+0024: *fd* 2 <- 28
+0024: alloc_file_handle( access=40100000, attributes=00000002, fd=2 )
+0024: alloc_file_handle() = 0 { handle=000c }
+26363.985:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager",1,0x7ff206476898)
+0024: open_key( parent=0000, access=00000001, attributes=00000040, name=L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.985:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.985:0020:0024:trace:reg:NtOpenKeyEx (0x0,L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",1,0x7ff206476898)
+0024: open_key( parent=0000, access=00000001, attributes=00000040, name=L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options" )
+0024: open_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.985:0020:0024:trace:reg:NtOpenKeyEx <- 0x0
+26363.985:0020:0024:trace:ntdll:NtQueryInformationToken (0xfffffffffffffffa,TokenUser,0x7ff206476c50,80,0x7ff206476df4)
+0024: get_token_sid( handle=fffffffa, which_sid=00000001 )
+0024: get_token_sid() = 0 { sid_len=28, sid=S-1-5-21-0-0-0-1000 }
+26363.985:0020:0024:trace:reg:NtCreateKey (0x0,L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine\\AppDefaults",<null>,0,f003f,0x7ff206476e78)
+0024: create_key( access=000f003f, options=00000000, objattr={rootdir=0000,attributes=000000c0,sd={},name=L"\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Wine\\AppDefaults"}, class=L"" )
+0024: create_key() = OBJECT_NAME_NOT_FOUND { hkey=0000 }
+26363.985:0020:0024:trace:reg:NtCreateKey <- 0x0
+26363.985:0020:0024:trace:virtual:alloc_free_area limit 0x100000000-0x7fffffff0000, size 0x100000, top_down 0.
+26363.985:0020:0024:trace:virtual:alloc_free_area range 0x0-0x110000.
+26363.985:0020:0024:trace:virtual:alloc_free_area range 0x120000-0x7fde0000.
+26363.985:0020:0024:trace:virtual:alloc_free_area range 0x7fff0000-0x140000000.
+26363.985:0020:0024:trace:virtual:alloc_free_area_in_range range 0x100000000-0x140000000.
+26363.985:0020:0024:trace:virtual_ranges:free_ranges_insert_view 0x100000000 - 0x100100000, aligned 0x100000000 - 0x100100000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x0 - 0x110000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x120000 - 0x7fde0000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x100000000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x100100000 - 0x140000000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x145220000 - 0xffffffffffffffff.
+26363.985:0020:0024:trace:virtual:dump_view View: 0x100000000 - 0x1000fffff c-rw- (valloc)
+26363.985:0020:0024:trace:virtual:dump_view       0x100000000 - 0x1000fffff c-rw-
+26363.985:0020:0024:trace:virtual:alloc_free_area limit 0x10000-0x7fffffff0000, size 0x800000, top_down 0.
+26363.985:0020:0024:trace:virtual:alloc_free_area range 0x0-0x110000.
+26363.985:0020:0024:trace:virtual:alloc_free_area range 0x120000-0x7fde0000.
+26363.985:0020:0024:trace:virtual:alloc_free_area_in_range range 0x120000-0x7fde0000.
+26363.985:0020:0024:trace:virtual_ranges:free_ranges_insert_view 0x120000 - 0x920000, aligned 0x120000 - 0x920000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x0 - 0x110000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x920000 - 0x7fde0000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x100000000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x100100000 - 0x140000000.
+26363.985:0020:0024:trace:virtual_ranges:dump_free_ranges 0x145220000 - 0xffffffffffffffff.
+26363.985:0020:0024:trace:virtual:dump_view View: 0x120000 - 0x91ffff c-rw- (valloc)
+26363.985:0020:0024:trace:virtual:dump_view       0x120000 - 0x120fff -----
+26363.985:0020:0024:trace:virtual:dump_view       0x121000 - 0x121fff cgrw-
+26363.985:0020:0024:trace:virtual:dump_view       0x122000 - 0x91ffff c-rw-
+26363.985:0020:0024:trace:sync:NtCreateKeyedEvent access 0xc0000000, name (null), flags 0
+0024: create_keyed_event( access=c0000000, objattr={} )
+0024: create_keyed_event() = 0 { handle=0010 }
+0024: create_file( access=80100000, sharing=00000005, create=1, options=00000060, attrs=00000000, objattr={rootdir=0000,attributes=00000000,sd={},name=L"\\??\\C:\\windows\\system32\\ntdll.dll"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-windows/ntdll.dll" )
+0024: create_file() = 0 { handle=0014 }
+0024: create_mapping( access=000f000d, flags=01000000, file_access=00000001, size=00000000, file_handle=0014, objattr={} )
+0024: create_mapping() = 0 { handle=0018 }
+0024: close_handle( handle=0014 )
+0024: close_handle() = 0
+0024: get_mapping_info( handle=0018, access=00000004 )
+0024: get_mapping_info() = 0 { size=000ab000, flags=01800000, shared_file=0000, name_len=66, total=171, image={base=170000000,stack_size=00100000,stack_commit=00001000,entry_point=00070480,map_size=000ab000,zerobits=00000000,subsystem=00000003,subsystem_minor=0000,subsystem_major=0006,osversion_major=0006,osversion_minor=0000,image_charact=2022,dll_charact=0160,machine=8664,contains_code=1,image_flags=04,loader_flags=00000000,header_size=00001000,file_size=000a7000,checksum=00000000}, name=L"\\??\\C:\\windows\\system32\\ntdll.dll", exp_name="ntdll.dll" }
+0024: get_handle_fd( handle=0018 )
+0024: *fd* 0018 -> 30
+0024: get_handle_fd() = 0 { type=1, cacheable=1, access=000f000d, options=00000020 }
+0024: get_image_map_address( handle=0018 )
+0024: get_image_map_address() = 0 { addr=6ffffff40000 }
+26363.986:0020:0024:trace:virtual_ranges:free_ranges_insert_view 0x6ffffff40000 - 0x6ffffffeb000, aligned 0x6ffffff40000 - 0x6fffffff0000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x0 - 0x110000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x920000 - 0x7fde0000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x100000000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x100100000 - 0x140000000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x145220000 - 0x6ffffff40000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x6fffffff0000 - 0xffffffffffffffff.
+26363.986:0020:0024:trace:module:map_image_into_view mapping PE file L"\\??\\C:\\windows\\system32\\ntdll.dll" at 0x6ffffff40000-0x6ffffffeb000
+26363.986:0020:0024:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .text at 0x6ffffff41000 off 1000 size 70000 virt 6f485 flags 60000020
+26363.986:0020:0024:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .rdata at 0x6ffffffb1000 off 71000 size 2a000 virt 29078 flags 40000040
+26363.986:0020:0024:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .data at 0x6ffffffdb000 off 9b000 size 1000 virt 439c flags c0000040
+26363.986:0020:0024:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .pdata at 0x6ffffffe0000 off 9c000 size 8000 virt 7c98 flags 40000040
+26363.986:0020:0024:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .eh_fram at 0x6ffffffe8000 off a4000 size 1000 virt c18 flags 40000040
+26363.986:0020:0024:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .rsrc at 0x6ffffffe9000 off a5000 size 1000 virt 3ac flags 40000040
+26363.986:0020:0024:trace:module:map_image_into_view mapping L"\\??\\C:\\windows\\system32\\ntdll.dll" section .reloc at 0x6ffffffea000 off a6000 size 1000 virt 294 flags 42000040
+26363.986:0020:0024:trace:module:map_image_into_view relocating L"\\??\\C:\\windows\\system32\\ntdll.dll" dynamic base 170000000 -> 6ffffff40000 mapped at 0x6ffffff40000
+0024: map_image_view( mapping=0018, base=6ffffff40000, size=000ab000, offset=00000000, entry=00070480, machine=8664 )
+0024: map_image_view() = 0
+26363.986:0020:0024:trace:virtual:dump_view View: 0x6ffffff40000 - 0x6ffffffeafff c-rWx (image)
+26363.986:0020:0024:trace:virtual:dump_view       0x6ffffff40000 - 0x6ffffff40fff c-r--
+26363.986:0020:0024:trace:virtual:dump_view       0x6ffffff41000 - 0x6ffffffb0fff c-r-x
+26363.986:0020:0024:trace:virtual:dump_view       0x6ffffffb1000 - 0x6ffffffdafff c-r--
+26363.986:0020:0024:trace:virtual:dump_view       0x6ffffffdb000 - 0x6ffffffdffff c-rW-
+26363.986:0020:0024:trace:virtual:dump_view       0x6ffffffe0000 - 0x6ffffffeafff c-r--
+0024: close_handle( handle=0018 )
+0024: close_handle() = 0
+0024: create_file( access=80100000, sharing=00000005, create=1, options=00000060, attrs=00000000, objattr={rootdir=0000,attributes=00000000,sd={},name=L"\\??\\C:\\windows\\system32\\apisetschema.dll"}, filename="/Users/cqhc/Library/Application Support/to.kryo.desktop/compat/sikarugir/WS12WineSikarugir11.0_1/wswine.bundle/lib/wine/x86_64-windows/apisetschema.dll" )
+0024: create_file() = 0 { handle=0014 }
+0024: create_mapping( access=000f0005, flags=08000000, file_access=00000001, size=00000000, file_handle=0014, objattr={} )
+0024: create_mapping() = 0 { handle=0018 }
+0024: close_handle( handle=0014 )
+0024: close_handle() = 0
+26363.986:0020:0024:trace:virtual:NtMapViewOfSection handle=0x18 process=0xffffffffffffffff addr=0x0 off=0 size=0x0 alloc_type=0x0 access=0x2
+0024: get_mapping_info( handle=0018, access=00000004 )
+0024: get_mapping_info() = 0 { size=00016000, flags=00800000, shared_file=0000, name_len=0, total=0, image={}, name=L"", exp_name="" }
+0024: get_handle_fd( handle=0018 )
+0024: *fd* 0018 -> 31
+0024: get_handle_fd() = 0 { type=1, cacheable=1, access=000f0005, options=00000020 }
+26363.986:0020:0024:trace:virtual:alloc_free_area limit 0x10000-0x7fffffff0000, size 0x16000, top_down 0.
+26363.986:0020:0024:trace:virtual:alloc_free_area range 0x0-0x110000.
+26363.986:0020:0024:trace:virtual:alloc_free_area_in_range range 0x10000-0x110000.
+26363.986:0020:0024:trace:virtual_ranges:free_ranges_insert_view 0x10000 - 0x26000, aligned 0x10000 - 0x30000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x0 - 0x10000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x30000 - 0x110000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x920000 - 0x7fde0000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x7fff0000 - 0x100000000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x100100000 - 0x140000000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x145220000 - 0x6ffffff40000.
+26363.986:0020:0024:trace:virtual_ranges:dump_free_ranges 0x6fffffff0000 - 0xffffffffffffffff.
+26363.986:0020:0024:trace:virtual:virtual_map_section handle=0x18 size=16000 offset=0
+0024: map_view( mapping=0018, access=00000004, base=00010000, size=00016000, start=00000000 )
+0024: map_view() = 0
+26363.986:0020:0024:trace:virtual:dump_view View: 0x10000 - 0x25fff c-r-- (file)
+26363.986:0020:0024:trace:virtual:dump_view       0x10000 - 0x25fff c-r--
+26363.986:0020:0024:trace:virtual:virtual_map_section status 0.
+0024: close_handle( handle=0018 )
+0024: close_handle() = 0
+26363.986:0020:0024:trace:module:load_apiset_dll loaded L"\\??\\C:\\windows\\system32\\apisetschema.dll" apiset at 0x11000
+0024: *killed* exit_code=0
+0020: *process killed*
+wineserver: exiting (pid=30367)

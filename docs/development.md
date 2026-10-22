@@ -50,15 +50,16 @@ also needs Rosetta 2. `pnpm app:build:mac` merges `src-tauri/tauri.macos.conf.js
 selects the `.app` and `.dmg` targets, bundles uBlock resources and sets the
 minimum system version. `src-tauri/Info.plist` declares `kryoto://`; the native
 side handles Launch Services `Opened` events and keeps the link pending until
-the shell is ready. Compatibility wrappers are discovered in
-`~/Applications/Sikarugir`.
+the shell is ready. Existing compatibility wrappers are discovered in
+`~/Applications/Sikarugir`; the managed Sikarugir Wine engine lives under the
+app data `compat/sikarugir` folder.
 
-The native Compatibility settings can install the official Sikarugir Creator
-Homebrew cask (and Rosetta on Apple silicon) after the user presses the install
-button. Creator is intentionally opened separately: its public project does not
-document a command-line or IPC interface for creating wrappers. A person must
-select the Windows executable and engine in Creator, save the wrapper to
-`~/Applications/Sikarugir`, and refresh Kryoto before the wrapper is detected.
+The native Compatibility settings download the first entry from the official
+Sikarugir engine catalog, match it to the latest GitHub release asset, verify
+the asset's SHA-256 digest, and unpack its `wswine.bundle` into Kryoto's managed
+compatibility directory. The engine's `bin/wine` is then selected directly for
+macOS Windows-game launches; no full Sikarugir app or Creator installation is
+needed. Existing wrappers in `~/Applications/Sikarugir` remain supported.
 
 macOS local builds are intentionally unsigned unless the machine has an Apple
 Developer signing identity. Notarization is a release-owner operation and is

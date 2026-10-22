@@ -47,6 +47,8 @@ pub struct LibraryGame {
     pub launch_options: String,
     /// Wine or Proton, for a non-Windows host.
     pub compat_tool: Option<String>,
+    /// Sikarugir's macOS renderer override (`None` uses WineD3D/default).
+    pub renderer: Option<String>,
     /// Add the release's WINEDLLOVERRIDES automatically under Wine/Proton.
     pub apply_overrides: bool,
     pub playtime_seconds: u64,
@@ -659,6 +661,7 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
         launch_options: &game.launch_options,
         compat_tool: tool,
         prefix_dir: &prefix,
+        renderer: game.renderer.as_deref(),
         source: game.source.as_deref(),
         apply_overrides: game.apply_overrides,
         windows_host: cfg!(windows),
@@ -678,10 +681,10 @@ pub(crate) fn tool_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, setti
     let resolved = crate::compat::resolve_tool(saved, &detected);
     if cfg!(target_os = "macos") {
         return match resolved {
-            Ok(Some(path)) if crate::compat::kind_of(&path) == "sikarugir" => Ok(Some(path)),
-            Ok(Some(_)) => Err("macOS uses Sikarugir wrappers as its Wine backend. Select a Sikarugir wrapper in Settings > Compatibility.".into()),
+            Ok(Some(path)) if crate::compat::kind_of(&path) == "sikarugir" || crate::compat::is_sikarugir_engine(&path) => Ok(Some(path)),
+            Ok(Some(_)) => Err("macOS uses Sikarugir Wine as its Windows-game backend. Get Sikarugir Wine in Settings > Compatibility, or select a Sikarugir wrapper.".into()),
             Ok(None) => Ok(None),
-            Err(_) => Err("No Sikarugir wrapper was found. Install Sikarugir, create a wrapper, and keep it in ~/Applications/Sikarugir.".into()),
+            Err(_) => Err("No Sikarugir Wine engine or wrapper was found. Get Sikarugir Wine in Settings > Compatibility, or select a wrapper.".into()),
         };
     }
     resolved
