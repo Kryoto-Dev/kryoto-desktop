@@ -33,6 +33,8 @@ mod runtimes;
 mod settings;
 mod storage;
 mod system;
+#[cfg(unix)]
+mod wine_session;
 
 use serde::{Deserialize, Serialize};
 use tauri::plugin::Builder as PluginBuilder;

@@ -714,8 +714,10 @@ pub async fn game_launch(app: AppHandle, running: State<'_, Running>, id: String
     let session = Arc::new(crate::handoff::Session::default());
     {
         let mut all = running.0.lock().map_err(|_| "state lock poisoned")?;
-        if all.get(&id).is_some_and(|s| !s.stopped() || s.pid().is_some()) {
-            return Err("It is already running.".into());
+        if all.contains_key(&id) {
+            // A stopped session may still be preparing or draining its Wine
+            // server. Only its owner removes the reservation, after cleanup.
+            return Err("It is already running or still closing. Try again once it has stopped.".into());
         }
         all.insert(id.clone(), session.clone());
     }
@@ -831,6 +833,17 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
     // Everything the game (and Wine/Proton) prints goes into its log (game_logs.rs).
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let log = crate::game_logs::begin(&app, &game, &plan, tool.as_deref());
+    #[cfg(unix)]
+    let wine = match crate::wine_session::WineSession::prepare(&plan, tool.as_deref(), &data_dir(&app)?.join("prefixes").join(&id), Path::new(&game.install_dir)) {
+        Ok(wine) => wine,
+        Err(e) => {
+            if let Some(log) = &log {
+                log.note(&e);
+                log.finish(None, 0, None);
+            }
+            return Err(e);
+        }
+    };
     let before = crate::handoff::existing();
     session.track(Path::new(&game.install_dir), &before);
     let mut child = match session.spawn(&mut cmd) {
@@ -855,6 +868,8 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
         }
         Err(e) => {
             let msg = format!("Could not start {}: {e}", plan.program.display());
+            #[cfg(unix)]
+            finish_wine(wine.as_ref(), log.as_ref());
             if let Some(log) = &log {
                 log.note(&msg);
                 log.finish(None, 0, None);
@@ -909,6 +924,14 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
             }
         }
         let seconds = if followed.is_some() { started_at.elapsed().as_secs() } else { exited_after };
+        // Wine's detached services outlive the game/process group, including
+        // in-game Quit, Cmd+Q and crashes. Finish shutdown before releasing
+        // Running or emitting the stopped event, not in a fire-and-forget task.
+        #[cfg(unix)]
+        {
+            finish_wine(wine.as_ref(), log.as_ref());
+            drop(wine);
+        }
         if let Some(log) = &log {
             log.finish(code, seconds, followed);
         }
@@ -929,6 +952,19 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
         let _ = app.emit("game-state", GameEvent { id, running: false, seconds: Some(seconds), code, stopped: session.stopped() });
     });
     Ok(())
+}
+
+#[cfg(unix)]
+fn finish_wine(wine: Option<&crate::wine_session::WineSession>, log: Option<&crate::game_logs::GameLog>) {
+    let Some(wine) = wine else { return };
+    let note = match wine.cleanup() {
+        Ok(()) => "Wine services for this game's prefix have stopped.".to_string(),
+        Err(e) => {
+            crate::logging::warn("library", &e);
+            format!("Wine cleanup: {e}")
+        }
+    };
+    if let Some(log) = log { log.note(&note); }
 }
 
 /// The first file called `name` under `dir`, shallowest first, at most `depth` deep.
