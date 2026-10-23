@@ -131,6 +131,7 @@ export function Welcome({
   return (
     <Box className="bg-black">
       <img
+        decoding="async"
         src="/brand/og-backdrop.jpg"
         alt=""
         draggable={false}
@@ -183,7 +184,7 @@ export function Welcome({
             ) : account ? (
               <>
                 <Button variant="primary" size="lg" className="w-full gap-3" onClick={onContinue}>
-                  {account.avatarUrl ? <img src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" /> : null}
+                  {account.avatarUrl ? <img decoding="async" src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" /> : null}
                   <span className="truncate">Continue as {name}</span>
                 </Button>
                 <Button

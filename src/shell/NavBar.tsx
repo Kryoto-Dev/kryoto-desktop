@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, ArrowRight } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { ArrowLeft, ArrowRight, Library, Store, User, Users, type LucideIcon } from 'lucide-react'
 import { IconButton, MenuList, useDismiss, useNativeOpen, type MenuEntry } from '@/ui'
 import { isTauri } from '@/lib/bridge'
 import { closeMenu, onPopupHover, openMenu, popupOpen } from '@/lib/popup'
 import { cn } from '@/lib/utils'
 
 export type TopTab = 'store' | 'library' | 'community' | 'profile'
+
+/** The tab icons: Store, Library and User are the mobile app's; Community has no tab there. */
+const TAB_ICONS: Record<TopTab, LucideIcon> = { store: Store, library: Library, community: Users, profile: User }
 
 export type NavTabSpec = {
   id: TopTab
@@ -43,6 +46,35 @@ export function NavBar({
   overStore?: boolean
   right?: ReactNode
 }) {
+  // The pill follows a press at once and stays on it while the page loads, so
+  // the selection never lags behind the click; it lets go when the page has
+  // caught up (or after a few seconds, if the press went nowhere).
+  const [target, setTarget] = useState<TopTab | null>(null)
+  useEffect(() => {
+    if (!target) return
+    if (current === target) return setTarget(null)
+    const t = window.setTimeout(() => setTarget(null), 4000)
+    return () => window.clearTimeout(t)
+  }, [current, target])
+  const active = target ?? current
+
+  const track = useRef<HTMLDivElement | null>(null)
+  const slots = useRef(new Map<TopTab, HTMLElement>())
+  const [pill, setPill] = useState<{ left: number; width: number } | null>(null)
+  const measure = useCallback(() => {
+    const el = slots.current.get(active)
+    if (!el) return setPill(null)
+    setPill((p) => (p && p.left === el.offsetLeft && p.width === el.offsetWidth ? p : { left: el.offsetLeft, width: el.offsetWidth }))
+  }, [active])
+  useLayoutEffect(measure)
+  useEffect(() => {
+    if (!track.current) return
+    const ro = new ResizeObserver(measure)
+    ro.observe(track.current)
+    slots.current.forEach((el) => ro.observe(el))
+    return () => ro.disconnect()
+  }, [measure, tabs.length])
+
   return (
     <nav aria-label="Main" className="relative z-40 flex h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-3">
       <div className="flex gap-1.5">
@@ -53,9 +85,26 @@ export function NavBar({
           <ArrowRight className="size-4" />
         </IconButton>
       </div>
-      <div className="kryo-pill flex items-center gap-1 border border-border bg-card p-1">
+      <div ref={track} className="kryo-pill relative flex items-center gap-1 border border-border bg-card p-1">
+        {pill ? (
+          <span
+            aria-hidden
+            className="kryo-pill pointer-events-none absolute bottom-1 top-1 bg-primary transition-[left,width] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]"
+            style={{ left: pill.left, width: pill.width }}
+          />
+        ) : null}
         {tabs.map((t) => (
-          <NavTab key={t.id} tab={t} current={current === t.id} native={overStore && isTauri()} />
+          <NavTab
+            key={t.id}
+            tab={t}
+            current={active === t.id}
+            native={overStore && isTauri()}
+            slot={(el) => {
+              if (el) slots.current.set(t.id, el)
+              else slots.current.delete(t.id)
+            }}
+            onPress={() => setTarget(t.id)}
+          />
         ))}
       </div>
       <div className="flex min-w-0 grow items-center justify-end gap-2">{right}</div>
@@ -63,9 +112,24 @@ export function NavBar({
   )
 }
 
-function NavTab({ tab, current, native }: { tab: NavTabSpec; current: boolean; native: boolean }) {
+function NavTab({
+  tab,
+  current,
+  native,
+  slot,
+  onPress,
+}: {
+  tab: NavTabSpec
+  current: boolean
+  native: boolean
+  slot: (el: HTMLElement | null) => void
+  onPress: () => void
+}) {
+  const TabIcon = TAB_ICONS[tab.id]
   const menuId = `tab:${tab.id}`
   const [domOpen, setDomOpen] = useState(false)
+  /** Opened from the keyboard: the first row is lit. Opened by the pointer: nothing is. */
+  const [byKeyboard, setByKeyboard] = useState(false)
   const nativeOpen = useNativeOpen(native ? menuId : undefined)
   const open = native ? nativeOpen : domOpen
   const timer = useRef<number | null>(null)
@@ -117,7 +181,10 @@ function NavTab({ tab, current, native }: { tab: NavTabSpec; current: boolean; n
 
   return (
     <div
-      ref={wrapper}
+      ref={(el) => {
+        wrapper.current = el
+        slot(el)
+      }}
       className="relative"
       onPointerEnter={() => {
         onTab.current = true
@@ -125,7 +192,10 @@ function NavTab({ tab, current, native }: { tab: NavTabSpec; current: boolean; n
         if (open) return
         // Moving over from another tab's open menu switches straight away.
         const other = native && popupOpen()?.startsWith('tab:')
-        timer.current = window.setTimeout(show, other ? 0 : 280)
+        timer.current = window.setTimeout(() => {
+          setByKeyboard(false)
+          show()
+        }, other ? 0 : 280)
       }}
       onPointerLeave={() => {
         onTab.current = false
@@ -144,20 +214,23 @@ function NavTab({ tab, current, native }: { tab: NavTabSpec; current: boolean; n
           if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
           e.preventDefault()
           clear()
+          setByKeyboard(true)
           show()
         }}
         onClick={() => {
           clear()
           if (native) closeMenu()
           else setDomOpen(false)
+          onPress()
           tab.onOpen()
         }}
         className={cn(
-          'kryo-pill h-9 max-w-56 truncate px-4 text-xs font-bold uppercase tracking-[0.2em] transition-colors',
-          current ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+          'kryo-pill relative flex h-9 max-w-56 items-center gap-2 px-4 text-xs font-bold uppercase tracking-[0.2em] transition-colors duration-300',
+          current ? 'text-primary-foreground' : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
         )}
       >
-        {tab.label}
+        <TabIcon className="size-3.5 shrink-0" />
+        <span className="truncate">{tab.label}</span>
       </button>
       {!native && domOpen ? (
         <div
@@ -165,7 +238,7 @@ function NavTab({ tab, current, native }: { tab: NavTabSpec; current: boolean; n
           className="absolute left-0 top-full z-[400] min-w-48 pt-2"
         >
           <div className="kryo-pop kryo-radius overflow-hidden border border-border bg-popover py-1 shadow-2xl shadow-black/60">
-            <MenuList items={tab.items} onDone={() => setDomOpen(false)} />
+            <MenuList items={tab.items} onDone={() => setDomOpen(false)} autoFocus={byKeyboard} />
           </div>
         </div>
       ) : null}

@@ -22,6 +22,8 @@ export type Account = {
   voice?: boolean
   /** Controller support is rolled out to this account (kryo.to feature flag). */
   controller?: boolean
+  /** Cloud saves are rolled out to this account (kryo.to feature flag `cloud_saves`). */
+  cloudSaves?: boolean
   /**
    * Their Kryos, kryo.to's coin for perks and badges. Shown beside the
    * account; a click opens the wallet (claims, the shop) in the Store.
@@ -83,7 +85,7 @@ export function useAccount(): Account | null | undefined {
       ? isOnline()
         ? undefined
         : remembered()
-      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, kryos: null, chat: true, friends: true, groups: true, room: true, controller: true },
+      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, kryos: null, chat: true, friends: true, groups: true, room: true, controller: true, cloudSaves: true },
   )
   useEffect(() => {
     let stop: (() => void) | undefined

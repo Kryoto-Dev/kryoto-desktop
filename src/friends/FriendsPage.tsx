@@ -240,7 +240,7 @@ export function FriendsPage({
           className="kryo-square flex items-center gap-3 border-b border-border p-4 text-left transition-colors hover:bg-secondary"
         >
           {account.avatarUrl ? (
-            <img src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-11 object-cover" />
+            <img decoding="async" src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-11 object-cover" />
           ) : (
             <span className="kryo-pill grid size-11 place-items-center bg-secondary text-sm font-bold">{name.slice(0, 1).toUpperCase()}</span>
           )}
@@ -522,7 +522,7 @@ function FriendRow({ f, label }: { f: FriendFace & Partial<Pick<Friend, 'online'
     <span className="flex min-w-0 items-center gap-2.5">
       <span className="relative shrink-0">
         {f.avatarUrl ? (
-          <img src={artSrc(f.avatarUrl) ?? undefined} alt="" className="kryo-pill size-7 object-cover" />
+          <img decoding="async" src={artSrc(f.avatarUrl) ?? undefined} alt="" className="kryo-pill size-7 object-cover" />
         ) : (
           <span className="kryo-pill grid size-7 place-items-center bg-secondary text-[10px] font-bold">
             {label.slice(0, 1).toUpperCase()}

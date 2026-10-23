@@ -17,6 +17,7 @@ import {
   library,
   presetFor,
   slugFrom,
+  withExecutable,
   type LibraryGame,
   type SikarugirRenderer,
 } from '@/lib/library'
@@ -87,6 +88,12 @@ export function GameProperties({
   const [link, setLink] = useState(game.slug ? `kryo.to/game/${game.slug}` : '')
   const set = <K extends keyof LibraryGame>(key: K, value: LibraryGame[K]) => setDraft((d) => ({ ...d, [key]: value }))
 
+  // Repair (a tab of this dialog) changes the game's source while it is open;
+  // show the source it now runs, not the one it had when the dialog opened.
+  useEffect(() => {
+    setDraft((d) => (d.source === game.source ? d : { ...d, source: game.source }))
+  }, [game.source])
+
   const previewEntry = startEntry(draft)
   useEffect(() => {
     const t = setTimeout(() => {
@@ -148,13 +155,7 @@ export function GameProperties({
     if (!isTauri()) return
     const picked = await pickPath({ defaultPath: draft.installDir, extensions: ['exe', 'bat'] })
     if (typeof picked !== 'string') return
-    const norm = picked.replace(/\\/g, '/')
-    const root = draft.installDir.replace(/\\/g, '/').replace(/\/+$/, '')
-    if (norm.toLowerCase().startsWith(`${root.toLowerCase()}/`)) set('executable', norm.slice(root.length + 1))
-    else {
-      const cut = norm.lastIndexOf('/')
-      setDraft((d) => ({ ...d, installDir: picked.slice(0, cut), executable: norm.slice(cut + 1) }))
-    }
+    setDraft((d) => withExecutable(d, picked))
   }
 
   const windows = isWindowsHost()
@@ -253,6 +254,12 @@ export function GameProperties({
                 </div>
               </Section>
             ) : null}
+            <Section title="Executable" hint="The file Play starts. Change it when the game only starts from a different .exe in its folder.">
+              <div className="flex items-center gap-2">
+                <span className="kryo-ascii-art grow select-text break-all text-[11px] text-muted-foreground">{draft.executable || 'None set'}</span>
+                <Button onClick={() => void browseExe()}>Change</Button>
+              </div>
+            </Section>
             <Section
               title="Launch options"
               hint={
@@ -339,13 +346,11 @@ export function GameProperties({
                 </Button>
               </div>
             </Section>
-            <Section title="Executable">
-              <div className="flex items-center gap-2">
-                <span className="kryo-ascii-art grow select-text break-all text-[11px] text-muted-foreground">{draft.executable || 'None set'}</span>
-                <Button onClick={() => void browseExe()}>Change</Button>
-              </div>
-              {draft.version ? <p className="text-[11px] text-muted-foreground">Installed build: {draft.version}</p> : null}
-            </Section>
+            {draft.version ? (
+              <Section title="Installed build">
+                <p className="text-sm text-foreground">{draft.version}</p>
+              </Section>
+            ) : null}
             <Section title="Uninstall">
               <Button variant="danger" className="w-fit" onClick={onUninstall}>
                 <Trash2 className="size-3.5" />

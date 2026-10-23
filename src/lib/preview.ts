@@ -113,6 +113,12 @@ const settings: Record<string, unknown> = {
   linuxMangohud: false,
   linuxGamemode: false,
   linuxFsr: false,
+  cloudSaves: true,
+  cloudSavesOnExit: true,
+  cloudSavesRestore: 'auto',
+  cloudSavesDetect: true,
+  cloudSavesShare: true,
+  cloudSavesKeepLocal: 5,
 }
 
 const GB = 1_073_741_824
@@ -306,6 +312,34 @@ function previewRuntimesInstall(ids: string[]) {
 }
 
 const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
+  // Cloud saves (src-tauri saves/): one game with every kind of location, a conflict on another.
+  cloud_saves_status: () => ({ feature: true, on: true, perk: true, allowance: { totalBytes: GB, versionsPerGame: 5, maxBackupBytes: 100 * 1_048_576 }, usage: { bytes: 214_000_000, games: 7, versions: 23 }, lastSync: now() - 300, conflicts: [] }),
+  cloud_saves_refresh: () => HANDLERS.cloud_saves_status!({}),
+  cloud_saves_library: () => games.slice(0, 4).map((g, i) => ({ id: g.id, title: g.title, lastBackupAt: i === 1 ? null : now() - i * 3600, conflict: i === 1, error: null, tooBig: false })),
+  cloud_saves_game: (a) => {
+    const conflict = games.findIndex((g) => g.id === a.id) === 1
+    const loc = (source: string, sourceLabel: string, label: string, files: number, bytes: number, extra: Record<string, unknown> = {}) => ({ key: `${source}:${label}`, kind: 'files', root: 'Documents', label, source, sourceLabel, path: `C:\\Users\\you\\${label}`, exists: files > 0, files, bytes, score: null, reasons: [], ...extra })
+    return {
+      identity: { key: 'steam:367520', aliases: ['steam:367520'], appid: '367520' },
+      feature: true, on: true, perk: true,
+      locations: [
+        loc('emulator', 'Emulator', 'AppData\\Roaming\\GSE Saves\\367520', 3, 48_000),
+        loc('known', 'Known', 'AppData\\LocalLow\\Team Cherry\\Hollow Knight', 6, 1_900_000),
+        loc('engine', 'Engine', 'HKEY_CURRENT_USER\\Software\\Team Cherry\\Hollow Knight', 0, 0, { kind: 'registry', path: null }),
+      ],
+      suggestions: [loc('detected', 'Detected', 'Documents\\My Games\\Hollow Knight', 2, 4_096, { score: 35, reasons: ['made while the game ran', 'save files'] })],
+      files: 9, bytes: 1_948_000, truncated: false, maxBackupBytes: 100 * 1_048_576,
+      state: { baseVersion: 'v3', baseHash: 'x', lastBackupAt: now() - 3600, lastRestoreAt: null, cloudHead: conflict ? { id: 'v4', size: 1_200_000, sha256: '', md5: '', fileCount: 9, machine: 'LIVING-ROOM-PC', createdAt: now() - 7200, parentId: 'v3' } : null, conflict, error: null, tooBig: false },
+      localBackups: [{ file: `${now() - 86400}.ksave`, createdAt: now() - 86400, size: 1_700_000 }],
+    }
+  },
+  cloud_saves_location: () => null,
+  cloud_saves_add_folder: () => null,
+  cloud_saves_backup: () => 'Backed up.',
+  cloud_saves_versions: () => [3, 2, 1].map((n) => ({ id: `v${n}`, size: 1_900_000 - n * 1000, sha256: '', md5: '', fileCount: 9, machine: n === 2 ? 'LIVING-ROOM-PC' : 'DESKTOP-MIRA', createdAt: now() - n * 86400, parentId: n > 1 ? `v${n - 1}` : null })),
+  cloud_saves_restore: () => 'Saves restored. What was here before is kept under Versions, On this PC.',
+  cloud_saves_restore_local: () => 'Saves put back from this PC\'s backup.',
+  cloud_saves_answer: () => null,
   cloud_achievements_status: () => ({ perk: true, games: 3, lastSync: Math.floor(Date.now() / 1000) - 120 }),
   runtimes_list: () => RUNTIMES.map((r) => ({ ...r })),
   runtimes_install: (a) => previewRuntimesInstall(a.ids as string[]),

@@ -36,7 +36,7 @@ export function Art({
       </span>
     )
   }
-  return <img src={art.src} alt="" className={cn('kryo-fade', className, adultBlur(adult, showAdult))} />
+  return <img decoding="async" src={art.src} alt="" className={cn('kryo-fade', className, adultBlur(adult, showAdult))} />
 }
 
 /**
@@ -85,11 +85,11 @@ export function GameBanner({
         </div>
       ) : hero.src && small ? (
         <>
-          <img src={hero.src} alt="" aria-hidden className={cn('kryo-fade absolute inset-0 size-full scale-110 object-cover opacity-50 blur-2xl', blur)} />
-          <img src={hero.src} alt="" className={cn('kryo-fade absolute inset-y-0 right-0 h-full w-auto max-w-[70%] object-contain', blur)} />
+          <img decoding="async" src={hero.src} alt="" aria-hidden className={cn('kryo-fade absolute inset-0 size-full scale-110 object-cover opacity-50 blur-2xl', blur)} />
+          <img decoding="async" src={hero.src} alt="" className={cn('kryo-fade absolute inset-y-0 right-0 h-full w-auto max-w-[70%] object-contain', blur)} />
         </>
       ) : hero.src ? (
-        <img src={hero.src} alt="" className={cn('kryo-fade absolute inset-0 size-full object-cover object-center', blur)} />
+        <img decoding="async" src={hero.src} alt="" className={cn('kryo-fade absolute inset-0 size-full object-cover object-center', blur)} />
       ) : (
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,var(--secondary),transparent_70%)]" />
       )}
@@ -99,7 +99,7 @@ export function GameBanner({
         {pending ? (
           <div className="h-14" />
         ) : mark.status === 'ready' && mark.src ? (
-          <img src={mark.src} alt={title} className="kryo-fade max-h-36 max-w-[42%] object-contain object-left drop-shadow-[0_6px_18px_rgba(0,0,0,0.7)]" />
+          <img decoding="async" src={mark.src} alt={title} className="kryo-fade max-h-36 max-w-[42%] object-contain object-left drop-shadow-[0_6px_18px_rgba(0,0,0,0.7)]" />
         ) : mark.status === 'loading' ? (
           <div className="h-14" />
         ) : (

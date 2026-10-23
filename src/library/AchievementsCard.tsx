@@ -128,10 +128,10 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
           <Label>Achievements</Label>
           <p className="text-sm font-bold text-foreground">Achievement tracking is unavailable</p>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            This game uses <b className="text-foreground">{data.emulator}</b>. Kryoto Desktop cannot track achievements with this emulator.
+            This game uses <b className="text-foreground">{data.emulator}</b>. Kryoto Desktop cannot track achievements with it.
           </p>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            You can try switching to gbe_fork or RUNE for achievement tracking. The game may stop working, and Kryoto Online multiplayer will be unavailable. Repair keeps a backup so you can Undo and try another emulator if it breaks.
+            You can switch its Steam emulator to gbe_fork or RUNE for achievement tracking. Only the Steam files change; the rest of the crack stays as it is. The game may stop working, and Kryoto Online multiplayer will be unavailable. Repair keeps a backup so you can Undo and try another emulator if it breaks.
           </p>
           <div className="flex flex-wrap gap-2">
             {game.slug ? <Button size="sm" disabled={running} onClick={() => setRepairOpen(true)}><Wrench className="size-3" aria-hidden /> Try another emulator</Button> : null}
@@ -163,13 +163,13 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
               {all ? 'Show fewer' : `Show all ${data.list.length}`}
             </Button>
           ) : null}
-          {cloud?.perk != null ? (
+          {cloud?.perk != null && data.appid ? (
             <p className="flex items-center gap-2 border-t border-border pt-3 text-[11px] text-muted-foreground">
               <Cloud className="size-3.5 shrink-0" aria-hidden />
               <span className="grow">{cloud.perk ? 'Saved to your kryo.to account, and back on any PC you sign in on.' : 'Supporters keep their achievements on their kryo.to account.'}</span>
               <button
                 type="button"
-                onClick={() => (cloud.perk ? openSettingsSection('achievements') : openStorePage('/donate'))}
+                onClick={() => (cloud.perk ? openSettingsSection('cloud') : openStorePage('/donate'))}
                 className="shrink-0 font-bold uppercase tracking-wider text-foreground hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
               >
                 {cloud.perk ? 'Manage' : 'See how'}
@@ -192,7 +192,7 @@ function Row({ a }: { a: GameAchievement }) {
         {secret ? (
           <EyeOff className="size-4 text-muted-foreground" aria-hidden />
         ) : picture ? (
-          <img src={artSrc(picture) ?? undefined} alt="" className={cn('size-full object-cover', !a.unlocked && !a.iconGray && 'grayscale')} />
+          <img decoding="async" src={artSrc(picture) ?? undefined} alt="" className={cn('size-full object-cover', !a.unlocked && !a.iconGray && 'grayscale')} />
         ) : (
           <Trophy className="size-4 text-muted-foreground" aria-hidden />
         )}

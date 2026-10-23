@@ -345,7 +345,8 @@ fn changed(last: &Mutex<Option<(i32, i32)>>, now: (i32, i32)) -> bool {
 /// Windows 11 rounds a frameless window's corners and draws its shadow
 /// itself when asked - the same corners as every other window, with no
 /// see-through edge to paint. `small` is the tighter radius Windows uses for
-/// menus. Older Windows and non-Windows hosts keep square corners.
+/// menus. Older Windows keeps square corners. Linux has no such call: its window
+/// is see-through (tauri.linux.conf.json) and the page rounds itself (styles.css).
 pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
     #[cfg(windows)]
     {
@@ -364,8 +365,86 @@ pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::gdk::WindowState;
+        use gtk::glib::Propagation;
+        use gtk::prelude::*;
+        // GNOME's own radius for a window it rounds.
+        const RADIUS: f64 = 12.0;
+        const SQUARE: WindowState = WindowState::MAXIMIZED
+            .union(WindowState::FULLSCREEN)
+            .union(WindowState::TILED);
+        let _ = small;
+        if let Ok(win) = window.gtk_window() {
+            // The window is see-through (tauri.linux.conf.json) so the page can
+            // round its own corners, but the views in it are separate surfaces:
+            // where one is transparent (the menu's corners over the Store) it
+            // shows the window, and a see-through window shows the desktop.
+            // So the window is filled, in the shell's colour, inside the same
+            // rounded shape the page draws.
+            win.connect_draw(|win, cr| {
+                let fill = WINDOW_FILL.lock().map(|f| *f).unwrap_or_default();
+                let square = win.window().is_none_or(|g| g.state().intersects(SQUARE));
+                let (w, h) = (f64::from(win.allocated_width()), f64::from(win.allocated_height()));
+                let r = if square { 0.0 } else { RADIUS };
+                let q = std::f64::consts::FRAC_PI_2;
+                cr.new_sub_path();
+                cr.arc(w - r, r, r, -q, 0.0);
+                cr.arc(w - r, h - r, r, 0.0, q);
+                cr.arc(r, h - r, r, q, 2.0 * q);
+                cr.arc(r, r, r, 2.0 * q, 3.0 * q);
+                cr.close_path();
+                let rgb = |c: [u8; 3]| (f64::from(c[0]) / 255.0, f64::from(c[1]) / 255.0, f64::from(c[2]) / 255.0);
+                let (sr, sg, sb) = rgb(fill.store);
+                cr.set_source_rgb(sr, sg, sb);
+                let _ = cr.fill_preserve();
+                // Above the Store's top edge it is the shell's own colour (the
+                // nav bar), so a menu's see-through corners over it match.
+                cr.clip();
+                let (hr, hg, hb) = rgb(fill.shell);
+                cr.set_source_rgb(hr, hg, hb);
+                cr.rectangle(0.0, 0.0, w, fill.store_top.clamp(0.0, h));
+                let _ = cr.fill();
+                Propagation::Proceed
+            });
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     let _ = (window, small);
+}
+
+/// What the Linux window is filled with behind its views: the shell's colour
+/// down to where the Store starts, the Store's colour below it.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Default)]
+struct Fill {
+    shell: [u8; 3],
+    store: [u8; 3],
+    store_top: f64,
+}
+
+#[cfg(target_os = "linux")]
+static WINDOW_FILL: Mutex<Fill> = Mutex::new(Fill { shell: [10; 3], store: [10; 3], store_top: 0.0 });
+
+#[cfg(target_os = "linux")]
+pub fn set_window_fill<R: Runtime>(window: &tauri::Window<R>, shell: [u8; 3], store: [u8; 3]) {
+    use gtk::prelude::WidgetExt;
+    if let Ok(mut f) = WINDOW_FILL.lock() {
+        f.shell = shell;
+        f.store = store;
+    }
+    if let Ok(win) = window.gtk_window() {
+        win.queue_draw();
+    }
+}
+
+/// Where the Store's view starts, from the top of the window.
+#[cfg(target_os = "linux")]
+pub fn set_fill_split(store_top: f64) {
+    if let Ok(mut f) = WINDOW_FILL.lock() {
+        f.store_top = store_top;
+    }
 }
 
 /* ── Starting with the computer ───────────────────────────── */

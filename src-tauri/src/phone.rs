@@ -777,6 +777,9 @@ pub async fn start_download(app: &AppHandle, slug: &str, turnstile_token: Option
 
 fn router(app: AppHandle) -> Router {
     Router::new()
+        .route("/v1/info", get(|AxumState(app): AxumState<AppHandle>| async move {
+            Json(serde_json::json!({ "protocol": 1, "installId": logging::install_id(&app) }))
+        }))
         .route("/v1/pair", post(pair))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/play", post(play))
@@ -916,14 +919,14 @@ fn addresses(port: u16) -> Vec<String> {
     rank(found, preferred_address(), port)
 }
 
-/// The QR code's text: `kryoto://pair?c=<code>&h=<address>&h=<address>`. Every
-/// address goes in because a PC may have several networks; the phone tries each.
-fn pair_uri(addresses: &[String], code: &str) -> Option<String> {
-    if addresses.is_empty() || code.is_empty() {
+/// The QR carries a one-use LAN code, private addresses and this PC's identity
+/// for authenticated account fallback when the phone cannot reach those addresses.
+fn pair_uri(addresses: &[String], code: &str, install_id: &str) -> Option<String> {
+    if code.is_empty() {
         return None;
     }
     let hosts: String = addresses.iter().map(|a| format!("&h={a}")).collect();
-    Some(format!("kryoto://pair?c={code}{hosts}"))
+    Some(format!("kryoto://pair?c={code}{hosts}&i={install_id}"))
 }
 
 #[tauri::command(async)]
@@ -941,7 +944,7 @@ pub fn phone_status(app: AppHandle, state: State<'_, PhoneState>) -> Result<Phon
     let addresses = port.map(addresses).unwrap_or_default();
     Ok(PhoneStatus {
         lan: s.phone_lan,
-        pair_uri: code.as_ref().and_then(|(c, _)| pair_uri(&addresses, c)),
+        pair_uri: code.as_ref().and_then(|(c, _)| pair_uri(&addresses, c, &logging::install_id(&app))),
         addresses,
         code_expires_in: code.as_ref().map(|(_, left)| *left),
         code: code.map(|(c, _)| c),
@@ -1117,10 +1120,10 @@ mod tests {
     #[test]
     fn the_qr_text_carries_the_code_and_every_address() {
         let both = vec!["192.168.1.5:47821".to_string(), "10.0.0.2:47822".to_string()];
-        assert_eq!(pair_uri(&both, "042517").as_deref(), Some("kryoto://pair?c=042517&h=192.168.1.5:47821&h=10.0.0.2:47822"));
-        // Nothing to scan without a reachable address or a live code.
-        assert_eq!(pair_uri(&[], "042517"), None);
-        assert_eq!(pair_uri(&both, ""), None);
+        assert_eq!(pair_uri(&both, "042517", "test-install").as_deref(), Some("kryoto://pair?c=042517&h=192.168.1.5:47821&h=10.0.0.2:47822&i=test-install"));
+        // Account fallback still works without an address; a live code is required.
+        assert_eq!(pair_uri(&[], "042517", "test-install").as_deref(), Some("kryoto://pair?c=042517&i=test-install"));
+        assert_eq!(pair_uri(&both, "", "test-install"), None);
     }
 
     #[test]

@@ -195,10 +195,26 @@ fn metadata_tracking(game: &LibraryGame) -> (Tracking, Option<String>) {
     }) {
         return named_tracking("Kryoto Online");
     }
-    named_tracking(game.source.as_deref().unwrap_or_default())
+    release_tracking(game.source.as_deref().unwrap_or_default())
+}
+
+/// The release's own label. A named crack the watcher cannot read (a custom one
+/// such as voices38, or none at all for DRM-free) is unsupported, so the page
+/// says so and offers gbe_fork, instead of a list that never unlocks.
+fn release_tracking(source: &str) -> (Tracking, Option<String>) {
+    let known = named_tracking(source);
+    let source = source.trim();
+    if known.0 != Tracking::Unknown || source.is_empty() {
+        return known;
+    }
+    let crack = source.strip_prefix("Steam +").map(str::trim).filter(|s| !s.is_empty()).unwrap_or(source);
+    (Tracking::Unsupported, Some(crack.to_string()))
 }
 
 pub(crate) fn tracking_of(game: &LibraryGame) -> (Tracking, Option<String>) {
+    if ach::local::load(Path::new(&game.install_dir)).is_some() {
+        return (Tracking::Supported, Some("Native achievements".into()));
+    }
     // Inspect the active Steam DLLs, excluding Repair's backups and SDK copies.
     // A downloaded Online add-on can replace them without changing the release label.
     let mut supported = None;
@@ -234,6 +250,12 @@ pub fn merge(list: Vec<Achievement>, unlocks: &[Unlock]) -> GameAchievements {
 #[tauri::command]
 pub async fn game_achievements(app: AppHandle, id: String) -> Result<GameAchievements, String> {
     let game = crate::library::load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
+    if let Some(local) = ach::local::load(Path::new(&game.install_dir)) {
+        let mut out = merge(local.list.clone(), &local.unlocks());
+        out.tracking = Tracking::Supported;
+        out.emulator = Some("Native achievements".into());
+        return Ok(out);
+    }
     let (tracking, emulator) = tracking_of(&game);
     let appid = appid_of(Path::new(&game.install_dir));
     if tracking == Tracking::Unsupported || appid.is_none() {
@@ -256,6 +278,10 @@ pub async fn game_achievements(app: AppHandle, id: String) -> Result<GameAchieve
 /// announce each achievement that was not unlocked before. Stops when the game
 /// does.
 pub fn watch<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, roots: Roots) {
+    if let Some(local) = ach::local::load(Path::new(&game.install_dir)) {
+        watch_local(app, game, local);
+        return;
+    }
     let Some(appid) = appid_of(Path::new(&game.install_dir)) else { return };
     let (id, title) = (game.id.clone(), game.title.clone());
     std::thread::spawn(move || {
@@ -294,6 +320,29 @@ pub fn watch<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, roots: Roots) {
     });
 }
 
+fn watch_local<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, local: ach::local::LocalGame) {
+    let (id, title) = (game.id.clone(), game.title.clone());
+    std::thread::spawn(move || {
+        let mut known: HashSet<String> = local.unlocks().into_iter().map(|u| u.name).collect();
+        loop {
+            std::thread::sleep(POLL);
+            let running = app.try_state::<Running>().is_some_and(|r| r.0.lock().map(|m| m.contains_key(&id)).unwrap_or(false));
+            for u in local.unlocks() {
+                if !known.insert(u.name.clone()) { continue; }
+                let Some(a) = local.list.iter().find(|a| a.name == u.name) else { continue };
+                let _ = app.emit("achievement-unlocked", serde_json::json!({
+                    "gameId": id, "name": u.name, "displayName": a.display_name, "icon": a.icon
+                }));
+                let _ = app.emit("notify", crate::downloads::Notice::new(
+                    &format!("Achievement unlocked: {}", a.display_name),
+                    if a.description.is_empty() { &title } else { &a.description }, Some(id.clone())
+                ).sound("achievement"));
+            }
+            if !running { break; }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +358,16 @@ mod tests {
         for source in ["Steam (DRM-free)", "Kryoto Original release", "unknown repack", "custom", ""] {
             assert_eq!(named_tracking(source), (Tracking::Unknown, None));
         }
+    }
+
+    #[test]
+    fn a_crack_the_watcher_cannot_read_is_unsupported_by_its_own_name() {
+        assert_eq!(release_tracking("Steam + voices38"), (Tracking::Unsupported, Some("voices38".into())));
+        assert_eq!(release_tracking("Steam (DRM-free)"), (Tracking::Unsupported, Some("Steam (DRM-free)".into())));
+        assert_eq!(release_tracking("Steam + gbe_fork + Steamless").0, Tracking::Supported);
+        assert_eq!(release_tracking(""), (Tracking::Unknown, None));
+        let game = LibraryGame { source: Some("Steam + voices38".into()), ..Default::default() };
+        assert_eq!(metadata_tracking(&game).0, Tracking::Unsupported);
     }
 
     #[test]
@@ -435,5 +494,28 @@ mod tests {
         assert_eq!(r.app_data, Some(user));
         assert_eq!(r.public_documents, Some(root.join("drive_c/users/Public/Documents")));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Runs a native game's own trophy recorder against a private fixture, then
+    /// reads its actual shipped manifest through Desktop's list/progress path.
+    #[test]
+    #[ignore]
+    fn native_achievements_end_to_end() {
+        let manifest = std::env::var("KRYOTO_NATIVE_MANIFEST").expect("manifest path");
+        let recorder = std::env::var("KRYOTO_NATIVE_RECORDER").expect("recorder fixture executable");
+        let dir = std::env::temp_dir().join(format!("kry-native-e2e-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir(dir.join("userdata")).unwrap();
+        std::fs::copy(manifest, dir.join(ach::local::MANIFEST)).unwrap();
+        let game = LibraryGame { install_dir: dir.to_string_lossy().into(), ..Default::default() };
+        assert_eq!(appid_of(&dir), None);
+        assert_eq!(tracking_of(&game).0, Tracking::Supported);
+        let local = ach::local::load(&dir).unwrap();
+        assert_eq!((local.list.len(), local.unlocks().len()), (40, 0));
+        assert!(std::process::Command::new(recorder).arg(dir.join("userdata")).status().unwrap().success());
+        let progress = merge(local.list.clone(), &local.unlocks());
+        assert_eq!((progress.total, progress.unlocked), (40, 35));
+        assert!(progress.list.iter().any(|a| a.achievement.name == "0" && a.unlocked));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

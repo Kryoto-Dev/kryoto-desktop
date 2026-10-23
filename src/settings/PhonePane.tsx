@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Copy } from 'lucide-react'
+import { ArrowLeft, ChevronRight, Copy, Smartphone } from 'lucide-react'
 import { Button, Caption, Check, Section } from '@/ui'
 import { call, errorText } from '@/lib/bridge'
 import { formatLastPlayed } from '@/lib/format'
 import { QrCode } from '@/settings/QrCode'
+import { openExternal } from '@/lib/window'
+
+const MOBILE_URL = 'https://kryo.to/mobile'
 
 type PhoneStatus = {
   lan: boolean
   addresses: string[]
   code: string | null
   codeExpiresIn: number | null
-  /** What the QR code holds; null without a live code or an address. */
+  /** What the QR code holds; null without a live code. */
   pairUri: string | null
   devices: { id: string; name: string; pairedAt: number; lastSeen: number }[]
 }
@@ -22,6 +25,7 @@ type PhoneStatus = {
 export function PhonePane() {
   const [status, setStatus] = useState<PhoneStatus | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  const [manual, setManual] = useState(false)
 
   const refresh = useCallback(async () => {
     await call<PhoneStatus>('phone_status')
@@ -44,6 +48,12 @@ export function PhonePane() {
   if (!status) return <Caption>{note ?? 'Loading...'}</Caption>
   return (
     <>
+      <Section title="Kryoto Mobile" hint="The Android app for this PC: its games, Play and Stop, and downloads, at home or away.">
+        <Button size="sm" className="w-fit" onClick={() => void openExternal(MOBILE_URL)}>
+          <Smartphone className="size-3" />
+          Get Kryoto Mobile
+        </Button>
+      </Section>
       <Section
         title="On this network"
         hint="Windows may ask to allow Kryoto on private networks. Anyone on your network with the code can pair, so only use a network you trust."
@@ -51,13 +61,13 @@ export function PhonePane() {
         <Check checked={status.lan} onChange={(on) => run('phone_set_lan', { on })} label="Let phones on this network see my games and start them" />
         {status.lan ? (
           <div className="grid gap-3">
-            <div className="grid gap-1.5">
+            {!manual ? <div className="grid justify-items-center gap-3 py-3 text-center">
               <Caption>Scan with Kryoto Mobile</Caption>
               {status.pairUri ? (
-                <div className="flex flex-wrap items-center gap-4">
-                  <QrCode text={status.pairUri} label="QR code to pair a phone" className="size-40 shrink-0 rounded-md" />
-                  <span className="max-w-[16rem] text-[11px] leading-relaxed text-muted-foreground">
-                    In Kryoto Mobile, open Library and tap Scan QR code. The phone must be on the same network.
+                <div className="grid justify-items-center gap-3">
+                  <QrCode text={status.pairUri} label="QR code to pair a phone" className="size-64 max-w-full shrink-0 rounded-md" />
+                  <span className="max-w-xs text-[11px] leading-relaxed text-muted-foreground">
+                    Open Library in Kryoto Mobile and tap Scan QR code. Connect on your Wi-Fi, or sign in to the same kryo.to account on both devices.
                   </span>
                 </div>
               ) : (
@@ -65,7 +75,12 @@ export function PhonePane() {
                   {status.addresses.length ? 'Make a new code to show the QR code.' : 'No private network address found. Connect this PC to Wi-Fi or Ethernet.'}
                 </span>
               )}
-            </div>
+            </div> : null}
+            <Button size="sm" className="w-fit" onClick={() => setManual(!manual)} aria-expanded={manual}>
+              {manual ? <ArrowLeft className="size-3" /> : <ChevronRight className="size-3" />}
+              {manual ? 'Back to QR code' : 'Enter details manually'}
+            </Button>
+            {manual ? <div className="phone-panel-in grid gap-3">
             <div className="grid gap-1.5">
               <Caption>Or type them in: address (the first one is usually right)</Caption>
               {status.addresses.map((a) => (
@@ -97,10 +112,12 @@ export function PhonePane() {
                 ) : (
                   <span className="text-[11px] text-muted-foreground">No code. Make one, then scan or type it on the phone.</span>
                 )}
-                <Button size="sm" onClick={() => run('phone_new_code')}>
-                  New code
-                </Button>
               </div>
+            </div>
+            </div> : null}
+            <div className="flex items-center gap-3">
+              <Button size="sm" onClick={() => run('phone_new_code')}>New code</Button>
+              <Caption>{status.code ? `Expires in ${Math.max(1, Math.ceil((status.codeExpiresIn ?? 0) / 60))} min` : 'Make a new code to connect.'}</Caption>
             </div>
           </div>
         ) : null}

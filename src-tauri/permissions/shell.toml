@@ -22,6 +22,9 @@ commands.allow = [
   "shell_theme",
   "phone_status", "phone_set_lan", "phone_new_code", "phone_revoke", "phone_report_look",
   "cloud_achievements_status",
+  "cloud_saves_status", "cloud_saves_refresh", "cloud_saves_game", "cloud_saves_location", "cloud_saves_add_folder",
+  "cloud_saves_backup", "cloud_saves_versions", "cloud_saves_restore", "cloud_saves_restore_local", "cloud_saves_answer",
+  "cloud_saves_library",
   "runtimes_list", "runtimes_install", "runtimes_progress", "runtimes_cancel", "runtimes_clear_cache",
   "pad_stop",
   "pad_list",
@@ -104,4 +107,5 @@ commands.allow = [
   "menu_pick",
   "menu_close",
   "menu_hover",
+  "store_library_changed",
 ]

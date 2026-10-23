@@ -2,15 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import { gameContext } from './context'
 import { ChevronDown, Download, FolderOpen, Glasses, Globe, Play, Settings2, Square, X } from 'lucide-react'
 import { Button, Caption, Card, CommandLine, IconButton, Label, MenuList, useDismiss, type MenuEntry } from '@/ui'
-import { fetchCatalogGame, hasChoice, library, normalEntry, playTarget, waysToPlay, type CatalogGame, type LibraryGame } from '@/lib/library'
+import { fetchCatalogGame, hasChoice, library, normalEntry, playTarget, waysToPlay, withExecutable, type CatalogGame, type LibraryGame } from '@/lib/library'
+import { pickPath } from '@/lib/pick'
 import { useOnline } from '@/lib/online'
 import { useLivePlaytime } from '@/hooks/useLivePlaytime'
 import { GameBanner } from '@/library/Art'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
-import { errorText } from '@/lib/bridge'
+import { errorText, isTauri } from '@/lib/bridge'
 import { cn } from '@/lib/utils'
 import { AddonsCard } from '@/library/AddonsCard'
 import { AchievementsCard } from '@/library/AchievementsCard'
+import { CloudSavesCard } from '@/library/CloudSavesCard'
 import { CompatibilityFacts } from '@/library/Compatibility'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
 import { automaticArtwork } from '@/lib/game-artwork'
@@ -62,6 +64,22 @@ export function GamePage({
   onContext?: (x: number, y: number) => void
 }) {
   const [latest, setLatest] = useState<string | null>(null)
+  const [exeBusy, setExeBusy] = useState(false)
+  const [exeError, setExeError] = useState<string | null>(null)
+
+  async function changeExe() {
+    setExeError(null)
+    const picked = await pickPath({ title: `Choose what starts ${game.title}`, defaultPath: game.installDir, extensions: ['exe', 'bat'] })
+    if (typeof picked !== 'string') return
+    setExeBusy(true)
+    try {
+      onGameChanged?.(await library.save(withExecutable(game, picked)))
+    } catch (e) {
+      setExeError(errorText(e))
+    } finally {
+      setExeBusy(false)
+    }
+  }
   const [command, setCommand] = useState<string>('')
   const [modesOpen, setModesOpen] = useState(false)
   const [gearOpen, setGearOpen] = useState(false)
@@ -294,6 +312,7 @@ export function GamePage({
           ) : null}
           <AddonsCard game={game} onGet={onGetUpdate} onChanged={(g) => onGameChanged?.(g)} />
           <AchievementsCard game={game} running={running} />
+          <CloudSavesCard game={game} running={running} />
         </div>
         <Card className="grid gap-3">
           <Label>Info</Label>
@@ -304,8 +323,20 @@ export function GamePage({
               <Fact k="Build" v={kept ? `${game.version}, kept${latest && latest !== game.version ? ` (current is ${latest})` : ''}` : game.version} />
             ) : null}
             <Fact k="Folder" v={game.installDir} mono />
+            {/* The file Play starts, changeable right here: a release can name
+                the wrong one, and the game then only starts from its folder. */}
+            <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">Starts</dt>
+            <dd className="m-0 flex min-w-0 items-center gap-2">
+              <span className="kryo-ascii-art min-w-0 select-text break-all text-[11px] text-foreground/90">{game.executable || 'None set'}</span>
+              {isTauri() ? (
+                <Button size="sm" variant="ghost" disabled={running || exeBusy} onClick={() => void changeExe()}>
+                  Change
+                </Button>
+              ) : null}
+            </dd>
             {game.launchOptions ? <Fact k="Options" v={game.launchOptions} mono /> : null}
           </dl>
+          {exeError ? <p className="text-[11px] text-destructive">{exeError}</p> : null}
           {game.slug && onWeb ? <CompatibilityFacts slug={game.slug} onWeb={onWeb} /> : null}
           {/* What Play starts, for when a game will not: there when it is
               wanted, folded away when it is not. The Store page and the ways

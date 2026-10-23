@@ -159,6 +159,9 @@ jobs:
       - name: Shared repair engine tests
         run: cargo test --locked --manifest-path crates/kryoto-repair/Cargo.toml
 
+      - name: Shared saves engine tests
+        run: cargo test --locked --manifest-path crates/kryoto-saves/Cargo.toml
+
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings

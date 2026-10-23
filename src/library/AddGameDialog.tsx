@@ -154,6 +154,7 @@ export function AddGameDialog({
           <div className="flex gap-4">
             {found.cover ? (
               <img
+                decoding="async"
                 src={artSrc(found.cover) ?? undefined}
                 alt=""
                 className={cn('w-20 shrink-0 object-cover', adultBlur(found.nsfw, showAdult))}
@@ -229,6 +230,7 @@ export function AddGameDialog({
                   >
                     {h.cover_vertical || h.cover ? (
                       <img
+                        decoding="async"
                         src={artSrc(h.cover_vertical || h.cover) ?? undefined}
                         alt=""
                         className={cn('h-12 w-8 shrink-0 object-cover', adultBlur(h.nsfw, showAdult))}

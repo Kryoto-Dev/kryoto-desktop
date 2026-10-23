@@ -175,7 +175,7 @@ export function Sidebar({
                   )}
                 >
                   {cover ? (
-                    <img src={artSrc(cover) ?? undefined} onError={() => reportArt(cover, 'sidebar')} alt="" className={cn('size-6 shrink-0 object-cover', adultBlur(adult, showAdult) && 'blur-[3px]')} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
+                    <img decoding="async" src={artSrc(cover) ?? undefined} onError={() => reportArt(cover, 'sidebar')} alt="" className={cn('size-6 shrink-0 object-cover', adultBlur(adult, showAdult) && 'blur-[3px]')} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
                   ) : (
                     <span className="size-6 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
                   )}
@@ -203,7 +203,7 @@ export function Sidebar({
             )}
           >
             {coverFor(g) ? (
-              <img src={artSrc(coverFor(g)) ?? undefined} onError={() => reportArt(coverFor(g)!, 'sidebar')} alt="" className={cn("size-6 shrink-0 object-cover", adultBlur(g.nsfw, showAdult) && "blur-[3px]")} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
+              <img decoding="async" src={artSrc(coverFor(g)) ?? undefined} onError={() => reportArt(coverFor(g)!, 'sidebar')} alt="" className={cn("size-6 shrink-0 object-cover", adultBlur(g.nsfw, showAdult) && "blur-[3px]")} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
             ) : (
               <span className="size-6 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
             )}

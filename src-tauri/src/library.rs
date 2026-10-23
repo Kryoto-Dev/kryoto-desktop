@@ -819,6 +819,8 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
         }
     }
 
+    // Newer saves another PC backed up, put here before the game reads them.
+    crate::saves::before_launch(&app, &game);
     // The name the player picked, into the emulator's files, before it reads them.
     crate::player_name::apply_for_launch(&app, &game);
     // The achievement list gbe_fork needs, into a build made without one.
@@ -890,6 +892,8 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
     crate::presence::beat(&app);
     let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None, stopped: false });
     crate::achievements::watch(app.clone(), &game, crate::achievements::roots_for(&plan.env));
+    // Where it writes while it runs, to find its saves (saves/tracer.rs).
+    let tracer = crate::saves::tracer::start(&app, &game, session.clone());
     if crate::settings::load(&app).minimize_on_play {
         if let Some(w) = app.get_window("main") {
             let _ = w.minimize();
@@ -949,7 +953,9 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
             Ok(())
         });
         crate::presence::beat(&app);
-        let _ = app.emit("game-state", GameEvent { id, running: false, seconds: Some(seconds), code, stopped: session.stopped() });
+        let _ = app.emit("game-state", GameEvent { id: id.clone(), running: false, seconds: Some(seconds), code, stopped: session.stopped() });
+        // Learn where it saved, then back the saves up.
+        crate::saves::after_exit(app.clone(), id, tracer);
     });
     Ok(())
 }

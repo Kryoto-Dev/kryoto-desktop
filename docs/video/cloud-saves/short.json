@@ -1,0 +1,22 @@
+{
+  "win": { "w": 1564, "h": 880 },
+  "voice": "../../../.tmp/cloud-saves-video/voice.mp3",
+  "tail": 2.0,
+  "brand": {
+    "mark": "../../../../kryo.to/.claude/skills/launch-video/examples/kryoto-intro/brand/kryo-mark.png",
+    "logo": "../../../../kryo.to/public/brand/kryo-logo-ascii.png",
+    "title": "Kryoto Desktop 0.2.28",
+    "name": "Your saves, on your next PC",
+    "opacity": 0.5
+  },
+  "scenes": [
+    { "at": 0, "card": true, "title": "Cloud saves.", "sub": "Your saves, on your next PC" },
+    { "at": 3, "id": "library", "title": "Carry on where you left off.", "sub": "A supporter perk · Rolling out to selected accounts" },
+    { "at": 8.88, "id": "settings", "title": "Settings. Cloud.", "sub": "Keep syncing and automatic backups on", "keep": "start" },
+    { "at": 14.8, "id": "backup", "title": "Play. Close. Backed up.", "sub": "The Saves card shows your last backup", "keep": "start" },
+    { "at": 22.8, "id": "new-pc", "title": "On your new PC.", "sub": "Same account · Install the game · Put them here", "keep": "start" },
+    { "at": 32.48, "id": "conflict", "title": "Different progress? Your choice.", "sub": "Choose this PC's saves or your account's" },
+    { "at": 36.68, "id": "versions", "title": "Go back to an earlier backup.", "sub": "Versions · Restore · Confirm with the game closed", "keep": "start" },
+    { "at": 41.04, "card": true, "outro": true, "title": "Kryoto", "sub": "Your saves, on your next PC" }
+  ]
+}

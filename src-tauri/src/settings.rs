@@ -73,6 +73,20 @@ pub struct Settings {
     /// or each build's own (player_name.rs). Games can pick their own.
     pub player_name_mode: crate::player_name::Mode,
     pub player_name: String,
+    /// Cloud saves (saves/), for accounts kryo.to has them on for.
+    pub cloud_saves: bool,
+    /// Back a game's saves up when it closes.
+    pub cloud_saves_on_exit: bool,
+    /// Newer saves from another PC before Play: `auto` puts them here,
+    /// `ask` asks first.
+    pub cloud_saves_restore: String,
+    /// Watch where games write while they run, to find their saves.
+    pub cloud_saves_detect: bool,
+    /// Tell kryo.to the save folders found (placeholder paths only), so
+    /// other players' games find theirs on first launch.
+    pub cloud_saves_share: bool,
+    /// How many local backups of replaced saves each game keeps.
+    pub cloud_saves_keep_local: u32,
 }
 
 impl Default for Settings {
@@ -107,6 +121,12 @@ impl Default for Settings {
             connections_v2: true,
             player_name_mode: crate::player_name::Mode::Account,
             player_name: String::new(),
+            cloud_saves: true,
+            cloud_saves_on_exit: true,
+            cloud_saves_restore: "auto".into(),
+            cloud_saves_detect: true,
+            cloud_saves_share: true,
+            cloud_saves_keep_local: 5,
         }
     }
 }
@@ -291,6 +311,10 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     }
     settings.catalog_endpoint = normalize_catalog_endpoint(&settings.catalog_endpoint)?;
     settings.player_name = crate::player_name::clean(&settings.player_name).unwrap_or_default();
+    if !matches!(settings.cloud_saves_restore.as_str(), "auto" | "ask") {
+        settings.cloud_saves_restore = "auto".into();
+    }
+    settings.cloud_saves_keep_local = settings.cloud_saves_keep_local.clamp(1, 20);
     // A choice made in Settings is the player's, never migrated again.
     settings.connections_v2 = true;
     std::fs::create_dir_all(&settings.library_dir)

@@ -35,6 +35,22 @@ function saveGuest(on: boolean) {
 /** How long the splash waits to hear who is signed in before moving on anyway. */
 const ACCOUNT_WAIT_MS = 6000
 
+/** The shell's background as [r, g, b]: the window is filled with it behind the menu view's see-through corners. */
+function shellColor(): [number, number, number] | null {
+  try {
+    const css = getComputedStyle(document.documentElement).getPropertyValue('--background').trim()
+    const ctx = document.createElement('canvas').getContext('2d', { willReadFrequently: true })
+    if (!ctx || !css) return null
+    ctx.clearRect(0, 0, 1, 1)
+    ctx.fillStyle = css
+    ctx.fillRect(0, 0, 1, 1)
+    const px = ctx.getImageData(0, 0, 1, 1).data
+    return px[3] === 255 ? [px[0] ?? 0, px[1] ?? 0, px[2] ?? 0] : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * The client's three stages: the splash box, the welcome screen (where you
  * sign in or continue as a guest), and the client itself.
@@ -73,7 +89,7 @@ export default function App() {
     const look = effectiveLook(settings, account, catalogAppearance)
     const apply = () => {
       applyLook(look)
-      if (isTauri()) void call('shell_theme', { dark: document.documentElement.classList.contains('dark') }).catch(() => {})
+      if (isTauri()) void call('shell_theme', { dark: document.documentElement.classList.contains('dark'), shell: shellColor() }).catch(() => {})
       // A phone linked to this PC follows the same look.
       if (isTauri()) {
         const dark = document.documentElement.classList.contains('dark')

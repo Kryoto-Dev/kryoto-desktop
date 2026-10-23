@@ -202,9 +202,10 @@ export type MenuEntry =
   | { separator: true }
   | { heading: string }
 
-export function MenuList({ items, onDone }: { items: MenuEntry[]; onDone: () => void }) {
+export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry[]; onDone: () => void; autoFocus?: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
-  useLayoutEffect(() => { ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus() }, [])
+  // A menu opened by pointing at it starts with nothing lit; one opened from the keyboard starts on its first row.
+  useLayoutEffect(() => { if (autoFocus) ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus() }, [autoFocus])
   return (
     <div ref={ref} onKeyDown={(e) => {
       if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
