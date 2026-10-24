@@ -198,11 +198,13 @@ export class Stage {
       return
     }
     if (now < this.nextIdle) return
-    const own = animsFor(this.mascot).filter((a) => a.cat === 'own' && a.id !== 'melt').map((a) => a.id)
+    // Kubi's refreeze only follows a melt, which never ends on a puddle.
+    const own = animsFor(this.mascot).filter((a) => a.cat === 'own' && a.id !== 'refreeze').map((a) => a.id)
     const pool = [...IDLE_POOL, ...own]
     const pick = pool[Math.floor(Math.random() * pool.length)]!
     const a = ANIMS[pick]!
-    this.play(pick, { for: a.once ? a.dur : Math.max(a.dur, 2.5) })
+    if (pick === 'melt') this.play('melt', { then: () => this.play('refreeze') })
+    else this.play(pick, { for: a.once ? a.dur : Math.max(a.dur, 2.5) })
     this.nextIdle = now + a.dur + 8 + Math.random() * 10
   }
 
