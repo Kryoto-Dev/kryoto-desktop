@@ -1,4 +1,4 @@
 [[permission]]
 identifier = "allow-report-catalog-state"
-description = "Allow the hosted catalog to report navigation state to the desktop shell, to name the download it is about to start, to close an open menu when the page is clicked, to pick from or hover the menu it draws itself, and to ask whether its game is installed here and play it."
-commands.allow = ["report_catalog_state", "store_nav_button", "store_expect_download", "remote_snapshot", "remote_apply", "remote_phone_seen", "cloud_achievements_pending", "cloud_achievements_report", "menu_close", "store_menu_pick", "store_menu_hover", "store_installed", "store_play"]
+description = "Allow the hosted catalog to report navigation state to the desktop shell, to name the download it is about to start, to close an open menu when the page is clicked, to pick from or hover the menu it draws itself, and to ask whether its game is installed here and play it, and to download a game from any link it lists."
+commands.allow = ["report_catalog_state", "store_nav_button", "store_expect_download", "remote_snapshot", "remote_apply", "remote_phone_seen", "cloud_achievements_pending", "cloud_achievements_report", "menu_close", "store_menu_pick", "store_menu_hover", "store_installed", "store_play", "store_download_link"]

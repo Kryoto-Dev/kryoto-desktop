@@ -232,23 +232,25 @@ fn download_mirror(
 
 #[derive(serde::Serialize)]
 struct MirrorHost {
-    host: &'static str,
+    host: String,
     /// `api` and `direct` download straight away; `page` opens the host's
-    /// page in a window of its own and may ask for a check.
+    /// page in a window of its own and may ask for a check, or for the person
+    /// to start the download there (any other site).
     kind: &'static str,
 }
 
-/// Which of these links Kryoto can download from itself.
+/// Which of these links Kryoto can download from itself: every web link but
+/// the few that only work in their own page (MEGA).
 #[tauri::command]
 fn mirror_hosts(urls: Vec<String>) -> Vec<Option<MirrorHost>> {
     urls.iter()
         .map(|u| {
-            resolvers::classify(u).map(|(kind, host)| MirrorHost {
+            resolvers::classify_any(u).map(|(kind, host)| MirrorHost {
                 host,
                 kind: match kind {
                     resolvers::Kind::Api => "api",
                     resolvers::Kind::Direct => "direct",
-                    resolvers::Kind::Page => "page",
+                    resolvers::Kind::Page | resolvers::Kind::Web => "page",
                 },
             })
         })
@@ -657,7 +659,14 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         // This PC's copy of a game, and Play for it, so its page can offer
         // Play instead of Download. `kryoto-library` fires when either changes.
         installed: (slug) => invoke('store_installed', { slug: String(slug || '') }),
-        play: (slug) => invoke('store_play', { slug: String(slug || '') })
+        play: (slug) => invoke('store_play', { slug: String(slug || '') }),
+        // Any link a game lists, downloaded here: a mirror host the app
+        // knows, a file, or a page that opens for the person to start it on.
+        download: (url, slug, title) => invoke('store_download_link', {
+          url: String(url || ''),
+          slug: String(slug || ''),
+          title: title ? String(title) : null
+        })
       })
     });
   } catch (_) {}
@@ -1088,6 +1097,36 @@ fn store_play(app: tauri::AppHandle, webview: tauri::Webview, slug: String) -> R
     from_kryoto_store(&app, &webview)?;
     let game = installed_by_slug(&app, &slug).ok_or("That game is not installed on this PC.")?;
     app.emit_to("main", "store-play", game.id).map_err(|e| e.to_string())
+}
+
+/// A download link pressed on a game's kryo.to page (`kryotoDesktop.download`):
+/// downloaded here from that link, whatever site it is on.
+#[tauri::command]
+fn store_download_link(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    url: String,
+    slug: String,
+    title: Option<String>,
+) -> Result<(), String> {
+    from_kryoto_store(&app, &webview)?;
+    let slug = slug.trim().to_ascii_lowercase();
+    if slug.is_empty() || slug.len() > 160 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Not a kryo.to game.".into());
+    }
+    let title = title
+        .map(|t| t.trim().chars().filter(|c| !c.is_control()).take(300).collect::<String>())
+        .filter(|t| !t.is_empty());
+    // MEGA and filez.stream only give their files to their own page: those
+    // open in the browser, as the link would anywhere else.
+    if resolvers::classify_any(&url).is_none() {
+        let parsed: url::Url = url.parse().map_err(|_| "Not a valid link.".to_string())?;
+        if !allowed_browser_url(&parsed) {
+            return Err("Not a web link.".into());
+        }
+        return open_external_url(parsed.as_str());
+    }
+    downloads::enqueue_mirror(&app, url, Some(slug), title, None)
 }
 
 /// The library or what is running changed: a kryo.to page showing Play or
@@ -1670,6 +1709,7 @@ pub fn run() {
             store_menu_hover,
             store_installed,
             store_play,
+            store_download_link,
             store_library_changed,
             menus::menu_hover
         ])
