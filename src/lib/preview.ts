@@ -122,6 +122,8 @@ const settings: Record<string, unknown> = {
   cloudSavesFind: 'precise',
   cloudSavesShare: true,
   cloudSavesKeepLocal: 5,
+  pet: true,
+  petMascot: 'telly',
 }
 
 const GB = 1_073_741_824

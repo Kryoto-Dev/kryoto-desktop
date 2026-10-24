@@ -62,7 +62,20 @@ export type Settings = {
   cloudSavesShare: boolean
   /** Local backups of replaced saves kept per game. */
   cloudSavesKeepLocal: number
+  /** The desktop pet (src/pet): out on the screen or put away. */
+  pet: boolean
+  petMascot: PetMascot
+  /** Where it stands, in physical pixels; pet.rs keeps it. */
+  petPos?: [number, number] | null
 }
+
+export type PetMascot = 'telly' | 'kubi' | 'yuki' | 'blip'
+export const PET_MASCOTS: { id: PetMascot; label: string }[] = [
+  { id: 'telly', label: 'Telly' },
+  { id: 'kubi', label: 'Kubi' },
+  { id: 'yuki', label: 'Yuki' },
+  { id: 'blip', label: 'Blip' },
+]
 
 /** How a game's in-game name is picked (src-tauri player_name.rs). */
 export type PlayerNameMode = 'account' | 'custom' | 'build'

@@ -513,6 +513,13 @@ html[data-window='popup'],
 html[data-window='popup'] body {
   background: transparent;
 }
+/* The desktop pet's window is see-through around the mascot (pet.rs). */
+html[data-window='pet'],
+html[data-window='pet'] body,
+html[data-window='pet'] #root {
+  background: transparent !important;
+  overflow: hidden;
+}
 /* The menu's view is exactly the menu's size, and a web view cannot be
    see-through over the Store's (its corners came out black), so the menu is
    square and only its rows follow the reader's corners. */

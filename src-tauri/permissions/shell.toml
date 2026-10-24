@@ -13,6 +13,7 @@ description = "Everything the desktop shell calls: the Store view, the library, 
 commands.allow = [
   "repair_sources", "repair_state", "repair_apply", "repair_undo", "repair_support", "repair_support_url",
   "take_pending_link",
+  "pet_menu", "pet_open_app", "pet_mascot",
   "display_rendered",
   "game_logs",
   "game_log_read",

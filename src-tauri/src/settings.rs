@@ -90,6 +90,12 @@ pub struct Settings {
     pub cloud_saves_share: bool,
     /// How many local backups of replaced saves each game keeps.
     pub cloud_saves_keep_local: u32,
+    /// The desktop pet (pet.rs): out on the screen or put away.
+    pub pet: bool,
+    /// Which mascot it is: telly, kubi, yuki or blip.
+    pub pet_mascot: String,
+    /// Where it was put, in physical pixels; the screen's corner when unset.
+    pub pet_pos: Option<[i32; 2]>,
 }
 
 impl Default for Settings {
@@ -131,6 +137,9 @@ impl Default for Settings {
             cloud_saves_find: "precise".into(),
             cloud_saves_share: true,
             cloud_saves_keep_local: 5,
+            pet: true,
+            pet_mascot: "telly".into(),
+            pet_pos: None,
         }
     }
 }
@@ -322,6 +331,9 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
         settings.cloud_saves_find = "precise".into();
     }
     settings.cloud_saves_keep_local = settings.cloud_saves_keep_local.clamp(1, 20);
+    if !crate::pet::is_mascot(&settings.pet_mascot) {
+        settings.pet_mascot = "telly".into();
+    }
     // A choice made in Settings is the player's, never migrated again.
     settings.connections_v2 = true;
     std::fs::create_dir_all(&settings.library_dir)
@@ -330,7 +342,12 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     // The phone switches belong to Settings > Phone's own commands, which also
     // start and stop the server; saving the whole page must not undo them.
     settings.phone_lan = before.phone_lan;
+    // Where the pet stands is the pet's to remember (pet.rs), not the page's.
+    settings.pet_pos = before.pet_pos;
     write(&app, &settings)?;
+    if before.pet != settings.pet || before.pet_mascot != settings.pet_mascot {
+        crate::pet::sync(&app);
+    }
     if before.share_playtime != settings.share_playtime {
         crate::presence::beat(&app);
     }

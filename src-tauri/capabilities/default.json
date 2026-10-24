@@ -1,13 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Window and webview permissions for the launcher shell and its menu view.",
+  "description": "Window and webview permissions for the launcher shell, its menu view and the desktop pet's window.",
   "windows": [
-    "main"
+    "main",
+    "pet"
   ],
   "webviews": [
     "main",
-    "popup"
+    "popup",
+    "pet"
   ],
   "permissions": [
     "core:default",

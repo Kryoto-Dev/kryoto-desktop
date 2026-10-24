@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { artSrc } from '@/lib/art'
 import { Bell, Cloud, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Volume2, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
-import { errorText } from '@/lib/bridge'
-import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, type Settings } from '@/lib/settings'
+import { errorText, on } from '@/lib/bridge'
+import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -218,6 +218,11 @@ function DesktopPane({ section }: { section: SettingsSection }) {
   useEffect(() => {
     if (stored) setEndpointDraft(stored.catalogEndpoint)
   }, [stored?.catalogEndpoint])
+  // The pet's own right-click menu changes these too (pet.rs).
+  useEffect(() => {
+    const off = on<{ pet: boolean; petMascot: PetMascot }>('pet-settings', (p) => setS((cur) => (cur ? { ...cur, ...p } : cur)))
+    return () => void off.then((f) => f())
+  }, [])
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => patch({ [k]: v } as Partial<Settings>)
   const patch = (p: Partial<Settings>) => {
@@ -230,7 +235,14 @@ function DesktopPane({ section }: { section: SettingsSection }) {
       // Storage changes its folders straight to disk; keep those.
       void settingsApi
         .get()
-        .then((latest) => settingsApi.save({ ...next, libraryDir: latest.libraryDir, libraryFolders: latest.libraryFolders }))
+        .then((latest) =>
+          settingsApi.save({
+            ...next,
+            libraryDir: latest.libraryDir,
+            libraryFolders: latest.libraryFolders,
+            ...('pet' in p || 'petMascot' in p ? {} : { pet: latest.pet, petMascot: latest.petMascot }),
+          }),
+        )
         .then(() => setState('saved'))
         .catch((e: unknown) => setState(errorText(e)))
     }, 250)
@@ -316,6 +328,10 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             <Check checked={s.closeToTray} onChange={(v) => set('closeToTray', v)} label="Closing the window keeps Kryoto running in the tray" />
             <Check checked={s.startWithSystem} onChange={(v) => set('startWithSystem', v)} label={`Start Kryoto when I sign in to ${isWindowsHost() ? 'Windows' : 'my computer'}`} />
             <Check checked={s.minimizeOnPlay} onChange={(v) => set('minimizeOnPlay', v)} label="Minimize Kryoto while a game runs" />
+            <Section title="Desktop pet" hint="Kryoto's mascot on your desktop, outside this window. Drag it anywhere; right-click it to switch or hide it. It steps aside while a game runs.">
+              <Check checked={s.pet} onChange={(v) => set('pet', v)} label="Show the pet on my desktop" />
+              {s.pet ? <Segmented label="Desktop pet" value={s.petMascot} options={PET_MASCOTS.map((m) => ({ value: m.id, label: m.label }))} onChange={(v) => set('petMascot', v)} /> : null}
+            </Section>
             <PlayerNameSection s={s} patch={patch} />
             <Section title="Play time and activity" hint="Share anonymous totals of Desktop players online, playing or idle. Signed-in play time counts toward community statistics; the play-time board only shows public profiles.">
               <Check checked={s.sharePlaytime} onChange={(v) => set('sharePlaytime', v)} label="Share my play time and Desktop activity with kryo.to" />

@@ -8,6 +8,7 @@ mod compat;
 mod display_env;
 mod game_logs;
 mod remote;
+mod pet;
 mod phone;
 mod downloads;
 mod handoff;
@@ -1421,6 +1422,9 @@ pub fn run() {
                     let _ = main.show();
                 }
             }
+            // The desktop pet, when it is on: it comes out even when Kryoto
+            // starts in the tray.
+            pet::sync(app.handle());
             Ok(())
         })
         // Game art, cached on this PC (art.rs). Only the shell's own views may
@@ -1436,6 +1440,8 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 system::on_main_window_event(window, event);
+            } else if window.label() == pet::LABEL {
+                pet::on_window_event(window, event);
             }
         })
         // Updates: checked against latest.json on the newest GitHub release,
@@ -1700,6 +1706,9 @@ pub fn run() {
             system::os_notify,
             system::pick_path,
             system::window_state_get,
+            pet::pet_menu,
+            pet::pet_open_app,
+            pet::pet_mascot,
             menus::menu_open,
             menus::menu_payload,
             menus::menu_ready,

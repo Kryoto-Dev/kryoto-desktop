@@ -8,9 +8,13 @@ import { Button } from '@/ui'
 import { setHideAdult, setShowAdult } from '@/lib/adult'
 import { GUEST, useAccount, useCatalogAppearance } from '@/hooks/useAccount'
 import { useBrowserPage } from '@/hooks/useBrowserPage'
-import { call } from '@/lib/bridge'
+import { call, on } from '@/lib/bridge'
+import { emitTo } from '@tauri-apps/api/event'
 import { logInfo } from '@/lib/log'
 import { useOnline } from '@/lib/online'
+
+/** The look last sent to the desktop pet, for when it opens later. */
+let petLook: { palette: string; dark: boolean; reducedMotion: boolean } | null = null
 
 type Phase = 'splash' | 'welcome' | 'main'
 
@@ -94,6 +98,9 @@ export default function App() {
       if (isTauri()) {
         const dark = document.documentElement.classList.contains('dark')
         void call('phone_report_look', { look: { theme: dark ? 'dark' : 'light', palette: look.palette, radius: look.radius, font: look.font, season: look.season ?? null, reducedMotion: look.reducedMotion === true } }).catch(() => {})
+        // The desktop pet (src/pet) wears the same palette.
+        petLook = { palette: look.palette, dark, reducedMotion: look.reducedMotion === true }
+        void emitTo('pet', 'pet-look', petLook).catch(() => {})
       }
     }
     apply()
@@ -103,6 +110,15 @@ export default function App() {
     setHideAdult(look.hideAdult === true)
     return () => system.removeEventListener('change', apply)
   }, [settings, account, catalogAppearance])
+
+  // The pet asks for the look when it opens, which can be after the look was sent.
+  useEffect(() => {
+    if (!isTauri()) return
+    const off = on('pet-hello', () => {
+      if (petLook) void emitTo('pet', 'pet-look', petLook).catch(() => {})
+    })
+    return () => void off.then((f) => f())
+  }, [])
 
   useEffect(() => {
     void applyWindow('splash')
