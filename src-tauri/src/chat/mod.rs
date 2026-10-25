@@ -646,6 +646,10 @@ pub async fn chat_call_signal(state: State<'_, ChatState>, peer: String, call_id
         "hangup" => CallKind::Hangup,
         "decline" => CallKind::Decline,
         "busy" => CallKind::Busy,
+        "restart" => CallKind::Restart,
+        "restarted" => CallKind::Restarted,
+        "muted" => CallKind::Muted,
+        "unmuted" => CallKind::Unmuted,
         _ => return Err("Not a call signal.".into()),
     };
     let id = hex::decode(&call_id).ok().filter(|b| b.len() == 16).ok_or("Not a call id.")?;

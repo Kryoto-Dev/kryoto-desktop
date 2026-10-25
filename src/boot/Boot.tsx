@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { ProfileLink, TeamName } from '@/ui/TeamName'
 import { artSrc } from '@/lib/art'
 import { ArrowLeft, Minus, RotateCw, X } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -183,9 +184,12 @@ export function Welcome({
               </>
             ) : account ? (
               <>
-                <Button variant="primary" size="lg" className="w-full gap-3" onClick={onContinue}>
+                <ProfileLink username={account.guest ? null : account.username} className="inline-flex max-w-full items-center gap-3 text-sm text-foreground hover:text-primary focus-visible:outline-2 focus-visible:outline-primary">
                   {account.avatarUrl ? <img decoding="async" src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" /> : null}
-                  <span className="truncate">Continue as {name}</span>
+                  <span className="truncate"><TeamName username={account.guest ? null : account.username}>{name}</TeamName></span>
+                </ProfileLink>
+                <Button variant="primary" size="lg" className="w-full gap-3" onClick={onContinue}>
+                  Continue
                 </Button>
                 <Button
                   variant="ghost"

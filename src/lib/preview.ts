@@ -8,6 +8,8 @@
  * runs for a few seconds and adds to its playtime.
  */
 
+import { PREVIEW_FRIENDS, type FriendsState } from '@/hooks/useFriends'
+
 type Handler = (p: unknown) => void
 const listeners = new Map<string, Set<Handler>>()
 
@@ -316,7 +318,58 @@ function previewRuntimesInstall(ids: string[]) {
   at(300, () => emit({ phase: 'done', fraction: 1, message: 'All installed.' }))
 }
 
+/**
+ * The friends list's actions against a copy of the sample friends, answered
+ * the way kryo.to answers (`nobody` is an account that does not exist).
+ */
+let previewFriendsState: FriendsState | null = null
+function previewFriendFetch(a: Record<string, unknown>): Record<string, unknown> {
+  const s: FriendsState = (previewFriendsState ??= structuredClone(PREVIEW_FRIENDS))
+  const method = String(a.method)
+  const parts = String(a.path).split('/').slice(2)
+  const body = (a.body ?? {}) as Record<string, unknown>
+  const face = (f: { id: string; username: string; displayName: string | null; avatarUrl: string | null; supporter: boolean }) => ({ id: f.id, username: f.username, displayName: f.displayName, avatarUrl: f.avatarUrl, supporter: f.supporter })
+  const befriend = (p: ReturnType<typeof face>) => s.friends.push({ ...p, favourite: false, nickname: null, muted: false, online: false })
+  let answer: Record<string, unknown> = { ok: true }
+  if (parts[0] === 'friends' && parts[1] === 'requests' && !parts[2]) {
+    const username = String(body.username ?? '').toLowerCase()
+    if (!username || username === 'nobody') throw new Error('Nobody is called that. Check the spelling.')
+    if (s.friends.some((f) => f.username === username)) throw new Error('You are already friends.')
+    const theirs = s.incoming.find((r) => r.username === username)
+    if (theirs) {
+      s.incoming = s.incoming.filter((r) => r !== theirs)
+      befriend(face(theirs))
+      answer = { status: 'friends' }
+    } else {
+      s.sent = [{ id: String(100 + s.sent.length), username, displayName: null, avatarUrl: null, supporter: false, requestId: String(200 + s.sent.length) }, ...s.sent]
+      answer = { status: 'requested' }
+    }
+  } else if (parts[0] === 'friends' && parts[1] === 'requests') {
+    const incoming = s.incoming.find((r) => r.requestId === parts[2])
+    if (incoming && body.action === 'accept') befriend(face(incoming))
+    s.incoming = s.incoming.filter((r) => r.requestId !== parts[2])
+    s.sent = s.sent.filter((r) => r.requestId !== parts[2])
+  } else if (parts[0] === 'friends' && parts[1] === 'invites') {
+    answer = { url: 'https://kryo.to/friends/invite/preview-invite-link', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() }
+  } else if (parts[0] === 'friends' && method === 'DELETE') {
+    s.friends = s.friends.filter((f) => f.id !== parts[1])
+  } else if (parts[0] === 'friends' && method === 'PATCH') {
+    s.friends = s.friends.map((f) => (f.id === parts[1] ? { ...f, favourite: !!body.favourite } : f))
+  } else if (parts[0] === 'blocks' && method === 'POST') {
+    const gone = s.friends.find((f) => f.id === parts[1])
+    s.friends = s.friends.filter((f) => f.id !== parts[1])
+    if (gone) s.hidden = [...s.hidden, gone.username]
+  } else if (parts[0] === 'mutes') {
+    s.friends = s.friends.map((f) => (f.id === parts[1] ? { ...f, muted: method === 'POST' } : f))
+  }
+  s.outgoing = s.sent.length
+  previewBus.emit('friends-state', structuredClone(s))
+  return answer
+}
+
 const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
+  friends_fetch: (a) => previewFriendFetch(a),
+  store_refresh_account: () => null,
   // Cloud saves (src-tauri saves/): one game with every kind of location, a conflict on another.
   cloud_saves_status: () => ({ feature: true, on: true, perk: true, allowance: { totalBytes: GB, versionsPerGame: 5, maxBackupBytes: 100 * 1_048_576 }, usage: { bytes: 214_000_000, games: 7, versions: 23 }, lastSync: now() - 300, conflicts: [] }),
   cloud_saves_refresh: () => HANDLERS.cloud_saves_status!({}),

@@ -1,3 +1,4 @@
+import { TeamName } from '@/ui/TeamName'
 import { useEffect, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { Caption } from '@/ui'
@@ -66,7 +67,7 @@ export function CompatibilityFacts({ slug, onWeb }: { slug: string; onWeb: (path
             <p className="m-0 text-[11px] text-muted-foreground">
               {setup.tester.username ? (
                 <a href={`https://kryo.to/user/${encodeURIComponent(setup.tester.username)}`} onClick={go(`/user/${encodeURIComponent(setup.tester.username)}`)} className={linkClass}>
-                  {setup.tester.name}
+                  <TeamName username={setup.tester.username}>{setup.tester.name}</TeamName>
                 </a>
               ) : (
                 <span className="text-foreground">{setup.tester.name}</span>

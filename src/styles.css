@@ -817,3 +817,50 @@ html[data-os='linux'] .backdrop-blur-lg {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+
+/* The pixel badges (kryo.to components/pixel-badges.tsx, copied here). The team gem's glint
+   crosses it one diagonal of cells at a time, then rests; the verified
+   shield's check draws in cell by cell once. Stepped, so it moves in cells
+   like the rest of Kryoto's motion. With reduced motion there is no motion
+   at all and the still picture is the finished one. */
+.kryo-px svg {
+  overflow: visible;
+}
+.kryo-px-glint {
+  opacity: 0;
+  animation: kryo-px-glint 5.5s steps(1, end) infinite;
+  animation-delay: calc(var(--d) * 70ms + 1.4s);
+}
+@keyframes kryo-px-glint {
+  0% { opacity: 0.85; }
+  2.5% { opacity: 0; }
+  100% { opacity: 0; }
+}
+.kryo-px-draw {
+  animation: kryo-px-draw 70ms steps(1, end) backwards;
+  animation-delay: calc(var(--i) * 75ms + 200ms);
+}
+@keyframes kryo-px-draw {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+/* The staff chip: square with its corner cell cut away, like a sprite's
+   frame, over a two-pixel dither of its own colour. Its own shape on
+   purpose, whatever corners the reader picked: it is Kryoto's badge. */
+/* Doubled to outrank .kryo-pill, which is unlayered and !important too. */
+.kryo-staff-chip.kryo-staff-chip {
+  border-radius: 0 !important;
+  clip-path: polygon(2px 0, calc(100% - 2px) 0, calc(100% - 2px) 2px, 100% 2px, 100% calc(100% - 2px), calc(100% - 2px) calc(100% - 2px), calc(100% - 2px) 100%, 2px 100%, 2px calc(100% - 2px), 0 calc(100% - 2px), 0 2px, 2px 2px);
+  background-image: repeating-conic-gradient(color-mix(in oklab, currentColor 9%, transparent) 0 25%, transparent 0 50%);
+  background-size: 4px 4px;
+}
+[data-motion='reduced'] .kryo-px *,
+[data-motion='reduced'] .kryo-px *::before {
+  animation: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kryo-px * {
+    animation: none !important;
+  }
+}
+

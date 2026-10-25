@@ -1088,6 +1088,10 @@ impl Chat {
                         Ok(CallKind::Hangup) => "hangup",
                         Ok(CallKind::Decline) => "decline",
                         Ok(CallKind::Busy) => "busy",
+                        Ok(CallKind::Restart) => "restart",
+                        Ok(CallKind::Restarted) => "restarted",
+                        Ok(CallKind::Muted) => "muted",
+                        Ok(CallKind::Unmuted) => "unmuted",
                         _ => return,
                     };
                     (self.emit)(ChatEvent::Call {

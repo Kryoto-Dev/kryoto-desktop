@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ProfileLink, TeamName } from '@/ui/TeamName'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
+  ArrowLeft,
   Check,
   CheckCheck,
   Clock,
@@ -20,7 +22,6 @@ import {
   Shield,
   SmilePlus,
   Trash2,
-  User,
   Users,
   X,
 } from 'lucide-react'
@@ -36,7 +37,6 @@ import {
   chatSend,
   chatSendGif,
   chatSettingsGet,
-  chatSettingsSet,
   chatTyping,
   chatVerifyInfo,
   chatVerifyMark,
@@ -57,10 +57,12 @@ import {
   type VerifyInfo,
   groupConversationId,
 } from '@/lib/chat'
+import type { Friend } from '@/hooks/useFriends'
 import { InvitePicker, type InviteGame } from './InvitePicker'
+import { ChatSettingsDialog } from './ChatSettings'
 import { ReportDialog } from './ReportDialog'
 import { startCall } from '@/lib/calls'
-import { Button, Caption, Check as Toggle, IconButton, Modal, Segmented } from '@/ui'
+import { Button, Caption, IconButton, Modal } from '@/ui'
 import { cn } from '@/lib/utils'
 import { artSrc } from '@/lib/art'
 
@@ -76,6 +78,16 @@ export function dmConversationId(a: string, b: string): string {
 
 function time(ms: number): string {
   return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+}
+
+/** The divider over a new day's messages: Today, Yesterday, or the date. */
+function dayLabel(ms: number): string {
+  const d = new Date(ms)
+  const start = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const days = Math.round((start(new Date()) - start(d)) / 86_400_000)
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Yesterday'
+  return d.toLocaleDateString(undefined, { weekday: days < 7 ? 'long' : undefined, day: 'numeric', month: 'long', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' })
 }
 
 function StatusIcon({ status }: { status: ChatMessage['status'] }) {
@@ -220,10 +232,17 @@ export function ChatPane({
   onJoinInvite,
   group,
   nameOf = () => 'Someone',
+  usernameOf = () => null,
   onMembers,
   canCall = false,
+  face,
+  onBack,
 }: {
   peer: { id: string; name: string; supporter: boolean }
+  /** Their picture and what they are doing, for the header (people, not groups). */
+  face?: Pick<Friend, 'username' | 'avatarUrl' | 'online' | 'playing'>
+  /** Back to the list, where the list and the conversation take turns. */
+  onBack?: () => void
   myId: string
   meSupporter: boolean
   onProfile: () => void
@@ -240,6 +259,7 @@ export function ChatPane({
   group?: GroupView
   /** Names of the people writing in a group. */
   nameOf?: (userId: string) => string
+  usernameOf?: (userId: string) => string | null
   onMembers?: () => void
   /** Voice calls are rolled out to this account. */
   canCall?: boolean
@@ -393,22 +413,48 @@ export function ChatPane({
     void chatReact(m.msgId, emoji, mine).catch((e) => setError(errorText(e)))
   }
 
-  const saveSettings = (next: ChatSettings) => {
-    setSettings(next)
-    void chatSettingsSet(next).catch((e) => setError(errorText(e)))
-  }
 
   const byId = useMemo(() => new Map(messages.map((m) => [m.msgId, m])), [messages])
   const counter = limit - text.length
 
   return (
     <section className="grid min-h-0 grid-rows-[auto_1fr_auto]">
-      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
-        <div className="grid min-w-0">
-          <b className="truncate text-sm text-foreground">{peer.name}</b>
-          <span className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground">
-            <Lock className="size-2.5" aria-hidden /> End-to-end encrypted
-          </span>
+      <header className={cn('flex items-center justify-between gap-3 border-b border-border py-3', onBack ? 'px-3' : 'px-5')}>
+        <div className="flex min-w-0 items-center gap-3">
+          {onBack ? (
+            <IconButton label="Back to the list" onClick={onBack}>
+              <ArrowLeft className="size-4" />
+            </IconButton>
+          ) : null}
+          {group ? (
+            <span className="kryo-pill grid size-8 shrink-0 place-items-center bg-secondary">
+              <Users className="size-4 text-muted-foreground" aria-hidden />
+            </span>
+          ) : (
+            <button type="button" onClick={onProfile} className="kryo-pill relative shrink-0" title={`${peer.name}'s profile`} aria-label={`${peer.name}'s profile`}>
+              {face?.avatarUrl ? (
+                <img decoding="async" src={artSrc(face.avatarUrl) ?? undefined} alt="" className="kryo-pill size-8 object-cover" />
+              ) : (
+                <span className="kryo-pill grid size-8 place-items-center bg-secondary text-xs font-bold text-foreground">{peer.name.slice(0, 1).toUpperCase()}</span>
+              )}
+              {face?.playing || face?.online ? (
+                <span className={cn('absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-background', face.playing ? 'bg-primary' : 'bg-success')} aria-hidden />
+              ) : null}
+            </button>
+          )}
+          <div className="grid min-w-0">
+            <ProfileLink username={group ? null : face?.username} onProfile={onProfile} className="truncate text-sm font-bold text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-primary"><TeamName username={group ? null : face?.username}>{peer.name}</TeamName></ProfileLink>
+            <span className="flex min-w-0 items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+              {face?.playing ? (
+                <span className="truncate normal-case tracking-normal text-foreground/80">Playing {face.playing.title}</span>
+              ) : (
+                <>
+                  <Lock className="size-2.5 shrink-0" aria-hidden />
+                  <span className="truncate">{group ? `${group.members.length} people · end-to-end encrypted` : 'End-to-end encrypted'}</span>
+                </>
+              )}
+            </span>
+          </div>
         </div>
         <div className="flex gap-1">
           {group ? (
@@ -431,9 +477,6 @@ export function ChatPane({
                   <Shield className="size-4" />
                 )}
               </IconButton>
-              <IconButton label="Profile" onClick={onProfile}>
-                <User className="size-4" />
-              </IconButton>
             </>
           )}
           <IconButton label="Chat settings" onClick={() => setSettingsOpen(true)}>
@@ -448,16 +491,25 @@ export function ChatPane({
             {group ? 'Say hi. Only the people in this group can read it.' : `Say hi. Only you and ${peer.name} can read this conversation.`}
           </p>
         ) : null}
-        {messages.map((m) => {
+        {messages.map((m, i) => {
+          const newDay = i === 0 || dayLabel(messages[i - 1]!.sentAt) !== dayLabel(m.sentAt)
           const quoted = m.replyTo ? byId.get(m.replyTo) : null
           const gif = m.kind === 'gif' && !m.deleted ? parseGif(m.body) : null
           const invite = m.kind === 'invite' && !m.deleted ? parseInvite(m.body) : null
           const file = m.kind === 'file' && !m.deleted ? parseFile(m.body) : null
           const canChange = m.outgoing && !m.deleted && Date.now() - m.sentAt < EDIT_WINDOW_MS
           return (
-            <div key={m.msgId} className={cn('group flex', m.outgoing ? 'justify-end' : 'justify-start')}>
+            <Fragment key={m.msgId}>
+            {newDay ? (
+              <div className="flex items-center gap-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground" role="separator" aria-label={dayLabel(m.sentAt)}>
+                <span className="h-px grow bg-border" aria-hidden />
+                {dayLabel(m.sentAt)}
+                <span className="h-px grow bg-border" aria-hidden />
+              </div>
+            ) : null}
+            <div className={cn('group flex', m.outgoing ? 'justify-end' : 'justify-start')}>
               <div className={cn('grid max-w-[75%] gap-1', m.outgoing ? 'justify-items-end' : 'justify-items-start')}>
-                {group && !m.outgoing ? <span className="text-[10px] font-bold text-muted-foreground">{nameOf(m.senderUser)}</span> : null}
+                {group && !m.outgoing ? <ProfileLink username={usernameOf(m.senderUser)} className="text-[10px] font-bold text-muted-foreground hover:underline focus-visible:outline-2 focus-visible:outline-primary"><TeamName username={usernameOf(m.senderUser)}>{nameOf(m.senderUser)}</TeamName></ProfileLink> : null}
                 {quoted ? (
                   <span className="truncate border-l-2 border-border pl-2 text-[11px] text-muted-foreground">
                     {quoted.deleted ? 'Message deleted' : quoted.kind === 'gif' ? 'GIF' : quoted.kind === 'file' ? `File: ${parseFile(quoted.body)?.name ?? ''}` : quoted.kind === 'invite' ? `Game invite: ${parseInvite(quoted.body)?.title ?? ''}` : quoted.body.slice(0, 80)}
@@ -549,6 +601,7 @@ export function ChatPane({
                 ) : null}
               </div>
             </div>
+            </Fragment>
           )
         })}
         {typing ? <p className="text-[11px] text-muted-foreground">{group ? 'Someone' : peer.name} is typing...</p> : null}
@@ -805,36 +858,16 @@ export function ChatPane({
         </Modal>
       ) : null}
 
-      {settingsOpen && settings ? (
-        <Modal title="Chat settings" onClose={() => setSettingsOpen(false)}>
-          <Toggle
-            checked={settings.readReceipts}
-            onChange={(v) => saveSettings({ ...settings, readReceipts: v })}
-            label="Read receipts: tell people when you have read their messages (and see theirs)"
-          />
-          <Toggle
-            checked={settings.typing}
-            onChange={(v) => saveSettings({ ...settings, typing: v })}
-            label='Typing indicators: show "typing..." both ways'
-          />
-          <Toggle
-            checked={settings.gifsAuto}
-            onChange={(v) => saveSettings({ ...settings, gifsAuto: v })}
-            label="Show GIFs straight away (the GIF provider then sees your IP address)"
-          />
-          <div className="grid gap-2">
-            <Caption>Notifications show</Caption>
-            <Segmented
-              value={settings.notificationContent}
-              onChange={(v) => saveSettings({ ...settings, notificationContent: v })}
-              options={[
-                { value: 'name', label: 'Who it is from' },
-                { value: 'full', label: 'Name and message' },
-                { value: 'none', label: 'Nothing' },
-              ]}
-            />
-          </div>
-        </Modal>
+      {settingsOpen ? (
+        <ChatSettingsDialog
+          available
+          calls={canCall}
+          onClose={() => {
+            setSettingsOpen(false)
+            // GIFs-straight-away may have changed under this conversation.
+            void chatSettingsGet().then(setSettings).catch(() => {})
+          }}
+        />
       ) : null}
 
       {gifOpen ? (

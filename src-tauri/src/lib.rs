@@ -548,6 +548,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
               friends: (f.friends || []).slice(0, 500).map((p) => Object.assign(face(p), { favourite: !!p.favourite, nickname: p.nickname || null, muted: !!p.muted, online: !!p.online, playing: p.playing && typeof p.playing.slug === 'string' ? { slug: p.playing.slug, title: String(p.playing.title || p.playing.slug), cover: p.playing.cover || null } : null })),
               incoming: (f.incoming || []).slice(0, 100).map((p) => Object.assign(face(p), { requestId: p.requestId })),
               outgoing: (f.outgoing || []).length,
+              sent: (f.outgoing || []).slice(0, 100).map((p) => Object.assign(face(p), { requestId: p.requestId })),
               messageRequests: {
                 incoming: ((f.messageRequests && f.messageRequests.incoming) || []).slice(0, 100).map(face),
                 outgoing: ((f.messageRequests && f.messageRequests.outgoing) || []).slice(0, 100).map(face),
@@ -1332,6 +1333,74 @@ fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, secon
     .map_err(|e| e.to_string())
 }
 
+/// Whether the friends list may send this request: only the routes behind its
+/// own actions (`src/lib/friends.ts`), never an arbitrary path on the account.
+fn friend_route_allowed(method: &str, path: &str) -> bool {
+    let id = |s: &str| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit());
+    let parts: Vec<&str> = path.split('/').collect();
+    match (method, parts.as_slice()) {
+        ("POST", ["", "api", "friends", "requests"]) | ("POST", ["", "api", "friends", "invites"]) => true,
+        ("POST", ["", "api", "friends", "requests", n]) => id(n),
+        ("DELETE" | "PATCH", ["", "api", "friends", n]) => id(n),
+        ("POST" | "DELETE", ["", "api", "blocks", n]) | ("POST" | "DELETE", ["", "api", "mutes", n]) => id(n),
+        _ => false,
+    }
+}
+
+/// A friends-list action (add, answer, remove, block, pin, mute, invite link),
+/// sent from the Store's kryo.to page with the player's own session. The page
+/// hands kryo.to's answer back through `store_friend_done`, tagged with `id`.
+#[tauri::command]
+fn store_friend_fetch(
+    app: tauri::AppHandle,
+    id: String,
+    method: String,
+    path: String,
+    body: Option<serde_json::Value>,
+) -> Result<(), String> {
+    if id.is_empty() || id.len() > 40 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Not a request id.".into());
+    }
+    if !friend_route_allowed(&method, &path) {
+        return Err("That is not something the friends list does.".into());
+    }
+    let body = match body {
+        None | Some(serde_json::Value::Null) => "undefined".to_string(),
+        Some(v @ serde_json::Value::Object(_)) => {
+            let text = v.to_string();
+            if text.len() > 4096 {
+                return Err("That is too long.".into());
+            }
+            serde_json::to_string(&text).map_err(|e| e.to_string())?
+        }
+        Some(_) => return Err("Not a request body.".into()),
+    };
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to in the Store first.".into());
+    }
+    let js = |s: &str| serde_json::to_string(s).map_err(|e| e.to_string());
+    let (id, method, path) = (js(&id)?, js(&method)?, js(&path)?);
+    view.eval(format!(
+        "(() => {{ const done = (r) => {{ try {{ window.__TAURI_INTERNALS__.invoke('store_friend_done', {{ result: Object.assign({{ id: {id} }}, r) }}); }} catch (_) {{}} }}; \
+         fetch({path}, {{ method: {method}, credentials: 'include', headers: {{ 'content-type': 'application/json' }}, body: {body} }}) \
+           .then((res) => res.json().catch(() => ({{}})).then((data) => done({{ ok: res.ok, status: res.status, data }}))) \
+           .catch(() => done({{ ok: false, status: 0, data: null }})) \
+           .finally(() => window.__kryoDesktopRefresh && window.__kryoDesktopRefresh()); }})()"
+    ))
+    .map_err(|e| e.to_string())
+}
+
+/// kryo.to's answer to a `store_friend_fetch`, passed on to the shell.
+#[tauri::command]
+fn store_friend_done(app: tauri::AppHandle, webview: tauri::Webview, result: serde_json::Value) -> Result<(), String> {
+    from_kryoto_store(&app, &webview)?;
+    if result.to_string().len() > 16 * 1024 || !result.get("id").is_some_and(|v| v.is_string()) {
+        return Err("Not an answer.".into());
+    }
+    app.emit_to("main", "store-friend-done", result).map_err(|e| e.to_string())
+}
+
 /// Ask the page to say again who is signed in and what is new.
 #[tauri::command]
 fn store_refresh_account(app: tauri::AppHandle) -> Result<(), String> {
@@ -1649,6 +1718,8 @@ pub fn run() {
             store_sign_out,
             store_mark_read,
             store_refresh_account,
+            store_friend_fetch,
+            store_friend_done,
             store_set_status,
             store_report_play,
             store_report_playing,
@@ -1754,6 +1825,35 @@ mod tests {
             .filter(|c| !allowed.contains(&format!("\"{c}\"")))
             .collect();
         assert!(missing.is_empty(), "add to permissions/shell.toml: {missing:?}");
+    }
+
+    /// The friends list reaches only its own routes through the Store's session.
+    #[test]
+    fn friend_actions_stay_on_their_routes() {
+        for (m, p) in [
+            ("POST", "/api/friends/requests"),
+            ("POST", "/api/friends/requests/123"),
+            ("POST", "/api/friends/invites"),
+            ("DELETE", "/api/friends/11593063676510772"),
+            ("PATCH", "/api/friends/42"),
+            ("POST", "/api/blocks/42"),
+            ("DELETE", "/api/mutes/42"),
+        ] {
+            assert!(friend_route_allowed(m, p), "{m} {p}");
+        }
+        for (m, p) in [
+            ("GET", "/api/friends/42"),
+            ("DELETE", "/api/friends/requests"),
+            ("DELETE", "/api/friends/export"),
+            ("POST", "/api/friends/requests/../../auth/logout"),
+            ("POST", "/api/account/library"),
+            ("DELETE", "/api/blocks/abc"),
+            ("POST", "/api/blocks/42/x"),
+            ("POST", "https://evil.example/api/friends/requests"),
+            ("POST", "/api/friends/requests?next=1"),
+        ] {
+            assert!(!friend_route_allowed(m, p), "{m} {p}");
+        }
     }
 
     /// Chat acts on the account's encrypted messages and keys: only the

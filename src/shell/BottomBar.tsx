@@ -2,6 +2,7 @@ import { Bell, Download, Play, Plus, Users } from 'lucide-react'
 import { asciiTrack } from '@/ui'
 import { formatBytes, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import type { Toast } from '@/shell/Toasts'
+import { useSocialBadge } from '@/hooks/useSocialBadge'
 
 const chip =
   'kryo-pill flex h-7 items-center gap-2 px-3 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground'
@@ -28,6 +29,7 @@ export function BottomBar({
   onFriends: () => void
   friendsActive?: boolean
 }) {
+  const waitingSocial = useSocialBadge().total
   const active = downloads.find(isWorking)
   const waiting = downloads.filter((d) => d.status === 'queued' || d.status === 'paused').length
   return (
@@ -72,9 +74,21 @@ export function BottomBar({
             <span className="truncate">{notice.title}</span>
           </button>
         ) : null}
-        <button type="button" className={`${chip} ${friendsActive ? 'bg-secondary text-foreground' : ''}`} aria-current={friendsActive ? 'page' : undefined} onClick={onFriends}>
+        <button
+          type="button"
+          className={`${chip} ${friendsActive ? 'bg-secondary text-foreground' : ''}`}
+          aria-current={friendsActive ? 'page' : undefined}
+          aria-label={waitingSocial ? `Friends & chat, ${waitingSocial} new` : 'Friends & chat'}
+          onClick={onFriends}
+        >
           Friends &amp; chat
-          <Users className="size-3" />
+          {waitingSocial ? (
+            <span className="kryo-pill bg-primary px-1.5 text-[10px] font-bold tabular-nums tracking-normal text-primary-foreground" aria-hidden>
+              {waitingSocial > 99 ? '99+' : waitingSocial}
+            </span>
+          ) : (
+            <Users className="size-3" />
+          )}
         </button>
       </div>
     </footer>

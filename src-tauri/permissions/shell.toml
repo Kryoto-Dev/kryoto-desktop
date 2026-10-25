@@ -46,6 +46,7 @@ commands.allow = [
   "store_sign_out",
   "store_mark_read",
   "store_refresh_account",
+  "store_friend_fetch",
   "store_set_status",
   "store_report_play",
   "store_report_playing",

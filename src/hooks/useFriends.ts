@@ -26,6 +26,8 @@ export type FriendsState = {
   friends: Friend[]
   incoming: (FriendFace & { requestId: string })[]
   outgoing: number
+  /** Requests you sent that are still waiting, so they can be taken back. */
+  sent: (FriendFace & { requestId: string })[]
   /** Lower-cased usernames of people with a block either way: left out of every list. */
   hidden: string[]
   /** People who are not friends but may chat: requests both ways, and accepted ones. */
@@ -34,7 +36,7 @@ export type FriendsState = {
 export type MessageRequests = { incoming: FriendFace[]; outgoing: FriendFace[]; accepted: FriendFace[] }
 const NO_REQUESTS: MessageRequests = { incoming: [], outgoing: [], accepted: [] }
 
-const PREVIEW: FriendsState = {
+export const PREVIEW_FRIENDS: FriendsState = {
   friends: [
     { id: '2', username: 'bo', displayName: 'Bo', avatarUrl: null, supporter: true, favourite: true, nickname: 'Bobby', muted: false, online: true, playing: { slug: 'lethal-company', title: 'Lethal Company', cover: null } },
     { id: '3', username: 'ana', displayName: 'Ana', avatarUrl: null, supporter: false, favourite: false, nickname: null, muted: false, online: true },
@@ -42,6 +44,7 @@ const PREVIEW: FriendsState = {
   ],
   incoming: [{ id: '5', username: 'cy', displayName: 'Cy', avatarUrl: null, supporter: false, requestId: '9' }],
   outgoing: 1,
+  sent: [{ id: '7', username: 'nova', displayName: 'Nova', avatarUrl: null, supporter: false, requestId: '10' }],
   hidden: ['blockedperson'],
   messageRequests: {
     incoming: [{ id: '6', username: 'dee', displayName: 'Dee', avatarUrl: null, supporter: false }],
@@ -54,7 +57,7 @@ const PREVIEW: FriendsState = {
 let last: FriendsState | null = null
 
 export function useFriends(): FriendsState | null {
-  const [state, setState] = useState<FriendsState | null>(isTauri() || isWeb() ? last : PREVIEW)
+  const [state, setState] = useState<FriendsState | null>(isTauri() || isWeb() ? last : (last ?? PREVIEW_FRIENDS))
   useEffect(() => {
     let stop: (() => void) | undefined
     let cancelled = false
@@ -63,6 +66,7 @@ export function useFriends(): FriendsState | null {
         friends: s.friends ?? [],
         incoming: s.incoming ?? [],
         outgoing: s.outgoing ?? 0,
+        sent: s.sent ?? [],
         hidden: s.hidden ?? [],
         messageRequests: { ...NO_REQUESTS, ...s.messageRequests },
       }

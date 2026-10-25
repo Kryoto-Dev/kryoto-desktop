@@ -702,6 +702,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       label: 'Community',
       onOpen: () => openWeb('/community'),
       items: [
+        ...(account.friends && !guest ? [{ label: 'Friends & chat', icon: <MessageCircle />, onSelect: () => go({ kind: 'friends' }) }, { separator: true as const }] : []),
         { label: 'Statistics', icon: <ChartColumn />, onSelect: () => openWeb('/community?tab=stats') },
         { label: 'Blog', icon: <Newspaper />, onSelect: () => openWeb('/blog') },
         { label: 'Collections', icon: <Layers />, onSelect: () => openWeb('/collections/discover') },
@@ -874,7 +875,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   } else if (view.kind === 'friends') {
     content = (
       <div className="absolute inset-0 flex bg-background">
-        <FriendsPage account={account} onProfile={guest ? signIn : () => openWeb(`/user/${username}`)} onDiscord={() => void openExternal(DISCORD_URL)} onWeb={openWeb} chatWith={chatWith} games={inviteGames} onJoinInvite={joinInvite} />
+        <FriendsPage account={account} onProfile={guest ? signIn : () => openWeb(`/user/${username}`)} onWeb={openWeb} chatWith={chatWith} games={inviteGames} onJoinInvite={joinInvite} />
       </div>
     )
   } else if (view.kind === 'downloads') {
@@ -974,10 +975,12 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   const overlayGame = overlay && 'id' in overlay ? gameById(overlay.id) : null
   // Voice calls ring wherever you are in the app.
   const friendsState = useFriends()
+  const callerOf = (id: string) => friendsState?.friends.find((x) => x.id === id) ?? friendsState?.messageRequests.accepted.find((x) => x.id === id)
   const callerName = (id: string) => {
-    const f = friendsState?.friends.find((x) => x.id === id) ?? friendsState?.messageRequests.accepted.find((x) => x.id === id)
+    const f = callerOf(id)
     return f ? friendName(f) : 'Someone'
   }
+  const callerAvatar = (id: string) => callerOf(id)?.avatarUrl ?? null
 
   return (
     <div className="flex h-full flex-col bg-background">
@@ -1143,7 +1146,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           </div>
         </Modal>
       ) : null}
-      {account.voice ? <CallOverlay nameOf={callerName} /> : null}
+      {account.voice ? <CallOverlay nameOf={callerName} avatarOf={callerAvatar} usernameOf={id => callerOf(id)?.username ?? null} /> : null}
       {bigPicture ? (
         <BigPicture
           games={lib.games}

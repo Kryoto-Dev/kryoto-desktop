@@ -50,6 +50,7 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
         friends: (f.friends ?? []).map((p: any) => ({ ...face(p), favourite: !!p.favourite, nickname: p.nickname ?? null, muted: !!p.muted, online: !!p.online, playing: p.playing ?? null })),
         incoming: (f.incoming ?? []).map((p: any) => ({ ...face(p), requestId: p.requestId })),
         outgoing: (f.outgoing ?? []).length,
+        sent: (f.outgoing ?? []).map((p: any) => ({ ...face(p), requestId: p.requestId })),
         messageRequests: {
           incoming: (f.messageRequests?.incoming ?? []).map(face),
           outgoing: (f.messageRequests?.outgoing ?? []).map(face),
@@ -166,6 +167,12 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
     room_post: (a) => api(token, 'POST', '/api/chat/room', { text: a.text }),
     room_delete: (a) => api(token, 'DELETE', `/api/chat/room/${encodeURIComponent(a.id)}`),
     store_refresh_account: () => refreshFriends(),
+    // The friends list's own actions (src/lib/friends.ts builds the route).
+    friends_fetch: async (a) => {
+      const r = await api<Record<string, unknown>>(token, String(a.method), String(a.path), a.body ?? undefined)
+      void refreshFriends()
+      return r
+    },
   }
 
   const backend: Backend = {

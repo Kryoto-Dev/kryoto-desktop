@@ -1,3 +1,4 @@
+import { ProfileLink, TeamName } from '@/ui/TeamName'
 import { useEffect, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Bell, ChevronDown, Expand, Megaphone, Shrink } from 'lucide-react'
@@ -145,24 +146,17 @@ export function TitleBar({
           </button>
         ) : null}
 
-        <MenuButton
-          native="account"
-          label="Account"
-          align="right"
-          items={accountMenu}
-          className="kryo-pill flex h-7 items-center gap-2 border border-border pl-0.5 pr-2.5 text-[11px] text-foreground transition-colors hover:border-foreground aria-expanded:border-foreground"
-          trigger={
-            <>
+        <div className="kryo-pill flex h-7 items-center gap-1 border border-border pl-0.5 pr-1 text-[11px] text-foreground">
+          <ProfileLink username={account.guest ? null : account.username} className="kryo-pill inline-flex min-w-0 items-center gap-2 hover:text-primary focus-visible:outline-2 focus-visible:outline-primary">
               {account.avatarUrl ? (
                 <img decoding="async" src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" />
               ) : (
                 <span className="kryo-pill grid size-6 place-items-center bg-secondary text-[10px] font-bold">{initial}</span>
               )}
-              <span className="max-w-40 truncate">{account.displayName || account.username}</span>
-              <ChevronDown className="size-3 text-muted-foreground" />
-            </>
-          }
-        />
+              <span className="max-w-40 truncate"><TeamName username={account.guest ? null : account.username}>{account.displayName || account.username}</TeamName></span>
+          </ProfileLink>
+          <MenuButton native="account" label="Account menu" align="right" items={accountMenu} className="kryo-pill p-1 text-muted-foreground hover:text-foreground" trigger={<ChevronDown className="size-3" aria-hidden />} />
+        </div>
 
         {isTauri() ? (
           <button
