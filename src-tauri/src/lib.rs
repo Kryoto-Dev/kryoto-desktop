@@ -339,8 +339,10 @@ fn shell_theme(app: tauri::AppHandle, dark: bool, shell: Option<[u8; 3]>) {
         // Only Linux fills the window behind its views.
         #[cfg(not(target_os = "linux"))]
         let _ = shell;
-        for (label, view) in app.webviews() {
-            if label != STORE {
+        // The main window's own views only: the desktop pet is a window of
+        // its own and must stay see-through (pet.rs).
+        for view in window.webviews() {
+            if view.label() != STORE {
                 let _ = view.set_background_color(Some(color));
             }
         }
