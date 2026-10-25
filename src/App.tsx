@@ -91,8 +91,13 @@ export default function App() {
   useEffect(() => {
     if (!settings) return
     const look = effectiveLook(settings, account, catalogAppearance)
+    // System: what the computer itself is set to. The webview's
+    // prefers-color-scheme can't say: it reports the window's theme, which
+    // follows this page (shell_theme), so it would only ever echo back the
+    // last theme shown. Null until the native side answers, or outside it.
+    let systemDark: boolean | null = null
     const apply = () => {
-      applyLook(look)
+      applyLook({ ...look, systemDark })
       if (isTauri()) void call('shell_theme', { dark: document.documentElement.classList.contains('dark'), shell: shellColor() }).catch(() => {})
       // A phone linked to this PC follows the same look.
       if (isTauri()) {
@@ -105,10 +110,34 @@ export default function App() {
     }
     apply()
     const system = matchMedia('(prefers-color-scheme: dark)')
-    if (look.theme === 'system') system.addEventListener('change', apply)
+    const following = look.theme === 'system'
+    // The computer's setting, read again when the window comes back and every
+    // few seconds while it is open: a switch in Windows' Settings shows here.
+    const askSystem = () =>
+      void call<boolean | null>('system_dark')
+        .then((dark) => {
+          if (dark !== null && dark !== systemDark) {
+            systemDark = dark
+            apply()
+          }
+        })
+        .catch(() => {})
+    let timer: ReturnType<typeof setInterval> | undefined
+    if (following) {
+      system.addEventListener('change', apply)
+      if (isTauri()) {
+        askSystem()
+        timer = setInterval(askSystem, 4000)
+        window.addEventListener('focus', askSystem)
+      }
+    }
     setShowAdult(look.showAdult)
     setHideAdult(look.hideAdult === true)
-    return () => system.removeEventListener('change', apply)
+    return () => {
+      system.removeEventListener('change', apply)
+      window.removeEventListener('focus', askSystem)
+      if (timer) clearInterval(timer)
+    }
   }, [settings, account, catalogAppearance])
 
   // The pet asks for the look when it opens, which can be after the look was sent.

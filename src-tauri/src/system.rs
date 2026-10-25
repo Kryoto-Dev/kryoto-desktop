@@ -98,8 +98,54 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        rest_views(&w, false);
     }
 }
+
+/* ── Views at rest while nobody can see them ──────────────── */
+
+/// The views put to rest, by label: only these wake again, so a Store the
+/// shell had hidden (the Library is open) stays hidden.
+#[cfg(windows)]
+static RESTING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A minimized window, or one closed to the tray, kept drawing its pages in
+/// WebView2: kryo.to's moving covers ran at full speed with nobody looking,
+/// and loud fans were the result. A browser hides a minimized window's tabs;
+/// this does the same, telling each view that was showing that it is not, so
+/// Chromium stops drawing it and the page reads `document.hidden`.
+#[cfg(windows)]
+pub fn rest_views<R: Runtime>(window: &tauri::Window<R>, rest: bool) {
+    if rest {
+        if RESTING.lock().is_ok_and(|r| !r.is_empty()) {
+            return;
+        }
+        for view in window.webviews() {
+            let label = view.label().to_string();
+            let _ = view.with_webview(move |w| unsafe {
+                let controller = w.controller();
+                let mut visible = windows::core::BOOL(0);
+                // A view hidden already (the Store behind the Library) is not
+                // ours to wake later.
+                if controller.IsVisible(&mut visible).is_ok() && visible.as_bool() && controller.SetIsVisible(false).is_ok() {
+                    if let Ok(mut resting) = RESTING.lock() {
+                        resting.push(label);
+                    }
+                }
+            });
+        }
+    } else {
+        let labels = RESTING.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default();
+        for view in window.webviews().into_iter().filter(|v| labels.iter().any(|l| l == v.label())) {
+            let _ = view.with_webview(|w| unsafe {
+                let _ = w.controller().SetIsVisible(true);
+            });
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn rest_views<R: Runtime>(_window: &tauri::Window<R>, _rest: bool) {}
 
 /* ── Tray, and closing to it ──────────────────────────────── */
 
@@ -285,6 +331,7 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
                 api.prevent_close();
                 crate::menus::close(app);
                 let _ = window.hide();
+                rest_views(window, true);
             } else {
                 app.exit(0);
             }
@@ -295,7 +342,11 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
         WindowEvent::Resized(s) if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) => {
             crate::menus::close(app);
             report_window_state(window);
+            // Minimizing is a resize too; so is coming back.
+            rest_views(window, window.is_minimized().unwrap_or(false));
         }
+        // Back from the taskbar or the tray without a resize.
+        WindowEvent::Focused(true) => rest_views(window, false),
         _ => {}
     }
 }
@@ -505,5 +556,35 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
             _ => Ok(()),
         }
+    }
+}
+
+/* ── The computer's own theme ─────────────────────────────── */
+
+/// Whether the computer is set to dark mode, for the "System" theme. The
+/// webview can't tell: its prefers-color-scheme reports the window's theme,
+/// which the page sets. None when it can't be read.
+#[cfg(windows)]
+pub fn os_dark() -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let name = wide("AppsUseLightTheme");
+    let mut value: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: NUL-terminated UTF-16 strings; `value` holds the DWORD asked for.
+    let rc = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut value as *mut u32).cast(), &mut size) };
+    (rc == 0).then_some(value == 0)
+}
+
+/// GNOME's (and most desktops') color-scheme preference.
+#[cfg(not(windows))]
+pub fn os_dark() -> Option<bool> {
+    let out = std::process::Command::new("gsettings").args(["get", "org.gnome.desktop.interface", "color-scheme"]).output().ok()?;
+    let scheme = String::from_utf8_lossy(&out.stdout);
+    match scheme.trim().trim_matches('\'') {
+        "prefer-dark" => Some(true),
+        "prefer-light" | "default" => Some(false),
+        _ => None,
     }
 }

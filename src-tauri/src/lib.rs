@@ -292,6 +292,16 @@ pub(crate) fn catalog_endpoint_changed<R: Runtime>(
     Ok(())
 }
 
+/// Counts the Store's page-load events, so an early injection of
+/// BROWSER_STATE_SCRIPT for one page stops once the next event comes.
+static STORE_LOAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A link to a picture rather than a page (`/api/steam/image.jpg?url=...`).
+fn is_image_file(url: &url::Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"].iter().any(|ext| path.ends_with(ext))
+}
+
 fn block_reason(url: &url::Url) -> String {
     match url.scheme() {
         "file" | "javascript" | "data" | "blob" => {
@@ -316,6 +326,12 @@ fn store<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<tauri::Webview<R>, Str
 /// Store events are the shell's business only.
 fn emit_state<R: Runtime>(app: &tauri::AppHandle<R>, state: BrowserState) {
     let _ = app.emit_to("main", "browser-state", &state);
+}
+
+/// Whether the computer is in dark mode, for Settings' "System" theme.
+#[tauri::command(async)]
+fn system_dark() -> Option<bool> {
+    system::os_dark()
 }
 
 /// Apply the shell's scheme to native window surfaces too.
@@ -929,7 +945,12 @@ async fn store_mount(
                     return NewWindowResponse::Deny;
                 }
             };
-            if is_kryoto(&url, &popup_app) {
+            if is_kryoto(&url, &popup_app) && is_image_file(&url) {
+                // A picture "in a new tab" (a screenshot): put in the Store,
+                // it would replace the site with a bare image, signed-out
+                // looking, until the next page. The browser shows it instead.
+                let _ = open_external_url(url.as_str());
+            } else if is_kryoto(&url, &popup_app) {
                 if let Some(view) = popup_app.get_webview(STORE) {
                     let _ = view.navigate(url);
                 }
@@ -1459,6 +1480,24 @@ pub fn run() {
         .manage(pad::Pads::default())
         .setup(move |app| {
             logging::init(app.handle());
+            // `--tray` only ever comes from the start-with-Windows entry. With
+            // the switch off, that entry is left over (settings reset or
+            // restored, an old install): take it away and don't start.
+            let start_with_system = settings::load(app.handle()).start_with_system;
+            if to_tray && !start_with_system {
+                logging::info("system", "started at sign-in with Start with Windows off; removing the entry and quitting");
+                if let Err(e) = system::set_autostart(false) {
+                    logging::error("system", &format!("start with Windows: {e}"));
+                }
+                std::process::exit(0);
+            }
+            // The entry follows the switch, whatever happened to either since
+            // (and points at where this copy is installed now).
+            std::thread::spawn(move || {
+                if let Err(e) = system::set_autostart(start_with_system) {
+                    crate::logging::error("system", &format!("start with Windows: {e}"));
+                }
+            });
             if let Err(e) = storage::recover_move(app.handle()) {
                 logging::error("storage-recovery", &e);
             }
@@ -1599,7 +1638,27 @@ pub fn run() {
                     error: None,
                 },
             );
-            if !loading {
+            let load = STORE_LOAD.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if loading {
+                // The page's `load` waits for every image, ad and frame on it;
+                // one that stalls kept "Checking your account" up for minutes.
+                // The script (and the account check in it) goes in as soon as
+                // the document can be read instead. It runs once per page
+                // (`__kryoDesktop`), so the copy at `load` does nothing then.
+                let view = webview.clone();
+                tauri::async_runtime::spawn(async move {
+                    for _ in 0..150 {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        if STORE_LOAD.load(std::sync::atomic::Ordering::SeqCst) != load {
+                            return;
+                        }
+                        let Ok(url) = view.url() else { return };
+                        let kryo = is_kryoto(&url, view.app_handle());
+                        let script = BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" });
+                        let _ = view.eval(format!("if (document.readyState !== 'loading' && !window.__kryoDesktop && location.href !== 'about:blank') {{ {script} }}"));
+                    }
+                });
+            } else {
                 let kryo = is_kryoto(payload.url(), webview.app_handle());
                 let _ = webview.eval(BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" }));
                 if kryo {
@@ -1652,6 +1711,7 @@ pub fn run() {
             library::library_prefix_folder,
             pad::pad_start,
             shell_theme,
+            system_dark,
             pad::pad_stop,
             pad::pad_list,
             pad::pad_config_get,
@@ -1956,6 +2016,15 @@ mod tests {
             merge_download_context((None, None), None, Some("celeste".into())),
             (Some("celeste".into()), None)
         );
+    }
+
+    #[test]
+    fn pictures_are_not_pages() {
+        let url = |s: &str| s.parse::<url::Url>().unwrap();
+        assert!(is_image_file(&url("https://kryo.to/api/steam/image.jpg?url=https%3A%2F%2Fx%2Fa.png")));
+        assert!(is_image_file(&url("https://kryo.to/media/proof/ABC.WEBP")));
+        assert!(!is_image_file(&url("https://kryo.to/game/hades-ii")));
+        assert!(!is_image_file(&url("https://kryo.to/api/games/hades-ii/download?file=a.jpg")));
     }
 
     #[test]

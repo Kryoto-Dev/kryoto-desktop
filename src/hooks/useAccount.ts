@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { call, isTauri, on } from '@/lib/bridge'
-import { isOnline } from '@/lib/online'
 import type { AccountAppearance, CatalogAppearance } from '@/lib/settings'
 
 export type Account = {
@@ -58,8 +57,9 @@ export function useCatalogAppearance() {
  * signed out. One sign-in, shared by the Store and the client.
  */
 /**
- * The last account kryo.to reported, kept so a start with no connection opens
- * the client as that account (the Store cannot say who it is offline).
+ * The last account kryo.to reported, kept so a start opens the client as that
+ * account before the Store has said (and with no connection at all, when it
+ * cannot say).
  */
 const REMEMBER = 'kryoto.account'
 function remembered(): Account | undefined {
@@ -80,11 +80,14 @@ function remember(a: Account | null) {
 }
 
 export function useAccount(): Account | null | undefined {
+  // The account kryo.to last reported, online too: the client opens as it
+  // straight away instead of waiting on the Store (a slow kryo.to kept
+  // "Checking your account" up for minutes). The Store's own answer replaces
+  // it as soon as it comes; signed out sends the client back to the welcome
+  // screen (App).
   const [account, setAccount] = useState<Account | null | undefined>(() =>
     isTauri()
-      ? isOnline()
-        ? undefined
-        : remembered()
+      ? remembered()
       : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, kryos: null, chat: true, friends: true, groups: true, room: true, voice: true, controller: true, cloudSaves: true },
   )
   useEffect(() => {

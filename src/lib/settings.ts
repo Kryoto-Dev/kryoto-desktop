@@ -164,9 +164,9 @@ export function effectiveLook(s: Settings, account: { appearance?: AccountAppear
 }
 
 /** Stamp the look on <html>, the way kryo.to does before first paint. */
-export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { theme?: 'system' | 'light' | 'dark'; season?: string | null; reducedMotion?: boolean }) {
+export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { theme?: 'system' | 'light' | 'dark'; season?: string | null; reducedMotion?: boolean; systemDark?: boolean | null }) {
   const html = document.documentElement
-  const dark = s.theme === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : s.theme !== 'light'
+  const dark = s.theme === 'system' ? s.systemDark ?? matchMedia('(prefers-color-scheme: dark)').matches : s.theme !== 'light'
   html.classList.toggle('dark', dark)
   html.style.colorScheme = dark ? 'dark' : 'light'
   if (s.reducedMotion) html.dataset.motion = 'reduced'
