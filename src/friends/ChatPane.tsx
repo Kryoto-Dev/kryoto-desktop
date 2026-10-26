@@ -6,10 +6,12 @@ import {
   Check,
   CheckCheck,
   Clock,
+  Copy,
   Gamepad2,
   ImagePlay,
   Paperclip,
   Phone,
+  PhoneMissed,
   Download,
   Flag,
   Lock,
@@ -43,6 +45,8 @@ import {
   parseGif,
   parseInvite,
   parseFile,
+  parseCall,
+  callLine,
   chatSendFile,
   chatFileSave,
   chatFilePreview,
@@ -62,7 +66,7 @@ import { InvitePicker, type InviteGame } from './InvitePicker'
 import { ChatSettingsDialog } from './ChatSettings'
 import { ReportDialog } from './ReportDialog'
 import { startCall } from '@/lib/calls'
-import { Button, Caption, IconButton, Modal } from '@/ui'
+import { Button, Caption, ContextMenu, IconButton, Modal, type MenuEntry } from '@/ui'
 import { cn } from '@/lib/utils'
 import { artSrc } from '@/lib/art'
 
@@ -281,7 +285,24 @@ export function ChatPane({
   const [verifyOpen, setVerifyOpen] = useState(false)
   const [inviting, setInviting] = useState(false)
   const [reporting, setReporting] = useState<string | null>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // Right-click on a message: what its hover buttons do, and copying it.
+  const messageMenu = (m: ChatMessage, canChange: boolean): MenuEntry[] => [
+    { label: 'Reply', icon: <Reply />, onSelect: () => setReplyTo(m) },
+    { label: 'React', icon: <SmilePlus />, onSelect: () => setReactingTo(m.msgId) },
+    ...(m.kind === 'text' ? [{ label: 'Copy text', icon: <Copy />, onSelect: () => void navigator.clipboard?.writeText(m.body).catch(() => {}) }] : []),
+    ...(canChange && m.kind === 'text'
+      ? [{ label: 'Edit', icon: <Pencil />, onSelect: () => {
+          setEditing(m)
+          setReplyTo(null)
+          setText(m.body)
+        } }]
+      : []),
+    ...(canChange || !m.outgoing ? [{ separator: true } as const] : []),
+    ...(canChange ? [{ label: 'Delete for everyone', icon: <Trash2 />, danger: true, onSelect: () => setDeleting(m) }] : []),
+    ...(!m.outgoing ? [{ label: 'Report to Kryoto staff', icon: <Flag />, danger: true, onSelect: () => setReporting(m.msgId) }] : []),
+  ]
   const waiting = request === 'incoming'
   const bottom = useRef<HTMLDivElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
@@ -507,7 +528,24 @@ export function ChatPane({
                 <span className="h-px grow bg-border" aria-hidden />
               </div>
             ) : null}
-            <div className={cn('group flex', m.outgoing ? 'justify-end' : 'justify-start')}>
+            {m.kind === 'call' ? (
+              // A finished call: who called and how it went, between the messages.
+              <div className="flex items-center justify-center gap-1.5 py-1 text-[11px] text-muted-foreground">
+                {parseCall(m.body)?.answered ? <Phone className="size-3" aria-hidden /> : <PhoneMissed className="size-3 text-destructive" aria-hidden />}
+                <span>{(() => { const c = parseCall(m.body); return c ? callLine(c, myId, peer.name) : 'Call' })()}</span>
+                <span aria-hidden>·</span>
+                <span>{time(m.sentAt)}</span>
+              </div>
+            ) : (
+            <div
+              className={cn('group flex', m.outgoing ? 'justify-end' : 'justify-start')}
+              onContextMenu={(e) => {
+                // A link or a picture keeps the system's own menu (open, save).
+                if (m.deleted || waiting || (e.target as HTMLElement).closest('a,img,video')) return
+                e.preventDefault()
+                setMenu({ x: e.clientX, y: e.clientY, items: messageMenu(m, canChange) })
+              }}
+            >
               <div className={cn('grid max-w-[75%] gap-1', m.outgoing ? 'justify-items-end' : 'justify-items-start')}>
                 {group && !m.outgoing ? <ProfileLink username={usernameOf(m.senderUser)} className="text-[10px] font-bold text-muted-foreground hover:underline focus-visible:outline-2 focus-visible:outline-primary"><TeamName username={usernameOf(m.senderUser)}>{nameOf(m.senderUser)}</TeamName></ProfileLink> : null}
                 {quoted ? (
@@ -601,6 +639,7 @@ export function ChatPane({
                 ) : null}
               </div>
             </div>
+            )}
             </Fragment>
           )
         })}
@@ -749,6 +788,7 @@ export function ChatPane({
       </footer>
       )}
 
+      {menu ? <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} /> : null}
       {reporting ? (
         <ReportDialog
           peer={

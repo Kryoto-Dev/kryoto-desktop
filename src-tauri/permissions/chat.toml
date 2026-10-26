@@ -43,6 +43,8 @@ commands.allow = [
   "chat_send_file",
   "room_list",
   "chat_call_signal",
+  "chat_call_log",
+  "chat_active",
   "chat_ice_servers",
   "room_post",
   "room_delete",

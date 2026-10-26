@@ -88,7 +88,7 @@ export type ChatMessage = {
   sentAt: number
   receivedAt: number
   /** "text", or "gif"/"invite"/"file" with `body` as JSON. */
-  kind: 'text' | 'gif' | 'invite' | 'file'
+  kind: 'text' | 'gif' | 'invite' | 'file' | 'call'
   body: string
   replyTo: string | null
   editedAt: number | null
@@ -168,6 +168,27 @@ export const textLimit = (supporter: boolean) => (supporter ? 8000 : 2000)
 
 export const QUICK_REACTIONS = ['👍', '😂', '🔥', '❤️', '😮', '😢']
 
+/** A finished call in the conversation (`call` rows): who called, and how it went. */
+export type CallRecord = { callId: string; answered: boolean; seconds: number; caller: string }
+
+export function parseCall(body: string): CallRecord | null {
+  try {
+    const c = JSON.parse(body) as CallRecord
+    return typeof c.answered === 'boolean' && typeof c.caller === 'string' ? { ...c, seconds: Number(c.seconds) || 0 } : null
+  } catch {
+    return null
+  }
+}
+
+/** What a call record says, from the reader's side. */
+export function callLine(c: CallRecord, myId: string | null, peerName: string): string {
+  const mine = c.caller === myId
+  if (!c.answered) return mine ? 'You called · no answer' : `Missed call from ${peerName}`
+  const s = Math.max(0, Math.round(c.seconds))
+  const length = s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  return `${mine ? 'You called' : `${peerName} called`} · ${length}`
+}
+
 export function parseInvite(body: string): Invite | null {
   try {
     const i = JSON.parse(body) as Invite
@@ -237,7 +258,13 @@ export const chatIdentityAck = (peer: string) => call<void>('chat_identity_ack',
 export const chatBackupStatus = () => call<BackupStatus>('chat_backup_status')
 
 /** Browser notifications for the web chat (an empty push; see src/web/engine.ts). */
-export type PushState = { supported: boolean; permission: NotificationPermission | 'unsupported'; on: boolean }
+export type PushState = {
+  supported: boolean
+  permission: NotificationPermission | 'unsupported'
+  on: boolean
+  /** The web chat inside kryo.to: notices use the site's permission, while it is open. */
+  embedded?: boolean
+}
 export const chatPushState = () => call<PushState>('chat_push_state')
 /** Call straight from the click: the browser only asks for permission inside one. */
 export const chatPushEnable = () => call<void>('chat_push_enable')
@@ -252,3 +279,26 @@ export const chatExportHistory = () => call<string | null>('chat_export_history'
 /** Send picked messages (by id; their text is read on the native side) to staff. */
 export const chatReport = (peer: string, msgs: string[], reason: string, note: string, block: boolean, conversation?: string) =>
   call<void>('chat_report', { report: { peer, msgs, reason, note, block, conversation: conversation ?? null } })
+
+/**
+ * While someone is using this device, tell this account's other devices every
+ * 45 seconds (and as soon as it is picked up), so they leave new-message
+ * notifications to this one instead of all buzzing at once. `inUse` says
+ * whether it is in use right now. Returns the stop.
+ */
+export function startActiveBeacon(inUse: () => boolean | Promise<boolean>): () => void {
+  let last = 0
+  const tick = async (force = false) => {
+    if (!force && Date.now() - last < 40_000) return
+    if (!(await inUse())) return
+    last = Date.now()
+    void call('chat_active').catch(() => {})
+  }
+  const timer = window.setInterval(() => void tick(), 45_000)
+  const onFocus = () => void tick(true)
+  window.addEventListener('focus', onFocus)
+  return () => {
+    window.clearInterval(timer)
+    window.removeEventListener('focus', onFocus)
+  }
+}

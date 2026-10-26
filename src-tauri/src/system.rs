@@ -289,7 +289,9 @@ pub fn set_unread_badge<R: Runtime>(app: &AppHandle<R>, unread: u32) {
         };
         let _ = tray.set_tooltip(Some(tip));
     }
-    let Some(window) = app.get_webview_window("main") else { return };
+    // `get_window`: the main window holds several views, and
+    // `get_webview_window` finds none for it.
+    let Some(window) = app.get_window("main") else { return };
     #[cfg(windows)]
     {
         let _ = window.set_overlay_icon((unread > 0).then(unread_dot));

@@ -362,6 +362,13 @@ function end(reason: string, tell: boolean) {
   const peer = 'peer' in state ? state.peer : ''
   const callId = 'callId' in state ? state.callId : ''
   if (tell && peer && callId) void signal(peer, callId, 'hangup').catch(() => {})
+  // The caller puts the call in the conversation, answered or not, so the
+  // other person sees they were called (once per call: only the caller does).
+  if (role === 'caller' && peer && callId && state.phase !== 'ended' && state.phase !== 'idle') {
+    const answered = state.phase === 'active'
+    const seconds = state.phase === 'active' ? Math.round((Date.now() - state.since) / 1000) : 0
+    void call('chat_call_log', { peer, callId, answered, seconds }).catch(() => {})
+  }
   // How long it went on, on the card that says it ended.
   const full = state.phase === 'active' && reason === 'Call ended.' ? `Call ended · ${clock(Date.now() - state.since)}` : reason
   cleanup()
@@ -514,6 +521,13 @@ async function onSignal(s: Signal) {
       return
     case 'hangup':
       if (mine) end(state.phase === 'incoming' ? 'Missed call.' : 'Call ended.', false)
+      return
+    case 'elsewhere':
+      // Picked up or turned down on another of this account's devices: stop ringing here.
+      if (mine && state.phase === 'incoming') {
+        cleanup()
+        set({ phase: 'idle' })
+      }
       return
     case 'decline':
       if (mine) end('They declined.', false)

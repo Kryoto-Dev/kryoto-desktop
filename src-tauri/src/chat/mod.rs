@@ -139,9 +139,13 @@ fn emitter(app: AppHandle) -> types::Emit {
             let _ = app.emit_to("main", "chat-group-changed", serde_json::json!({ "groupId": group_id }));
         }
         ChatEvent::Call { user_id, call_id, kind, payload } => {
-            if kind == "offer" {
+            // Once per call: one ringing call is one notice, however many
+            // offers it takes to connect.
+            if kind == "offer" && first_ring(&call_id) {
                 // Ring: bring the window up, and tell the person if it was hidden.
-                let focused = app.get_webview_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
+                // `get_window`, not `get_webview_window`: the main window holds
+                // several views, and the latter finds none for it.
+                let focused = app.get_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
                 if !focused {
                     let state = app.state::<ChatState>();
                     let name = state.people.lock().expect("people").0.iter().find(|p| p.id == user_id).map(|p| p.name.clone());
@@ -157,7 +161,7 @@ fn emitter(app: AppHandle) -> types::Emit {
         }
         ChatEvent::Notify { conversation_id, sender_user, preview, group_name } => {
             // Not while the window is in front: the message is on screen.
-            let focused = app.get_webview_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
+            let focused = app.get_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
             let _ = app.emit_to("main", "chat-unread", serde_json::json!({ "conversationId": conversation_id }));
             if focused {
                 return;
@@ -182,6 +186,20 @@ fn emitter(app: AppHandle) -> types::Emit {
             });
         }
     })
+}
+
+/// Whether this call has not rung here before (and remember it).
+fn first_ring(call_id: &str) -> bool {
+    static RUNG: std::sync::Mutex<std::collections::VecDeque<String>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+    let Ok(mut rung) = RUNG.lock() else { return true };
+    if rung.iter().any(|c| c == call_id) {
+        return false;
+    }
+    rung.push_back(call_id.to_string());
+    if rung.len() > 64 {
+        rung.pop_front();
+    }
+    true
 }
 
 /// Count unread messages (people you muted left out) onto the tray and
@@ -654,6 +672,19 @@ pub async fn chat_call_signal(state: State<'_, ChatState>, peer: String, call_id
     };
     let id = hex::decode(&call_id).ok().filter(|b| b.len() == 16).ok_or("Not a call id.")?;
     current(&state)?.send_call(user_id(&peer)?, id, kind, payload).await.map_err(|e| e.to_string())
+}
+
+/// Put a finished call in the conversation (the caller's side sends it).
+#[tauri::command]
+pub async fn chat_call_log(state: State<'_, ChatState>, peer: String, call_id: String, answered: bool, seconds: u32) -> Result<(), String> {
+    let id = hex::decode(&call_id).ok().filter(|b| b.len() == 16).ok_or("Not a call id.")?;
+    current(&state)?.send_call_log(user_id(&peer)?, id, answered, seconds).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Someone is using Kryoto here: this account's other devices keep quiet.
+#[tauri::command]
+pub async fn chat_active(state: State<'_, ChatState>) -> Result<(), String> {
+    current(&state)?.send_active().await.map_err(|e| e.to_string())
 }
 
 /// STUN/TURN servers for calls, from kryo.to (TURN credentials are short-lived).

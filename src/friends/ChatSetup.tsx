@@ -281,6 +281,38 @@ function BrowserNotifications() {
       .catch(() => setState(null))
   }, [])
   if (!state?.supported) return null
+  if (state.embedded) {
+    return (
+      <div className="grid gap-1.5 border-t border-border pt-3">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-foreground">{state.on ? "Notifications are on, through kryo.to's." : 'Get a notification when a message arrives and kryo.to is in the background.'}</span>
+          {state.on ? null : (
+            <Button
+              size="sm"
+              disabled={busy || state.permission === 'denied'}
+              onClick={() => {
+                setBusy(true)
+                setError(null)
+                void chatPushEnable()
+                  .then(() => chatPushState().then(setState))
+                  .catch((e: unknown) => setError(errorText(e)))
+                  .finally(() => setBusy(false))
+              }}
+            >
+              <Bell className="size-3" aria-hidden />
+              Turn on
+            </Button>
+          )}
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          {state.permission === 'denied'
+            ? "Notifications are blocked for kryo.to. Allow them in the browser's site settings first."
+            : "Shown while a kryo.to tab is open, using kryo.to's own notifications."}
+        </p>
+        {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      </div>
+    )
+  }
   const flip = () => {
     setBusy(true)
     setError(null)

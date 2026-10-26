@@ -12,6 +12,8 @@ export type KryoNotification = {
   image: string | null
   readAt: string | null
   createdAt: string
+  /** Already shown as a system notification on another device (kryo.to). */
+  shown?: boolean
 }
 
 export type Inbox = { unreadCount: number; notifications: KryoNotification[] }
@@ -57,7 +59,11 @@ export function useInbox() {
     void on<Inbox>('inbox-state', (i) => {
       const list = i.notifications ?? []
       if (seen) {
-        for (const n of list) if (!n.readAt && !seen.has(n.id)) void notify(n.title, n.body)
+        // Only what no other device showed already (a browser push, the
+        // phone); and tell kryo.to, so those skip what is shown here.
+        const fresh = list.filter((n) => !n.readAt && !n.shown && !seen!.has(n.id))
+        for (const n of fresh) void notify(n.title, n.body)
+        if (fresh.length && isTauri()) void call('store_notifications_shown', { ids: fresh.map((n) => n.id) }).catch(() => {})
       }
       seen = new Set([...(seen ?? []), ...list.map((n) => n.id)])
       setInbox({ unreadCount: i.unreadCount ?? 0, notifications: list })

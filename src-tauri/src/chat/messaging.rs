@@ -18,13 +18,30 @@ use km_core::chat::{
 };
 use km_core::{new_message_id, CoreError, DeviceKeys, DeviceKind, SignedDevice, SignedPrekey, TrustedDevice, UserDevices};
 use km_proto::gateway::{self as gw, client_frame::Kind as C, server_frame::Kind as S, SendStatus};
-use km_proto::{content::Body, Attachment, Call, CallKind, Content, Delete, Edit, Gif, GroupMeta, Invite, Reaction, Receipt, ReceiptKind, Text, Typing};
+use km_proto::{content::Body, Active, Attachment, Call, CallKind, CallLog, Content, Delete, Edit, Gif, GroupMeta, Invite, Reaction, Receipt, ReceiptKind, Text, Typing};
 use km_store_sqlcipher::{MessageRow, NewMessage, Status};
 use serde::{Deserialize, Serialize};
 
 use super::engine::{Chat, Client};
 use super::types::{ChatEvent, Settings};
 use crate::logging;
+
+/// Until when (ms) another of this account's devices is in use: it sent
+/// `Active` a moment ago, so it shows the notifications and this one keeps
+/// quiet (the message still arrives and counts as unread here).
+static ACTIVE_ELSEWHERE_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How long one `Active` keeps the other devices quiet; clients send it
+/// every 45 seconds while someone is using them.
+const ACTIVE_FOR_MS: u64 = 75_000;
+
+pub fn active_elsewhere() -> bool {
+    now_ms() < ACTIVE_ELSEWHERE_UNTIL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A call record's stored body (`call` rows).
+fn call_log_json(l: &CallLog, caller: u64) -> String {
+    serde_json::json!({ "callId": hex::encode(&l.call_id), "answered": l.answered, "seconds": l.seconds, "caller": caller.to_string() }).to_string()
+}
 
 /// A GIF as stored and shown: where to load it from, never the file.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -330,8 +347,9 @@ impl Chat {
             }
             return row;
         }
-        // Invites are checked field by field when they arrive (invite_valid).
-        if row.outgoing || row.deleted || row.kind == "invite" {
+        // Invites are checked field by field when they arrive (invite_valid);
+        // call records carry no text.
+        if row.outgoing || row.deleted || row.kind == "invite" || row.kind == "call" {
             return row;
         }
         let sender: u64 = row.sender_user.parse().unwrap_or(0);
@@ -695,7 +713,29 @@ impl Chat {
         };
         let supporter = self.me_supporter();
         validate_outgoing(&content, supporter).map_err(|e| invalid(e, supporter))?;
-        self.deliver(&[peer], &content, true, None).await
+        // Picking up or turning it down here stops it ringing on this
+        // account's other devices.
+        let mine = matches!(kind, CallKind::Answer | CallKind::Decline);
+        let users: &[u64] = if mine { &[peer, me] } else { &[peer] };
+        self.deliver(users, &content, true, None).await
+    }
+
+    /// The record of a finished call, in the conversation for both people
+    /// (sent by the caller). `answered` false is a missed or cancelled call.
+    pub async fn send_call_log(&self, peer: u64, call_id: Vec<u8>, answered: bool, seconds: u32) -> Result<MessageRow, SendError> {
+        let me = self.my_id().await;
+        let log = CallLog { call_id, answered, seconds: if answered { seconds.min(24 * 3600) } else { 0 } };
+        let body = call_log_json(&log, me);
+        let content = Content { msg_id: new_message_id().to_vec(), conversation_id: dm_conversation_id(me, peer), sent_at_ms: now_ms(), body: Some(Body::CallLog(log)) };
+        self.send_new(Target::Dm(peer), content, "call", &body, None).await
+    }
+
+    /// "This device is in use": to this account's other devices that are
+    /// online, never stored, so they leave the notifications to this one.
+    pub async fn send_active(&self) -> Result<(), SendError> {
+        let me = self.my_id().await;
+        let content = Content { msg_id: new_message_id().to_vec(), conversation_id: dm_conversation_id(me, me), sent_at_ms: now_ms(), body: Some(Body::Active(Active {})) };
+        self.deliver(&[me], &content, true, None).await
     }
 
     /// One of your own messages, if it may still be edited or deleted.
@@ -838,6 +878,14 @@ impl Chat {
                     Some(a) => Body::Attachment(a),
                     None => continue,
                 },
+                "call" => match serde_json::from_str::<serde_json::Value>(&row.body) {
+                    Ok(v) => Body::CallLog(CallLog {
+                        call_id: v["callId"].as_str().and_then(|h| hex::decode(h).ok()).unwrap_or_default(),
+                        answered: v["answered"].as_bool().unwrap_or(false),
+                        seconds: v["seconds"].as_u64().unwrap_or(0) as u32,
+                    }),
+                    Err(_) => continue,
+                },
                 _ => Body::Text(Text {
                     text: row.body.clone(),
                     reply_to: row.reply_to.as_deref().and_then(|r| hex::decode(r).ok()).unwrap_or_default(),
@@ -919,7 +967,8 @@ impl Chat {
         match content.body {
             Some(Body::Invite(ref i)) if !km_core::chat::invite_valid(i) => {}
             Some(Body::Attachment(ref a)) if !km_core::chat::attachment_valid(a) => {}
-            Some(Body::Text(_)) | Some(Body::Gif(_)) | Some(Body::Invite(_)) | Some(Body::Attachment(_)) => {
+            Some(Body::CallLog(ref l)) if !km_core::chat::call_log_valid(l) || target.group().is_some() => {}
+            Some(Body::Text(_)) | Some(Body::Gif(_)) | Some(Body::Invite(_)) | Some(Body::Attachment(_)) | Some(Body::CallLog(_)) => {
                 let (kind, body, reply) = match &content.body {
                     Some(Body::Text(t)) => ("text", t.text.clone(), (t.reply_to.len() == 16).then(|| t.reply_to.clone())),
                     Some(Body::Gif(g)) => (
@@ -937,6 +986,7 @@ impl Chat {
                     ),
                     Some(Body::Invite(i)) => ("invite", serde_json::to_string(&InviteBody::from_proto(i)).unwrap_or_default(), None),
                     Some(Body::Attachment(a)) => ("file", serde_json::to_string(&FileBody::from_proto(a)).unwrap_or_default(), None),
+                    Some(Body::CallLog(l)) => ("call", call_log_json(l, sender), None),
                     _ => unreachable!(),
                 };
                 let row = {
@@ -965,7 +1015,10 @@ impl Chat {
                 (self.emit)(ChatEvent::Message(shown.clone()));
                 if !from_me {
                     let muted = self.context.lock().expect("context").people.get(&sender).is_some_and(|p| p.muted);
-                    if !muted {
+                    // A call record follows the call, which already rang; and
+                    // with another of this account's devices in use, that one
+                    // shows the notice.
+                    if !muted && kind != "call" && !active_elsewhere() {
                         let preview = (self.settings().await.notification_content == "full").then(|| match shown.kind.as_str() {
                             "invite" => serde_json::from_str::<InviteBody>(&shown.body)
                                 .map(|i| format!("Invites you to play {}", i.title))
@@ -1077,6 +1130,17 @@ impl Chat {
                 if let Some(u) = updated {
                     self.emit_row(false, u);
                 }
+            }
+            // Answered or declined on another of this account's devices.
+            Some(Body::Call(c)) if from_me => {
+                if let (Target::Dm(peer), true) = (target, km_core::chat::call_valid(&c)) {
+                    if matches!(CallKind::try_from(c.kind), Ok(CallKind::Answer) | Ok(CallKind::Decline)) {
+                        (self.emit)(ChatEvent::Call { user_id: peer.to_string(), call_id: hex::encode(&c.call_id), kind: "elsewhere".into(), payload: String::new() });
+                    }
+                }
+            }
+            Some(Body::Active(_)) if from_me => {
+                ACTIVE_ELSEWHERE_UNTIL.store(now_ms() + ACTIVE_FOR_MS, std::sync::atomic::Ordering::Relaxed);
             }
             Some(Body::Call(c)) if !from_me => {
                 // Calls are one-to-one, from people who may talk to us.

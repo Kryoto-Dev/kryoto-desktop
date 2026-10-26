@@ -67,6 +67,8 @@ import { useSettings } from '@/lib/settings'
 import * as nav from '@/lib/history'
 import type { View } from '@/lib/history'
 import { call, errorText, on } from '@/lib/bridge'
+import { startActiveBeacon } from '@/lib/chat'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { logError } from '@/lib/log'
 import { flushPlays, isExpectedReportError, reportPlay } from '@/lib/play-reports'
 import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
@@ -159,6 +161,8 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   // its cache); anything else is loaded. `pending` is where it was sent, so
   // a redirect on the way replaces the entry instead of adding one.
   const pending = useRef<{ url: string; from: string; at: number; stale: string[] } | null>(null)
+  // Kryoto in front: this account's other devices leave chat notifications to it.
+  useEffect(() => (isTauri() ? startActiveBeacon(() => getCurrentWindow().isFocused().catch(() => false)) : undefined), [])
   useEffect(() => {
     if (view.kind !== 'web' || nav.sameUrl(view.url, page.url)) return
     const p = pending.current

@@ -48,6 +48,11 @@ export type ToSite =
   | { type: 'message'; from: string; peer: string }
   | { type: 'call'; phase: string; peer: string; name: string; since: number | null; muted: boolean; deafened: boolean; reason: string | null; reconnecting: boolean }
   | { type: 'navigate'; path: string }
+  // A message or a ring while the tab is in the background: the site shows it
+  // with its own notification permission (a framed page cannot have one).
+  | { type: 'notify'; title: string; body: string | null }
+  // What the site's permission is; `request` asks the reader for it first.
+  | { type: 'notify-ask'; request: boolean }
 
 export type FromSite =
   | { type: 'open'; username: string }
@@ -55,6 +60,7 @@ export type FromSite =
   | { type: 'look'; look: { theme: 'light' | 'dark'; palette: string; radius: string; font: string | null; season: string | null; motion: string | null } }
   | { type: 'signin-start' }
   | { type: 'call'; action: 'accept' | 'decline' | 'hangup' | 'mute' | 'deafen' }
+  | { type: 'notify-permission'; permission: NotificationPermission | 'unsupported' }
 
 export function toSite(msg: ToSite) {
   if (!EMBEDDED) return
@@ -72,6 +78,30 @@ export function fromSite(handler: (msg: FromSite) => void): () => void {
   }
   window.addEventListener('message', listener)
   return () => window.removeEventListener('message', listener)
+}
+
+/**
+ * kryo.to's notification permission, which is what notices from the framed
+ * chat use. A frame on another origin always reads `denied` itself (browsers
+ * refuse notifications to cross-origin frames), which said "blocked" to
+ * people who had allowed them. `request` asks the reader, inside their click
+ * (the click in the frame counts for the page around it).
+ */
+export function sitePermission(request: boolean): Promise<NotificationPermission | 'unsupported'> {
+  return new Promise((resolve) => {
+    let stop = () => {}
+    const timer = window.setTimeout(() => {
+      stop()
+      resolve('unsupported')
+    }, request ? 60_000 : 1500)
+    stop = fromSite((m) => {
+      if (m.type !== 'notify-permission') return
+      window.clearTimeout(timer)
+      stop()
+      resolve(m.permission)
+    })
+    toSite({ type: 'notify-ask', request })
+  })
 }
 
 let held = false

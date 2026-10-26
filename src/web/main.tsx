@@ -9,7 +9,7 @@ import { CallOverlay } from '@/friends/CallOverlay'
 import { friendName, useFriends } from '@/hooks/useFriends'
 import { useSocialBadge } from '@/hooks/useSocialBadge'
 import { accept, decline, hangUp, subscribe as onCall, toggleDeafen, toggleMute } from '@/lib/calls'
-import type { ChatMessage } from '@/lib/chat'
+import { startActiveBeacon, type ChatMessage } from '@/lib/chat'
 import { applyLook } from '@/lib/settings'
 import { Button, Label } from '@/ui'
 import { API_BASE, api, startSignIn, waitForToken, type DeviceStart } from './api'
@@ -309,6 +309,19 @@ function App() {
   const [busyElsewhere, setBusyElsewhere] = useState(false)
   // Other tabs ask before taking chat over; they must not end a call here.
   useEffect(() => onCall((c) => setEngineInCall(c.phase !== 'idle' && c.phase !== 'ended')), [])
+  // In use: the tab is in front and someone touched chat in the last two
+  // minutes (inside kryo.to the frame only sees its own clicks and keys).
+  useEffect(() => {
+    let touched = 0
+    const touch = () => (touched = Date.now())
+    const events = ['pointerdown', 'keydown', 'wheel'] as const
+    events.forEach((e) => window.addEventListener(e, touch, { passive: true }))
+    const stop = startActiveBeacon(() => document.visibilityState === 'visible' && (EMBEDDED || document.hasFocus()) && Date.now() - touched < 120_000)
+    return () => {
+      stop()
+      events.forEach((e) => window.removeEventListener(e, touch))
+    }
+  }, [])
   useEffect(() => {
     void Store.open()
       .then((s) => s.get<string>('token'))

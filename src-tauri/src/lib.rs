@@ -598,16 +598,26 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   let remoteBusy = false;
   let lastReport = '';
   let lastReportAt = 0;
+  // kryo.to says how soon to ask again (`next` on take): every beat while
+  // somebody is looking at this PC from kryo.to or a phone, every 20 s or so
+  // otherwise. Asking every 3 s from every PC all day was the busiest load on
+  // the site (kryoto-bugs KB-0002). An older kryo.to sends no `next`: every beat.
+  let nextTakeAt = 0;
+  let watched = true;
   const post = (path, body) => fetch(path, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     .then((r) => (r.ok ? r.json() : null));
   const remote = async () => {
     if (!KRYO || !me || remoteBusy || document.visibilityState === 'prerender') return;
+    if (Date.now() < nextTakeAt) return;
     remoteBusy = true;
     try {
       const snap = await invoke('remote_snapshot');
       if (!snap || !snap.installId) return;
       // `mirrors`: a game only on mirrors may be sent too (remote.rs).
       const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: snap.protocol, mirrors: true }).catch(() => null);
+      const next = taken && typeof taken.next === 'number' && taken.next > 0 ? Math.min(taken.next, 60000) : 0;
+      watched = !next || next <= 5000;
+      nextTakeAt = next ? Date.now() + next - 500 : 0;
       let now = snap;
       if (taken && Array.isArray(taken.commands) && taken.commands.length) {
         const results = await invoke('remote_apply', { commands: taken.commands });
@@ -617,9 +627,11 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         }
         now = (await invoke('remote_snapshot')) || snap;
       }
-      // Downloads moving, a game starting or stopping, or the library changing.
+      // Downloads moving, a game starting or stopping, or the library changing:
+      // at once while watched, otherwise with the half-minute report that
+      // keeps the PC listed as online.
       const body = JSON.stringify([now.downloads, now.running || [], (now.games || []).map((g) => g.id + ':' + (g.lastPlayed || 0))]);
-      if (body !== lastReport || Date.now() - lastReportAt > 30000) {
+      if ((body !== lastReport && watched) || Date.now() - lastReportAt > 30000) {
         lastReport = body;
         lastReportAt = Date.now();
         const answer = await post('/api/desktop/remote/report', now).catch(() => null);
@@ -1272,6 +1284,27 @@ fn store_mark_read(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Tell kryo.to these notifications were shown here as system notifications,
+/// so the account's other devices (Kryoto Mobile) do not show them again.
+/// Runs in the Store's page, with the session the player signed in with.
+#[tauri::command]
+fn store_notifications_shown(app: tauri::AppHandle, ids: Vec<String>) -> Result<(), String> {
+    let ids: Vec<String> = ids.into_iter().filter(|id| !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())).take(50).collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to first.".into());
+    }
+    let body = serde_json::to_string(&serde_json::json!({ "shown": ids })).map_err(|e| e.to_string())?;
+    view.eval(format!(
+        "fetch('/api/notifications',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:{}}}).catch(()=>{{}})",
+        serde_json::to_string(&body).map_err(|e| e.to_string())?
+    ))
+    .map_err(|e| e.to_string())
+}
+
 /// Set a game's status in the account's kryo.to library (`playing`, `plan`,
 /// `completed`, `onhold`, `dropped`, `favorite`), or take it out with `None`.
 /// Runs in the Store's page, with the session the player signed in with.
@@ -1760,6 +1793,8 @@ pub fn run() {
             chat::chat_send_file,
             chat::room_list,
             chat::chat_call_signal,
+            chat::chat_call_log,
+            chat::chat_active,
             chat::chat_ice_servers,
             chat::room_post,
             chat::room_delete,
@@ -1777,6 +1812,7 @@ pub fn run() {
             store_visible,
             store_sign_out,
             store_mark_read,
+            store_notifications_shown,
             store_refresh_account,
             store_friend_fetch,
             store_friend_done,

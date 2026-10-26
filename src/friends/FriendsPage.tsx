@@ -44,6 +44,8 @@ import {
   useChatStatus,
   parseFile,
   parseInvite,
+  parseCall,
+  callLine,
   type ChatMessage,
   type ChatPersonInfo,
   type ChatStatus,
@@ -462,6 +464,12 @@ export function FriendsPage({
               onOpen={setSelected}
               onNewGroup={() => setCreatingGroup(true)}
               onCompose={() => setComposing(true)}
+              onMenu={(key, x, y) => {
+                // A friend's conversation offers what the friends list does;
+                // anything else (a group, someone who is not a friend) opens.
+                const friend = state.friends.find((f) => f.id === key)
+                setMenu({ x, y, items: friend ? friendMenu(friend) : [{ label: 'Open', icon: <MessageSquare />, onSelect: () => setSelected(key) }] })
+              }}
             />
           ) : live ? (
             <div className="grid content-start gap-5 overflow-auto p-3">
@@ -956,6 +964,10 @@ function preview(m: ChatMessage | null, myId: string | null, nameOf: (id: string
   if (m.kind === 'gif') return `${who}GIF`
   if (m.kind === 'file') return `${who}File: ${parseFile(m.body)?.name ?? ''}`
   if (m.kind === 'invite') return `${who}Game invite: ${parseInvite(m.body)?.title ?? ''}`
+  if (m.kind === 'call') {
+    const c = parseCall(m.body)
+    return c ? callLine(c, myId, nameOf(m.outgoing ? '' : m.senderUser)) : 'Call'
+  }
   return who + m.body.replace(/\s+/g, ' ')
 }
 
@@ -986,6 +998,7 @@ function ChatsList({
   onOpen,
   onNewGroup,
   onCompose,
+  onMenu,
 }: {
   conversations: Conversation[]
   needle: string
@@ -1002,7 +1015,13 @@ function ChatsList({
   onOpen: (key: string) => void
   onNewGroup: () => void
   onCompose: () => void
+  /** Right-click on a conversation, at the pointer. */
+  onMenu: (key: string, x: number, y: number) => void
 }) {
+  const menuAt = (key: string) => (e: React.MouseEvent) => {
+    e.preventDefault()
+    onMenu(key, e.clientX, e.clientY)
+  }
   const requestIds = new Set(requests.map((p) => p.id))
   const groupOf = new Map((groups ?? []).map((g) => [groupConversationId(g.id), g]))
   const rows = conversations
@@ -1024,7 +1043,7 @@ function ChatsList({
         <div className="grid gap-0.5">
           <GroupTitle title="Message requests" count={requests.length} />
           {requests.map((p) => (
-            <button key={p.id} type="button" onClick={() => onOpen(p.id)} aria-current={selected === p.id ? 'true' : undefined} className={cn(row, selected === p.id && 'bg-secondary')}>
+            <button key={p.id} type="button" onClick={() => onOpen(p.id)} onContextMenu={menuAt(p.id)} aria-current={selected === p.id ? 'true' : undefined} className={cn(row, selected === p.id && 'bg-secondary')}>
               <FriendRow f={p} label={friendName(p)} sub="Wants to message you" />
             </button>
           ))}
@@ -1044,7 +1063,7 @@ function ChatsList({
           </div>
         ) : null}
         {rows.map((r) => (
-          <button key={r.key} type="button" onClick={() => onOpen(r.key)} aria-current={selected === r.key ? 'true' : undefined} className={cn(row, selected === r.key && 'bg-secondary')}>
+          <button key={r.key} type="button" onClick={() => onOpen(r.key)} onContextMenu={menuAt(r.key)} aria-current={selected === r.key ? 'true' : undefined} className={cn(row, selected === r.key && 'bg-secondary')}>
             {r.group ? (
               <span className="kryo-pill grid size-7 shrink-0 place-items-center bg-secondary">
                 <Users className="size-3.5 text-muted-foreground" aria-hidden />
@@ -1070,7 +1089,7 @@ function ChatsList({
           </button>
         ))}
         {quiet.map((g) => (
-          <button key={g.id} type="button" onClick={() => onOpen(groupTarget(g.id))} aria-current={selected === groupTarget(g.id) ? 'true' : undefined} className={cn(row, selected === groupTarget(g.id) && 'bg-secondary')}>
+          <button key={g.id} type="button" onClick={() => onOpen(groupTarget(g.id))} onContextMenu={menuAt(groupTarget(g.id))} aria-current={selected === groupTarget(g.id) ? 'true' : undefined} className={cn(row, selected === groupTarget(g.id) && 'bg-secondary')}>
             <span className="kryo-pill grid size-7 shrink-0 place-items-center bg-secondary">
               <Users className="size-3.5 text-muted-foreground" aria-hidden />
             </span>

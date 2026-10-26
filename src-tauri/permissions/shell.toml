@@ -20,7 +20,7 @@ commands.allow = [
   "game_logs_folder",
   "library_prefix_folder",
   "pad_start",
-  "shell_theme", "system_dark",
+  "shell_theme", "system_dark", "store_notifications_shown",
   "phone_status", "phone_set_lan", "phone_new_code", "phone_revoke", "phone_report_look",
   "cloud_achievements_status",
   "cloud_saves_status", "cloud_saves_refresh", "cloud_saves_game", "cloud_saves_location", "cloud_saves_leave_out", "cloud_saves_add_folder",

@@ -8,6 +8,7 @@ import type { Backend } from '@/lib/bridge'
 import { api } from './api'
 import { parseTarget, WebChat, type ChatStatus, type Person } from './engine'
 import { Store } from './store'
+import { EMBEDDED, sitePermission } from './embed'
 
 type Handler = (payload: unknown) => void
 
@@ -136,9 +137,19 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
     chat_verify_mark: async (a) => (await need()).verifyMark(a.peer, a.verified),
     chat_identity_ack: async (a) => (await need()).identityAck(a.peer),
     chat_backup_status: async () => (await need()).backupStatus(),
-    chat_push_state: async () => (await need()).pushState(),
-    chat_push_enable: async () => (await need()).pushEnable(),
-    chat_push_disable: async () => (await need()).pushDisable(),
+    // Inside kryo.to: the site's own notifications, while kryo.to is open.
+    chat_push_state: async () => {
+      if (!EMBEDDED) return (await need()).pushState()
+      const permission = await sitePermission(false)
+      return { supported: permission !== 'unsupported', permission, on: permission === 'granted', embedded: true }
+    },
+    chat_push_enable: async () => {
+      if (!EMBEDDED) return (await need()).pushEnable()
+      if ((await sitePermission(true)) !== 'granted') throw new Error("Notifications are blocked for kryo.to. Allow them in the browser's site settings.")
+    },
+    chat_push_disable: async () => (EMBEDDED ? undefined : (await need()).pushDisable()),
+    chat_call_log: async (a) => (await need()).callLog(a.peer, a.callId, a.answered, a.seconds),
+    chat_active: async () => (await need()).active().catch(() => {}),
     chat_backup_create: async () => (await need()).backupCreate(),
     chat_backup_delete: async () => (await need()).backupDelete(),
     chat_devices: async () => (await need()).myDevices(),

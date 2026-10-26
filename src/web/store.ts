@@ -23,7 +23,7 @@ export type MessageRow = {
   outgoing: boolean
   sentAt: number
   receivedAt: number
-  kind: 'text' | 'gif' | 'invite' | 'file'
+  kind: 'text' | 'gif' | 'invite' | 'file' | 'call'
   body: string
   replyTo: string | null
   editedAt: number | null
