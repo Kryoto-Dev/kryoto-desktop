@@ -124,7 +124,8 @@ export function LibraryHome({
       {recent.length > 1 ? (
         <section className="grid min-w-0 gap-3">
           <Label>Recent</Label>
-          <div className="grid auto-cols-[minmax(260px,1fr)] grid-flow-col gap-3 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {/* Capped: with one or two recent games a `1fr` card filled the whole width at 460:215 and dwarfed the page (KB-0021). */}
+          <div className="grid auto-cols-[minmax(260px,360px)] grid-flow-col justify-start gap-3 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {recent.slice(1, 7).map((g) => (
               <div key={g.id} className="relative">
               <button

@@ -344,6 +344,7 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
         WindowEvent::Resized(s) if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) => {
             crate::menus::close(app);
             report_window_state(window);
+            refresh_corners(window);
             // Minimizing is a resize too; so is coming back.
             rest_views(window, window.is_minimized().unwrap_or(false));
         }
@@ -395,76 +396,197 @@ fn changed(last: &Mutex<Option<(i32, i32)>>, now: (i32, i32)) -> bool {
 
 /* ── Window corners ───────────────────────────────────────── */
 
-/// Windows 11 rounds a frameless window's corners and draws its shadow
-/// itself when asked - the same corners as every other window, with no
-/// see-through edge to paint. `small` is the tighter radius Windows uses for
-/// menus. Older Windows keeps square corners. Linux has no such call: its window
-/// is see-through (tauri.linux.conf.json) and the page rounds itself (styles.css).
-pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
-        if let Ok(hwnd) = window.hwnd() {
-            // DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3.
-            let pref: i32 = if small { 3 } else { 2 };
-            // SAFETY: a live window handle and a pointer to a 4-byte value.
-            unsafe {
-                DwmSetWindowAttribute(
-                    hwnd.0 as _,
-                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                    (&pref as *const i32).cast(),
-                    std::mem::size_of::<i32>() as u32,
-                );
-            }
-        }
+/// The window's corner radius in logical pixels: the reader's corner style
+/// (Settings > Appearance, or their kryo.to account), sent by the shell with
+/// `window_corners`. Square while the window fills the screen (maximized,
+/// full screen, tiled), where a rounded corner would show the desktop behind.
+static RADIUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(16);
+
+pub fn corner() -> i32 {
+    RADIUS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A corner style as pixels: the same `--kryo-radius` the pages use (styles.css).
+pub fn radius_for(style: &str) -> i32 {
+    match style {
+        "sharp" => 0,
+        "soft" => 2,
+        "rounded" => 5,
+        "round" => 10,
+        _ => 16,
     }
+}
+
+/// The shell's corner style changed: round the window to match.
+#[tauri::command]
+pub fn window_corners(window: tauri::Window, radius: String) {
+    RADIUS.store(radius_for(&radius), std::sync::atomic::Ordering::Relaxed);
+    apply_corners(&window);
+}
+
+/// Set up the corners once, at start, and draw them at the current style.
+///
+/// * Windows 11 rounds a frameless window and draws its shadow when asked.
+/// * Windows 10 has no such call: the window gets a rounded region instead,
+///   redone on every resize (`refresh_corners`).
+/// * Linux: a shape mask on an opaque window. The window used to be
+///   see-through for its corners, but WebKitGTK 2.54 draws dark pixels in a
+///   see-through window as clear and the app vanished on new distros
+///   (kryoto-bugs KB-0006). A shape cuts the corners off for real instead.
+pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
+    let _ = small;
     #[cfg(target_os = "linux")]
     {
-        use gtk::gdk::WindowState;
         use gtk::glib::Propagation;
         use gtk::prelude::*;
-        // GNOME's own radius for a window it rounds.
-        const RADIUS: f64 = 12.0;
-        const SQUARE: WindowState = WindowState::MAXIMIZED
-            .union(WindowState::FULLSCREEN)
-            .union(WindowState::TILED);
-        let _ = small;
         if let Ok(win) = window.gtk_window() {
-            // The window is see-through (tauri.linux.conf.json) so the page can
-            // round its own corners, but the views in it are separate surfaces:
-            // where one is transparent (the menu's corners over the Store) it
-            // shows the window, and a see-through window shows the desktop.
-            // So the window is filled, in the shell's colour, inside the same
-            // rounded shape the page draws.
+            // The views in the window are separate surfaces, and where one is
+            // transparent (a menu's corners over the Store) it shows the
+            // window: so the window is filled in the shell's colour.
             win.connect_draw(|win, cr| {
                 let fill = WINDOW_FILL.lock().map(|f| *f).unwrap_or_default();
-                let square = win.window().is_none_or(|g| g.state().intersects(SQUARE));
                 let (w, h) = (f64::from(win.allocated_width()), f64::from(win.allocated_height()));
-                let r = if square { 0.0 } else { RADIUS };
-                let q = std::f64::consts::FRAC_PI_2;
-                cr.new_sub_path();
-                cr.arc(w - r, r, r, -q, 0.0);
-                cr.arc(w - r, h - r, r, 0.0, q);
-                cr.arc(r, h - r, r, q, 2.0 * q);
-                cr.arc(r, r, r, 2.0 * q, 3.0 * q);
-                cr.close_path();
                 let rgb = |c: [u8; 3]| (f64::from(c[0]) / 255.0, f64::from(c[1]) / 255.0, f64::from(c[2]) / 255.0);
                 let (sr, sg, sb) = rgb(fill.store);
                 cr.set_source_rgb(sr, sg, sb);
-                let _ = cr.fill_preserve();
+                cr.rectangle(0.0, 0.0, w, h);
+                let _ = cr.fill();
                 // Above the Store's top edge it is the shell's own colour (the
                 // nav bar), so a menu's see-through corners over it match.
-                cr.clip();
                 let (hr, hg, hb) = rgb(fill.shell);
                 cr.set_source_rgb(hr, hg, hb);
                 cr.rectangle(0.0, 0.0, w, fill.store_top.clamp(0.0, h));
                 let _ = cr.fill();
                 Propagation::Proceed
             });
+            win.connect_size_allocate(|win, _| linux_shape::window(win));
+            win.connect_window_state_event(|win, _| {
+                linux_shape::window(win);
+                Propagation::Proceed
+            });
         }
     }
+    apply_corners(window);
+}
+
+/// Draw the corners at the current style.
+fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+        if let Ok(hwnd) = window.hwnd() {
+            // DWMWCP_DONOTROUND = 1, DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3:
+            // Windows 11 offers these three, so the styles map onto them.
+            let pref: i32 = match corner() {
+                0 => 1,
+                1..=5 => 3,
+                _ => 2,
+            };
+            // SAFETY: a live window handle and a pointer to a 4-byte value.
+            let result = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd.0 as _,
+                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                    (&pref as *const i32).cast(),
+                    std::mem::size_of::<i32>() as u32,
+                )
+            };
+            // Refused before Windows 11: a region does it there.
+            if result != 0 {
+                WIN10_REGION.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        refresh_corners(window);
+    }
+    // GTK only on its own thread; the Tauri window travels, the GTK one is
+    // looked up there.
+    #[cfg(target_os = "linux")]
+    {
+        let handle = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            if let Ok(win) = handle.gtk_window() {
+                linux_shape::window(&win);
+            }
+        });
+    }
     #[cfg(not(any(windows, target_os = "linux")))]
-    let _ = (window, small);
+    let _ = window;
+}
+
+/// Windows 10: the window's corners are a region, which follows the size.
+#[cfg(windows)]
+static WIN10_REGION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Redo the rounded region after a resize (Windows 10 only; a no-op elsewhere).
+pub fn refresh_corners<R: Runtime>(window: &tauri::Window<R>) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+        if !WIN10_REGION.load(std::sync::atomic::Ordering::Relaxed) || window.label() != "main" {
+            return;
+        }
+        let Ok(hwnd) = window.hwnd() else { return };
+        let square = corner() == 0 || window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false);
+        let Ok(size) = window.outer_size() else { return };
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let d = (f64::from(corner() * 2) * scale).round() as i32;
+        // SAFETY: a live window handle; SetWindowRgn takes ownership of the region.
+        unsafe {
+            if square {
+                SetWindowRgn(hwnd.0 as _, std::ptr::null_mut(), 1);
+            } else {
+                let region = CreateRoundRectRgn(0, 0, size.width as i32 + 1, size.height as i32 + 1, d, d);
+                SetWindowRgn(hwnd.0 as _, region, 1);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
+/// Linux shape masks: corners cut off a widget for real, on an opaque surface.
+#[cfg(target_os = "linux")]
+pub mod linux_shape {
+    use gtk::cairo::{RectangleInt, Region};
+    use gtk::gdk::WindowState;
+    use gtk::prelude::*;
+
+    /// A rounded rectangle as rows of pixels: what X11 shapes are made of.
+    pub fn rounded(w: i32, h: i32, radius: i32) -> Region {
+        let region = Region::create();
+        let r = radius.min(w / 2).min(h / 2).max(0);
+        for y in 0..r {
+            let dy = f64::from(r) - f64::from(y) - 0.5;
+            let inset = (f64::from(r) - (f64::from(r * r) - dy * dy).max(0.0).sqrt()).round() as i32;
+            let _ = region.union_rectangle(&RectangleInt::new(inset, y, w - 2 * inset, 1));
+            let _ = region.union_rectangle(&RectangleInt::new(inset, h - 1 - y, w - 2 * inset, 1));
+        }
+        let _ = region.union_rectangle(&RectangleInt::new(0, r, w, h - 2 * r));
+        region
+    }
+
+    /// The main window at the reader's corner style, square while it fills the screen.
+    pub fn window(win: &impl IsA<gtk::Widget>) {
+        const SQUARE: WindowState = WindowState::MAXIMIZED.union(WindowState::FULLSCREEN).union(WindowState::TILED);
+        let widget = win.as_ref();
+        let radius = super::corner();
+        let square = radius == 0 || widget.window().is_none_or(|g| g.state().intersects(SQUARE));
+        let (w, h) = (widget.allocated_width(), widget.allocated_height());
+        if square || w <= 2 * radius || h <= 2 * radius {
+            widget.shape_combine_region(None);
+        } else {
+            widget.shape_combine_region(Some(&rounded(w, h, radius)));
+        }
+    }
+
+    /// A child view (the menu): rounded at `radius` at the size it was given.
+    pub fn view(widget: &gtk::Widget, w: i32, h: i32, radius: i32) {
+        if radius > 0 && w > 2 * radius && h > 2 * radius {
+            widget.shape_combine_region(Some(&rounded(w, h, radius)));
+        } else {
+            widget.shape_combine_region(None);
+        }
+    }
 }
 
 /// What the Linux window is filled with behind its views: the shell's colour

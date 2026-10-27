@@ -527,9 +527,9 @@ html[data-window='popup'] [role='menuitem'] {
   border-radius: min(var(--kryo-radius), 6px);
 }
 
-/* Linux's menu view is see-through (menus.rs), so the panel can have corners. */
+/* Linux cuts the menu view to the reader's corner style with a shape (menus.rs), so the panel takes the same corners. */
 html[data-os='linux'][data-window='popup'] .kryo-square.border.bg-popover {
-  border-radius: 10px;
+  border-radius: var(--kryo-radius);
   /* The edge as an inset ring: a real border's anti-aliased pixels outside the
      arc showed as light specks at each corner of the see-through view. */
   border-color: transparent;
@@ -799,16 +799,17 @@ html.kryo-pad .kryo-bp-tile:focus {
    frame anything under it changes, and with the window full of moving art it
    was most of what made the Linux client feel slow. The panels keep their
    near-solid fill, which is what they mostly showed anyway. */
-/* Linux: the window is see-through (tauri.linux.conf.json), so the corners are
-   the page's own. Square again once it fills the screen. */
-html[data-os='linux']:not([data-window='popup']):not([data-frame='square']),
-html[data-os='linux']:not([data-window='popup']):not([data-frame='square']) body {
-  background: transparent;
-}
-html[data-os='linux']:not([data-window='popup']):not([data-frame='square']) #root {
-  border-radius: 12px;
-  overflow: hidden;
-  background: var(--background);
+/* Linux: the main window is opaque, with square corners. It was see-through for
+   rounded corners from 0.2.24, but WebKitGTK 2.54 (the system WebKit behind the
+   .rpm and .deb on Fedora 44 and other new distros) draws dark pixels in a
+   see-through window as clear: the whole app vanished and only text, images
+   and buttons showed (kryoto-bugs KB-0006, KB-0007). The AppImage's older
+   WebKit hid it. Rounded corners are not worth an invisible app.
+   A dark color-scheme also lowers every background's alpha in such a window,
+   so the scheme stays light here; every colour, scrollbar and field is ours. */
+:root[data-os='linux'],
+:root.dark[data-os='linux'] {
+  color-scheme: light;
 }
 html[data-os='linux'] .backdrop-blur,
 html[data-os='linux'] .backdrop-blur-sm,

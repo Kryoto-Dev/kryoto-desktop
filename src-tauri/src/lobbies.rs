@@ -144,7 +144,8 @@ pub fn online_lobby(app: AppHandle, running: State<'_, Running>, id: String) -> 
 
 /// Join a lobby with a game that is already running: Steam passes the game a
 /// join request for it.
-#[tauri::command]
+// Async: on Linux the opener waits a moment to see Steam take the link.
+#[tauri::command(async)]
 pub fn steam_join_lobby(lobby: String, host: String) -> Result<(), String> {
     if !is_steam_id(&lobby) || !is_steam_id(&host) {
         return Err("That invite does not name a lobby.".into());
@@ -158,7 +159,8 @@ pub fn steam_join_lobby(lobby: String, host: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(&url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+    return crate::linux_open::open(&url).map_err(|e| format!("Could not open Steam: {e}"));
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     result.map(|_| ()).map_err(|e| format!("Could not open Steam: {e}"))
 }
 

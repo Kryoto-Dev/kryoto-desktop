@@ -168,7 +168,9 @@ export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { t
   const html = document.documentElement
   const dark = s.theme === 'system' ? s.systemDark ?? matchMedia('(prefers-color-scheme: dark)').matches : s.theme !== 'light'
   html.classList.toggle('dark', dark)
-  html.style.colorScheme = dark ? 'dark' : 'light'
+  // Never dark on Linux: WebKitGTK 2.54 draws a see-through window's
+  // backgrounds at partial alpha under a dark scheme (styles.css, KB-0006).
+  html.style.colorScheme = dark && html.dataset.os !== 'linux' ? 'dark' : 'light'
   if (s.reducedMotion) html.dataset.motion = 'reduced'
   else delete html.dataset.motion
   html.dataset.palette = s.palette || 'monochrome'

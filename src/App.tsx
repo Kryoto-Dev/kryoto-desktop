@@ -102,6 +102,8 @@ export default function App() {
       // A phone linked to this PC follows the same look.
       if (isTauri()) {
         const dark = document.documentElement.classList.contains('dark')
+        // The window's own corners follow the reader's corner style (system.rs).
+        void call('window_corners', { radius: look.radius }).catch(() => {})
         void call('phone_report_look', { look: { theme: dark ? 'dark' : 'light', palette: look.palette, radius: look.radius, font: look.font, season: look.season ?? null, reducedMotion: look.reducedMotion === true } }).catch(() => {})
         // The desktop pet (src/pet) wears the same palette.
         petLook = { palette: look.palette, dark, reducedMotion: look.reducedMotion === true }

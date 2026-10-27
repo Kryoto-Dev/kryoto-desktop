@@ -27,7 +27,8 @@ export function PopupApp() {
       if (!p) return
       const html = document.documentElement
       html.classList.toggle('dark', p.look.theme !== 'light')
-      html.style.colorScheme = p.look.theme === 'light' ? 'light' : 'dark'
+      // Light on Linux whatever the theme: see applyLook (KB-0006).
+      html.style.colorScheme = p.look.theme === 'light' || html.dataset.os === 'linux' ? 'light' : 'dark'
       html.dataset.palette = p.look.palette
       html.dataset.radius = p.look.radius
       if (p.look.season) html.dataset.season = p.look.season

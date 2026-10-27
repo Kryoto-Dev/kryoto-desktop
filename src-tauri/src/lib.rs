@@ -21,6 +21,8 @@ mod lobbies;
 mod linux_overlay;
 #[cfg(target_os = "linux")]
 mod linux_store_downloads;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux_open;
 mod logging;
 mod menus;
 mod online;
@@ -340,10 +342,12 @@ fn shell_theme(app: tauri::AppHandle, dark: bool, shell: Option<[u8; 3]>) {
     if let Some(window) = app.get_window("main") {
         let _ = window.set_theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }));
         let value = if dark { 10 } else { 249 };
-        // Linux: see-through, so the page's rounded corners show the desktop
-        // behind them (styles.css, `data-os='linux'`).
-        let alpha = if cfg!(target_os = "linux") { 0 } else { 255 };
-        let color = tauri::window::Color(value, value, value, alpha);
+        // Opaque everywhere. Linux had a see-through window for rounded
+        // corners, but WebKitGTK 2.54 draws dark pixels in one as clear and the
+        // app vanished on new distros (kryoto-bugs KB-0006, styles.css). The
+        // Linux window fill below still paints behind the views, so nothing
+        // that loses its alpha can show the desktop.
+        let color = tauri::window::Color(value, value, value, 255);
         let _ = window.set_background_color(Some(color));
         #[cfg(target_os = "linux")]
         {
@@ -842,7 +846,8 @@ fn open_external_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(parsed.as_str()).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open").arg(parsed.as_str()).spawn();
+    return linux_open::open(parsed.as_str());
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     result.map(|_| ()).map_err(|e| e.to_string())
 }
 
@@ -961,7 +966,11 @@ async fn store_mount(
                 // A picture "in a new tab" (a screenshot): put in the Store,
                 // it would replace the site with a bare image, signed-out
                 // looking, until the next page. The browser shows it instead.
-                let _ = open_external_url(url.as_str());
+                // Off the UI thread: on Linux the opener waits to see it work.
+                let target = url.to_string();
+                std::thread::spawn(move || {
+                    let _ = open_external_url(&target);
+                });
             } else if is_kryoto(&url, &popup_app) {
                 if let Some(view) = popup_app.get_webview(STORE) {
                     let _ = view.navigate(url);
@@ -973,7 +982,11 @@ async fn store_mount(
                     let _ = popup_app.emit("notify", downloads::Notice::new("Can't use that mirror", &e, None));
                 }
             } else if allowed_browser_url(&url) {
-                let _ = open_external_url(url.as_str());
+                // Off the UI thread: on Linux the opener waits to see it work.
+                let target = url.to_string();
+                std::thread::spawn(move || {
+                    let _ = open_external_url(&target);
+                });
             }
             NewWindowResponse::Deny
         });
@@ -1874,6 +1887,7 @@ pub fn run() {
             system::app_exit,
             system::os_notify,
             system::pick_path,
+            system::window_corners,
             system::window_state_get,
             pet::pet_menu,
             pet::pet_open_app,

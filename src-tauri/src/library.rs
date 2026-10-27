@@ -1030,14 +1030,17 @@ pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
             _ => return Err(format!("{path} is not there any more.")),
         }
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return crate::linux_open::open(&dir.to_string_lossy());
     #[cfg(windows)]
     let program = "explorer";
     #[cfg(target_os = "macos")]
     let program = "open";
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let program = "xdg-open";
-    std::process::Command::new(program).arg(&dir).spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        std::process::Command::new(program).arg(&dir).spawn().map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
