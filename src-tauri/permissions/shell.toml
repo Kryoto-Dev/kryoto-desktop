@@ -22,6 +22,7 @@ commands.allow = [
   "pad_start",
   "shell_theme", "system_dark", "store_notifications_shown",
   "phone_status", "phone_set_lan", "phone_new_code", "phone_revoke", "phone_report_look",
+  "remote_status", "remote_set_consent",
   "cloud_achievements_status",
   "cloud_saves_status", "cloud_saves_refresh", "cloud_saves_game", "cloud_saves_location", "cloud_saves_leave_out", "cloud_saves_add_folder",
   "cloud_saves_backup", "cloud_saves_versions", "cloud_saves_restore", "cloud_saves_restore_local", "cloud_saves_answer",

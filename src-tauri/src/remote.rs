@@ -9,10 +9,18 @@
 //! browser (BROWSER_STATE_SCRIPT in lib.rs): it takes what kryo.to queued and
 //! hands it to `remote_apply`, and sends `remote_snapshot` back while
 //! something moves. Only a kryo.to page in the Store may call either.
+//!
+//! Remote is opt-in per account (kryo.to `lib/remote-consent.ts`). Until the
+//! signed-in account has turned it on, nothing here runs: no beat, no
+//! snapshot, no command. The answer comes with the account (`/api/auth/me`,
+//! `set_consent`) and is forgotten on sign-out; kryo.to refusing a beat turns
+//! it off at once (`remote_consent_off`). A phone paired on this network
+//! (phone.rs) is not Remote and does not depend on it.
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State, Webview};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::io::Write;
 
@@ -25,6 +33,106 @@ pub const PROTOCOL: u8 = 3;
 /// How often the Store page is asked to take what kryo.to queued and report back.
 const BEAT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Remote is on for the account signed in to the Store's kryo.to page. Off
+/// until kryo.to says otherwise, so a start, a sign-in or a wake from sleep
+/// never turns it on by itself.
+static ALLOWED: AtomicBool = AtomicBool::new(false);
+/// The account has answered (on or off), so Settings > Phone asks no more.
+static DECIDED: AtomicBool = AtomicBool::new(false);
+static SIGNED_IN: AtomicBool = AtomicBool::new(false);
+
+pub const OFF: &str = "Remote is off for this account.";
+
+pub fn allowed() -> bool {
+    ALLOWED.load(Ordering::SeqCst)
+}
+
+/// What Settings > Phone shows about Remote.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsentStatus {
+    signed_in: bool,
+    enabled: bool,
+    decided: bool,
+}
+
+fn status() -> ConsentStatus {
+    ConsentStatus { signed_in: SIGNED_IN.load(Ordering::SeqCst), enabled: allowed(), decided: DECIDED.load(Ordering::SeqCst) }
+}
+
+/// The account's answer (enabled, decided), from the Store page's account
+/// report (lib.rs). None is signed out: off, whatever the last account said.
+pub fn set_consent<R: tauri::Runtime>(app: &AppHandle<R>, account: Option<(bool, bool)>) {
+    store_consent(account);
+    let _ = tauri::Emitter::emit_to(app, "main", "remote-consent", status());
+}
+
+fn store_consent(account: Option<(bool, bool)>) {
+    let (enabled, decided) = account.unwrap_or((false, false));
+    SIGNED_IN.store(account.is_some(), Ordering::SeqCst);
+    DECIDED.store(decided, Ordering::SeqCst);
+    let was = ALLOWED.swap(enabled, Ordering::SeqCst);
+    if was != enabled {
+        crate::logging::info("remote", if enabled { "Remote is on for this account" } else { "Remote is off" });
+        if !enabled {
+            *PHONE_SEEN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+}
+
+/// Settings > Phone: is Remote on for the signed-in account.
+#[tauri::command]
+pub fn remote_status() -> ConsentStatus {
+    status()
+}
+
+/// kryo.to refused a beat because Remote is off (turned off on another
+/// device): stop now rather than at the next account check. The page may only
+/// turn it off this way; on comes with the account.
+#[tauri::command(async)]
+pub fn remote_consent_off(app: AppHandle, webview: Webview) -> Result<(), String> {
+    from_store(&app, &webview)?;
+    if SIGNED_IN.load(Ordering::SeqCst) {
+        set_consent(&app, Some((false, true)));
+    }
+    Ok(())
+}
+
+/// Settings > Phone: turn Remote on or off for the signed-in account, on
+/// kryo.to with the Store's own session. Off stops this PC at once, before
+/// kryo.to answers; on waits for kryo.to. The answer comes back through
+/// `remote_consent_done`, then the account is read again.
+#[tauri::command]
+pub fn remote_set_consent(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let view = crate::store(&app)?;
+    if !view.url().is_ok_and(|u| crate::is_kryoto(&u, &app)) {
+        return Err("Open kryo.to in the Store first.".into());
+    }
+    if !SIGNED_IN.load(Ordering::SeqCst) {
+        return Err("Sign in to kryo.to first.".into());
+    }
+    if !enabled {
+        set_consent(&app, Some((false, true)));
+    }
+    view.eval(format!(
+        "(() => {{ const done = (r) => {{ try {{ window.__TAURI_INTERNALS__.invoke('remote_consent_done', {{ result: r }}); }} catch (_) {{}} }}; \
+         fetch('/api/account/remote', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json' }}, body: JSON.stringify({{ enabled: {enabled} }}) }}) \
+           .then((res) => res.json().catch(() => ({{}})).then((data) => done({{ ok: res.ok, error: res.ok ? null : String((data && data.error) || 'kryo.to did not save that.') }}))) \
+           .catch(() => done({{ ok: false, error: 'Could not reach kryo.to.' }})) \
+           .finally(() => window.__kryoDesktopRefresh && window.__kryoDesktopRefresh()); }})()"
+    ))
+    .map_err(|e| e.to_string())
+}
+
+/// kryo.to's answer to `remote_set_consent`, passed on to Settings.
+#[tauri::command]
+pub fn remote_consent_done(app: AppHandle, webview: Webview, result: serde_json::Value) -> Result<(), String> {
+    from_store(&app, &webview)?;
+    let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let error = result.get("error").and_then(|v| v.as_str()).map(|e| e.chars().take(200).collect::<String>());
+    tauri::Emitter::emit_to(&app, "main", "remote-consent-done", serde_json::json!({ "ok": ok, "error": error })).map_err(|e| e.to_string())
+}
+
 /// The Remote loop's beat, kept here rather than in a timer on the Store page.
 /// The Store is hidden whenever the Library, Settings or the tray is showing,
 /// and the browser slows a hidden page's timers down to about one a minute:
@@ -35,6 +143,10 @@ pub fn start<R: tauri::Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(BEAT).await;
+            // Off: nothing is asked of the page, so nothing goes to kryo.to.
+            if !allowed() {
+                continue;
+            }
             let Ok(view) = crate::store(&app) else { continue };
             if view.url().is_ok_and(|u| crate::is_kryoto(&u, &app)) {
                 let _ = view.eval("window.__kryoRemoteTick&&window.__kryoRemoteTick()");
@@ -75,6 +187,15 @@ pub struct Snapshot {
     running: Vec<String>,
 }
 
+/// A Remote call from the Store, with Remote on.
+fn remote_from_store(app: &AppHandle, webview: &Webview) -> Result<(), String> {
+    from_store(app, webview)?;
+    if !allowed() {
+        return Err(OFF.into());
+    }
+    Ok(())
+}
+
 pub(crate) fn from_store(app: &AppHandle, webview: &Webview) -> Result<(), String> {
     if webview.label() != crate::STORE {
         return Err("Only the Store may ask.".into());
@@ -94,7 +215,7 @@ pub static PHONE_SEEN: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(Non
 /// lib.rs). Only from the Store's own kryo.to page.
 #[tauri::command(async)]
 pub fn remote_phone_seen(app: AppHandle, webview: Webview, seen_at: Option<f64>) -> Result<(), String> {
-    from_store(&app, &webview)?;
+    remote_from_store(&app, &webview)?;
     let seen = seen_at.filter(|t| t.is_finite() && *t > 0.0).map(|t| t as u64);
     *PHONE_SEEN.lock().unwrap_or_else(|e| e.into_inner()) = seen;
     Ok(())
@@ -104,7 +225,7 @@ pub fn remote_phone_seen(app: AppHandle, webview: Webview, seen_at: Option<f64>)
 /// are left out after a day, so the list is about now.
 #[tauri::command(async)]
 pub fn remote_snapshot(app: AppHandle, webview: Webview, state: State<'_, Downloads>) -> Result<Snapshot, String> {
-    from_store(&app, &webview)?;
+    remote_from_store(&app, &webview)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let downloads = downloads::downloads_list(state)
         .into_iter()
@@ -164,7 +285,7 @@ fn game_id_of(c: &RemoteCommand) -> Result<String, String> {
 /// or pause, resume or cancel one. Confirm each durable acceptance separately.
 #[tauri::command(async)]
 pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads>, commands: Vec<RemoteCommand>) -> Result<Vec<RemoteResult>, String> {
-    from_store(&app, &webview)?;
+    remote_from_store(&app, &webview)?;
     let _guard = APPLY.lock().map_err(|_| "remote command lock poisoned")?;
     let settings = crate::settings::load(&app);
     let file = app.path().app_data_dir().map_err(|e| e.to_string())?.join("remote-receipts.json");
@@ -176,6 +297,12 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
         let id = c.id.clone();
         if id.is_empty() || id.len() > 19 || !id.bytes().all(|b| b.is_ascii_digit()) {
             results.push(RemoteResult { id, error: Some("Invalid remote command ID.".into()), retryable: false });
+            continue;
+        }
+        // Asked again right before each one: Remote turned off while these
+        // were on their way means none of the rest is carried out.
+        if !allowed() {
+            results.push(RemoteResult { id, error: Some(OFF.into()), retryable: false });
             continue;
         }
         let accepted = accept_once(&file, &mut receipts, &id, now, || -> Result<(), String> { match c.kind.as_str() {
@@ -274,7 +401,7 @@ fn retryable_error(error: &str) -> bool {
     !matches!(error, "Invalid remote command ID." | "Invalid download URL." | "Invalid download ID." |
         "This download does not come from Kryoto." | "That download is no longer in the list." |
         "That download has already finished transferring." | "Unknown remote action." |
-        "Invalid game ID." | "That game is no longer in the library." | "Stop the game first." | "Cancel it first.")
+        "Invalid game ID." | "That game is no longer in the library." | "Stop the game first." | "Cancel it first." | OFF)
 }
 
 fn read_receipts(file: &std::path::Path) -> Result<BTreeMap<String, u64>, String> {
@@ -314,6 +441,21 @@ mod tests {
         assert!(!retryable_error("This download does not come from Kryoto."));
         assert!(retryable_error("Could not save remote receipt: access denied"));
         assert!(retryable_error("Wait for the download to stop, then try again."));
+        assert!(!retryable_error(OFF));
+    }
+
+    #[test]
+    fn remote_is_off_until_the_account_says_on_and_off_again_on_sign_out() {
+        assert!(!allowed());
+        store_consent(Some((false, false)));
+        assert!(!allowed());
+        store_consent(Some((true, true)));
+        assert!(allowed());
+        assert!(status().decided);
+        // Signed out (or a new account whose answer is not known yet): off.
+        store_consent(None);
+        assert!(!allowed());
+        assert!(!status().signed_in && !status().decided);
     }
 
     #[test]

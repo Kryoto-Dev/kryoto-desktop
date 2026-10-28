@@ -99,6 +99,13 @@ struct Account {
     #[serde(default)]
     cloud_saves: bool,
     /// Their Kryos balance (kryo.to's coin for perks and badges).
+    /// Remote is on for this account (kryo.to lib/remote-consent.ts, remote.rs).
+    /// Missing (an older kryo.to) is off.
+    #[serde(default)]
+    remote: bool,
+    /// The account has answered whether Remote is on.
+    #[serde(default)]
+    remote_decided: bool,
     #[serde(default)]
     kryos: Option<i64>,
 }
@@ -486,6 +493,9 @@ const BROWSER_STATE_SCRIPT: &str = r#"
 
   let me;
   let kryos = null;
+  // Remote is on for the signed-in account (kryo.to lib/remote-consent.ts).
+  // Off until /api/auth/me says on; nothing below talks to Remote before.
+  let remoteOn = false;
   let account = null;
   let savedAt = 0;
   // The wallet on kryo.to's perks page moves the balance after a claim, an
@@ -530,6 +540,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         const changed = id !== me || coins !== kryos;
         me = id;
         kryos = coins;
+        remoteOn = !!(u && u.remote && u.remote.enabled === true);
         wantPalette = u && u.appearancePalette ? u.appearancePalette : null;
         reportAppearance();
         const nextAccount = u ? {
@@ -545,6 +556,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           controller: !!(u.features && u.features.controller),
           cloudSaves: !!(u.features && u.features.cloud_saves),
           kryos: coins,
+          remote: !!(u.remote && u.remote.enabled === true),
+          remoteDecided: !!(u.remote && u.remote.decided === true),
           appearance: {
             theme: u.appearanceTheme || null,
             palette: u.appearancePalette || null,
@@ -609,9 +622,18 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   let nextTakeAt = 0;
   let watched = true;
   const post = (path, body) => fetch(path, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-    .then((r) => (r.ok ? r.json() : null));
+  // A refusal because Remote is off comes back as { remote: false }; any other as null.
+    .then((r) => (r.ok ? r.json() : r.json().then((j) => (j && j.remote === false ? { remote: false } : null), () => null)));
+  // Turned off on another device: stop at once, natively too (remote.rs).
+  const remoteOff = () => {
+    remoteOn = false;
+    lastReport = '';
+    nextTakeAt = 0;
+    invoke('remote_consent_off').catch(() => {});
+    soon();
+  };
   const remote = async () => {
-    if (!KRYO || !me || remoteBusy || document.visibilityState === 'prerender') return;
+    if (!KRYO || !me || !remoteOn || remoteBusy || document.visibilityState === 'prerender') return;
     if (Date.now() < nextTakeAt) return;
     remoteBusy = true;
     try {
@@ -620,11 +642,16 @@ const BROWSER_STATE_SCRIPT: &str = r#"
       // `mirrors`: a game only on mirrors may be sent too (remote.rs).
       const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: snap.protocol, mirrors: true }).catch(() => null);
       const next = taken && typeof taken.next === 'number' && taken.next > 0 ? Math.min(taken.next, 60000) : 0;
+      if (taken && taken.remote === false) return remoteOff();
       watched = !next || next <= 5000;
       nextTakeAt = next ? Date.now() + next - 500 : 0;
       let now = snap;
       if (taken && Array.isArray(taken.commands) && taken.commands.length) {
         const results = await invoke('remote_apply', { commands: taken.commands });
+        // Still on? Asked right before anything is carried out, so a command
+        // in flight when Remote was turned off is never run.
+        const still = await fetch('/api/account/remote', { credentials: 'include', cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+        if (!still || !still.remote || still.remote.enabled !== true || !remoteOn) return remoteOff();
         for (const result of results || []) {
           const command = taken.commands.find((c) => c.id === result.id);
             if (command) await post('/api/desktop/remote/ack', { installId: snap.installId, id: result.id, leaseToken: command.leaseToken, ...(result.error ? { error: result.error, retryable: result.retryable !== false } : {}) });
@@ -640,6 +667,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         lastReportAt = Date.now();
         const answer = await post('/api/desktop/remote/report', now).catch(() => null);
         // A phone connected through kryo.to, for Settings > Phone (phone.rs).
+        if (answer && answer.remote === false) return remoteOff();
         if (answer && 'phoneSeenAt' in answer) invoke('remote_phone_seen', { seenAt: answer.phoneSeenAt ? Date.parse(answer.phoneSeenAt) : null }).catch(() => {});
       }
     } catch (_) {
@@ -1237,6 +1265,8 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
             player_name::remember_account(&app, account.as_ref().map(|a| a.username.as_str()));
             saves::set_account(&app, account.as_ref().map(|a| a.username.as_str()), account.as_ref().is_some_and(|a| a.cloud_saves));
             let _ = app.emit_to("main", "account-state", account);
+            // Remote follows the signed-in account's own answer; signed out is off.
+            remote::set_consent(&app, account.as_ref().map(|a| (a.remote, a.remote_decided)));
         }
         if let Some(friends) = state.friends {
             let _ = app.emit_to("main", "friends-state", friends);
@@ -1728,6 +1758,10 @@ pub fn run() {
             remote::remote_apply,
             phone::phone_status,
             phone::phone_set_lan,
+            remote::remote_status,
+            remote::remote_set_consent,
+            remote::remote_consent_off,
+            remote::remote_consent_done,
             phone::phone_new_code,
             phone::phone_revoke,
             phone::phone_report_look,
@@ -1992,6 +2026,19 @@ mod tests {
     /// kryo.to pages and Cloudflare's challenge frame included. The notification
     /// plugin's replaced `window.Notification` and every download failed its
     /// Turnstile check. A new plugin has to be checked for that first.
+
+    /// Remote is opt-in (remote.rs): a Store page can only say it was turned
+    /// off, never turn it on, and its script does nothing for Remote until the
+    /// signed-in account's answer says on.
+    #[test]
+    fn a_store_page_cannot_turn_remote_on() {
+        let catalog_perms = include_str!("../permissions/catalog.toml");
+        assert!(!catalog_perms.contains("\"remote_set_consent\""));
+        assert!(!catalog_perms.contains("\"remote_status\""));
+        assert!(BROWSER_STATE_SCRIPT.contains("let remoteOn = false;"));
+        assert!(BROWSER_STATE_SCRIPT.contains("if (!KRYO || !me || !remoteOn ||"));
+        assert!(BROWSER_STATE_SCRIPT.contains("u.remote.enabled === true"));
+    }
     #[test]
     fn no_plugin_touches_the_store_pages() {
         let toml = include_str!("../Cargo.toml");

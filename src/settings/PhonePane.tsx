@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft, ChevronRight, Copy, Smartphone } from 'lucide-react'
 import { Button, Caption, Check, Section } from '@/ui'
-import { call, errorText } from '@/lib/bridge'
+import { call, errorText, on } from '@/lib/bridge'
 import { formatLastPlayed } from '@/lib/format'
 import { QrCode } from '@/settings/QrCode'
 import { openExternal } from '@/lib/window'
@@ -22,6 +22,72 @@ type PhoneStatus = {
 
 /** A phone reaching this PC through kryo.to counts as connected for this long after it last did. */
 const REMOTE_LIVE_MS = 2 * 60_000
+
+/** Remote for the signed-in kryo.to account (remote.rs, kryo.to lib/remote-consent.ts). */
+type RemoteConsent = { signedIn: boolean; enabled: boolean; decided: boolean }
+
+/**
+ * Remote, away from home: off until the account turns it on, here or on
+ * kryo.to/remote. The answer is the account's, so turning it on here turns it
+ * on in Kryoto Mobile, Kryoto Forge and on kryo.to too, and off stops this PC
+ * at once. Separate from pairing on this network, which never goes through
+ * kryo.to.
+ */
+function RemoteSection() {
+  const [consent, setConsent] = useState<RemoteConsent | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    void call<RemoteConsent>('remote_status').then((c) => alive && setConsent(c)).catch(() => {})
+    const offs = [
+      on<RemoteConsent>('remote-consent', (c) => setConsent(c)),
+      on<{ ok: boolean; error: string | null }>('remote-consent-done', (r) => {
+        setSaving(false)
+        setNote(r.ok ? null : (r.error ?? 'kryo.to did not save that.'))
+      }),
+    ]
+    return () => {
+      alive = false
+      for (const off of offs) void off.then((f) => f())
+    }
+  }, [])
+
+  const set = (enabled: boolean) => {
+    setSaving(true)
+    setNote(null)
+    void call('remote_set_consent', { enabled }).catch((e: unknown) => {
+      setSaving(false)
+      setNote(errorText(e))
+    })
+  }
+
+  if (!consent) return null
+  return (
+    <Section
+      title="Remote, away from home"
+      hint={
+        consent.enabled
+          ? 'On for your kryo.to account. While Kryoto Desktop is open, this PC tells kryo.to its name, system and version, its games and what is running, and its downloads. From kryo.to/remote and Kryoto Mobile away from home you can send it games, pause, resume, cancel or clear downloads, start and stop games, and take games off it.'
+          : 'Off. Nothing about this PC goes to kryo.to for Remote, and nothing can be started on it from there. Turn it on to see this PC, its games and downloads on kryo.to/remote and in Kryoto Mobile away from home, and to send it games, start and stop games, pause, resume, cancel or clear downloads, and take games off it from there. It is for your whole kryo.to account, and you can turn it off again here or on kryo.to.'
+      }
+    >
+      {!consent.signedIn ? (
+        <span className="text-[11px] text-muted-foreground">Sign in to kryo.to in the Store to choose.</span>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button size="sm" variant={consent.enabled ? 'outline' : 'primary'} disabled={saving} onClick={() => set(!consent.enabled)}>
+            {saving ? 'Saving' : consent.enabled ? 'Turn off Remote' : 'Turn on Remote'}
+          </Button>
+          <Caption>{consent.enabled ? 'Remote is on' : consent.decided ? 'Remote is off' : 'Not turned on yet'}</Caption>
+        </div>
+      )}
+      {note ? <span className="text-[11px] text-destructive">{note}</span> : null}
+      <span className="text-[11px] text-muted-foreground">A phone paired on this network below works either way.</span>
+    </Section>
+  )
+}
 
 /**
  * Settings > Phone: let Kryoto Mobile see the library and start games, on this
@@ -59,6 +125,7 @@ export function PhonePane() {
           Get Kryoto Mobile
         </Button>
       </Section>
+      <RemoteSection />
       <Section
         title="On this network"
         hint="Windows may ask to allow Kryoto on private networks. Anyone on your network with the code can pair, so only use a network you trust."
@@ -155,7 +222,7 @@ export function PhonePane() {
           ))
         ) : status.remoteSeenAt ? null : (
           <span className="text-[11px] text-muted-foreground">
-            No phones yet. Pair one on this network above, or sign in to the same kryo.to account in Kryoto Mobile.
+            No phones yet. Pair one on this network above, or turn on Remote and sign in to the same kryo.to account in Kryoto Mobile.
           </span>
         )}
       </Section>

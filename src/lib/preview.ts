@@ -13,6 +13,8 @@ import { PREVIEW_FRIENDS, type FriendsState } from '@/hooks/useFriends'
 type Handler = (p: unknown) => void
 const listeners = new Map<string, Set<Handler>>()
 
+const remoteConsent = { signedIn: true, enabled: false, decided: false }
+
 export const previewBus = {
   on(event: string, fn: Handler) {
     if (!listeners.has(event)) listeners.set(event, new Set())
@@ -697,6 +699,16 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   download_install_anyway: (a) => {
     const d = downloadList.find((x) => x.id === a.id)
     if (d) Object.assign(d, { status: 'extracting', hashMismatch: false, error: null })
+  // Remote (remote.rs): off until turned on, as for a fresh account.
+  remote_status: () => ({ ...remoteConsent }),
+  remote_set_consent: (a) => {
+    Object.assign(remoteConsent, { enabled: a.enabled === true, decided: true })
+    setTimeout(() => {
+      previewBus.emit('remote-consent', { ...remoteConsent })
+      previewBus.emit('remote-consent-done', { ok: true, error: null })
+    }, 300)
+    return null
+  },
     previewBus.emit('downloads', clone(downloadList))
     return null
   },
