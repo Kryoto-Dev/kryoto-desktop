@@ -9,7 +9,9 @@
 //! page should be. Converting with the page's own ratio, to physical pixels,
 //! puts it exactly where the shell measured, whatever Windows reports.
 //!
-//! Linux keeps logical pixels: GTK allocates in them (see linux_overlay.rs).
+//! Linux's native bounds calls are ineffective for these views. Its overlay
+//! converts CSS pixels to GTK logical pixels using DPR / GTK's widget scale
+//! (see linux_overlay.rs), including fractional X11 display scaling.
 
 use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size};
 

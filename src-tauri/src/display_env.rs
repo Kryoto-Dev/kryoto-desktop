@@ -9,12 +9,12 @@
 //! AMD and Intel machine its hardware acceleration; turning it off only for
 //! NVIDIA (PR #7) left the other broken cases broken. So:
 //!
-//! * **Automatic** (the default): DMA-BUF rendering off, GPU compositing on.
-//!   Measured on WebKitGTK 2.52 (Oct 2026) with kryo.to in the page: with
-//!   DMA-BUF on, scrolling ran at 6 fps and opening a menu froze for 300 ms,
-//!   the "really bad" lag people filmed whenever they opened anything in the
-//!   Store; with it off, 60-70 fps and no long frames. It is also what
-//!   NVIDIA's driver, machines without a render node and the AppImage needed.
+//! * **Automatic** (the default): shared-memory buffers, GPU compositing on
+//!   where supported. `WEBKIT_DMABUF_RENDERER_FORCE_SHM` avoids DMA-BUF buffer
+//!   sharing without disabling the accelerated renderer. The old
+//!   `WEBKIT_DISABLE_DMABUF_RENDERER` workaround also removed that renderer's
+//!   backing store on current WebKitGTK: maximized pages and typing repainted
+//!   the Store on the CPU, even though Settings said GPU compositing was on.
 //! * **Compatible**: turned off, and compositing too. The last resort that
 //!   draws on anything, but slow: every frame is drawn on the CPU.
 //! * **Full**: on, whatever the machine. For people who know theirs works.
@@ -23,8 +23,8 @@
 //! graphics drivers are the system's. On a rolling distribution with a newer
 //! Mesa (Fedora 44 with Mesa 26 on AMD, Oct 2026) that WebKit's DMA-BUF
 //! renderer aborted the web process on a C++ assertion, and the window went
-//! blank or closed. Without DMA-BUF it still composites on the GPU. The .deb
-//! and .rpm use the system's own WebKit and keep it.
+//! blank or closed. Shared-memory buffers avoid that driver mismatch while
+//! keeping the accelerated backing store available.
 //!
 //! And it heals itself: every start leaves a marker that the shell removes
 //! once it has drawn its first frame (`display_rendered`), and a web process
@@ -92,7 +92,7 @@ pub struct Plan {
 pub fn plan(chosen: Mode, env_mode: Option<&str>, is_set: impl Fn(&str) -> bool, facts: Facts) -> Plan {
     let mut mode = env_mode.and_then(Mode::parse).unwrap_or(chosen);
     let mut healed = false;
-    // Automatic already has DMA-BUF off, so a start that failed to draw is
+    // Automatic already bypasses DMA-BUF buffer sharing, so a failed start is
     // left with one step: drawing on the CPU.
     if mode == Mode::Auto && facts.last_start_failed {
         mode = Mode::Compatible;
@@ -106,35 +106,38 @@ pub fn plan(chosen: Mode, env_mode: Option<&str>, is_set: impl Fn(&str) -> bool,
         set.push(("GDK_BACKEND", "x11"));
     }
 
-    let (dmabuf_off, compositing_off, reason) = match mode {
+    let (shared_memory, compositing_off, reason) = match mode {
         Mode::Full => (false, false, "Full: hardware rendering, as chosen".to_string()),
         Mode::Compatible if healed => (
-            true,
+            false,
             true,
             "Compatible: the last start did not draw its window, so hardware rendering was turned off".to_string(),
         ),
-        Mode::Compatible => (true, true, "Compatible: hardware rendering off, as chosen".to_string()),
-        Mode::Auto if facts.nvidia => (true, false, "Automatic: NVIDIA driver, DMA-BUF rendering off".to_string()),
-        Mode::Auto if !facts.render_node => (true, false, "Automatic: no GPU render node, DMA-BUF rendering off".to_string()),
+        Mode::Compatible => (false, true, "Compatible: hardware rendering off, as chosen".to_string()),
+        Mode::Auto if facts.nvidia => (true, false, "Automatic: NVIDIA driver, shared-memory buffers with GPU compositing".to_string()),
+        Mode::Auto if !facts.render_node => (true, false, "Automatic: no GPU render node, shared-memory buffers".to_string()),
         Mode::Auto if facts.dmabuf_failed => (
             true,
             false,
-            "Automatic: DMA-BUF rendering failed here before, so it stays off (GPU compositing stays on)".to_string(),
+            "Automatic: DMA-BUF buffer sharing failed here before, using shared-memory buffers with GPU compositing".to_string(),
         ),
         Mode::Auto if facts.appimage => (
             true,
             false,
-            "Automatic: AppImage, DMA-BUF rendering off (its WebKit and this system's graphics drivers can disagree)".to_string(),
+            "Automatic: AppImage, shared-memory buffers (its WebKit and this system's graphics drivers can disagree)".to_string(),
         ),
-        Mode::Auto => (true, false, "Automatic: GPU compositing, DMA-BUF rendering off (with it on, pages stutter when they open)".to_string()),
+        Mode::Auto => (true, false, "Automatic: shared-memory buffers with GPU compositing".to_string()),
     };
-    if dmabuf_off && !is_set("WEBKIT_DISABLE_DMABUF_RENDERER") {
+    if shared_memory && !is_set("WEBKIT_DMABUF_RENDERER_FORCE_SHM") && !is_set("WEBKIT_DISABLE_DMABUF_RENDERER") {
+        set.push(("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1"));
+    }
+    if compositing_off && !is_set("WEBKIT_DISABLE_DMABUF_RENDERER") {
         set.push(("WEBKIT_DISABLE_DMABUF_RENDERER", "1"));
     }
     if compositing_off && !is_set("WEBKIT_DISABLE_COMPOSITING_MODE") {
         set.push(("WEBKIT_DISABLE_COMPOSITING_MODE", "1"));
     }
-    let overridden = ["WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE"].iter().any(|k| is_set(k));
+    let overridden = ["WEBKIT_DMABUF_RENDERER_FORCE_SHM", "WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE"].iter().any(|k| is_set(k));
     let reason = if overridden { format!("{reason} (your environment variables take precedence)") } else { reason };
     Plan { mode, healed, set, reason }
 }
@@ -182,7 +185,7 @@ mod linux {
         data_dir().map(|d| d.join("display-probe"))
     }
 
-    /// DMA-BUF failed here once; Automatic keeps it off from then on.
+    /// DMA-BUF failed here once; Automatic keeps using shared-memory buffers.
     pub fn dmabuf_failed_file() -> Option<PathBuf> {
         data_dir().map(|d| d.join("display-dmabuf-failed"))
     }
@@ -211,7 +214,7 @@ mod linux {
     /// Before 0.2.23 a single failed start switched to Compatible for good,
     /// which draws everything on the CPU. A saved "compatible" from then cannot
     /// be told apart from one somebody picked, so it goes back to Automatic
-    /// with DMA-BUF off - the step that fixes nearly every machine - and if
+    /// with DMA-BUF buffer sharing bypassed, and if
     /// that fails to draw too, the next start is Compatible again.
     fn migrate() {
         let Some(marker) = v2_file() else { return };
@@ -322,7 +325,7 @@ pub fn watch_crashes(view: &tauri::Webview) {
             note_renderer_crash();
             crate::logging::error(
                 "display",
-                &format!("the {label} view's web process ended ({reason:?}); reloading it, and the next start turns DMA-BUF rendering off"),
+                &format!("the {label} view's web process ended ({reason:?}); reloading it, and the next start uses shared-memory buffers or Compatible mode"),
             );
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -393,19 +396,18 @@ mod tests {
     }
 
     #[test]
-    fn automatic_keeps_the_gpu_but_not_dmabuf() {
-        // AMD and Intel too: DMA-BUF made kryo.to stutter in the Store.
+    fn automatic_keeps_the_accelerated_renderer_with_shared_memory_buffers() {
         let p = plan(Mode::Auto, None, none, Facts { render_node: true, ..Facts::default() });
-        assert_eq!(vars(&p), ["WEBKIT_DISABLE_DMABUF_RENDERER"], "{p:?}");
+        assert_eq!(p.set, [("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1")], "{p:?}");
         assert!(p.reason.contains("GPU compositing"));
     }
 
     #[test]
-    fn nvidia_and_no_render_node_turn_dmabuf_off() {
+    fn nvidia_and_no_render_node_use_shared_memory_buffers() {
         let p = plan(Mode::Auto, None, none, Facts { nvidia: true, render_node: true, ..Facts::default() });
-        assert_eq!(vars(&p), ["WEBKIT_DISABLE_DMABUF_RENDERER"]);
+        assert_eq!(vars(&p), ["WEBKIT_DMABUF_RENDERER_FORCE_SHM"]);
         let p = plan(Mode::Auto, None, none, Facts::default());
-        assert_eq!(vars(&p), ["WEBKIT_DISABLE_DMABUF_RENDERER"]);
+        assert_eq!(vars(&p), ["WEBKIT_DMABUF_RENDERER_FORCE_SHM"]);
     }
 
     #[test]
@@ -433,9 +435,24 @@ mod tests {
     }
 
     #[test]
+    fn shared_memory_override_is_respected() {
+        let set = |k: &str| k == "WEBKIT_DMABUF_RENDERER_FORCE_SHM";
+        let p = plan(Mode::Auto, None, set, Facts { render_node: true, ..Facts::default() });
+        assert!(p.set.is_empty());
+        assert!(p.reason.contains("environment"));
+    }
+
+    #[test]
+    fn a_previous_dmabuf_failure_keeps_the_accelerated_renderer() {
+        let p = plan(Mode::Auto, None, none, Facts { render_node: true, dmabuf_failed: true, ..Facts::default() });
+        assert_eq!(p.set, [("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1")]);
+        assert!(!p.healed);
+    }
+
+    #[test]
     fn the_appimage_keeps_dmabuf_off_but_the_gpu_on() {
         let p = plan(Mode::Auto, None, none, Facts { render_node: true, appimage: true, ..Facts::default() });
-        assert_eq!(vars(&p), ["WEBKIT_DISABLE_DMABUF_RENDERER"]);
+        assert_eq!(vars(&p), ["WEBKIT_DMABUF_RENDERER_FORCE_SHM"]);
         assert!(p.reason.contains("AppImage"));
         // Full means full, AppImage or not.
         let p = plan(Mode::Full, None, none, Facts { render_node: true, appimage: true, ..Facts::default() });
@@ -445,7 +462,7 @@ mod tests {
     #[test]
     fn wayland_goes_through_xwayland() {
         let p = plan(Mode::Auto, None, none, Facts { wayland: true, render_node: true, ..Facts::default() });
-        assert_eq!(p.set, [("GDK_BACKEND", "x11"), ("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]);
+        assert_eq!(p.set, [("GDK_BACKEND", "x11"), ("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1")]);
     }
 
     #[test]

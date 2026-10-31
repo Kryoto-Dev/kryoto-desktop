@@ -432,9 +432,9 @@ function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Setti
 }
 
 const DISPLAY_HINT: Record<DisplayMode, string> = {
-  auto: 'Drawn on your graphics card, with the DMA-BUF renderer off: smooth on almost every machine. The renderer made pages stutter as they opened.',
+  auto: 'Uses shared-memory buffers to avoid DMA-BUF driver problems while keeping accelerated rendering available.',
   compatible: 'Draws on anything, a little slower. Use it when pages are blank, flicker or are drawn in the wrong place.',
-  full: 'Turns the DMA-BUF renderer on too. Faster on a few machines; on most it makes pages stutter or draw blank.',
+  full: 'Enables DMA-BUF buffer sharing. Some graphics drivers may stutter, draw incorrectly or crash with it enabled.',
 }
 
 /**

@@ -194,12 +194,12 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, s
     crate::placement::place(&view, x, y, width, height, css)?;
     #[cfg(target_os = "linux")]
     {
-        crate::linux_overlay::place(&view, x, y, width, height);
+        crate::linux_overlay::place(&view, x, y, width, height, css);
         // Rounded like the panel it draws, at the reader's corner style
         // (styles.css), cut by a shape so the view itself can stay opaque (KB-0006).
-        let (w, h) = (width.round() as i32, height.round() as i32);
         let _ = view.with_webview(move |v| {
-            use gtk::prelude::Cast;
+            use gtk::prelude::*;
+            let (_, _, w, h) = crate::linux_overlay::rect(0.0, 0.0, width, height, css, v.inner().scale_factor());
             crate::system::linux_shape::view(v.inner().upcast_ref::<gtk::Widget>(), w, h, crate::system::corner());
         });
     }
