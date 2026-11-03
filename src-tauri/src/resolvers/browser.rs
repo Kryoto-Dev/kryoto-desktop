@@ -9,6 +9,10 @@
 //! user agent. Nothing about the host's check is skipped: when the page shows
 //! a check that wants a person, or nothing has happened after a while, the
 //! window is shown and waits for them.
+//!
+//! Any other page (`Mode::Open`, from `web.rs`) is shown straight away and
+//! nothing on it is pressed: the person starts the download there, and that
+//! download is taken over the same way.
 
 use super::Resolved;
 use base64::Engine as _;
@@ -27,6 +31,18 @@ const INTERACTIVE_GRACE: Duration = Duration::from_secs(6);
 /// All of it, including time a person spends on a captcha.
 const BUDGET: Duration = Duration::from_secs(180);
 const PRESS_EVERY: Duration = Duration::from_secs(4);
+/// How long a page the person is using stays open for them.
+const OPEN_BUDGET: Duration = Duration::from_secs(15 * 60);
+
+/// How a page is worked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// A mirror host: its own Download is pressed, and the window shows only
+    /// when the host wants a person.
+    Host,
+    /// Any other page: shown at once for the person to start the download.
+    Open,
+}
 const PROBE_MARK: &str = "\u{200b}\u{e00d}KRY:";
 
 /// One page at a time: a second resolve waits for the first.
@@ -136,10 +152,11 @@ if(window.turnstile&&window.turnstile.render)go();else{{var s=document.createEle
     )
 }
 
-static FILE_EXT_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(?i)\.(zip|rar|7z|00\d|iso|bin|tar|gz|xz|zst)$").unwrap());
+static FILE_EXT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\.(zip|rar|7z|00\d|iso|bin|tar|gz|xz|zst|exe|msi|appimage|deb|rpm|dmg|apk|jar)$").unwrap()
+});
 
-/// A navigation straight to an archive: taken as the file, not followed.
+/// A navigation straight to an archive or a program: taken as the file, not followed.
 fn looks_like_file(url: &Url) -> bool {
     FILE_EXT_RE.is_match(url.path())
 }
@@ -158,7 +175,7 @@ fn file_name_of(url: &Url) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str) -> Result<Resolved, String> {
+pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str, mode: Mode) -> Result<Resolved, String> {
     let url: Url = page.parse().map_err(|_| "not a valid link".to_string())?;
     if !matches!(url.scheme(), "https" | "http") {
         return Err("not a web link".into());
@@ -259,6 +276,7 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str) -> Re
     // A host with a recipe of its own runs that instead of button presses.
     let recipe = mocha_share_token(&url).map(|t| mocha_js(&t));
     let mut recipe_ran = false;
+    let budget = if mode == Mode::Open { OPEN_BUDGET } else { BUDGET };
 
     let outcome = loop {
         tokio::time::sleep(TICK).await;
@@ -273,7 +291,9 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str) -> Re
             }
             ready = p.r == "complete";
             interactive_since = if p.t { Some(interactive_since.unwrap_or_else(Instant::now)) } else { None };
-            if p.n && started.elapsed() > Duration::from_secs(5) {
+            // Only a mirror host's page is about its file; any other page may
+            // say "removed" about anything.
+            if p.n && mode == Mode::Host && started.elapsed() > Duration::from_secs(5) {
                 break Err("the host says the file is gone".to_string());
             }
         }
@@ -294,10 +314,12 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str) -> Re
                 connections: 4,
             });
         }
-        if started.elapsed() >= BUDGET {
+        if started.elapsed() >= budget {
             break Err("its page did not give the file in time".to_string());
         }
-        if let Some(js) = recipe.as_deref() {
+        // On the person's own page (`Mode::Open`) nothing is pressed for them.
+        if mode == Mode::Open {
+        } else if let Some(js) = recipe.as_deref() {
             if ready && !recipe_ran {
                 recipe_ran = true;
                 let _ = window.eval(js);
@@ -306,23 +328,27 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str) -> Re
             last_press = Instant::now();
             let _ = window.eval(press_js());
         }
-        let due = match interactive_since {
-            Some(t) => t.elapsed() >= INTERACTIVE_GRACE,
-            None => started.elapsed() >= HIDDEN_FOR,
+        let due = match (mode, interactive_since) {
+            (Mode::Open, _) => true,
+            (Mode::Host, Some(t)) => t.elapsed() >= INTERACTIVE_GRACE,
+            (Mode::Host, None) => started.elapsed() >= HIDDEN_FOR,
         };
         if due && !shown {
             shown = true;
             let _ = window.show();
             let _ = window.set_focus();
             let _ = app.emit("resolver-status", serde_json::json!({ "state": "interactive", "host": host }));
-            let _ = app.emit(
-                "notify",
-                crate::downloads::Notice::new(
-                    &format!("{host} wants a quick check"),
+            let (title, body) = match mode {
+                Mode::Host => (
+                    format!("{host} wants a quick check"),
                     "Its page is open in a window of its own. Pass the check there and the download carries on in Kryoto.",
-                    None,
                 ),
-            );
+                Mode::Open => (
+                    format!("Start the download on {host}"),
+                    "Its page is open in a window of its own. Start the download there and Kryoto takes it over.",
+                ),
+            };
+            let _ = app.emit("notify", crate::downloads::Notice::new(&title, body, None));
         }
     };
 
@@ -353,6 +379,8 @@ mod tests {
     fn archives_count_as_files_and_pages_do_not() {
         assert!(looks_like_file(&"https://x.com/a/game.7z".parse().unwrap()));
         assert!(looks_like_file(&"https://x.com/a/game.part.001".parse().unwrap()));
+        assert!(looks_like_file(&"https://github.com/o/r/releases/download/v1/Setup.exe".parse().unwrap()));
+        assert!(looks_like_file(&"https://x.com/Game.AppImage".parse().unwrap()));
         assert!(!looks_like_file(&"https://x.com/f/abc".parse().unwrap()));
         assert!(!looks_like_file(&"https://x.com/download.html".parse().unwrap()));
     }

@@ -62,7 +62,20 @@ export type Settings = {
   cloudSavesShare: boolean
   /** Local backups of replaced saves kept per game. */
   cloudSavesKeepLocal: number
+  /** The desktop pet (src/pet): out on the screen or put away. */
+  pet: boolean
+  petMascot: PetMascot
+  /** Where it stands, in physical pixels; pet.rs keeps it. */
+  petPos?: [number, number] | null
 }
+
+export type PetMascot = 'telly' | 'kubi' | 'yuki' | 'blip'
+export const PET_MASCOTS: { id: PetMascot; label: string }[] = [
+  { id: 'telly', label: 'Telly' },
+  { id: 'kubi', label: 'Kubi' },
+  { id: 'yuki', label: 'Yuki' },
+  { id: 'blip', label: 'Blip' },
+]
 
 /** How a game's in-game name is picked (src-tauri player_name.rs). */
 export type PlayerNameMode = 'account' | 'custom' | 'build'
@@ -151,11 +164,13 @@ export function effectiveLook(s: Settings, account: { appearance?: AccountAppear
 }
 
 /** Stamp the look on <html>, the way kryo.to does before first paint. */
-export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { theme?: 'system' | 'light' | 'dark'; season?: string | null; reducedMotion?: boolean }) {
+export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { theme?: 'system' | 'light' | 'dark'; season?: string | null; reducedMotion?: boolean; systemDark?: boolean | null }) {
   const html = document.documentElement
-  const dark = s.theme === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : s.theme !== 'light'
+  const dark = s.theme === 'system' ? s.systemDark ?? matchMedia('(prefers-color-scheme: dark)').matches : s.theme !== 'light'
   html.classList.toggle('dark', dark)
-  html.style.colorScheme = dark ? 'dark' : 'light'
+  // Never dark on Linux: WebKitGTK 2.54 draws a see-through window's
+  // backgrounds at partial alpha under a dark scheme (styles.css, KB-0006).
+  html.style.colorScheme = dark && html.dataset.os !== 'linux' ? 'dark' : 'light'
   if (s.reducedMotion) html.dataset.motion = 'reduced'
   else delete html.dataset.motion
   html.dataset.palette = s.palette || 'monochrome'

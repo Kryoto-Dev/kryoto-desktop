@@ -103,6 +103,31 @@ export const SOUNDS = {
     ],
   },
 
+  // ---- Calls (they ring whatever the everyday switch says; calls.ts) ----------
+  ring: {
+    label: 'Someone is calling (repeats)',
+    voices: [
+      ...mallet(G4, 0, 0.08, 0.14),
+      ...mallet(E4, 0.14, 0.075, 0.14),
+      ...mallet(G4, 0.28, 0.08, 0.14),
+      ...mallet(C5, 0.42, 0.07, 0.3),
+      body(C4, 0.42, 0.5, 0.025),
+    ],
+    echo: { delay: 0.14, feedback: 0.18, mix: 0.15 },
+  },
+  calling: {
+    label: 'Calling someone (repeats)',
+    voices: [...mallet(C4, 0, 0.05, 0.2), ...mallet(E4, 0.22, 0.05, 0.28)],
+  },
+  callJoin: {
+    label: 'A call connects',
+    voices: [...mallet(C4, 0, 0.07, 0.12), ...mallet(G4, 0.09, 0.07, 0.24)],
+  },
+  callEnd: {
+    label: 'A call ends',
+    voices: [...mallet(G4, 0, 0.065, 0.12), ...mallet(C4, 0.1, 0.065, 0.26)],
+  },
+
   // ---- Big Picture -----------------------------------------------------------
   bpIntro: {
     label: 'Big Picture opens',

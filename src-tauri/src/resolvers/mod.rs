@@ -12,6 +12,9 @@
 //!    window of our own, the host's own download button is pressed, and the
 //!    download it starts is taken over. If the check wants a person, the
 //!    window is shown and waits for them. See `browser.rs`.
+//!  * Any other web link: a file is fetched as it is; a page opens in that
+//!    same window, shown, for the person to start the download there, and the
+//!    download it starts is taken over the same way. See `web.rs`.
 //!
 //! Whatever comes back carries the headers the file wants (cookies, user
 //! agent, referer) and how many connections the host tolerates.
@@ -25,6 +28,7 @@ mod mediafire;
 mod mocha;
 mod pixeldrain;
 mod simple;
+mod web;
 
 use regex::Regex;
 use std::collections::HashMap;
@@ -59,6 +63,9 @@ pub enum Kind {
     Page,
     /// Already the file.
     Direct,
+    /// A link no resolver knows: the file itself, or a page the person
+    /// starts the download on.
+    Web,
 }
 
 pub(crate) fn host_matches(url: &str, re: &Regex) -> bool {
@@ -167,13 +174,33 @@ pub fn classify(url: &str) -> Option<(Kind, &'static str)> {
     page_host(url).map(|name| (Kind::Page, name))
 }
 
+/// Links never opened for a download. MEGA and filez.stream decrypt their
+/// files inside their own page and hand the browser a `blob:`, which nothing
+/// outside the page can fetch; any 0807.st link that is not the file itself
+/// (its `/d/` link deletes the file when opened).
+fn never_opened(url: &str) -> bool {
+    let host = hostname(url);
+    ["mega.nz", "mega.io", "mega.co.nz", "filez.stream", "0807.st"].iter().any(|d| domain_match(&host, d))
+}
+
+/// What kind of link `url` is and who it is from, for any web link: the
+/// mirror hosts by name (`classify`), anything else by its address.
+pub fn classify_any(url: &str) -> Option<(Kind, String)> {
+    if let Some((kind, name)) = classify(url) {
+        return Some((kind, name.to_string()));
+    }
+    let host = hostname(url);
+    let web = (url.starts_with("https://") || url.starts_with("http://")) && !host.is_empty() && !never_opened(url);
+    web.then(|| (Kind::Web, host.strip_prefix("www.").unwrap_or(&host).to_string()))
+}
+
 /// Resolve a mirror link to its file.
 ///
 /// An API host that fails falls through to the browser, which is how a
 /// person would get past whatever the API would not do (a Cloudflare check
 /// in front of Buzzheavier, say).
 pub async fn resolve<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolved, String> {
-    let (kind, name) = classify(url).ok_or_else(|| format!("Kryoto can't download from {} yet.", hostname(url)))?;
+    let (kind, name) = classify_any(url).ok_or_else(|| format!("Kryoto can't download from {}. Open it in your browser instead.", hostname(url)))?;
     let started = std::time::Instant::now();
     let result = match kind {
         Kind::Direct => Ok(Resolved {
@@ -201,11 +228,12 @@ pub async fn resolve<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolv
                 Ok(r) => Ok(r),
                 Err(e) => {
                     crate::logging::info("resolver", &format!("{name}: {e}; trying its page"));
-                    browser::solve(app, url, name).await.map_err(|b| format!("{e}; {b}"))
+                    browser::solve(app, url, &name, browser::Mode::Host).await.map_err(|b| format!("{e}; {b}"))
                 }
             }
         }
-        Kind::Page => browser::solve(app, url, name).await,
+        Kind::Page => browser::solve(app, url, &name, browser::Mode::Host).await,
+        Kind::Web => web::resolve(app, url, &name).await,
     };
     match &result {
         Ok(r) => crate::logging::info(
@@ -263,6 +291,23 @@ mod tests {
             #[cfg(not(windows))]
             assert_eq!(classify(url), None, "VikingFile opens externally without extension support");
         }
+    }
+
+    #[test]
+    fn any_other_web_link_is_a_page_to_open() {
+        assert_eq!(
+            classify_any("https://github.com/Kryoto-Dev/kryoto-minecraft-launcher/releases/latest"),
+            Some((Kind::Web, "github.com".into()))
+        );
+        assert_eq!(classify_any("https://www.example.org/get"), Some((Kind::Web, "example.org".into())));
+        assert_eq!(classify_any("https://pixeldrain.com/u/abcd1234"), Some((Kind::Api, "Pixeldrain".into())));
+        assert_eq!(classify_any("https://0807.st/Ab3dEfG.7z"), Some((Kind::Direct, "0807.st".into())));
+        // Never opened: MEGA's files only exist inside its page, and 0807's
+        // deletion link deletes the file.
+        assert_eq!(classify_any("https://mega.nz/file/abc#key"), None);
+        assert_eq!(classify_any("https://0807.st/d/deletiontoken"), None);
+        assert_eq!(classify_any("magnet:?xt=urn:btih:abc"), None);
+        assert_eq!(classify_any("file:///C:/Windows"), None);
     }
 
     #[test]

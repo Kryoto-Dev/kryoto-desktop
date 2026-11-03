@@ -12,7 +12,7 @@
         "center": true,
         "theme": "Dark",
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "shadow": true,
         "visible": false
       }

@@ -98,8 +98,54 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        rest_views(&w, false);
     }
 }
+
+/* ── Views at rest while nobody can see them ──────────────── */
+
+/// The views put to rest, by label: only these wake again, so a Store the
+/// shell had hidden (the Library is open) stays hidden.
+#[cfg(windows)]
+static RESTING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A minimized window, or one closed to the tray, kept drawing its pages in
+/// WebView2: kryo.to's moving covers ran at full speed with nobody looking,
+/// and loud fans were the result. A browser hides a minimized window's tabs;
+/// this does the same, telling each view that was showing that it is not, so
+/// Chromium stops drawing it and the page reads `document.hidden`.
+#[cfg(windows)]
+pub fn rest_views<R: Runtime>(window: &tauri::Window<R>, rest: bool) {
+    if rest {
+        if RESTING.lock().is_ok_and(|r| !r.is_empty()) {
+            return;
+        }
+        for view in window.webviews() {
+            let label = view.label().to_string();
+            let _ = view.with_webview(move |w| unsafe {
+                let controller = w.controller();
+                let mut visible = windows::core::BOOL(0);
+                // A view hidden already (the Store behind the Library) is not
+                // ours to wake later.
+                if controller.IsVisible(&mut visible).is_ok() && visible.as_bool() && controller.SetIsVisible(false).is_ok() {
+                    if let Ok(mut resting) = RESTING.lock() {
+                        resting.push(label);
+                    }
+                }
+            });
+        }
+    } else {
+        let labels = RESTING.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default();
+        for view in window.webviews().into_iter().filter(|v| labels.iter().any(|l| l == v.label())) {
+            let _ = view.with_webview(|w| unsafe {
+                let _ = w.controller().SetIsVisible(true);
+            });
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn rest_views<R: Runtime>(_window: &tauri::Window<R>, _rest: bool) {}
 
 /* ── Tray, and closing to it ──────────────────────────────── */
 
@@ -243,7 +289,9 @@ pub fn set_unread_badge<R: Runtime>(app: &AppHandle<R>, unread: u32) {
         };
         let _ = tray.set_tooltip(Some(tip));
     }
-    let Some(window) = app.get_webview_window("main") else { return };
+    // `get_window`: the main window holds several views, and
+    // `get_webview_window` finds none for it.
+    let Some(window) = app.get_window("main") else { return };
     #[cfg(windows)]
     {
         let _ = window.set_overlay_icon((unread > 0).then(unread_dot));
@@ -285,6 +333,7 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
                 api.prevent_close();
                 crate::menus::close(app);
                 let _ = window.hide();
+                rest_views(window, true);
             } else {
                 app.exit(0);
             }
@@ -295,7 +344,12 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
         WindowEvent::Resized(s) if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) => {
             crate::menus::close(app);
             report_window_state(window);
+            refresh_corners(window);
+            // Minimizing is a resize too; so is coming back.
+            rest_views(window, window.is_minimized().unwrap_or(false));
         }
+        // Back from the taskbar or the tray without a resize.
+        WindowEvent::Focused(true) => rest_views(window, false),
         _ => {}
     }
 }
@@ -342,76 +396,197 @@ fn changed(last: &Mutex<Option<(i32, i32)>>, now: (i32, i32)) -> bool {
 
 /* ── Window corners ───────────────────────────────────────── */
 
-/// Windows 11 rounds a frameless window's corners and draws its shadow
-/// itself when asked - the same corners as every other window, with no
-/// see-through edge to paint. `small` is the tighter radius Windows uses for
-/// menus. Older Windows keeps square corners. Linux has no such call: its window
-/// is see-through (tauri.linux.conf.json) and the page rounds itself (styles.css).
-pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
-        if let Ok(hwnd) = window.hwnd() {
-            // DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3.
-            let pref: i32 = if small { 3 } else { 2 };
-            // SAFETY: a live window handle and a pointer to a 4-byte value.
-            unsafe {
-                DwmSetWindowAttribute(
-                    hwnd.0 as _,
-                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                    (&pref as *const i32).cast(),
-                    std::mem::size_of::<i32>() as u32,
-                );
-            }
-        }
+/// The window's corner radius in logical pixels: the reader's corner style
+/// (Settings > Appearance, or their kryo.to account), sent by the shell with
+/// `window_corners`. Square while the window fills the screen (maximized,
+/// full screen, tiled), where a rounded corner would show the desktop behind.
+static RADIUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(16);
+
+pub fn corner() -> i32 {
+    RADIUS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A corner style as pixels: the same `--kryo-radius` the pages use (styles.css).
+pub fn radius_for(style: &str) -> i32 {
+    match style {
+        "sharp" => 0,
+        "soft" => 2,
+        "rounded" => 5,
+        "round" => 10,
+        _ => 16,
     }
+}
+
+/// The shell's corner style changed: round the window to match.
+#[tauri::command]
+pub fn window_corners(window: tauri::Window, radius: String) {
+    RADIUS.store(radius_for(&radius), std::sync::atomic::Ordering::Relaxed);
+    apply_corners(&window);
+}
+
+/// Set up the corners once, at start, and draw them at the current style.
+///
+/// * Windows 11 rounds a frameless window and draws its shadow when asked.
+/// * Windows 10 has no such call: the window gets a rounded region instead,
+///   redone on every resize (`refresh_corners`).
+/// * Linux: a shape mask on an opaque window. The window used to be
+///   see-through for its corners, but WebKitGTK 2.54 draws dark pixels in a
+///   see-through window as clear and the app vanished on new distros
+///   (kryoto-bugs KB-0006). A shape cuts the corners off for real instead.
+pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
+    let _ = small;
     #[cfg(target_os = "linux")]
     {
-        use gtk::gdk::WindowState;
         use gtk::glib::Propagation;
         use gtk::prelude::*;
-        // GNOME's own radius for a window it rounds.
-        const RADIUS: f64 = 12.0;
-        const SQUARE: WindowState = WindowState::MAXIMIZED
-            .union(WindowState::FULLSCREEN)
-            .union(WindowState::TILED);
-        let _ = small;
         if let Ok(win) = window.gtk_window() {
-            // The window is see-through (tauri.linux.conf.json) so the page can
-            // round its own corners, but the views in it are separate surfaces:
-            // where one is transparent (the menu's corners over the Store) it
-            // shows the window, and a see-through window shows the desktop.
-            // So the window is filled, in the shell's colour, inside the same
-            // rounded shape the page draws.
+            // The views in the window are separate surfaces, and where one is
+            // transparent (a menu's corners over the Store) it shows the
+            // window: so the window is filled in the shell's colour.
             win.connect_draw(|win, cr| {
                 let fill = WINDOW_FILL.lock().map(|f| *f).unwrap_or_default();
-                let square = win.window().is_none_or(|g| g.state().intersects(SQUARE));
                 let (w, h) = (f64::from(win.allocated_width()), f64::from(win.allocated_height()));
-                let r = if square { 0.0 } else { RADIUS };
-                let q = std::f64::consts::FRAC_PI_2;
-                cr.new_sub_path();
-                cr.arc(w - r, r, r, -q, 0.0);
-                cr.arc(w - r, h - r, r, 0.0, q);
-                cr.arc(r, h - r, r, q, 2.0 * q);
-                cr.arc(r, r, r, 2.0 * q, 3.0 * q);
-                cr.close_path();
                 let rgb = |c: [u8; 3]| (f64::from(c[0]) / 255.0, f64::from(c[1]) / 255.0, f64::from(c[2]) / 255.0);
                 let (sr, sg, sb) = rgb(fill.store);
                 cr.set_source_rgb(sr, sg, sb);
-                let _ = cr.fill_preserve();
+                cr.rectangle(0.0, 0.0, w, h);
+                let _ = cr.fill();
                 // Above the Store's top edge it is the shell's own colour (the
                 // nav bar), so a menu's see-through corners over it match.
-                cr.clip();
                 let (hr, hg, hb) = rgb(fill.shell);
                 cr.set_source_rgb(hr, hg, hb);
                 cr.rectangle(0.0, 0.0, w, fill.store_top.clamp(0.0, h));
                 let _ = cr.fill();
                 Propagation::Proceed
             });
+            win.connect_size_allocate(|win, _| linux_shape::window(win));
+            win.connect_window_state_event(|win, _| {
+                linux_shape::window(win);
+                Propagation::Proceed
+            });
         }
     }
+    apply_corners(window);
+}
+
+/// Draw the corners at the current style.
+fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+        if let Ok(hwnd) = window.hwnd() {
+            // DWMWCP_DONOTROUND = 1, DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3:
+            // Windows 11 offers these three, so the styles map onto them.
+            let pref: i32 = match corner() {
+                0 => 1,
+                1..=5 => 3,
+                _ => 2,
+            };
+            // SAFETY: a live window handle and a pointer to a 4-byte value.
+            let result = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd.0 as _,
+                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                    (&pref as *const i32).cast(),
+                    std::mem::size_of::<i32>() as u32,
+                )
+            };
+            // Refused before Windows 11: a region does it there.
+            if result != 0 {
+                WIN10_REGION.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        refresh_corners(window);
+    }
+    // GTK only on its own thread; the Tauri window travels, the GTK one is
+    // looked up there.
+    #[cfg(target_os = "linux")]
+    {
+        let handle = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            if let Ok(win) = handle.gtk_window() {
+                linux_shape::window(&win);
+            }
+        });
+    }
     #[cfg(not(any(windows, target_os = "linux")))]
-    let _ = (window, small);
+    let _ = window;
+}
+
+/// Windows 10: the window's corners are a region, which follows the size.
+#[cfg(windows)]
+static WIN10_REGION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Redo the rounded region after a resize (Windows 10 only; a no-op elsewhere).
+pub fn refresh_corners<R: Runtime>(window: &tauri::Window<R>) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+        if !WIN10_REGION.load(std::sync::atomic::Ordering::Relaxed) || window.label() != "main" {
+            return;
+        }
+        let Ok(hwnd) = window.hwnd() else { return };
+        let square = corner() == 0 || window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false);
+        let Ok(size) = window.outer_size() else { return };
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let d = (f64::from(corner() * 2) * scale).round() as i32;
+        // SAFETY: a live window handle; SetWindowRgn takes ownership of the region.
+        unsafe {
+            if square {
+                SetWindowRgn(hwnd.0 as _, std::ptr::null_mut(), 1);
+            } else {
+                let region = CreateRoundRectRgn(0, 0, size.width as i32 + 1, size.height as i32 + 1, d, d);
+                SetWindowRgn(hwnd.0 as _, region, 1);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
+/// Linux shape masks: corners cut off a widget for real, on an opaque surface.
+#[cfg(target_os = "linux")]
+pub mod linux_shape {
+    use gtk::cairo::{RectangleInt, Region};
+    use gtk::gdk::WindowState;
+    use gtk::prelude::*;
+
+    /// A rounded rectangle as rows of pixels: what X11 shapes are made of.
+    pub fn rounded(w: i32, h: i32, radius: i32) -> Region {
+        let region = Region::create();
+        let r = radius.min(w / 2).min(h / 2).max(0);
+        for y in 0..r {
+            let dy = f64::from(r) - f64::from(y) - 0.5;
+            let inset = (f64::from(r) - (f64::from(r * r) - dy * dy).max(0.0).sqrt()).round() as i32;
+            let _ = region.union_rectangle(&RectangleInt::new(inset, y, w - 2 * inset, 1));
+            let _ = region.union_rectangle(&RectangleInt::new(inset, h - 1 - y, w - 2 * inset, 1));
+        }
+        let _ = region.union_rectangle(&RectangleInt::new(0, r, w, h - 2 * r));
+        region
+    }
+
+    /// The main window at the reader's corner style, square while it fills the screen.
+    pub fn window(win: &impl IsA<gtk::Widget>) {
+        const SQUARE: WindowState = WindowState::MAXIMIZED.union(WindowState::FULLSCREEN).union(WindowState::TILED);
+        let widget = win.as_ref();
+        let radius = super::corner();
+        let square = radius == 0 || widget.window().is_none_or(|g| g.state().intersects(SQUARE));
+        let (w, h) = (widget.allocated_width(), widget.allocated_height());
+        if square || w <= 2 * radius || h <= 2 * radius {
+            widget.shape_combine_region(None);
+        } else {
+            widget.shape_combine_region(Some(&rounded(w, h, radius)));
+        }
+    }
+
+    /// A child view (the menu): rounded at `radius` at the size it was given.
+    pub fn view(widget: &gtk::Widget, w: i32, h: i32, radius: i32) {
+        if radius > 0 && w > 2 * radius && h > 2 * radius {
+            widget.shape_combine_region(Some(&rounded(w, h, radius)));
+        } else {
+            widget.shape_combine_region(None);
+        }
+    }
 }
 
 /// What the Linux window is filled with behind its views: the shell's colour
@@ -545,4 +720,34 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn set_autostart(_: bool) -> Result<(), String> {
     Err("Starting with the system is not supported on this operating system.".into())
+}
+
+/* ── The computer's own theme ─────────────────────────────── */
+
+/// Whether the computer is set to dark mode, for the "System" theme. The
+/// webview can't tell: its prefers-color-scheme reports the window's theme,
+/// which the page sets. None when it can't be read.
+#[cfg(windows)]
+pub fn os_dark() -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let name = wide("AppsUseLightTheme");
+    let mut value: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: NUL-terminated UTF-16 strings; `value` holds the DWORD asked for.
+    let rc = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut value as *mut u32).cast(), &mut size) };
+    (rc == 0).then_some(value == 0)
+}
+
+/// GNOME's (and most desktops') color-scheme preference.
+#[cfg(not(windows))]
+pub fn os_dark() -> Option<bool> {
+    let out = std::process::Command::new("gsettings").args(["get", "org.gnome.desktop.interface", "color-scheme"]).output().ok()?;
+    let scheme = String::from_utf8_lossy(&out.stdout);
+    match scheme.trim().trim_matches('\'') {
+        "prefer-dark" => Some(true),
+        "prefer-light" | "default" => Some(false),
+        _ => None,
+    }
 }

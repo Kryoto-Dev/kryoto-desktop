@@ -683,8 +683,9 @@ pub fn remote_control<R: Runtime>(app: &AppHandle<R>, id: &str, status: Status) 
     Ok(())
 }
 
-/// Queue a download from one of a game's mirrors: resolved to its file when
-/// its turn comes (`resolvers`), then fetched and installed like any other.
+/// Queue a download from one of a game's mirrors, or any other link it lists:
+/// resolved to its file when its turn comes (`resolvers`), then fetched and
+/// installed like any other.
 pub fn enqueue_mirror<R: Runtime>(
     app: &AppHandle<R>,
     page: String,
@@ -692,8 +693,8 @@ pub fn enqueue_mirror<R: Runtime>(
     title: Option<String>,
     release: Option<String>,
 ) -> Result<(), String> {
-    let (_, host) = crate::resolvers::classify(&page).ok_or("Kryoto can't download from that host yet. Open it in your browser instead.")?;
-    enqueue_item(app, page.clone(), slug, title, Some(Mirror { page, host: host.into() }), release, None)
+    let (_, host) = crate::resolvers::classify_any(&page).ok_or("Kryoto can't download from that link. Open it in your browser instead.")?;
+    enqueue_item(app, page.clone(), slug, title, Some(Mirror { page, host }), release, None)
 }
 
 fn enqueue_item<R: Runtime>(
@@ -2337,12 +2338,28 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         ensure_7zr(app).await;
     }
 
+    // A download that is the program itself goes in as it is, and is what Play starts.
+    let program = is_program(&archive).then(|| item.file_name.clone());
     let progress_app = app.clone();
     let progress_id = id.to_string();
     let (dest_clone, staging_clone) = (dest.clone(), staging.clone());
     let stop = flag.clone();
+    let lone = program.clone();
     let damaged = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
         let _ = std::fs::remove_dir_all(&staging_clone);
+        if let Some(name) = lone {
+            std::fs::create_dir_all(&staging_clone).map_err(|e| e.to_string())?;
+            let placed = staging_clone.join(safe_name(&name));
+            std::fs::copy(&archive, &placed).map_err(|e| format!("Installing {name} failed: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&placed, std::fs::Permissions::from_mode(0o755));
+            }
+            move_tree(&staging_clone, &dest_clone).map_err(|e| format!("Installing into {} failed: {e}", dest_clone.display()))?;
+            let _ = std::fs::remove_dir_all(&staging_clone);
+            return Ok(Vec::new());
+        }
         let unpacked = extract_until(
             &archive,
             &staging_clone,
@@ -2380,7 +2397,10 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         crate::logging::error("install", &format!("{title}: {w}"));
     }
 
-    let (root, executable) = locate(&dest, &item.meta.executable);
+    let (root, executable) = match program.as_deref() {
+        Some(name) => (dest.clone(), safe_name(name)),
+        None => locate(&dest, &item.meta.executable),
+    };
     let game = library::upsert_installed(
         app,
         LibraryGame {
@@ -2449,6 +2469,15 @@ fn damage_warning(damaged: &[String], verified: bool) -> Option<String> {
     Some(format!(
         "7-Zip reported a checksum error in {files}. The files were unpacked anyway and many games run fine like this. {origin} If the game crashes or looks wrong, try a mirror or report the release."
     ))
+}
+
+/// A download that is a program rather than an archive of one: an installer,
+/// a one-file game, an AppImage. 7-Zip opens most .exe files as archives of
+/// their sections, so these are never handed to it.
+fn is_program(file: &Path) -> bool {
+    file.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|e| e == "exe" || e == "appimage")
 }
 
 /// What a .7z says it unpacks to, from its headers. `None` for other formats.

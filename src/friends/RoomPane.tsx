@@ -1,5 +1,6 @@
+import { TeamName } from '@/ui/TeamName'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Globe, Send, Trash2 } from 'lucide-react'
+import { ArrowLeft, Globe, Send, Trash2 } from 'lucide-react'
 import { artSrc } from '@/lib/art'
 import { call, errorText } from '@/lib/bridge'
 import { Button, IconButton } from '@/ui'
@@ -20,7 +21,7 @@ const POLL_MS = 4000
  * NOT end-to-end encrypted - kryo.to keeps the messages for 30 days and
  * moderators can remove them - and the header says so.
  */
-export function RoomPane({ myUsername, onProfile }: { myUsername: string; onProfile: (username: string) => void }) {
+export function RoomPane({ myUsername, onProfile, onBack }: { myUsername: string; onProfile: (username: string) => void; onBack?: () => void }) {
   const [messages, setMessages] = useState<RoomMessage[]>([])
   const [canModerate, setCanModerate] = useState(false)
   const [text, setText] = useState('')
@@ -85,7 +86,12 @@ export function RoomPane({ myUsername, onProfile }: { myUsername: string; onProf
 
   return (
     <section className="grid min-h-0 grid-rows-[auto_1fr_auto]">
-      <header className="flex items-center gap-3 border-b border-border px-5 py-3">
+      <header className={cn('flex items-center gap-3 border-b border-border py-3', onBack ? 'px-3' : 'px-5')}>
+        {onBack ? (
+          <IconButton label="Back to the list" onClick={onBack}>
+            <ArrowLeft className="size-4" />
+          </IconButton>
+        ) : null}
         <Globe className="size-4 text-muted-foreground" aria-hidden />
         <div className="grid">
           <b className="text-sm text-foreground">Public room</b>
@@ -111,7 +117,7 @@ export function RoomPane({ myUsername, onProfile }: { myUsername: string; onProf
               <div className="grid min-w-0 gap-0.5">
                 <span className="flex items-center gap-2 text-[11px]">
                   <button type="button" onClick={() => onProfile(m.user.username)} className={cn('font-bold hover:underline', mine ? 'text-primary' : 'text-foreground')}>
-                    {name}
+                    <TeamName username={m.user.username}>{name}</TeamName>
                   </button>
                   <span className="text-muted-foreground">
                     {new Date(m.createdAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}

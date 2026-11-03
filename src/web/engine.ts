@@ -16,6 +16,7 @@
 import init, { Kryo } from './pkg/km_wasm'
 import { api, GATEWAY_HTTP, GATEWAY_WS } from './api'
 import { Store, type MessageRow } from './store'
+import { EMBEDDED, toSite } from './embed'
 
 export type ChatStatus =
   | { state: 'off' }
@@ -86,6 +87,13 @@ export class WebChat {
   private backoff = 1
   /** The gateway's VAPID key (hex), empty when it sends no pushes. */
   private pushKey = ''
+  /** Calls that have rung here already: one notice each. */
+  private rung = new Set<string>()
+  /**
+   * Until when another of this account's devices is in use (it sent
+   * `active`): that one shows the notifications, this one keeps quiet.
+   */
+  private activeElsewhereUntil = 0
 
   private constructor(
     private kryo: Kryo,
@@ -558,7 +566,21 @@ export class WebChat {
     if (this.awaiting(peer)) throw new SendError('Accept their message request first.')
     const c = this.content({ dm: peer }, { type: 'call', callId, callKind, payload })
     Kryo.validate(JSON.stringify(c), this.meSupporter)
-    await this.deliver([peer], c, true, null)
+    // Picking up or turning it down here stops it ringing on this account's other devices.
+    const mine = callKind === 'answer' || callKind === 'decline'
+    await this.deliver(mine ? [peer, this.userId] : [peer], c, true, null)
+  }
+
+  /** The record of a finished call, in the conversation for both people (the caller sends it). */
+  async callLog(peer: string, callId: string, answered: boolean, seconds: number) {
+    const secs = answered ? Math.min(24 * 3600, Math.max(0, Math.round(seconds))) : 0
+    const body = { type: 'callLog', callId, answered, seconds: secs }
+    return this.sendNew({ dm: peer }, body, 'call', JSON.stringify({ callId, answered, seconds: secs, caller: this.userId }), null)
+  }
+
+  /** "This device is in use": to this account's other devices online now, never stored. */
+  async active() {
+    await this.deliver([this.userId], this.content({ dm: this.userId }, { type: 'active' }), true, null)
   }
 
   private async resendPending() {
@@ -568,7 +590,10 @@ export class WebChat {
       if (!t) continue
       let body: Record<string, unknown>
       if (row.kind === 'text') body = { type: 'text', text: row.body, replyTo: row.replyTo ?? '' }
-      else body = { type: row.kind, ...(JSON.parse(row.body) as object) }
+      else if (row.kind === 'call') {
+        const { callId, answered, seconds } = JSON.parse(row.body) as { callId: string; answered: boolean; seconds: number }
+        body = { type: 'callLog', callId, answered, seconds }
+      } else body = { type: row.kind, ...(JSON.parse(row.body) as object) }
       try {
         const { users, group } = await this.recipients(t)
         await this.deliver(users, this.content(t, body, row.msgId, row.sentAt), false, group)
@@ -614,10 +639,14 @@ export class WebChat {
       case 'text':
       case 'gif':
       case 'invite':
-      case 'file': {
+      case 'file':
+      case 'callLog': {
         if (b.type === 'invite' && !/^[a-z0-9-]{1,120}$/.test(b.slug ?? '')) return
+        if (b.type === 'callLog' && !('dm' in t)) return
         const { type, ...rest } = b
         void type
+        // A call record keeps who made the call.
+        if (b.type === 'callLog') rest.caller = sender
         const row: MessageRow = {
           msgId: c.msgId,
           conversationId: c.conversationId,
@@ -627,7 +656,7 @@ export class WebChat {
           outgoing: fromMe,
           sentAt: c.sentAt,
           receivedAt: Date.now(),
-          kind: b.type,
+          kind: b.type === 'callLog' ? 'call' : b.type,
           body: b.type === 'text' ? b.text : JSON.stringify(rest),
           replyTo: b.type === 'text' && b.replyTo && b.replyTo.length === 32 ? b.replyTo : null,
           editedAt: null,
@@ -640,7 +669,8 @@ export class WebChat {
         this.emit('chat-message', shown)
         if (fromMe) return
         this.emit('chat-unread', { conversationId: c.conversationId })
-        if (!this.people.get(sender)?.muted) void this.notify(sender, shown, 'group' in t ? t.group : null)
+        // A call record follows the call, which already rang.
+        if (!this.people.get(sender)?.muted && b.type !== 'callLog') void this.notify(sender, shown, 'group' in t ? t.group : null)
         if (this.awaiting(sender) || 'group' in t) return
         await this.deliver([sender, me], this.content(t, { type: 'receipt', receiptKind: 'delivered', msgIds: [c.msgId] }), false, null).catch(() => {})
         return
@@ -690,17 +720,29 @@ export class WebChat {
           this.emit('chat-group-changed', { groupId: t.group })
         }
         return
+      case 'active':
+        if (fromMe) this.activeElsewhereUntil = Date.now() + 75_000
+        return
       case 'call':
+        // Picked up or turned down on another of this account's devices.
+        if (fromMe && 'dm' in t && (b.callKind === 'answer' || b.callKind === 'decline')) {
+          this.emit('chat-call', { userId: t.dm, callId: b.callId, kind: 'elsewhere', payload: '' })
+          return
+        }
         if (!fromMe && 'dm' in t && !this.awaiting(sender)) {
           this.emit('chat-call', { userId: sender, callId: b.callId, kind: b.callKind, payload: b.payload })
-          if (b.callKind === 'offer' && document.hidden) void this.notifyText(`${this.people.get(sender)?.name ?? 'Someone'} is calling`, null)
+          // One notice per call, however many offers it takes.
+          if (b.callKind === 'offer' && !this.rung.has(b.callId)) {
+            this.rung.add(b.callId)
+            if (document.hidden) void this.notifyText(`${this.people.get(sender)?.name ?? 'Someone'} is calling`, null)
+          }
         }
         return
     }
   }
 
   private async notify(sender: string, row: MessageRow, group: string | null) {
-    if (!document.hidden) return
+    if (!document.hidden || Date.now() < this.activeElsewhereUntil) return
     const mode = (await this.settings()).notificationContent
     const who = this.people.get(sender)?.name ?? 'New message'
     const title = mode === 'none' ? 'New message on Kryoto' : group ? `${who} in ${await this.groupName(group)}` : who
@@ -709,6 +751,11 @@ export class WebChat {
   }
 
   private async notifyText(title: string, body: string | null) {
+    // Inside kryo.to the site shows it: this frame may never notify itself.
+    if (EMBEDDED) {
+      toSite({ type: 'notify', title, body })
+      return
+    }
     if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
     try {
       new Notification(title, body ? { body } : undefined)

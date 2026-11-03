@@ -26,6 +26,7 @@ pub const LABEL: &str = "popup";
 /// the window, in logical pixels.
 const GAP: f64 = 6.0;
 
+
 #[derive(Clone, Copy, Default, Deserialize)]
 pub struct Anchor {
     left: f64,
@@ -146,9 +147,9 @@ pub async fn menu_open(
     let window = app.get_window("main").ok_or("The main window is gone.")?;
     let builder = WebviewBuilder::new(LABEL, WebviewUrl::default())
         // The shell's own background, for the moment before the menu paints.
-        // Linux: see-through, so the panel's rounded corners (styles.css) show
-        // the window's fill behind them (system.rs, `round_corners`).
-        .background_color(Color(10, 10, 10, if cfg!(target_os = "linux") { 0 } else { 255 }))
+        // Opaque everywhere: see-through views drew dark pixels as clear on
+        // WebKitGTK 2.54 (KB-0006). Linux rounds the view with a shape instead.
+        .background_color(Color(10, 10, 10, 255))
         .focused(false);
     let (position, size) = crate::placement::rect(anchor.left, anchor.bottom, 320.0, 480.0, scale);
     let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;
@@ -192,7 +193,16 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, s
     let y = (anchor.bottom + GAP).min(inner.height - height - GAP).max(GAP);
     crate::placement::place(&view, x, y, width, height, css)?;
     #[cfg(target_os = "linux")]
-    crate::linux_overlay::place(&view, x, y, width, height);
+    {
+        crate::linux_overlay::place(&view, x, y, width, height);
+        // Rounded like the panel it draws, at the reader's corner style
+        // (styles.css), cut by a shape so the view itself can stay opaque (KB-0006).
+        let (w, h) = (width.round() as i32, height.round() as i32);
+        let _ = view.with_webview(move |v| {
+            use gtk::prelude::Cast;
+            crate::system::linux_shape::view(v.inner().upcast_ref::<gtk::Widget>(), w, h, crate::system::corner());
+        });
+    }
     view.show().map_err(|e| e.to_string())?;
     #[cfg(windows)]
     raise(&view);

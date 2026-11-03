@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import { PopupApp } from './popup/PopupApp'
+import { PetApp } from './pet/PetApp'
 import { GlobalTooltip } from './ui/GlobalTooltip'
 import { installErrorLogging } from './lib/log'
 import { installWindowDrag } from './lib/window-drag'
@@ -34,6 +35,8 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     {label === 'popup' ? (
       <PopupApp />
+    ) : label === 'pet' ? (
+      <PetApp />
     ) : (
       <>
         <App />

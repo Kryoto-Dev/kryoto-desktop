@@ -1,3 +1,4 @@
+import { TeamName } from '@/ui/TeamName'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Play, Square } from 'lucide-react'
@@ -203,7 +204,7 @@ export function BigPicture({
           {pad ? pad.name : 'No controller'}
         </span>
         <span className="text-lg font-bold tabular-nums">{clock}</span>
-        {playerUsername ? <a href={`https://kryo.to/user/${encodeURIComponent(playerUsername)}`} onClick={e => { if (onProfile) { e.preventDefault(); onProfile() } }} className="kryo-pill text-sm text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">{playerName}</a> : <span className="text-sm text-muted-foreground">{playerName}</span>}
+        {playerUsername ? <a href={`https://kryo.to/user/${encodeURIComponent(playerUsername)}`} onClick={e => { if (onProfile) { e.preventDefault(); onProfile() } }} className="kryo-pill text-sm text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"><TeamName username={playerUsername}>{playerName}</TeamName></a> : <span className="text-sm text-muted-foreground">{playerName}</span>}
       </header>
 
       <main className="min-h-0 overflow-auto px-12 pb-8 pt-3">

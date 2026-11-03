@@ -107,8 +107,12 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
 
   const addFolder = async () => {
     if (!isTauri()) return run('add', () => call('storage_add_folder', { path: 'E:\\Kryoto Games' }))
-    const dir = await pickPath({ directory: true, title: 'Add a library folder' })
-    if (typeof dir === 'string') await run('add', () => call('storage_add_folder', { path: dir }))
+    // The picker inside run() too: a picker that fails says so here instead
+    // of the button doing nothing (kryoto-bugs KB-0042).
+    await run('add', async () => {
+      const dir = await pickPath({ directory: true, title: 'Add a library folder' })
+      if (typeof dir === 'string') await call('storage_add_folder', { path: dir })
+    })
   }
 
   if (!data) {

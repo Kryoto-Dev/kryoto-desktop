@@ -6,10 +6,15 @@ import { fetchAddons, library, type KryoAddon, type LibraryGame } from '@/lib/li
 import { GameRepair } from './GameRepair'
 
 const isOnline = (a: { label: string | null; source: string | null }) => /online/i.test(`${a.label ?? ''} ${a.source ?? ''}`)
+/** A DLC packed on its own, filed on kryo.to as `DLC: <name>` (kryo.to lib/dlc-addons.ts). */
+const isDlc = (a: { label: string | null }) => /^dlc:\s*/i.test(a.label ?? '')
+const dlcName = (label: string | null) => (label ?? '').replace(/^dlc:\s*/i, '').trim() || 'DLC'
+/** More DLC than this and the list folds away behind a button. */
+const DLC_SHOWN = 5
 
 /**
- * A game's add-ons: what kryo.to has for it (language packs, the Online
- * add-on), what is applied, and Kryoto Online set up on this PC. Applying one
+ * A game's add-ons: what kryo.to has for it (its DLC, language packs, the
+ * Online add-on), what is applied, and Kryoto Online set up on this PC. Applying one
  * opens the game's download window; it applies itself when it lands. Undo
  * deletes what the add-on wrote.
  */
@@ -26,6 +31,7 @@ export function AddonsCard({
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [repairOpen, setRepairOpen] = useState(false)
+  const [allDlc, setAllDlc] = useState(false)
   const [confirm, setConfirm] = useState<{ kind: 'addon'; file: string; label: string; count: number } | { kind: 'online' } | null>(null)
 
   useEffect(() => {
@@ -65,6 +71,8 @@ export function AddonsCard({
   // so too (`offered`); either one saying no hides it.
   const wanted = (a: KryoAddon) => !isOnline(a) || (onlineOffered && a.offered !== false)
   const offers = (available ?? []).filter((a) => !isApplied(a) && wanted(a))
+  const dlcOffers = offers.filter((a) => isDlc(a))
+  const otherOffers = offers.filter((a) => !isDlc(a))
   const kryoOnline = offers.find(isOnline)
   const showOnline = !!game.online || onlineOffered
 
@@ -88,7 +96,43 @@ export function AddonsCard({
     <Card className="grid gap-4">
       <Label>Add-ons</Label>
 
-      {offers.map((a) => (
+      {/* The game's DLC, each optional. The download window's "Download all
+          DLC" starts every one; each goes into the game as it lands. */}
+      {dlcOffers.length > 0 ? (
+        <div className="grid gap-2">
+          <div className="flex items-center gap-3">
+            <Caption className="grow">
+              DLC · {dlcOffers.length} not applied
+            </Caption>
+            {dlcOffers.length > 1 ? (
+              <Button size="sm" variant="primary" onClick={onGet}>
+                <Download className="size-3" />
+                Apply all DLC
+              </Button>
+            ) : null}
+          </div>
+          {(allDlc ? dlcOffers : dlcOffers.slice(0, DLC_SHOWN)).map((a) => (
+            <Row
+              key={a.id}
+              title={dlcName(a.label)}
+              sub={a.download_size ?? undefined}
+              action={
+                <Button size="sm" onClick={onGet}>
+                  <Download className="size-3" />
+                  Apply
+                </Button>
+              }
+            />
+          ))}
+          {dlcOffers.length > DLC_SHOWN ? (
+            <Button size="sm" variant="ghost" className="justify-self-start" onClick={() => setAllDlc((v) => !v)}>
+              {allDlc ? 'Show fewer' : `Show all ${dlcOffers.length} DLC`}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {otherOffers.map((a) => (
         <Row
           key={a.id}
           title={a.label || 'Add-on'}

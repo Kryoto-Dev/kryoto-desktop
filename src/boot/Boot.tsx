@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { ProfileLink, TeamName } from '@/ui/TeamName'
 import { artSrc } from '@/lib/art'
 import { ArrowLeft, Minus, RotateCw, X } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -113,6 +114,15 @@ export function Welcome({
 }) {
   const [signingIn, setSigningIn] = useState(false)
   const [switching, setSwitching] = useState(false)
+  // A check that takes this long is stuck on kryo.to's side: offer the ways on.
+  const checking = account === undefined || switching
+  const [slow, setSlow] = useState(false)
+  useEffect(() => {
+    setSlow(false)
+    if (!checking) return
+    const t = window.setTimeout(() => setSlow(true), 10_000)
+    return () => window.clearTimeout(t)
+  }, [checking])
 
   // Signing in on the page finishes the job: the account arriving is the cue.
   useEffect(() => {
@@ -165,13 +175,13 @@ export function Welcome({
           />
         ) : (
           <div className="no-drag kryo-in grid w-80 justify-items-center gap-3" style={{ animationDelay: '900ms' }}>
-            {account === undefined || switching ? (
+            {checking ? (
               <>
                 <AsciiBar fraction={null} cells={18} showPct={false} className="text-foreground/70" />
                 <p className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
-                  {page.error ? 'kryo.to is not answering' : 'Checking your account'}
+                  {page.error ? 'kryo.to is not answering' : slow ? 'kryo.to is slow to answer' : 'Checking your account'}
                 </p>
-                {page.error ? (
+                {page.error || slow ? (
                   <>
                     <Button size="sm" onClick={onRetry}>
                       <RotateCw className="size-3" />
@@ -183,9 +193,12 @@ export function Welcome({
               </>
             ) : account ? (
               <>
-                <Button variant="primary" size="lg" className="w-full gap-3" onClick={onContinue}>
+                <ProfileLink username={account.guest ? null : account.username} className="inline-flex max-w-full items-center gap-3 text-sm text-foreground hover:text-primary focus-visible:outline-2 focus-visible:outline-primary">
                   {account.avatarUrl ? <img decoding="async" src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" /> : null}
-                  <span className="truncate">Continue as {name}</span>
+                  <span className="truncate"><TeamName username={account.guest ? null : account.username}>{name}</TeamName></span>
+                </ProfileLink>
+                <Button variant="primary" size="lg" className="w-full gap-3" onClick={onContinue}>
+                  Continue
                 </Button>
                 <Button
                   variant="ghost"

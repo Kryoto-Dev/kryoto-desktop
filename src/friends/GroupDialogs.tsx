@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { ProfileLink, TeamName } from '@/ui/TeamName'
 import { Crown, LogOut, Shield, UserMinus } from 'lucide-react'
 import { errorText } from '@/lib/bridge'
 import { chatGroupAdd, chatGroupCreate, chatGroupRemove, chatGroupRename, here, type GroupView } from '@/lib/chat'
@@ -33,7 +34,7 @@ function PickFriends({
         {list.length === 0 ? <li className="p-2 text-xs text-muted-foreground">Nobody to add.</li> : null}
         {list.map((f) => (
           <li key={f.id}>
-            <Check checked={picked.has(f.id)} onChange={() => onToggle(f.id)} label={friendName(f)} />
+            <Check checked={picked.has(f.id)} onChange={() => onToggle(f.id)} label={<ProfileLink username={f.username} className="hover:underline focus-visible:outline-2 focus-visible:outline-primary"><TeamName username={f.username}>{friendName(f)}</TeamName></ProfileLink>} />
           </li>
         ))}
       </ul>
@@ -110,6 +111,7 @@ export function GroupMembersDialog({
   myId,
   friends,
   nameOf,
+  usernameOf = () => null,
   onClose,
   onLeft,
 }: {
@@ -117,6 +119,7 @@ export function GroupMembersDialog({
   myId: string
   friends: (FriendFace & { nickname?: string | null })[]
   nameOf: (id: string) => string
+  usernameOf?: (id: string) => string | null
   onClose: () => void
   onLeft: () => void
 }) {
@@ -177,7 +180,7 @@ export function GroupMembersDialog({
         {group.members.map((m) => (
           <li key={m.userId} className="kryo-radius flex items-center justify-between gap-2 border border-border px-3 py-1.5 text-xs text-foreground">
             <span className="flex min-w-0 items-center gap-2">
-              <span className="truncate">{m.userId === myId ? 'You' : nameOf(m.userId)}</span>
+              <ProfileLink username={m.userId === myId ? null : usernameOf(m.userId)} className="truncate hover:underline focus-visible:outline-2 focus-visible:outline-primary"><TeamName username={m.userId === myId ? null : usernameOf(m.userId)}>{m.userId === myId ? 'You' : nameOf(m.userId)}</TeamName></ProfileLink>
               {roleIcon(m.role)}
             </span>
             {canManage && m.userId !== myId && (group.myRole === 'owner' || m.role === 'member') ? (

@@ -8,6 +8,7 @@ mod compat;
 mod display_env;
 mod game_logs;
 mod remote;
+mod pet;
 mod phone;
 mod downloads;
 mod handoff;
@@ -20,6 +21,8 @@ mod lobbies;
 mod linux_overlay;
 #[cfg(target_os = "linux")]
 mod linux_store_downloads;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux_open;
 mod logging;
 mod menus;
 mod online;
@@ -234,23 +237,25 @@ fn download_mirror(
 
 #[derive(serde::Serialize)]
 struct MirrorHost {
-    host: &'static str,
+    host: String,
     /// `api` and `direct` download straight away; `page` opens the host's
-    /// page in a window of its own and may ask for a check.
+    /// page in a window of its own and may ask for a check, or for the person
+    /// to start the download there (any other site).
     kind: &'static str,
 }
 
-/// Which of these links Kryoto can download from itself.
+/// Which of these links Kryoto can download from itself: every web link but
+/// the few that only work in their own page (MEGA).
 #[tauri::command]
 fn mirror_hosts(urls: Vec<String>) -> Vec<Option<MirrorHost>> {
     urls.iter()
         .map(|u| {
-            resolvers::classify(u).map(|(kind, host)| MirrorHost {
+            resolvers::classify_any(u).map(|(kind, host)| MirrorHost {
                 host,
                 kind: match kind {
                     resolvers::Kind::Api => "api",
                     resolvers::Kind::Direct => "direct",
-                    resolvers::Kind::Page => "page",
+                    resolvers::Kind::Page | resolvers::Kind::Web => "page",
                 },
             })
         })
@@ -291,6 +296,16 @@ pub(crate) fn catalog_endpoint_changed<R: Runtime>(
     Ok(())
 }
 
+/// Counts the Store's page-load events, so an early injection of
+/// BROWSER_STATE_SCRIPT for one page stops once the next event comes.
+static STORE_LOAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A link to a picture rather than a page (`/api/steam/image.jpg?url=...`).
+fn is_image_file(url: &url::Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"].iter().any(|ext| path.ends_with(ext))
+}
+
 fn block_reason(url: &url::Url) -> String {
     match url.scheme() {
         "file" | "javascript" | "data" | "blob" => {
@@ -317,16 +332,24 @@ fn emit_state<R: Runtime>(app: &tauri::AppHandle<R>, state: BrowserState) {
     let _ = app.emit_to("main", "browser-state", &state);
 }
 
+/// Whether the computer is in dark mode, for Settings' "System" theme.
+#[tauri::command(async)]
+fn system_dark() -> Option<bool> {
+    system::os_dark()
+}
+
 /// Apply the shell's scheme to native window surfaces too.
 #[tauri::command]
 fn shell_theme(app: tauri::AppHandle, dark: bool, shell: Option<[u8; 3]>) {
     if let Some(window) = app.get_window("main") {
         let _ = window.set_theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }));
         let value = if dark { 10 } else { 249 };
-        // Linux: see-through, so the page's rounded corners show the desktop
-        // behind them (styles.css, `data-os='linux'`).
-        let alpha = if cfg!(target_os = "linux") { 0 } else { 255 };
-        let color = tauri::window::Color(value, value, value, alpha);
+        // Opaque everywhere. Linux had a see-through window for rounded
+        // corners, but WebKitGTK 2.54 draws dark pixels in one as clear and the
+        // app vanished on new distros (kryoto-bugs KB-0006, styles.css). The
+        // Linux window fill below still paints behind the views, so nothing
+        // that loses its alpha can show the desktop.
+        let color = tauri::window::Color(value, value, value, 255);
         let _ = window.set_background_color(Some(color));
         #[cfg(target_os = "linux")]
         {
@@ -338,8 +361,10 @@ fn shell_theme(app: tauri::AppHandle, dark: bool, shell: Option<[u8; 3]>) {
         // Only Linux fills the window behind its views.
         #[cfg(not(target_os = "linux"))]
         let _ = shell;
-        for (label, view) in app.webviews() {
-            if label != STORE {
+        // The main window's own views only: the desktop pet is a window of
+        // its own and must stay see-through (pet.rs).
+        for view in window.webviews() {
+            if view.label() != STORE {
                 let _ = view.set_background_color(Some(color));
             }
         }
@@ -545,6 +570,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
               friends: (f.friends || []).slice(0, 500).map((p) => Object.assign(face(p), { favourite: !!p.favourite, nickname: p.nickname || null, muted: !!p.muted, online: !!p.online, playing: p.playing && typeof p.playing.slug === 'string' ? { slug: p.playing.slug, title: String(p.playing.title || p.playing.slug), cover: p.playing.cover || null } : null })),
               incoming: (f.incoming || []).slice(0, 100).map((p) => Object.assign(face(p), { requestId: p.requestId })),
               outgoing: (f.outgoing || []).length,
+              sent: (f.outgoing || []).slice(0, 100).map((p) => Object.assign(face(p), { requestId: p.requestId })),
               messageRequests: {
                 incoming: ((f.messageRequests && f.messageRequests.incoming) || []).slice(0, 100).map(face),
                 outgoing: ((f.messageRequests && f.messageRequests.outgoing) || []).slice(0, 100).map(face),
@@ -578,16 +604,26 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   let remoteBusy = false;
   let lastReport = '';
   let lastReportAt = 0;
+  // kryo.to says how soon to ask again (`next` on take): every beat while
+  // somebody is looking at this PC from kryo.to or a phone, every 20 s or so
+  // otherwise. Asking every 3 s from every PC all day was the busiest load on
+  // the site (kryoto-bugs KB-0002). An older kryo.to sends no `next`: every beat.
+  let nextTakeAt = 0;
+  let watched = true;
   const post = (path, body) => fetch(path, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     .then((r) => (r.ok ? r.json() : null));
   const remote = async () => {
     if (!KRYO || !me || remoteBusy || document.visibilityState === 'prerender') return;
+    if (Date.now() < nextTakeAt) return;
     remoteBusy = true;
     try {
       const snap = await invoke('remote_snapshot');
       if (!snap || !snap.installId) return;
       // `mirrors`: a game only on mirrors may be sent too (remote.rs).
       const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: snap.protocol, mirrors: true }).catch(() => null);
+      const next = taken && typeof taken.next === 'number' && taken.next > 0 ? Math.min(taken.next, 60000) : 0;
+      watched = !next || next <= 5000;
+      nextTakeAt = next ? Date.now() + next - 500 : 0;
       let now = snap;
       if (taken && Array.isArray(taken.commands) && taken.commands.length) {
         const results = await invoke('remote_apply', { commands: taken.commands });
@@ -597,9 +633,11 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         }
         now = (await invoke('remote_snapshot')) || snap;
       }
-      // Downloads moving, a game starting or stopping, or the library changing.
+      // Downloads moving, a game starting or stopping, or the library changing:
+      // at once while watched, otherwise with the half-minute report that
+      // keeps the PC listed as online.
       const body = JSON.stringify([now.downloads, now.running || [], (now.games || []).map((g) => g.id + ':' + (g.lastPlayed || 0))]);
-      if (body !== lastReport || Date.now() - lastReportAt > 30000) {
+      if ((body !== lastReport && watched) || Date.now() - lastReportAt > 30000) {
         lastReport = body;
         lastReportAt = Date.now();
         const answer = await post('/api/desktop/remote/report', now).catch(() => null);
@@ -659,7 +697,14 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         // This PC's copy of a game, and Play for it, so its page can offer
         // Play instead of Download. `kryoto-library` fires when either changes.
         installed: (slug) => invoke('store_installed', { slug: String(slug || '') }),
-        play: (slug) => invoke('store_play', { slug: String(slug || '') })
+        play: (slug) => invoke('store_play', { slug: String(slug || '') }),
+        // Any link a game lists, downloaded here: a mirror host the app
+        // knows, a file, or a page that opens for the person to start it on.
+        download: (url, slug, title) => invoke('store_download_link', {
+          url: String(url || ''),
+          slug: String(slug || ''),
+          title: title ? String(title) : null
+        })
       })
     });
   } catch (_) {}
@@ -803,7 +848,8 @@ fn open_external_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(parsed.as_str()).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open").arg(parsed.as_str()).spawn();
+    return linux_open::open(parsed.as_str());
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     result.map(|_| ()).map_err(|e| e.to_string())
 }
 
@@ -922,7 +968,16 @@ async fn store_mount(
                     return NewWindowResponse::Deny;
                 }
             };
-            if is_kryoto(&url, &popup_app) {
+            if is_kryoto(&url, &popup_app) && is_image_file(&url) {
+                // A picture "in a new tab" (a screenshot): put in the Store,
+                // it would replace the site with a bare image, signed-out
+                // looking, until the next page. The browser shows it instead.
+                // Off the UI thread: on Linux the opener waits to see it work.
+                let target = url.to_string();
+                std::thread::spawn(move || {
+                    let _ = open_external_url(&target);
+                });
+            } else if is_kryoto(&url, &popup_app) {
                 if let Some(view) = popup_app.get_webview(STORE) {
                     let _ = view.navigate(url);
                 }
@@ -933,7 +988,11 @@ async fn store_mount(
                     let _ = popup_app.emit("notify", downloads::Notice::new("Can't use that mirror", &e, None));
                 }
             } else if allowed_browser_url(&url) {
-                let _ = open_external_url(url.as_str());
+                // Off the UI thread: on Linux the opener waits to see it work.
+                let target = url.to_string();
+                std::thread::spawn(move || {
+                    let _ = open_external_url(&target);
+                });
             }
             NewWindowResponse::Deny
         });
@@ -1096,6 +1155,36 @@ fn store_play(app: tauri::AppHandle, webview: tauri::Webview, slug: String) -> R
     app.emit_to("main", "store-play", game.id).map_err(|e| e.to_string())
 }
 
+/// A download link pressed on a game's kryo.to page (`kryotoDesktop.download`):
+/// downloaded here from that link, whatever site it is on.
+#[tauri::command]
+fn store_download_link(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    url: String,
+    slug: String,
+    title: Option<String>,
+) -> Result<(), String> {
+    from_kryoto_store(&app, &webview)?;
+    let slug = slug.trim().to_ascii_lowercase();
+    if slug.is_empty() || slug.len() > 160 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Not a kryo.to game.".into());
+    }
+    let title = title
+        .map(|t| t.trim().chars().filter(|c| !c.is_control()).take(300).collect::<String>())
+        .filter(|t| !t.is_empty());
+    // MEGA and filez.stream only give their files to their own page: those
+    // open in the browser, as the link would anywhere else.
+    if resolvers::classify_any(&url).is_none() {
+        let parsed: url::Url = url.parse().map_err(|_| "Not a valid link.".to_string())?;
+        if !allowed_browser_url(&parsed) {
+            return Err("Not a web link.".into());
+        }
+        return open_external_url(parsed.as_str());
+    }
+    downloads::enqueue_mirror(&app, url, Some(slug), title, None)
+}
+
 /// The library or what is running changed: a kryo.to page showing Play or
 /// Download asks again (`kryoto-library`). Called by the shell, which sees both.
 #[tauri::command]
@@ -1214,6 +1303,27 @@ fn store_mark_read(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Tell kryo.to these notifications were shown here as system notifications,
+/// so the account's other devices (Kryoto Mobile) do not show them again.
+/// Runs in the Store's page, with the session the player signed in with.
+#[tauri::command]
+fn store_notifications_shown(app: tauri::AppHandle, ids: Vec<String>) -> Result<(), String> {
+    let ids: Vec<String> = ids.into_iter().filter(|id| !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())).take(50).collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to first.".into());
+    }
+    let body = serde_json::to_string(&serde_json::json!({ "shown": ids })).map_err(|e| e.to_string())?;
+    view.eval(format!(
+        "fetch('/api/notifications',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:{}}}).catch(()=>{{}})",
+        serde_json::to_string(&body).map_err(|e| e.to_string())?
+    ))
+    .map_err(|e| e.to_string())
+}
+
 /// Set a game's status in the account's kryo.to library (`playing`, `plan`,
 /// `completed`, `onhold`, `dropped`, `favorite`), or take it out with `None`.
 /// Runs in the Store's page, with the session the player signed in with.
@@ -1296,6 +1406,74 @@ fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, secon
     .map_err(|e| e.to_string())
 }
 
+/// Whether the friends list may send this request: only the routes behind its
+/// own actions (`src/lib/friends.ts`), never an arbitrary path on the account.
+fn friend_route_allowed(method: &str, path: &str) -> bool {
+    let id = |s: &str| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit());
+    let parts: Vec<&str> = path.split('/').collect();
+    match (method, parts.as_slice()) {
+        ("POST", ["", "api", "friends", "requests"]) | ("POST", ["", "api", "friends", "invites"]) => true,
+        ("POST", ["", "api", "friends", "requests", n]) => id(n),
+        ("DELETE" | "PATCH", ["", "api", "friends", n]) => id(n),
+        ("POST" | "DELETE", ["", "api", "blocks", n]) | ("POST" | "DELETE", ["", "api", "mutes", n]) => id(n),
+        _ => false,
+    }
+}
+
+/// A friends-list action (add, answer, remove, block, pin, mute, invite link),
+/// sent from the Store's kryo.to page with the player's own session. The page
+/// hands kryo.to's answer back through `store_friend_done`, tagged with `id`.
+#[tauri::command]
+fn store_friend_fetch(
+    app: tauri::AppHandle,
+    id: String,
+    method: String,
+    path: String,
+    body: Option<serde_json::Value>,
+) -> Result<(), String> {
+    if id.is_empty() || id.len() > 40 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Not a request id.".into());
+    }
+    if !friend_route_allowed(&method, &path) {
+        return Err("That is not something the friends list does.".into());
+    }
+    let body = match body {
+        None | Some(serde_json::Value::Null) => "undefined".to_string(),
+        Some(v @ serde_json::Value::Object(_)) => {
+            let text = v.to_string();
+            if text.len() > 4096 {
+                return Err("That is too long.".into());
+            }
+            serde_json::to_string(&text).map_err(|e| e.to_string())?
+        }
+        Some(_) => return Err("Not a request body.".into()),
+    };
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to in the Store first.".into());
+    }
+    let js = |s: &str| serde_json::to_string(s).map_err(|e| e.to_string());
+    let (id, method, path) = (js(&id)?, js(&method)?, js(&path)?);
+    view.eval(format!(
+        "(() => {{ const done = (r) => {{ try {{ window.__TAURI_INTERNALS__.invoke('store_friend_done', {{ result: Object.assign({{ id: {id} }}, r) }}); }} catch (_) {{}} }}; \
+         fetch({path}, {{ method: {method}, credentials: 'include', headers: {{ 'content-type': 'application/json' }}, body: {body} }}) \
+           .then((res) => res.json().catch(() => ({{}})).then((data) => done({{ ok: res.ok, status: res.status, data }}))) \
+           .catch(() => done({{ ok: false, status: 0, data: null }})) \
+           .finally(() => window.__kryoDesktopRefresh && window.__kryoDesktopRefresh()); }})()"
+    ))
+    .map_err(|e| e.to_string())
+}
+
+/// kryo.to's answer to a `store_friend_fetch`, passed on to the shell.
+#[tauri::command]
+fn store_friend_done(app: tauri::AppHandle, webview: tauri::Webview, result: serde_json::Value) -> Result<(), String> {
+    from_kryoto_store(&app, &webview)?;
+    if result.to_string().len() > 16 * 1024 || !result.get("id").is_some_and(|v| v.is_string()) {
+        return Err("Not an answer.".into());
+    }
+    app.emit_to("main", "store-friend-done", result).map_err(|e| e.to_string())
+}
+
 /// Ask the page to say again who is signed in and what is new.
 #[tauri::command]
 fn store_refresh_account(app: tauri::AppHandle) -> Result<(), String> {
@@ -1354,6 +1532,24 @@ pub fn run() {
         .manage(pad::Pads::default())
         .setup(move |app| {
             logging::init(app.handle());
+            // `--tray` only ever comes from the start-with-Windows entry. With
+            // the switch off, that entry is left over (settings reset or
+            // restored, an old install): take it away and don't start.
+            let start_with_system = settings::load(app.handle()).start_with_system;
+            if to_tray && !start_with_system {
+                logging::info("system", "started at sign-in with Start with Windows off; removing the entry and quitting");
+                if let Err(e) = system::set_autostart(false) {
+                    logging::error("system", &format!("start with Windows: {e}"));
+                }
+                std::process::exit(0);
+            }
+            // The entry follows the switch, whatever happened to either since
+            // (and points at where this copy is installed now).
+            std::thread::spawn(move || {
+                if let Err(e) = system::set_autostart(start_with_system) {
+                    crate::logging::error("system", &format!("start with Windows: {e}"));
+                }
+            });
             if let Err(e) = storage::recover_move(app.handle()) {
                 logging::error("storage-recovery", &e);
             }
@@ -1388,6 +1584,9 @@ pub fn run() {
                     let _ = main.show();
                 }
             }
+            // The desktop pet, when it is on: it comes out even when Kryoto
+            // starts in the tray.
+            pet::sync(app.handle());
             Ok(())
         })
         // Game art, cached on this PC (art.rs). Only the shell's own views may
@@ -1403,6 +1602,8 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 system::on_main_window_event(window, event);
+            } else if window.label() == pet::LABEL {
+                pet::on_window_event(window, event);
             }
         })
         // Updates: checked against latest.json on the newest GitHub release,
@@ -1489,7 +1690,27 @@ pub fn run() {
                     error: None,
                 },
             );
-            if !loading {
+            let load = STORE_LOAD.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if loading {
+                // The page's `load` waits for every image, ad and frame on it;
+                // one that stalls kept "Checking your account" up for minutes.
+                // The script (and the account check in it) goes in as soon as
+                // the document can be read instead. It runs once per page
+                // (`__kryoDesktop`), so the copy at `load` does nothing then.
+                let view = webview.clone();
+                tauri::async_runtime::spawn(async move {
+                    for _ in 0..150 {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        if STORE_LOAD.load(std::sync::atomic::Ordering::SeqCst) != load {
+                            return;
+                        }
+                        let Ok(url) = view.url() else { return };
+                        let kryo = is_kryoto(&url, view.app_handle());
+                        let script = BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" });
+                        let _ = view.eval(format!("if (document.readyState !== 'loading' && !window.__kryoDesktop && location.href !== 'about:blank') {{ {script} }}"));
+                    }
+                });
+            } else {
                 let kryo = is_kryoto(payload.url(), webview.app_handle());
                 let _ = webview.eval(BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" }));
                 if kryo {
@@ -1542,6 +1763,7 @@ pub fn run() {
             library::library_prefix_folder,
             pad::pad_start,
             shell_theme,
+            system_dark,
             pad::pad_stop,
             pad::pad_list,
             pad::pad_config_get,
@@ -1590,6 +1812,8 @@ pub fn run() {
             chat::chat_send_file,
             chat::room_list,
             chat::chat_call_signal,
+            chat::chat_call_log,
+            chat::chat_active,
             chat::chat_ice_servers,
             chat::room_post,
             chat::room_delete,
@@ -1607,7 +1831,10 @@ pub fn run() {
             store_visible,
             store_sign_out,
             store_mark_read,
+            store_notifications_shown,
             store_refresh_account,
+            store_friend_fetch,
+            store_friend_done,
             store_set_status,
             store_report_play,
             store_report_playing,
@@ -1666,7 +1893,11 @@ pub fn run() {
             system::app_exit,
             system::os_notify,
             system::pick_path,
+            system::window_corners,
             system::window_state_get,
+            pet::pet_menu,
+            pet::pet_open_app,
+            pet::pet_mascot,
             menus::menu_open,
             menus::menu_payload,
             menus::menu_ready,
@@ -1676,6 +1907,7 @@ pub fn run() {
             store_menu_hover,
             store_installed,
             store_play,
+            store_download_link,
             store_library_changed,
             menus::menu_hover
         ])
@@ -1727,6 +1959,35 @@ mod tests {
             .filter(|c| !allowed.contains(&format!("\"{c}\"")))
             .collect();
         assert!(missing.is_empty(), "add to permissions/shell.toml: {missing:?}");
+    }
+
+    /// The friends list reaches only its own routes through the Store's session.
+    #[test]
+    fn friend_actions_stay_on_their_routes() {
+        for (m, p) in [
+            ("POST", "/api/friends/requests"),
+            ("POST", "/api/friends/requests/123"),
+            ("POST", "/api/friends/invites"),
+            ("DELETE", "/api/friends/11593063676510772"),
+            ("PATCH", "/api/friends/42"),
+            ("POST", "/api/blocks/42"),
+            ("DELETE", "/api/mutes/42"),
+        ] {
+            assert!(friend_route_allowed(m, p), "{m} {p}");
+        }
+        for (m, p) in [
+            ("GET", "/api/friends/42"),
+            ("DELETE", "/api/friends/requests"),
+            ("DELETE", "/api/friends/export"),
+            ("POST", "/api/friends/requests/../../auth/logout"),
+            ("POST", "/api/account/library"),
+            ("DELETE", "/api/blocks/abc"),
+            ("POST", "/api/blocks/42/x"),
+            ("POST", "https://evil.example/api/friends/requests"),
+            ("POST", "/api/friends/requests?next=1"),
+        ] {
+            assert!(!friend_route_allowed(m, p), "{m} {p}");
+        }
     }
 
     /// Chat acts on the account's encrypted messages and keys: only the
@@ -1829,6 +2090,15 @@ mod tests {
             merge_download_context((None, None), None, Some("celeste".into())),
             (Some("celeste".into()), None)
         );
+    }
+
+    #[test]
+    fn pictures_are_not_pages() {
+        let url = |s: &str| s.parse::<url::Url>().unwrap();
+        assert!(is_image_file(&url("https://kryo.to/api/steam/image.jpg?url=https%3A%2F%2Fx%2Fa.png")));
+        assert!(is_image_file(&url("https://kryo.to/media/proof/ABC.WEBP")));
+        assert!(!is_image_file(&url("https://kryo.to/game/hades-ii")));
+        assert!(!is_image_file(&url("https://kryo.to/api/games/hades-ii/download?file=a.jpg")));
     }
 
     #[test]

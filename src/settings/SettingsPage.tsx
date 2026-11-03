@@ -1,9 +1,10 @@
+import { ProfileLink, TeamName } from '@/ui/TeamName'
 import { useEffect, useRef, useState } from 'react'
 import { artSrc } from '@/lib/art'
-import { Bell, Cloud, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Volume2, Wrench } from 'lucide-react'
+import { Bell, Cloud, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Volume2, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
-import { errorText } from '@/lib/bridge'
-import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, type Settings } from '@/lib/settings'
+import { errorText, on } from '@/lib/bridge'
+import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -17,6 +18,7 @@ import { LogsPane } from '@/settings/LogsPane'
 import { PhonePane } from '@/settings/PhonePane'
 import { ControllerPane } from '@/settings/ControllerPane'
 import { CloudPane } from '@/settings/CloudPane'
+import { ChatSettingsPanel } from '@/friends/ChatSettings'
 
 /**
  * Settings: one page for everything you can set.
@@ -38,6 +40,8 @@ export type SettingsSection =
   | 'storage'
   | 'downloads'
   | 'sounds'
+  /** Chat and calls on this PC: keys, message settings, microphone and speaker. */
+  | 'chat'
   | 'runtimes'
   | 'phone'
   | 'controller'
@@ -92,6 +96,8 @@ export function SettingsPage({
     { id: 'downloads', label: 'Downloads', icon: <Download /> },
     ...(guest ? [] : [{ id: 'cloud' as const, label: 'Cloud', icon: <Cloud /> }]),
     { id: 'sounds', label: 'Sounds', icon: <Volume2 /> },
+    // Behind kryo.to's `chat` feature flag.
+    ...(account.chat && !guest ? [{ id: 'chat' as const, label: 'Chat & calls', icon: <MessageCircle /> }] : []),
     ...(isWindowsHost() ? [{ id: 'runtimes' as const, label: 'Game runtimes', icon: <Package /> }] : []),
     { id: 'phone', label: 'Phone', icon: <Smartphone /> },
     // Behind kryo.to's `controller` feature flag.
@@ -105,17 +111,17 @@ export function SettingsPage({
   return (
     <div className="grid min-h-0 grow grid-cols-[232px_1fr]">
       <nav aria-label="Settings" className="flex min-h-0 flex-col gap-5 overflow-auto border-r border-border bg-card/40 p-3">
-        <div className="flex items-center gap-2.5 px-2 pt-2">
+        <ProfileLink username={guest ? null : account.username} className="flex items-center gap-2.5 px-2 pt-2 focus-visible:outline-2 focus-visible:outline-primary">
           {account.avatarUrl ? (
             <img decoding="async" src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-9 object-cover" />
           ) : (
             <span className="kryo-pill grid size-9 place-items-center bg-secondary text-xs font-bold">{name.slice(0, 1).toUpperCase()}</span>
           )}
           <span className="grid min-w-0">
-            <b className="truncate text-xs text-foreground">{name}</b>
-            <span className="truncate text-[10px] text-muted-foreground">{guest ? 'No account' : `@${account.username}`}</span>
+            <b className="truncate text-xs text-foreground"><TeamName username={account.guest ? null : account.username}>{name}</TeamName></b>
+            <span className="truncate text-[10px] text-muted-foreground">{guest ? 'No account' : <TeamName username={account.username}>@{account.username}</TeamName>}</span>
           </span>
-        </div>
+        </ProfileLink>
         {guest ? null : <Rail title="kryo.to account" items={kryo} current={railSection} onSection={onSection} />}
         <Rail title="Kryoto Desktop" items={desktop} current={railSection} onSection={onSection} />
         <div className="mt-auto px-1">
@@ -131,7 +137,7 @@ export function SettingsPage({
           )}
         </div>
       </nav>
-      {WEB[section] && !guest ? <WebPane fragment={WEB[section]!} page={page} /> : <DesktopPane section={railSection} />}
+      {WEB[section] && !guest ? <WebPane fragment={WEB[section]!} page={page} /> : <DesktopPane section={railSection} account={account} />}
     </div>
   )
 }
@@ -206,7 +212,7 @@ function WebPane({ fragment, page }: { fragment: string; page: BrowserPageState 
 }
 
 /** The app's own settings. Each change is saved straight away. */
-function DesktopPane({ section }: { section: SettingsSection }) {
+function DesktopPane({ section, account }: { section: SettingsSection; account: Account }) {
   const stored = useSettings()
   const [s, setS] = useState<Settings | null>(stored)
   const [state, setState] = useState<'idle' | 'saving' | 'saved' | string>('idle')
@@ -218,6 +224,11 @@ function DesktopPane({ section }: { section: SettingsSection }) {
   useEffect(() => {
     if (stored) setEndpointDraft(stored.catalogEndpoint)
   }, [stored?.catalogEndpoint])
+  // The pet's own right-click menu changes these too (pet.rs).
+  useEffect(() => {
+    const off = on<{ pet: boolean; petMascot: PetMascot }>('pet-settings', (p) => setS((cur) => (cur ? { ...cur, ...p } : cur)))
+    return () => void off.then((f) => f())
+  }, [])
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => patch({ [k]: v } as Partial<Settings>)
   const patch = (p: Partial<Settings>) => {
@@ -230,7 +241,14 @@ function DesktopPane({ section }: { section: SettingsSection }) {
       // Storage changes its folders straight to disk; keep those.
       void settingsApi
         .get()
-        .then((latest) => settingsApi.save({ ...next, libraryDir: latest.libraryDir, libraryFolders: latest.libraryFolders }))
+        .then((latest) =>
+          settingsApi.save({
+            ...next,
+            libraryDir: latest.libraryDir,
+            libraryFolders: latest.libraryFolders,
+            ...('pet' in p || 'petMascot' in p ? {} : { pet: latest.pet, petMascot: latest.petMascot }),
+          }),
+        )
         .then(() => setState('saved'))
         .catch((e: unknown) => setState(errorText(e)))
     }, 250)
@@ -316,6 +334,10 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             <Check checked={s.closeToTray} onChange={(v) => set('closeToTray', v)} label="Closing the window keeps Kryoto running in the tray" />
             <Check checked={s.startWithSystem} onChange={(v) => set('startWithSystem', v)} label={`Start Kryoto when I sign in to ${isWindowsHost() ? 'Windows' : 'my computer'}`} />
             <Check checked={s.minimizeOnPlay} onChange={(v) => set('minimizeOnPlay', v)} label="Minimize Kryoto while a game runs" />
+            <Section title="Desktop pet" hint="Kryoto's mascot on your desktop, outside this window. Drag it anywhere; right-click it to switch or hide it. It steps aside while a game runs.">
+              <Check checked={s.pet} onChange={(v) => set('pet', v)} label="Show the pet on my desktop" />
+              {s.pet ? <Segmented label="Desktop pet" value={s.petMascot} options={PET_MASCOTS.map((m) => ({ value: m.id, label: m.label }))} onChange={(v) => set('petMascot', v)} /> : null}
+            </Section>
             <PlayerNameSection s={s} patch={patch} />
             <Section title="Play time and activity" hint="Share anonymous totals of Desktop players online, playing or idle. Signed-in play time counts toward community statistics; the play-time board only shows public profiles.">
               <Check checked={s.sharePlaytime} onChange={(v) => set('sharePlaytime', v)} label="Share my play time and Desktop activity with kryo.to" />
@@ -358,6 +380,7 @@ function DesktopPane({ section }: { section: SettingsSection }) {
         {section === 'logs' ? <LogsPane sendReports={s.sendReports} onSendReports={(v) => set('sendReports', v)} /> : null}
         {section === 'phone' ? <PhonePane /> : null}
         {section === 'sounds' ? <SoundsPane /> : null}
+        {section === 'chat' ? <ChatSettingsPanel available={!!account.chat} calls={!!account.voice} /> : null}
         {section === 'runtimes' ? <RuntimesPane /> : null}
       </div>
     </div>
