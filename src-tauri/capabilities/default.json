@@ -32,6 +32,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-set-position",
     "core:window:allow-unminimize",
+    "core:event:allow-emit-to",
     "allow-shell"
   ]
 }
