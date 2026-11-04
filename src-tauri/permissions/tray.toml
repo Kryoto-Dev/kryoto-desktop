@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-tray-action"
+description = "Open, hide, or exit Kryoto from the system tray panel."
+commands.allow = ["tray_action"]
