@@ -35,10 +35,12 @@ export function TrayApp() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const choose = async (action: TrayAction) => {
+  const choose = async (action: TrayAction, gameId?: string) => {
     setActionError(null)
     try {
-      if (action !== 'open' && action !== 'exit') await emitTo('main', 'tray-go', action)
+      if (action !== 'open' && action !== 'exit') {
+        await emitTo('main', 'tray-go', gameId ? { action: 'game', gameId } : action)
+      }
       await call('tray_action', { action: action === 'exit' ? 'exit' : 'open' })
     } catch (error) {
       setActionError(errorText(error))
@@ -76,7 +78,7 @@ export function TrayApp() {
               const cover = coverFor(game)
               const image = cover && (isCustomArt(cover) ? artSrc(cover) : cover)
               return (
-                <button key={game.id} type="button" className="tray-game" onClick={() => choose('library')} title={`Open ${game.title}`}>
+                <button key={game.id} type="button" className="tray-game" onClick={() => choose('library', game.id)} title={`Open ${game.title}`}>
                   {image && !brokenArt.has(image) ? (
                     <img
                       src={image}
