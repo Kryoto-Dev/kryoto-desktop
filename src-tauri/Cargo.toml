@@ -36,7 +36,7 @@ regex = "1"
 base64 = "0.22"
 percent-encoding = "2"
 notify-rust = "4"
-tauri-plugin-updater = "2.13"
+tauri-plugin-updater = "2.14"
 tauri-plugin-process = "2.4"
 # Controllers (kryo.to feature flag `controller`): SDL2, built from source and
 # linked in, reads them (the library Steam and most games use, with the
@@ -49,9 +49,9 @@ padmap = { git = "https://github.com/Kryoto-Dev/kryoto-padmap.git", rev = "c6af8
 
 # Chat (FRIENDS-AND-CHAT.md). All cryptography lives in kryoto-messaging; this
 # app only drives it. Pin the repository revision for reproducible clean builds.
-km-core = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "1faad72e5107936c537659e475fbf22dc4ae2197" }
-km-proto = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "1faad72e5107936c537659e475fbf22dc4ae2197" }
-km-store-sqlcipher = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "1faad72e5107936c537659e475fbf22dc4ae2197", default-features = false }
+km-core = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "b87d6b6025a9c5c4fbeb32934b35bbe416014992" }
+km-proto = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "b87d6b6025a9c5c4fbeb32934b35bbe416014992" }
+km-store-sqlcipher = { git = "https://github.com/Kryoto-Dev/kryoto-messaging.git", rev = "b87d6b6025a9c5c4fbeb32934b35bbe416014992", default-features = false }
 # OS secure store: Windows Credential Manager, macOS Keychain, or Linux Secret
 # Service. The passphrase file remains the fallback when a desktop store is
 # unavailable (for example, a headless Linux session).

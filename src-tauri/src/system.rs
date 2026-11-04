@@ -402,6 +402,7 @@ fn changed(last: &Mutex<Option<(i32, i32)>>, now: (i32, i32)) -> bool {
 /// full screen, tiled), where a rounded corner would show the desktop behind.
 static RADIUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(16);
 
+#[cfg(any(windows, target_os = "linux"))]
 pub fn corner() -> i32 {
     RADIUS.load(std::sync::atomic::Ordering::Relaxed)
 }
