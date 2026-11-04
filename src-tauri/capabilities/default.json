@@ -4,12 +4,14 @@
   "description": "Window and webview permissions for the launcher shell, its menu view and the desktop pet's window.",
   "windows": [
     "main",
-    "pet"
+    "pet",
+    "tray"
   ],
   "webviews": [
     "main",
     "popup",
-    "pet"
+    "pet",
+    "tray"
   ],
   "permissions": [
     "core:default",
@@ -39,6 +41,7 @@
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-set-position",
     "core:window:allow-unminimize",
     "allow-shell"
   ]

@@ -43,7 +43,7 @@ use tauri::plugin::Builder as PluginBuilder;
 #[cfg(not(target_os = "linux"))]
 use tauri::webview::DownloadEvent;
 use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
-use tauri::{Emitter, Manager, Runtime, WebviewUrl};
+use tauri::{Emitter, Manager, Runtime, WebviewUrl, WindowEvent};
 
 /// The Store / Community / profile pages: one real web view, kryo.to in it.
 /// The label is what `capabilities/catalog.json` grants the reporting bridge to.
@@ -1598,6 +1598,8 @@ pub fn run() {
                 system::on_main_window_event(window, event);
             } else if window.label() == pet::LABEL {
                 pet::on_window_event(window, event);
+            } else if window.label() == system::TRAY_PANEL_LABEL && matches!(event, WindowEvent::Focused(false)) {
+                let _ = window.hide();
             }
         })
         // Updates: checked against latest.json on the newest GitHub release,
@@ -1885,6 +1887,7 @@ pub fn run() {
             logging::logs_send,
             system::shell_ready,
             system::app_exit,
+            system::tray_action,
             system::os_notify,
             system::pick_path,
             system::window_corners,

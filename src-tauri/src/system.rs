@@ -10,8 +10,9 @@ use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+use tauri::window::Color;
 
 /* ── One copy at a time ───────────────────────────────────── */
 
@@ -156,6 +157,7 @@ pub static SHELL_READY: AtomicBool = AtomicBool::new(false);
 /// Whether the tray icon exists. Without one (a Linux desktop with no tray),
 /// closing must quit: a hidden window with no icon to bring it back is lost.
 pub static TRAY_OK: AtomicBool = AtomicBool::new(false);
+pub const TRAY_PANEL_LABEL: &str = "tray";
 
 #[tauri::command]
 pub fn shell_ready(ready: bool) {
@@ -237,6 +239,55 @@ pub fn app_exit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Open the Steam-like tray surface beside the pointer that opened it.
+pub fn show_tray_panel<R: Runtime>(app: &AppHandle<R>, position: tauri::PhysicalPosition<f64>) {
+    let panel_width = 360.0;
+    let panel_height = 520.0;
+    let x = (position.x - panel_width).round() as i32;
+    let y = (position.y - panel_height - 10.0).round() as i32;
+    let panel = match app.get_webview_window(TRAY_PANEL_LABEL) {
+        Some(panel) => panel,
+        None => match WebviewWindowBuilder::new(app, TRAY_PANEL_LABEL, WebviewUrl::default())
+            .title("Kryoto")
+            .inner_size(panel_width, panel_height)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .build()
+        {
+            Ok(panel) => panel,
+            Err(error) => {
+                crate::logging::error("tray", &format!("tray panel: {error}"));
+                return;
+            }
+        },
+    };
+    let _ = panel.set_position(PhysicalPosition::new(x, y));
+    let _ = panel.show();
+    let _ = panel.set_focus();
+}
+
+#[tauri::command]
+pub fn tray_action(app: AppHandle, action: String) -> Result<(), String> {
+    if action == "exit" {
+        app.exit(0);
+        return Ok(());
+    }
+    if let Some(panel) = app.get_webview_window(TRAY_PANEL_LABEL) {
+        let _ = panel.hide();
+    }
+    show_main(&app);
+    if action != "open" {
+        app.emit_to("main", "tray-go", action).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // First, because on Linux the tray only opens its menu - a click on the
     // icon itself is not delivered there.
@@ -265,8 +316,13 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                show_main(tray.app_handle());
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                position,
+                ..
+            } = event {
+                show_tray_panel(tray.app_handle(), position);
             }
         });
     if let Some(icon) = app.default_window_icon() {
