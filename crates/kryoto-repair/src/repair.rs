@@ -5,6 +5,7 @@ use crate::{
     journal::{self, Journal},
     release,
     settings::Emulator,
+    tools::valid_sikarugir_runner,
     Cancel,
 };
 use serde::{Deserialize, Serialize};
@@ -247,6 +248,30 @@ pub async fn apply<F: Fn(&str, Option<u8>) + Send + Sync>(
     identity: &EmuIdentity,
     progress: F,
 ) -> Result<RepairReport, String> {
+    apply_with_backend(root, cache, trusted_slug, source, identity, None, progress).await
+}
+
+/// Apply a repair, selecting the host's runner for the downloaded Windows
+/// helper executables. On macOS that runner must be a validated Sikarugir
+/// wrapper launcher or Wine engine; falling back to a host `wine` command would
+/// bypass the selected Sikarugir backend.
+pub async fn apply_with_backend<F: Fn(&str, Option<u8>) + Send + Sync>(
+    root: &Path,
+    cache: &Path,
+    trusted_slug: Option<&str>,
+    source: Emulator,
+    identity: &EmuIdentity,
+    windows_runner: Option<&Path>,
+    progress: F,
+) -> Result<RepairReport, String> {
+    if cfg!(target_os = "macos") {
+        let Some(runner) = windows_runner else {
+            return Err("macOS repair needs selected Sikarugir Wine to run its Windows helper tools.".into());
+        };
+        if !valid_sikarugir_runner(runner) {
+            return Err("The selected Sikarugir Wine engine or wrapper launcher is missing or invalid.".into());
+        }
+    }
     progress("Checking if I am inside a game folder", None);
     let root = root
         .canonicalize()
@@ -279,7 +304,10 @@ pub async fn apply<F: Fn(&str, Option<u8>) + Send + Sync>(
         originals.push((dll.clone(), original));
     }
     let _guard = journal::lock(&root)?;
-    let tools = release::install(&client, cache, source, &progress).await?;
+    let mut tools = release::install(&client, cache, source, &progress).await?;
+    if let Some(runner) = windows_runner {
+        tools.paths.sikarugir = Some(runner.to_path_buf());
+    }
     // Reject a plan if Forge would patch a spare DLL that the compatibility scan excluded.
     if crack::find_steam_api_dlls(&root) != evidence.dlls {
         return Err("The Steam DLL layout contains extra SDK or backup copies. Contact support before replacing them.".into());

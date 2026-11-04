@@ -56,9 +56,9 @@ pub fn copy(text: &str) -> Result<(), String> {
             process::{Command, Stdio},
         };
         #[cfg(target_os = "macos")]
-        let commands = vec![("pbcopy", vec![])];
+        let commands: Vec<(&str, Vec<&str>)> = vec![("pbcopy", Vec::new())];
         #[cfg(not(target_os = "macos"))]
-        let commands = vec![
+        let commands: Vec<(&str, Vec<&str>)> = vec![
             ("wl-copy", vec![]),
             ("xclip", vec!["-selection", "clipboard"]),
         ];

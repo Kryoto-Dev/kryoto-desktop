@@ -22,6 +22,16 @@ export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export function tauriEnv(extra = {}) {
   const env = { ...process.env, ...extra }
 
+  // SDL2 0.38 bundles an older CMake project. CMake 4 removed the legacy
+  // compatibility default, while this setting lets the bundled project keep
+  // building without changing the vendored SDL2 source.
+  if (process.platform === 'darwin') {
+    env.CMAKE_POLICY_VERSION_MINIMUM ??= '3.5'
+    // Rust 1.97 can race while producing macOS proc-macro artifacts when the
+    // path-remapped release build uses the machine's full parallelism.
+    env.CARGO_BUILD_JOBS ??= '2'
+  }
+
   if (process.platform === 'win32') {
     const sep = ';'
     const parts = (env.PATH || env.Path || '').split(sep)

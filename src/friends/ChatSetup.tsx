@@ -176,8 +176,8 @@ export function ChatSetup({ available }: { available: boolean }) {
             them, not Kryoto.
           </p>
           <p className="text-xs text-muted-foreground">
-            The keys stay on this PC, protected by your Windows or Linux account (or a passphrase, where neither keeps
-            secrets).
+            The keys stay on this PC, protected by your Windows, macOS or Linux account (or a passphrase where the
+            desktop secure store is unavailable).
           </p>
         </Modal>
       ) : null}

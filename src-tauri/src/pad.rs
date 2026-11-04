@@ -210,18 +210,27 @@ fn sdl_line(prefs: &PadPrefs) -> Option<String> {
     Some(parsed.remapped(&prefs.remap).to_line())
 }
 
-/// What Play adds to a game's environment on Linux (a setup or a remap saved):
+/// What Play adds to a game's environment on a Unix compatibility host (a
+/// setup or a remap saved):
 ///
 /// - `SDL_GAMECONTROLLERCONFIG`: the mappings, which SDL reads before its own
 ///   database.
-/// - `SDL_JOYSTICK_HIDAPI=0`: SDL's HIDAPI drivers address PlayStation and
-///   Switch pads by another GUID than evdev's, so the mapping would not reach
-///   them; this keeps SDL on evdev, where it does.
-/// - `PROTON_PREFER_SDL=1`: likewise for Proton, which otherwise hands some
-///   pads to Windows games raw (hidraw), around SDL.
+///
+/// On Linux, it also disables HIDAPI and asks Proton to prefer SDL. Those two
+/// settings are Linux/evdev-specific and must not be sent to Sikarugir on
+/// macOS, where HIDAPI is the native SDL path.
 ///
 /// Windows games get the virtual controller instead ([`virt`]). Values in the
 /// game's own launch options win (`launch::set_default`).
+fn game_env_for(lines: &[&str], linux: bool) -> Vec<(String, String)> {
+    let mut env = vec![("SDL_GAMECONTROLLERCONFIG".into(), padmap::config_env(lines.to_vec()))];
+    if linux {
+        env.push(("SDL_JOYSTICK_HIDAPI".into(), "0".into()));
+        env.push(("PROTON_PREFER_SDL".into(), "1".into()));
+    }
+    env
+}
+
 pub fn game_env<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, String)> {
     if cfg!(windows) {
         return Vec::new();
@@ -234,11 +243,7 @@ pub fn game_env<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, String)> {
     if lines.is_empty() {
         return Vec::new();
     }
-    vec![
-        ("SDL_GAMECONTROLLERCONFIG".into(), padmap::config_env(lines)),
-        ("SDL_JOYSTICK_HIDAPI".into(), "0".into()),
-        ("PROTON_PREFER_SDL".into(), "1".into()),
-    ]
+    game_env_for(&lines, cfg!(target_os = "linux"))
 }
 
 /* ── Commands ─────────────────────────────────────────────── */
@@ -1225,6 +1230,15 @@ mod tests {
         // A setup saved here is handed over even without a remap.
         let p = PadPrefs { mapping: Some("03008231110100003414000000000000,SteelSeries,a:b0,b:b1,".into()), ..Default::default() };
         assert!(sdl_line(&p).unwrap().contains("a:b0"));
+    }
+
+    #[test]
+    fn macos_controller_environment_has_no_linux_only_switches() {
+        let lines = ["03008231110100003414000000000000,SteelSeries,a:b0,b:b1,"];
+        let env = game_env_for(&lines, false);
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].0, "SDL_GAMECONTROLLERCONFIG");
+        assert!(!env.iter().any(|(key, _)| key == "SDL_JOYSTICK_HIDAPI" || key == "PROTON_PREFER_SDL"));
     }
 
     #[test]

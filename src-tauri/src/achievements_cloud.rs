@@ -106,7 +106,8 @@ fn tracked(app: &AppHandle) -> Vec<(LibraryGame, String)> {
         .collect()
 }
 
-/// Where this game saves: the PC's own folders on Windows, its prefix on Linux.
+/// Where this game saves: the PC's own folders on Windows, its compatibility
+/// prefix on Linux or macOS.
 fn roots(app: &AppHandle, game: &LibraryGame) -> Roots {
     if cfg!(windows) {
         return Roots::from_env();

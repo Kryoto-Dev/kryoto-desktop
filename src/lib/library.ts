@@ -20,6 +20,9 @@ export type LaunchEntry = {
   type?: string
 }
 
+/** Renderer choices shipped by the official Sikarugir Template. */
+export type SikarugirRenderer = 'd3dmetal' | 'dxvk' | 'cnc_ddraw' | 'd9vk' | 'dxmt' | 'wined3d'
+
 export type LibraryGame = {
   id: string
   title: string
@@ -44,6 +47,7 @@ export type LibraryGame = {
   askEachTime: boolean
   launchOptions: string
   compatTool: string | null
+  renderer: SikarugirRenderer | null
   applyOverrides: boolean
   playtimeSeconds: number
   lastPlayed: number | null
@@ -195,6 +199,7 @@ export const BLANK_GAME: LibraryGame = {
   askEachTime: false,
   launchOptions: '',
   compatTool: null,
+  renderer: null,
   applyOverrides: true,
   playtimeSeconds: 0,
   lastPlayed: null,
@@ -212,7 +217,7 @@ export const gameLogs = {
   list: (id: string) => call<GameLogInfo[]>('game_logs', { id }),
   read: (id: string, name: string) => call<string>('game_log_read', { id, name }),
   folder: (id: string) => call<string>('game_logs_folder', { id }),
-  /** The game's Wine prefix on Linux; null on Windows or before its first start. */
+  /** The game's Wine prefix on Linux or Sikarugir prefix on macOS; null on Windows or before its first start. */
   prefix: (id: string) => call<string | null>('library_prefix_folder', { id }),
 }
 
@@ -482,3 +487,4 @@ export function steamLine(game: LibraryGame, entry: number | null): string {
 }
 
 export const isWindowsHost = () => /Windows/i.test(navigator.userAgent)
+export const isMacHost = () => /Macintosh|Mac OS/i.test(navigator.userAgent)

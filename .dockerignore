@@ -1,0 +1,9 @@
+.git
+.env
+.env.local
+.tmp
+dist
+dist-web
+node_modules
+src-tauri/target
+target

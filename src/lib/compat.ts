@@ -84,7 +84,7 @@ export async function fetchCompatibility(slug: string): Promise<Compatibility | 
   return { headline: s.headline, platforms: s.platforms, unspecified: s.unspecified, reports }
 }
 
-/** The platform this copy runs on. Linux players play the Windows build through Proton or Wine. */
+/** The platform this copy runs on. Linux and macOS players use a compatibility backend for Windows builds. */
 export function hostPlatform(): Platform {
   const ua = navigator.userAgent
   if (/Windows/i.test(ua)) return 'windows'

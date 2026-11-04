@@ -51,8 +51,10 @@ fn disk_space_of(path: &Path) -> Option<(u64, u64)> {
     Some((s.f_blocks as u64 * block, s.f_bavail as u64 * block))
 }
 
-/// The drive a path is on, as the player knows it: `C:` on Windows, the
-/// mount point it lives under elsewhere (`/`, `/home`, `/mnt/games`).
+/// The drive a path is on, as the player knows it: `C:` on Windows, the volume
+/// label on macOS, and the mount point it lives under on Linux (`/`, `/home`,
+/// `/mnt/games`).
+#[cfg(not(target_os = "macos"))]
 fn drive_of(path: &Path) -> String {
     if let Some(Component::Prefix(p)) = path.components().next() {
         return p.as_os_str().to_string_lossy().trim_end_matches('\\').to_uppercase();
@@ -67,6 +69,39 @@ fn drive_of(path: &Path) -> String {
         .filter(|m| full.starts_with(m))
         .max_by_key(|m| m.len())
         .unwrap_or_else(|| "/".into())
+}
+
+#[cfg(target_os = "macos")]
+fn drive_of(path: &Path) -> String {
+    use std::ffi::{CStr, CString};
+    use std::os::unix::ffi::OsStrExt;
+
+    let full = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let Ok(raw) = CString::new(full.as_os_str().as_bytes()) else {
+        return "Macintosh HD".into();
+    };
+    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `raw` is a NUL-terminated path and `stats` is a live output
+    // buffer owned by this function.
+    if unsafe { libc::statfs(raw.as_ptr(), &mut stats) } != 0 {
+        return "Macintosh HD".into();
+    }
+    let mount = unsafe { CStr::from_ptr(stats.f_mntonname.as_ptr()) }.to_string_lossy();
+    mac_volume_label(&mount)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_volume_label(mount: &str) -> String {
+    let mount = mount.trim_end_matches('/');
+    if mount.is_empty() {
+        return "Macintosh HD".into();
+    }
+    mount
+        .strip_prefix("/Volumes/")
+        .and_then(|volume| volume.split('/').next())
+        .filter(|volume| !volume.is_empty())
+        .unwrap_or(mount)
+        .to_string()
 }
 
 /// The game's own folder inside whichever library folder holds it: for
@@ -337,7 +372,7 @@ fn copy_tree(from: &Path, to: &Path, progress: &mut dyn FnMut(u64)) -> std::io::
         let kind = entry.file_type()?;
         #[cfg(unix)]
         if kind.is_symlink() {
-            // Linux games ship links (libraries, launch scripts); keep them links.
+            // Unix games ship links (libraries, launch scripts); keep them links.
             std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &target)?;
             continue;
         }

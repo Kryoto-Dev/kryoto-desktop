@@ -1,7 +1,7 @@
-//! Chat's secrets: in the OS secure store (Windows Credential Manager, or the
-//! Secret Service - GNOME Keyring, KWallet - on Linux), or, where there is no
-//! secure store, in a file sealed with a passphrase the person types at each
-//! start.
+//! Chat's secrets: in the OS secure store (Windows Credential Manager, macOS
+//! Keychain, or the Secret Service - GNOME Keyring, KWallet - on Linux), or,
+//! where there is no secure store, in a file sealed with a passphrase the
+//! person types at each start.
 //!
 //! Two kinds of entry, never anything else:
 //! - `session`: the device sign-in token chat connects with.

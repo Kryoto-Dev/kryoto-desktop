@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react'
 import { Dropdown, inputCls } from '@/ui'
 import { call } from '@/lib/bridge'
 
-export type CompatTool = { name: string; path: string; kind: 'proton' | 'umu' | 'wine' }
+export type CompatTool = { name: string; path: string; kind: 'proton' | 'umu' | 'wine' | 'sikarugir' }
 
 const AUTO = '__auto__'
 const CUSTOM = '__custom__'
 
-/** Every Wine and Proton found on this computer, for the dropdowns. */
+/** Every compatibility backend found on this computer, for the dropdowns. */
 export function useCompatTools() {
   const [tools, setTools] = useState<CompatTool[] | null>(null)
   useEffect(() => {
@@ -19,9 +19,9 @@ export function useCompatTools() {
 }
 
 /**
- * Steam's compatibility-tool list: the Proton and Wine builds on this
- * computer, newest Proton first, or a path of your own. "Automatic" uses the
- * first one found.
+ * Steam's compatibility-tool list: the Proton and Wine builds on Linux, or
+ * Sikarugir Wine and wrappers on macOS, newest first, or a path of your own.
+ * "Automatic" uses the first one found.
  */
 export function CompatPicker({
   value,
@@ -42,7 +42,11 @@ export function CompatPicker({
   const first = tools?.[0]
   const options = [
     { value: AUTO, label: first ? `${autoLabel} (${first.name})` : autoLabel },
-    ...(tools ?? []).map((t) => ({ value: t.path, label: t.name, hint: t.kind === 'proton' ? 'Proton' : t.kind === 'umu' ? 'umu' : 'Wine' })),
+    ...(tools ?? []).map((t) => ({
+      value: t.path,
+      label: t.name,
+      hint: t.kind === 'proton' ? 'Proton' : t.kind === 'umu' ? 'umu' : t.kind === 'sikarugir' ? 'Sikarugir' : 'Wine',
+    })),
     { value: CUSTOM, label: 'Another one…' },
   ]
   const current = custom ? CUSTOM : value && known ? value : AUTO
@@ -63,12 +67,12 @@ export function CompatPicker({
         <input
           className={inputCls}
           value={value ?? ''}
-          placeholder="/path/to/proton or /usr/bin/wine"
+          placeholder="/path/to/proton, /usr/bin/wine, Sikarugir Wine, or a wrapper launcher"
           onChange={(e) => onChange(e.target.value || null)}
         />
       ) : null}
       {tools && tools.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No Proton or Wine found. Install Steam with Proton, or Wine, then reopen this.</p>
+        <p className="text-xs text-muted-foreground">No compatibility backend found. Install or create one, then reopen this.</p>
       ) : null}
     </div>
   )
