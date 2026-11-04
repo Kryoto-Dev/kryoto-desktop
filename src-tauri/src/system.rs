@@ -241,8 +241,8 @@ pub fn app_exit(app: AppHandle) {
 
 /// Open the Steam-like tray surface beside the pointer that opened it.
 pub fn show_tray_panel<R: Runtime>(app: &AppHandle<R>, position: tauri::PhysicalPosition<f64>) {
-    let panel_width = 360.0;
-    let panel_height = 520.0;
+    let panel_width = 336.0;
+    let panel_height = 430.0;
     let x = (position.x - panel_width).round() as i32;
     let y = (position.y - panel_height - 10.0).round() as i32;
     let panel = match app.get_webview_window(TRAY_PANEL_LABEL) {
@@ -278,12 +278,12 @@ pub fn tray_action(app: AppHandle, action: String) -> Result<(), String> {
         app.exit(0);
         return Ok(());
     }
-    if let Some(panel) = app.get_webview_window(TRAY_PANEL_LABEL) {
-        let _ = panel.hide();
-    }
     show_main(&app);
     if action != "open" {
         app.emit_to("main", "tray-go", action).map_err(|e| e.to_string())?;
+    }
+    if let Some(panel) = app.get_webview_window(TRAY_PANEL_LABEL) {
+        let _ = panel.hide();
     }
     Ok(())
 }
@@ -302,7 +302,6 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &quit])?;
     let mut builder = TrayIconBuilder::with_id("kryoto")
         .tooltip(if cfg!(debug_assertions) { "Kryoto Desktop Dev" } else { "Kryoto Desktop" })
-        .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
@@ -317,7 +316,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button: MouseButton::Left | MouseButton::Right,
                 button_state: MouseButtonState::Up,
                 position,
                 ..
@@ -325,6 +324,10 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 show_tray_panel(tray.app_handle(), position);
             }
         });
+    #[cfg(not(windows))]
+    {
+        builder = builder.menu(&menu);
+    }
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
