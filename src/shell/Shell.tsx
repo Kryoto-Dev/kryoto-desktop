@@ -332,8 +332,10 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   useEffect(() => {
     let stop: (() => void) | undefined
     let cancelled = false
-    void on<string>('tray-go', (where) => {
-      if (where === 'store') openWeb('/')
+    void on<string | { action: string; gameId?: string }>('tray-go', (payload) => {
+      const where = typeof payload === 'string' ? payload : payload.action
+      if (where === 'game' && typeof payload !== 'string' && payload.gameId) go({ kind: 'game', id: payload.gameId })
+      else if (where === 'store') openWeb('/')
       else if (where === 'library') go({ kind: 'home' })
       else if (where === 'downloads') go({ kind: 'downloads' })
       else if (where === 'settings') openSettings()
