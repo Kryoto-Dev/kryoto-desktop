@@ -373,7 +373,10 @@ export class WebChat {
           throw new SendError('They have not turned on chat yet.')
         }
         if (this.kryo.needsClaim(u)) {
-          const b = await this.ask('keysClaim', { userId: u }).catch(() => null)
+          const b = await this.ask('keysClaim', { userId: u }).catch((e: unknown) => {
+            console.warn('[chat] key claim:', e)
+            return null
+          })
           if (b) this.kryo.addClaims(JSON.stringify(b))
         }
         reach.push(u)
@@ -382,9 +385,17 @@ export class WebChat {
       let frame: Uint8Array
       try {
         frame = this.kryo.sendFrame(rid, JSON.stringify(content), JSON.stringify(reach), ephemeral, group ?? '', quietSend(content))
-      } catch {
+      } catch (e) {
         if (group || users.every((u) => u === this.userId)) return
-        throw new SendError('They have not turned on chat yet.')
+        // They have a device (checked above), so chat is not off: it cannot
+        // take a message yet (a device still uploading its keys, a key claim
+        // that failed). Once more with fresh devices and keys (KB-0256).
+        console.warn('[chat] nothing could be encrypted:', e)
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 1500))
+          continue
+        }
+        throw new SendError('Their chat is still starting. Try again in a moment.')
       }
       await this.persist()
       const ack = await this.raw(rid, frame)
