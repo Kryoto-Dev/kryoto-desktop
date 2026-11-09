@@ -1,24 +1,37 @@
 import { ProfileLink, TeamName } from '@/ui/TeamName'
 import { useEffect, useRef, useState } from 'react'
 import { artSrc } from '@/lib/art'
-import { Bell, Cloud, Code2, Download, Gamepad2, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, Volume2, Wrench } from 'lucide-react'
-import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
+import { Wand2, Bell, Cloud, Download, FolderInput, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, ChevronDown } from '@/ui/pixel-icons'
+import { AsciiBar, Button, Caption, Check, Dropdown, Section, Segmented, inputCls } from '@/ui'
 import { errorText, on } from '@/lib/bridge'
-import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, type PetMascot, type Settings } from '@/lib/settings'
+import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
-import { browserNavigate, isTauri, mountStore, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
+import { browserNavigate, isTauri, mountStore, openBigPicture, openSetup, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
 import { SoundsPane } from '@/settings/SoundsPane'
 import { RuntimesPane } from '@/settings/RuntimesPane'
-import { StoragePane } from '@/settings/StoragePane'
+import { DownloadFolder, LeftoverPrefixes, StoragePane } from '@/settings/StoragePane'
 import { CompatPane } from '@/settings/CompatPane'
 import { LogsPane } from '@/settings/LogsPane'
 import { PhonePane } from '@/settings/PhonePane'
 import { ControllerPane } from '@/settings/ControllerPane'
 import { CloudPane } from '@/settings/CloudPane'
+import { DebridSection, PatchbayPane } from '@/settings/PatchbayPane'
+import { ControllerWelcome } from '@/controller/ControllerWelcome'
 import { ChatSettingsPanel } from '@/friends/ChatSettings'
+import { SceneMotion } from '@/ui/ascii/SceneMotion'
+import { BACKUP, TRAY, type CellScene } from '@/ui/ascii/motion'
+import { HatchZipExplainer, NEW_IN_SETTINGS, NewDot, NewHere, markSeen, useNewSettings } from '@/ui/FeatureNotice'
+import { FindGamesButton } from '@/library/FoundGames'
+import { VrPane } from '@/settings/VrPane'
+import { Bridge } from '@/library/Bridge'
+import { DiscordPane } from '@/settings/DiscordPane'
+import { GameUpdatesSection } from '@/settings/GameUpdatesSection'
+import { DefenderSection } from '@/settings/DefenderSection'
+import { anchorId, revealSetting } from '@/lib/settings-links'
+import { useSettled } from '@/hooks/useSettled'
 
 /**
  * Settings: one page for everything you can set.
@@ -30,6 +43,12 @@ import { ChatSettingsPanel } from '@/friends/ChatSettings'
  * app has. Changes save as you make them.
  */
 
+/** A small moving picture beside a section's title: what the section is about, at a glance. */
+const SECTION_SCENES: Partial<Record<SettingsSection, CellScene>> = {
+  downloads: TRAY,
+  cloud: BACKUP,
+}
+
 export type SettingsSection =
   | 'profile'
   | 'appearance'
@@ -37,6 +56,8 @@ export type SettingsSection =
   | 'security'
   | 'support'
   | 'general'
+  /** Phone and Controller. */
+  | 'devices'
   | 'storage'
   | 'downloads'
   | 'sounds'
@@ -52,6 +73,10 @@ export type SettingsSection =
   | 'cloud'
   /** The old name of Cloud, still asked for by older links. */
   | 'achievements'
+  /** Your own servers for saves and achievements, and debrid. */
+  | 'patchbay'
+  /** Headset runtimes, and what a VR game starts first. */
+  | 'vr'
 
 /** kryo.to's settings, by the fragment that opens each category there. */
 const WEB: Partial<Record<SettingsSection, string>> = {
@@ -68,6 +93,7 @@ type RailItem = { id: SettingsSection; label: string; icon: React.ReactNode }
 
 export function SettingsPage({
   section,
+  reveal = null,
   onSection,
   account,
   page,
@@ -75,6 +101,8 @@ export function SettingsPage({
   onSignIn,
 }: {
   section: SettingsSection
+  /** One setting to scroll to and light (lib/settings-links.ts); `at` changes when it is asked for again. */
+  reveal?: { anchor: string; at: number } | null
   onSection: (s: SettingsSection) => void
   account: Account
   page: BrowserPageState
@@ -82,7 +110,13 @@ export function SettingsPage({
   onSignIn: () => void
 }) {
   const guest = !!account.guest
-  const railSection: SettingsSection = section === 'achievements' ? 'cloud' : section
+  const railSection = section
+  const fresh = useNewSettings(guest)
+  // Opening a section with something new in it is seeing it: the dots go out.
+  useEffect(() => {
+    const id = NEW_IN_SETTINGS[railSection]?.id
+    if (id && fresh.includes(railSection)) markSeen(id)
+  }, [railSection, fresh])
   const kryo: RailItem[] = [
     { id: 'profile', label: 'Profile', icon: <User /> },
     { id: 'appearance', label: 'Appearance', icon: <Palette /> },
@@ -94,17 +128,13 @@ export function SettingsPage({
     { id: 'general', label: 'General', icon: <SlidersHorizontal /> },
     { id: 'storage', label: 'Storage', icon: <HardDrive /> },
     { id: 'downloads', label: 'Downloads', icon: <Download /> },
-    ...(guest ? [] : [{ id: 'cloud' as const, label: 'Cloud', icon: <Cloud /> }]),
-    { id: 'sounds', label: 'Sounds', icon: <Volume2 /> },
+    // Saves and achievements can be kept on this PC, so Cloud is for guests too.
+    { id: 'cloud' as const, label: 'Cloud', icon: <Cloud /> },
     // Behind kryo.to's `chat` feature flag.
     ...(account.chat && !guest ? [{ id: 'chat' as const, label: 'Chat & calls', icon: <MessageCircle /> }] : []),
-    ...(isWindowsHost() ? [{ id: 'runtimes' as const, label: 'Game runtimes', icon: <Package /> }] : []),
-    { id: 'phone', label: 'Phone', icon: <Smartphone /> },
-    // Behind kryo.to's `controller` feature flag.
-    ...(account.controller ? [{ id: 'controller' as const, label: 'Controller', icon: <Gamepad2 /> }] : []),
-    ...(isWindowsHost() ? [] : [{ id: 'compat' as const, label: 'Compatibility', icon: <Wrench /> }]),
-    { id: 'developer', label: 'Developer', icon: <Code2 /> },
-    { id: 'logs', label: 'Logs', icon: <ScrollText /> },
+    { id: isWindowsHost() ? ('runtimes' as const) : ('compat' as const), label: 'Running games', icon: <Package /> },
+    { id: 'devices', label: 'Devices', icon: <Smartphone /> },
+    { id: 'logs', label: 'Troubleshooting', icon: <ScrollText /> },
   ]
   const name = account.displayName || account.username
 
@@ -122,8 +152,8 @@ export function SettingsPage({
             <span className="truncate text-[10px] text-muted-foreground">{guest ? 'No account' : <TeamName username={account.username}>@{account.username}</TeamName>}</span>
           </span>
         </ProfileLink>
-        {guest ? null : <Rail title="kryo.to account" items={kryo} current={railSection} onSection={onSection} />}
-        <Rail title="Kryoto Desktop" items={desktop} current={railSection} onSection={onSection} />
+        {guest ? null : <Rail title="kryo.to account" items={kryo} current={railSection} onSection={onSection} fresh={fresh} />}
+        <Rail title="Kryoto Desktop" items={desktop} current={railSection} onSection={onSection} fresh={fresh} />
         <div className="mt-auto px-1">
           {guest ? (
             <Button variant="primary" size="sm" className="w-full" onClick={onSignIn}>
@@ -137,12 +167,17 @@ export function SettingsPage({
           )}
         </div>
       </nav>
-      {WEB[section] && !guest ? <WebPane fragment={WEB[section]!} page={page} /> : <DesktopPane section={railSection} account={account} />}
+      {WEB[section] && !guest ? (
+        // kryo.to's own sections are addressed by its fragments (its lib/settings-links.ts).
+        <WebPane fragment={reveal?.anchor ?? WEB[section]!} page={page} />
+      ) : (
+        <DesktopPane section={railSection} account={account} reveal={reveal} />
+      )}
     </div>
   )
 }
 
-function Rail({ title, items, current, onSection }: { title: string; items: RailItem[]; current: SettingsSection; onSection: (s: SettingsSection) => void }) {
+function Rail({ title, items, current, onSection, fresh = [] }: { title: string; items: RailItem[]; current: SettingsSection; onSection: (s: SettingsSection) => void; fresh?: SettingsSection[] }) {
   return (
     <div className="grid gap-1">
       <Caption className="px-2 pb-1">{title}</Caption>
@@ -159,6 +194,7 @@ function Rail({ title, items, current, onSection }: { title: string; items: Rail
         >
           {it.icon}
           {it.label}
+          {fresh.includes(it.id) && current !== it.id ? <NewDot className="ml-auto" /> : null}
         </button>
       ))}
     </div>
@@ -212,9 +248,15 @@ function WebPane({ fragment, page }: { fragment: string; page: BrowserPageState 
 }
 
 /** The app's own settings. Each change is saved straight away. */
-function DesktopPane({ section, account }: { section: SettingsSection; account: Account }) {
+function DesktopPane({ section, account, reveal }: { section: SettingsSection; account: Account; reveal: { anchor: string; at: number } | null }) {
   const stored = useSettings()
+  const ready = !!stored
+  useEffect(() => {
+    if (reveal && ready) return revealSetting(reveal.anchor)
+  }, [reveal, section, ready])
   const [s, setS] = useState<Settings | null>(stored)
+  // A section's parts each ask for their own data: shown together, so none pushes the next.
+  const settled = useSettled(section, !s)
   const [state, setState] = useState<'idle' | 'saving' | 'saved' | string>('idle')
   const [endpointDraft, setEndpointDraft] = useState(stored?.catalogEndpoint ?? '')
   const timer = useRef<number | undefined>(undefined)
@@ -260,12 +302,11 @@ function DesktopPane({ section, account }: { section: SettingsSection; account: 
     storage: 'Storage',
     downloads: 'Downloads',
     cloud: 'Cloud',
-    sounds: 'Sounds',
-    runtimes: 'Game runtimes',
-    controller: 'Controller',
-    compat: 'Compatibility',
-    logs: 'Logs',
-    developer: 'Developer',
+    chat: 'Chat & calls',
+    runtimes: 'Running games',
+    devices: 'Devices',
+    compat: 'Running games',
+    logs: 'Troubleshooting',
   }
 
   const applyEndpoint = () => {
@@ -285,18 +326,60 @@ function DesktopPane({ section, account }: { section: SettingsSection; account: 
   return (
     <div className="min-h-0 overflow-auto">
       {/* The controller page is wider: the drawing and its labels need the room. */}
-      <div className={cn('mx-auto grid gap-7 px-8 py-8', section === 'controller' ? 'max-w-5xl' : 'max-w-3xl')}>
-        <header className="flex items-baseline justify-between gap-4">
+      <div className={cn('mx-auto grid gap-7 px-8 py-8', section === 'devices' && account.controller ? 'max-w-5xl' : 'max-w-3xl')}>
+        <header className="flex items-center justify-between gap-4">
           <h1 className="text-xl font-bold text-foreground">{title[section]}</h1>
-          <span className={cn('text-[10px] uppercase tracking-wider', state === 'saved' || state === 'saving' || state === 'idle' ? 'text-muted-foreground' : 'text-destructive')}>
-            {state === 'saving' ? 'Saving' : state === 'saved' ? 'Saved' : state === 'idle' ? '' : state}
+          <span className="flex items-center gap-5">
+            <span className={cn('text-[10px] uppercase tracking-wider', state === 'saved' || state === 'saving' || state === 'idle' ? 'text-muted-foreground' : 'text-destructive')}>
+              {state === 'saving' ? 'Saving' : state === 'saved' ? 'Saved' : state === 'idle' ? '' : state}
+            </span>
+            {SECTION_SCENES[section] ? <SceneMotion scene={SECTION_SCENES[section]!} className="h-9 text-muted-foreground" /> : null}
           </span>
         </header>
 
-        {section === 'storage' ? <StoragePane onChanged={() => void settingsApi.get().then((v) => setS((cur) => (cur ? { ...cur, libraryDir: v.libraryDir, libraryFolders: v.libraryFolders } : v)))} /> : null}
+        <div className={cn('grid gap-7 transition-opacity duration-150', !settled && 'opacity-0')}>
+        {section === 'storage' ? (
+          <>
+            <StoragePane onChanged={() => void settingsApi.get().then((v) => setS((cur) => (cur ? { ...cur, libraryDir: v.libraryDir, libraryFolders: v.libraryFolders } : v)))} />
+            <Section title="Bring games in" anchor="find-games" hint="Find games Kryoto installed that your library lost, or bring them over from Steam and Hydra with Bridge.">
+              <span className="flex flex-wrap items-center gap-2">
+                <FindGamesButton />
+                <span id={anchorId('bridge')}>
+                  <BridgeButton />
+                </span>
+                <NewHere id="find-games" />
+              </span>
+            </Section>
+            {!isWindowsHost() ? <LeftoverPrefixes /> : null}
+            {isWindowsHost() ? (
+              <Section title="Windows Security" anchor="defender">
+                <DefenderSection />
+              </Section>
+            ) : null}
+          </>
+        ) : null}
         {section === 'downloads' ? (
           <>
-            <Section title="Connections" hint="Connections per download. More may improve speed if the filehost allows it.">
+            {s.libraryFolders.length ? (
+              <Section title="Installing" anchor="ask-folder" hint="Updates always go where the game already is.">
+                <Check
+                  checked={s.askInstallFolder}
+                  onChange={(v) => set('askInstallFolder', v)}
+                  label={<span className="flex items-center gap-2">Ask where to install <NewHere id="ask-folder" /></span>}
+                />
+              </Section>
+            ) : null}
+            <Section title="Download folder" anchor="download-folder" hint="Archives download here, and games still install to your library folders. Keep downloads on one drive and games on another.">
+              <DownloadFolder value={s.downloadDir} onChange={(v) => set('downloadDir', v)} />
+            </Section>
+            <Section title="Unpacking" hint="Used by itself when a drive has room for the game but not for the game and its archive side by side. The archive is deleted as it is unpacked.">
+              <Check checked={s.extractInPlace} onChange={(v) => set('extractInPlace', v)} label="Extract in place (HatchZip) for every install" />
+              <details className="group">
+                <summary className="w-fit cursor-pointer list-none text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground">How it works</summary>
+                <HatchZipExplainer compact className="pt-3" />
+              </details>
+            </Section>
+            <Section title="Connections" hint="More may improve speed if the filehost allows it.">
               <Segmented
                 label="Download connections" value={String(s.connections)}
                 options={['1', '4', '8', '16', '32'].map((v) => ({ value: v, label: v }))}
@@ -318,37 +401,91 @@ function DesktopPane({ section, account }: { section: SettingsSection; account: 
             </Section>
             <Check checked={s.deleteArchives} onChange={(v) => set('deleteArchives', v)} label="Delete the archive once a game is installed" />
             <Check checked={s.notifyDownloads} onChange={(v) => set('notifyDownloads', v)} label="Tell me when a game is ready to play" />
-            <Section title="New games install to" hint="Change it, or add folders on other drives, in Storage.">
-              <p className="kryo-ascii-art select-text text-[11px] text-foreground">{s.libraryDir}</p>
-            </Section>
+            <GameUpdatesSection settings={s} set={set} />
+            <DebridSection s={s} onSaved={setS} />
           </>
         ) : null}
         {section === 'general' ? (
           <>
-            <Section title="Desktop theme" hint="Applies to the library, downloads, settings and menus. Follow kryo.to to match the website's theme toggle.">
+            <Section title="Setup" hint={`Where games go, ${isWindowsHost() ? 'Windows Security' : 'Proton for Windows games'}, the theme and the extras, one step at a time.`}>
+              <Button className="w-fit" onClick={openSetup}>
+                <Wand2 className="size-3.5" />
+                Open setup
+              </Button>
+            </Section>
+            <Section title="Desktop theme" hint="Applies to the library, downloads, settings and menus.">
               <Segmented label="Desktop theme" value={s.theme ?? 'account'} options={[{ value: 'account', label: 'Follow kryo.to' }, { value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]} onChange={(v) => set('theme', v)} />
             </Section>
             <Section title="Open on">
               <Segmented label="Open on" value={s.startPage} options={[{ value: 'library', label: 'Library' }, { value: 'store', label: 'Store' }]} onChange={(v) => set('startPage', v)} />
             </Section>
+            <Section title="Built-in browser" hint="Sites you open from the Store's address bar load without their ad servers. kryo.to itself is never filtered, and its ads open in your own browser.">
+              <Check checked={s.blockAds} onChange={(v) => set('blockAds', v)} label="Block ads on other sites" />
+            </Section>
             <Check checked={s.closeToTray} onChange={(v) => set('closeToTray', v)} label="Closing the window keeps Kryoto running in the tray" />
             <Check checked={s.startWithSystem} onChange={(v) => set('startWithSystem', v)} label={`Start Kryoto when I sign in to ${isWindowsHost() ? 'Windows' : 'my computer'}`} />
             <Check checked={s.minimizeOnPlay} onChange={(v) => set('minimizeOnPlay', v)} label="Minimize Kryoto while a game runs" />
-            <Section title="Desktop pet" hint="Kryoto's mascot on your desktop, outside this window. Drag it anywhere; right-click it to switch or hide it. It steps aside while a game runs.">
+            <Section title="Desktop pet" hint="Drag it anywhere; right-click it to switch or hide it. It steps aside while a game runs.">
               <Check checked={s.pet} onChange={(v) => set('pet', v)} label="Show the pet on my desktop" />
               {s.pet ? <Segmented label="Desktop pet" value={s.petMascot} options={PET_MASCOTS.map((m) => ({ value: m.id, label: m.label }))} onChange={(v) => set('petMascot', v)} /> : null}
             </Section>
             <PlayerNameSection s={s} patch={patch} />
-            <Section title="Play time and activity" hint="Share anonymous totals of Desktop players online, playing or idle. Signed-in play time counts toward community statistics; the play-time board only shows public profiles.">
+            <Section title="Game language" hint="The language games start in, when they have it, in games built with gbe_fork or RUNE (most of the catalog). Set it per game under Properties. Game's own leaves each game's files as they are now.">
+              <Dropdown
+                label="Game language"
+                value={s.gameLanguage}
+                options={[{ value: '', label: "Game's own" }, ...GAME_LANGUAGES]}
+                onChange={(gameLanguage) => patch({ gameLanguage })}
+              />
+            </Section>
+            <Section title="Play time and activity" hint="Share anonymous totals of Desktop players online, playing or idle. Signed-in play time counts toward community statistics; the play-time board only shows public profiles. Games kryo.to does not list are never shared: their play time stays on this PC.">
               <Check checked={s.sharePlaytime} onChange={(v) => set('sharePlaytime', v)} label="Share my play time and Desktop activity with kryo.to" />
             </Section>
+            <DiscordPane s={s} patch={patch} />
             <GraphicsSection />
+            <SoundsPane />
           </>
         ) : null}
-        {section === 'cloud' ? <CloudPane s={s} set={set} onManage={() => openStorePage('/perks#cloud')} /> : null}
-        {section === 'controller' ? <ControllerPane /> : null}
+        {section === 'cloud' ? (
+          <>
+            <CloudPane s={s} set={set} onManage={() => openStorePage('/perks#cloud')} />
+            <details id={anchorId('patchbay')} className="group grid">
+              <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground">
+                <ChevronDown className="size-3 transition-transform group-open:rotate-180" aria-hidden />
+                Patchbay: your own servers
+              </summary>
+              <div className="grid gap-4 pt-5">
+                <PatchbayPane s={s} onSaved={setS} />
+              </div>
+            </details>
+          </>
+        ) : null}
+        {section === 'devices' ? (
+          <>
+            <div id={anchorId('phone')} className="grid gap-7">
+              <h2 className="text-sm font-bold text-foreground">Phone</h2>
+              <PhonePane />
+            </div>
+            {account.controller ? (
+              <div id={anchorId('controller')} className="grid gap-7 border-t border-border pt-7">
+                <h2 className="text-sm font-bold text-foreground">Controller</h2>
+                <ControllerWelcome onBigPicture={openBigPicture} />
+                <ControllerPane />
+              </div>
+            ) : null}
+          </>
+        ) : null}
         {section === 'compat' ? <CompatPane s={s} set={set} /> : null}
-        {section === 'developer' ? (
+        {section === 'runtimes' ? <RuntimesPane /> : null}
+        {section === 'compat' || section === 'runtimes' ? (
+          <div id={anchorId('vr')} className="grid gap-7 border-t border-border pt-7">
+            <h2 className="text-sm font-bold text-foreground">VR</h2>
+            <VrPane s={s} set={set} />
+          </div>
+        ) : null}
+        {section === 'logs' ? (
+          <>
+            <LogsPane sendReports={s.sendReports} onSendReports={(v) => set('sendReports', v)} />
           <Section title="Kryo.to endpoint" hint="Blank uses production. For local testing, use http://localhost:3000.">
             <div className="grid gap-3">
               <label className="grid gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -376,12 +513,10 @@ function DesktopPane({ section, account }: { section: SettingsSection; account: 
               </Button>
             </div>
           </Section>
+          </>
         ) : null}
-        {section === 'logs' ? <LogsPane sendReports={s.sendReports} onSendReports={(v) => set('sendReports', v)} /> : null}
-        {section === 'phone' ? <PhonePane /> : null}
-        {section === 'sounds' ? <SoundsPane /> : null}
         {section === 'chat' ? <ChatSettingsPanel available={!!account.chat} calls={!!account.voice} /> : null}
-        {section === 'runtimes' ? <RuntimesPane /> : null}
+        </div>
       </div>
     </div>
   )
@@ -395,6 +530,8 @@ function DesktopPane({ section, account }: { section: SettingsSection; account: 
  */
 function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Settings>) => void }) {
   const [account, setAccount] = useState<string | null>(null)
+  /** Custom picked just now: the name field takes the cursor (not when Settings opens on it). */
+  const [picked, setPicked] = useState(false)
   useEffect(() => {
     if (isTauri()) void settingsApi.playerAccountName().then(setAccount).catch(() => {})
   }, [])
@@ -411,11 +548,15 @@ function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Setti
             { value: 'custom', label: 'Custom' },
             { value: 'build', label: "Game's own" },
           ]}
-          onChange={(v) => patch({ playerNameMode: v })}
+          onChange={(v) => {
+            setPicked(v === 'custom')
+            patch({ playerNameMode: v })
+          }}
         />
         {s.playerNameMode === 'custom' ? (
           <input
             className={inputCls}
+            autoFocus={picked}
             value={s.playerName}
             maxLength={PLAYER_NAME_MAX}
             placeholder="Your name in games"
@@ -477,5 +618,22 @@ function GraphicsSection() {
       </p>
       {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
     </Section>
+  )
+}
+
+/**
+ * The guided screen (library/Bridge.tsx), also under Library > Bridge and in
+ * Add a game. Linked to as `storage#bridge`.
+ */
+function BridgeButton() {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button size="sm" onClick={() => setOpen(true)}>
+        <FolderInput className="size-3" />
+        Open Bridge
+      </Button>
+      {open ? <Bridge onClose={() => setOpen(false)} /> : null}
+    </>
   )
 }

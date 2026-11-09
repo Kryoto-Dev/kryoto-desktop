@@ -1,21 +1,23 @@
 import { TeamName } from '@/ui/TeamName'
 import { useEffect, useState } from 'react'
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown } from '@/ui/pixel-icons'
 import { Caption } from '@/ui'
 import { useOnline } from '@/lib/online'
 import { cn } from '@/lib/utils'
+import { RichText } from '@/rich/RichText'
 import { fetchCompatibility, hostPlatform, PLATFORM_LABEL, setupLabel, STATUS_INFO, workingSetup, type Compatibility as Compat } from '@/lib/compat'
 
 const TONE = { good: 'text-success', warn: 'text-warning', bad: 'text-destructive', none: 'text-muted-foreground' } as const
 
-const linkClass = 'rounded-sm text-foreground underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring'
+const linkClass = 'kryo-radius text-foreground underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring'
 
 /**
  * What testers found on this PC's platform, inside the game's Info card: the
  * site's headline, this platform's status and report count, and the newest
  * setup that worked here (Proton steps, for a Linux player). Nothing at all
- * for a game nobody has tested. The steps are shown as plain text, never as
- * HTML, so a report cannot load anything; the full list is on kryo.to.
+ * for a game nobody has tested. The steps go through the shared renderer, which
+ * builds no HTML from them and loads no picture a report names; the full list
+ * is on kryo.to.
  */
 export function CompatibilityFacts({ slug, onWeb }: { slug: string; onWeb: (path: string) => void }) {
   const [compat, setCompat] = useState<Compat | null>(null)
@@ -63,7 +65,9 @@ export function CompatibilityFacts({ slug, onWeb }: { slug: string; onWeb: (path
             <ChevronDown className="size-3 transition-transform group-open:rotate-180" />
           </summary>
           <div className="mt-2 grid gap-2">
-            <p className="m-0 max-h-60 select-text overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-foreground/90">{setup.instructions}</p>
+            <div className="max-h-60 select-text overflow-auto break-words text-[11px] leading-relaxed text-foreground/90">
+              <RichText text={setup.instructions ?? ''} />
+            </div>
             <p className="m-0 text-[11px] text-muted-foreground">
               {setup.tester.username ? (
                 <a href={`https://kryo.to/user/${encodeURIComponent(setup.tester.username)}`} onClick={go(`/user/${encodeURIComponent(setup.tester.username)}`)} className={linkClass}>

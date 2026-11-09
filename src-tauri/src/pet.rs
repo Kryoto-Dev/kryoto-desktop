@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::window::Color;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -69,7 +69,58 @@ fn create<R: Runtime>(app: &AppHandle<R>, saved: Option<[i32; 2]>) -> Result<(),
     }
     let handle = app.clone();
     window.on_menu_event(move |_, event| on_menu(&handle, event.id().as_ref()));
+    watch_memory(app);
     Ok(())
+}
+
+/// Memory this full and the pet eats some (suggestion #52); it is hungry
+/// again once use has dropped below `EASED`.
+const FULL: f64 = 0.92;
+const EASED: f64 = 0.86;
+/// How often memory is read, and how often a full PC is eaten from again.
+const MEMORY_EVERY: Duration = Duration::from_secs(5);
+const SNACK_EVERY: Duration = Duration::from_secs(90);
+
+static WATCHING: AtomicBool = AtomicBool::new(false);
+
+/// Still full? With a gap between the two marks, so use hovering at the line
+/// does not set it eating every few seconds. Pure, for the tests.
+pub fn full_now(was_full: bool, used: u64, total: u64) -> bool {
+    if total == 0 {
+        return false;
+    }
+    let share = used as f64 / total as f64;
+    if was_full { share >= EASED } else { share >= FULL }
+}
+
+/// While the pet is open, read memory every few seconds on a thread of its
+/// own (one cheap system call, no process list) and tell the pet when it is
+/// nearly full: `pet-hungry` on the way in, then again now and then while it
+/// stays full. Ends by itself when the pet is put away.
+fn watch_memory<R: Runtime>(app: &AppHandle<R>) {
+    if WATCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // Debug builds can act it out on a PC with memory to spare.
+        let pretend = cfg!(debug_assertions) && std::env::var_os("KRYOTO_DEV_PET_HUNGRY").is_some();
+        let mut sys = sysinfo::System::new();
+        let mut full = false;
+        let mut fed: Option<Instant> = None;
+        while let Some(w) = app.get_webview_window(LABEL) {
+            sys.refresh_memory();
+            full = pretend || full_now(full, sys.used_memory(), sys.total_memory());
+            if !full {
+                fed = None;
+            } else if fed.is_none_or(|at| at.elapsed() >= SNACK_EVERY) {
+                fed = Some(Instant::now());
+                let _ = w.emit_to(LABEL, "pet-hungry", ());
+            }
+            std::thread::sleep(MEMORY_EVERY);
+        }
+        WATCHING.store(false, Ordering::SeqCst);
+    });
 }
 
 /// A remembered spot is only used while a monitor still covers it.
@@ -91,10 +142,14 @@ fn corner<R: Runtime>(app: &AppHandle<R>) -> Option<[i32; 2]> {
 
 static LAST_POS: Mutex<Option<[i32; 2]>> = Mutex::new(None);
 static SAVING: AtomicBool = AtomicBool::new(false);
+static MOVED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Remember where it was put: once the moving stops, not on every pixel of a drag.
 pub fn on_window_event<R: Runtime>(window: &tauri::Window<R>, event: &WindowEvent) {
     let WindowEvent::Moved(p) = event else { return };
+    if let Ok(mut at) = MOVED_AT.lock() {
+        *at = Some(Instant::now());
+    }
     if let Ok(mut last) = LAST_POS.lock() {
         *last = Some([p.x, p.y]);
     }
@@ -160,14 +215,65 @@ pub fn pet_menu(app: AppHandle) -> Result<(), String> {
     window.popup_menu(&menu).map_err(e)
 }
 
-/// A double-click on the pet brings Kryoto up.
+/// Picked up. The system moves the window from here, and `start_dragging`
+/// returns as soon as it has handed the move over, long before the button
+/// comes up; the page hears "pet-dropped" when it does, so the pet dangles
+/// its legs the whole way, as on the site.
 #[tauri::command]
-pub fn pet_open_app(app: AppHandle) {
-    crate::system::show_main(&app);
+pub fn pet_drag(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.start_dragging().map_err(|e| e.to_string())?;
+    let app = window.app_handle().clone();
+    std::thread::spawn(move || {
+        wait_for_release();
+        let _ = app.emit_to(LABEL, "pet-dropped", ());
+    });
+    Ok(())
+}
+
+/// Until the primary button is up (or two minutes, whatever happened).
+#[cfg(windows)]
+fn wait_for_release() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+    // This reads the physical buttons: swapped, the primary one is the right.
+    let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+    let until = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < until && unsafe { GetAsyncKeyState(button.into()) } < 0 {
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+/// No button state to read here: the drag is over once the window has stood
+/// still for a moment. The page also lands it at the first pointer event after.
+#[cfg(not(windows))]
+fn wait_for_release() {
+    let start = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let moved = MOVED_AT.lock().ok().and_then(|at| *at).filter(|at| *at > start).unwrap_or(start);
+        if moved.elapsed() > Duration::from_millis(900) || start.elapsed() > Duration::from_secs(120) {
+            return;
+        }
+    }
 }
 
 /// Which mascot to draw, for the pet's page when it starts.
 #[tauri::command]
 pub fn pet_mascot(app: AppHandle) -> String {
     crate::settings::load(&app).pet_mascot
+}
+
+#[cfg(test)]
+mod tests {
+    use super::full_now;
+
+    #[test]
+    fn eats_when_nearly_full_and_stops_once_eased() {
+        assert!(!full_now(false, 90, 100));
+        assert!(full_now(false, 93, 100));
+        // Hovering just under the mark keeps it full: no snack every 5 s.
+        assert!(full_now(true, 90, 100));
+        assert!(!full_now(true, 80, 100));
+        assert!(!full_now(false, 1, 0));
+    }
 }

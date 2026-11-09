@@ -1,0 +1,32 @@
+import { discordGames, discordWords, useDiscord } from '@/lib/discord'
+import { openSettingsSection } from '@/lib/window'
+
+const LINK = 'kryo-square text-foreground/80 underline-offset-4 hover:text-foreground hover:underline'
+
+/**
+ * One quiet line: what Discord shows for this game, and the switch for it.
+ * The same on a game's page, in Properties and in Settings. Nothing for a game
+ * another launcher keeps.
+ */
+export function DiscordChip({ id, named = false }: { id: string; named?: boolean }) {
+  const d = useDiscord()
+  const g = d?.games.find((x) => x.id === id)
+  if (!d || !g) return null
+  const { text, tip } = discordWords(g, d.open)
+  return (
+    <span className="inline-flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground" title={tip}>
+      {g.now ? <span className="kryo-blink size-1.5 shrink-0 rounded-full bg-success" aria-hidden /> : null}
+      {named ? <span className="truncate text-foreground">{g.title}</span> : null}
+      <span className="truncate">{text}</span>
+      {g.why === 'off' ? (
+        <button type="button" className={LINK} onClick={() => openSettingsSection('general', 'discord')}>
+          Settings
+        </button>
+      ) : (
+        <button type="button" className={LINK} title={g.why === 'adult' ? tip : undefined} onClick={() => void discordGames.set(id, !!g.why)}>
+          {g.why ? 'Show' : 'Hide'}
+        </button>
+      )}
+    </span>
+  )
+}

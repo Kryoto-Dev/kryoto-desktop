@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { errorText } from '@/lib/bridge'
-import { chatReport, type ChatMessage } from '@/lib/chat'
+import { chatReport, here, type ChatMessage } from '@/lib/chat'
+import { EmojiButton, RichTextarea } from '@/rich/RichEditor'
+import { plainRich } from '@/rich/rich-text'
 import { Button, Caption, Check, Dropdown, Modal } from '@/ui'
 
 const REASONS = [
@@ -40,6 +42,7 @@ export function ReportDialog({
   )
   const [reason, setReason] = useState<Reason>('spam')
   const [note, setNote] = useState('')
+  const box = useRef<HTMLTextAreaElement>(null)
   const [block, setBlock] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -72,15 +75,15 @@ export function ReportDialog({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="danger" disabled={busy || picked.size === 0} onClick={() => void send()}>
+          <Button variant="danger" disabled={busy || picked.size === 0} onClick={() => send()}>
             Send report
           </Button>
         </>
       }
     >
       <p className="text-xs text-muted-foreground">
-        Your chats are end-to-end encrypted, so Kryoto staff cannot read them. The messages you tick below leave this
-        PC and go to staff as a support ticket; nothing else does. {peer.name} is not told.
+        Your chats are end-to-end encrypted, so Kryoto staff cannot read them. The messages you tick below leave{' '}
+        {here()} and go to staff as a support ticket; nothing else does. {peer.name} is not told.
       </p>
       <div className="grid gap-1.5">
         <Caption>Why</Caption>
@@ -97,7 +100,7 @@ export function ReportDialog({
                 label={
                   <span className="text-xs">
                     <b>{m.outgoing ? 'You' : peer.name}:</b>{' '}
-                    {m.kind === 'gif' ? 'GIF' : m.kind === 'invite' ? 'Game invite' : m.kind === 'file' ? 'A file' : m.body.slice(0, 140)}
+                    {m.kind === 'gif' ? 'GIF' : m.kind === 'invite' ? 'Game invite' : m.kind === 'file' ? 'A file' : plainRich(m.body).slice(0, 140)}
                   </span>
                 }
               />
@@ -105,14 +108,20 @@ export function ReportDialog({
           ))}
         </ul>
       </div>
-      <textarea
-        value={note}
-        onChange={(e) => setNote(e.target.value.slice(0, 500))}
-        rows={2}
-        placeholder="Anything staff should know (optional)"
-        aria-label="Note for staff"
-        className="kryo-radius w-full resize-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-foreground"
-      />
+      <div className="flex items-end gap-2">
+        <RichTextarea
+          ref={box}
+          value={note}
+          onValueChange={setNote}
+          maxLength={500}
+          wrapperClassName="grow"
+          rows={2}
+          placeholder="Anything staff should know (optional)"
+          aria-label="Note for staff"
+          className="kryo-radius block w-full resize-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-foreground"
+        />
+        <EmojiButton target={box} value={note} onValueChange={setNote} stickers={false} />
+      </div>
       <Check checked={block} onChange={setBlock} label={`Also block ${peer.name}`} />
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </Modal>

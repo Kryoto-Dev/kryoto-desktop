@@ -9,6 +9,8 @@ export type Account = {
   appearance?: AccountAppearance | null
   /** A kryo.to supporter, or someone who bought "no ads": never asked to donate. */
   supporter?: boolean
+  /** Their donation rank ('supporter' up to 'sponsor'): which rank emoji and stickers they can use. */
+  rank?: string | null
   /** Chat is rolled out to this account (kryo.to feature flag). */
   chat?: boolean
   /** Friends are rolled out to this account (kryo.to feature flag). */

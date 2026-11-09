@@ -214,6 +214,71 @@ impl FileBody {
     }
 }
 
+/// A picture's width and height from its header, so the reader's chat can keep
+/// the space before it loads. None for anything else; the file still sends.
+pub fn image_size(b: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |at: usize| Some(u32::from(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?])));
+    let le16 = |at: usize| Some(u32::from(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?])));
+    let le24 = |at: usize| Some(u32::from_le_bytes([*b.get(at)?, *b.get(at + 1)?, *b.get(at + 2)?, 0]));
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let side = |at: usize| Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?));
+        return Some((side(16)?, side(20)?));
+    }
+    if b.starts_with(b"GIF8") {
+        return Some((le16(6)?, le16(8)?));
+    }
+    if b.starts_with(&[0xff, 0xd8]) {
+        let mut at = 2;
+        while *b.get(at)? == 0xff {
+            let marker = *b.get(at + 1)?;
+            // Start of frame: every SOFn but the tables that share the range.
+            if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+                return Some((be16(at + 7)?, be16(at + 5)?));
+            }
+            at += 2 + be16(at + 2)? as usize;
+        }
+        return None;
+    }
+    if b.get(..4)? == b"RIFF" && b.get(8..12)? == b"WEBP" {
+        return match b.get(12..16)? {
+            b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+            b"VP8 " => Some((le16(26)? & 0x3fff, le16(28)? & 0x3fff)),
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(b.get(21..25)?.try_into().ok()?);
+                Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
+#[cfg(test)]
+mod image_size_tests {
+    use super::image_size;
+
+    #[test]
+    fn reads_png_gif_and_jpeg_headers() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend([0, 0, 2, 128, 0, 0, 1, 224]);
+        assert_eq!(image_size(&png), Some((640, 480)));
+        assert_eq!(image_size(b"GIF89a\x40\x01\xf0\x00"), Some((320, 240)));
+        // A short APP0 segment, then a baseline frame of 200 by 100.
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 11, 8, 0, 100, 0, 200];
+        assert_eq!(image_size(&jpeg), Some((200, 100)));
+    }
+
+    #[test]
+    fn reads_webp_and_gives_up_on_anything_else() {
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0\0\0\0\0".to_vec();
+        webp.extend([0x7f, 0x02, 0, 0xdf, 0x01, 0]);
+        assert_eq!(image_size(&webp), Some((640, 480)));
+        assert_eq!(image_size(b"not a picture"), None);
+        assert_eq!(image_size(&[0xff, 0xd8]), None);
+        assert_eq!(image_size(b""), None);
+    }
+}
+
 /// A guess at the type from the file name, for previews and the save dialog.
 pub fn mime_of(name: &str) -> &'static str {
     match name.rsplit('.').next().map(|e| e.to_ascii_lowercase()).as_deref() {
@@ -393,16 +458,6 @@ impl Chat {
         Ok(rows.into_iter().map(|m| self.shown(m)).collect())
     }
 
-    /// Search this PC's messages. Nothing is searched anywhere else.
-    pub async fn search(&self, query: &str) -> Result<Vec<MessageRow>, String> {
-        let q = query.trim();
-        if q.chars().count() < 2 {
-            return Ok(Vec::new());
-        }
-        let rows = self.engine.lock().await.store.search(q, 50).map_err(|e| e.to_string())?;
-        Ok(rows.into_iter().map(|m| self.shown(m)).collect())
-    }
-
     /// A user's checked devices, from the cache unless `refresh`.
     pub(super) async fn devices_of(&self, client: &Client, user: u64, refresh: bool) -> Result<Vec<TrustedDevice>, SendError> {
         if !refresh {
@@ -488,8 +543,10 @@ impl Chat {
                 // else in can be reached right now): nothing to send.
                 return if group.is_some() || users.iter().all(|u| *u == me) { Ok(()) } else { Err(SendError::NoChat) };
             }
+            // Only what shows as a new message is worth telling anyone about.
+            let quiet = !matches!(content.body, Some(Body::Text(_) | Body::Gif(_) | Body::Invite(_) | Body::Attachment(_) | Body::CallLog(_)));
             let answer = client
-                .request(C::Send(gw::Send { client_msg_id: content.msg_id.clone(), items, ephemeral, group_id: group.unwrap_or(0) }))
+                .request(C::Send(gw::Send { client_msg_id: content.msg_id.clone(), items, ephemeral, group_id: group.unwrap_or(0), quiet }))
                 .await
                 .map_err(|e| if e.code == "offline" { SendError::Offline } else { SendError::Failed(e.message) })?;
             let S::SendAck(ack) = answer else { return Err(SendError::Failed("Unexpected answer.".into())) };
@@ -631,6 +688,7 @@ impl Chat {
         }
         let client = self.client().ok_or(SendError::Offline)?;
         let size = bytes.len() as u64;
+        let (width, height) = image_size(&bytes).unwrap_or((0, 0));
         let sealed = tokio::task::spawn_blocking(move || km_core::seal_attachment(&bytes))
             .await
             .map_err(|e| SendError::Failed(e.to_string()))?
@@ -662,8 +720,8 @@ impl Chat {
             mime: mime_of(&name).into(),
             name: if name.trim().is_empty() { "file".into() } else { name },
             size,
-            width: 0,
-            height: 0,
+            width,
+            height,
         };
         let body = serde_json::to_string(&file).map_err(|e| SendError::Failed(e.to_string()))?;
         let me = self.my_id().await;
@@ -791,6 +849,13 @@ impl Chat {
         drop(eng);
         if let Some(u) = updated {
             self.emit_row(false, u);
+        }
+        // The file goes with the message. If this fails the server's own expiry takes it.
+        if row.kind == "file" {
+            let id = serde_json::from_str::<FileBody>(&row.body).ok().and_then(|f| f.id.parse().ok());
+            if let (Some(id), Some(client)) = (id, self.client()) {
+                let _ = client.request(C::AttachmentDelete(gw::AttachmentDelete { id })).await;
+            }
         }
         Ok(())
     }

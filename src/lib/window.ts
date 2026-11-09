@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { LogicalSize } from '@tauri-apps/api/dpi'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { call, isTauri, on } from '@/lib/bridge'
+import { noteStore } from '@/lib/popup'
+import { SITE_ORIGIN } from '@/lib/endpoint'
 
 export { isTauri }
 
@@ -28,10 +30,23 @@ const SIZES: Record<WindowKind, { width: number; height: number }> = {
 }
 
 let currentKind: WindowKind | null = null
+let placing: Promise<unknown> = Promise.resolve()
 
-export async function applyWindow(kind: WindowKind) {
+/**
+ * One at a time. Each is a run of native calls: on a busy PC the splash's were
+ * still going when a quick sign-in started the client's, the two interleaved,
+ * and the client opened in the splash's 340 by 380 with its maximum size stuck
+ * there.
+ */
+export function applyWindow(kind: WindowKind) {
   if (kind === 'main') delete document.documentElement.dataset.shape
   else document.documentElement.dataset.shape = 'box'
+  const done = placing.then(() => placeWindow(kind))
+  placing = done.catch(() => undefined)
+  return done
+}
+
+async function placeWindow(kind: WindowKind) {
   if (!isTauri() || currentKind === kind) return
   const win = getCurrentWindow()
   const first = currentKind === null
@@ -105,7 +120,7 @@ export const exitApp = () => (isTauri() ? call<void>('app_exit') : Promise.resol
 
 /* ── Store web view ─────────────────────────────────────── */
 
-export const STORE_HOME = 'https://kryo.to/'
+export const STORE_HOME = `${SITE_ORIGIN}/`
 
 /** Remember the client's size for next time. */
 export function rememberWindowSize(width: number, height: number) {
@@ -123,6 +138,7 @@ export function rememberWindowSize(width: number, height: number) {
  */
 export function mountStore(url: string, rect: { x: number; y: number; width: number; height: number }, visible?: boolean) {
   if (!isTauri()) return Promise.resolve()
+  noteStore(rect)
   // The page's own pixel ratio, so the view lands where it was measured even
   // when Windows reports another scale for the window (src-tauri placement.rs).
   return call<void>('store_mount', { url, ...rect, visible: visible ?? null, userAgent: navigator.userAgent, scale: window.devicePixelRatio || null })
@@ -143,6 +159,7 @@ export function placeMainStore() {
 
 export function setStoreVisible(visible: boolean) {
   if (!isTauri()) return Promise.resolve()
+  noteStore(null, visible)
   return call<void>('store_visible', { visible }).catch(() => {})
 }
 
@@ -157,10 +174,37 @@ export function openStorePage(path: string) {
   window.dispatchEvent(new CustomEvent<string>(OPEN_STORE_EVENT, { detail: path }))
 }
 
-/** Open a section of Kryoto Desktop's Settings from anywhere in the app. */
+/**
+ * Open a section of Kryoto Desktop's Settings from anywhere in the app, and
+ * with `anchor` one setting in it (lib/settings-links.ts).
+ */
 export const OPEN_SETTINGS_EVENT = 'kryo:open-settings'
-export function openSettingsSection(section: string) {
-  window.dispatchEvent(new CustomEvent<string>(OPEN_SETTINGS_EVENT, { detail: section }))
+export function openSettingsSection(section: string, anchor?: string) {
+  window.dispatchEvent(new CustomEvent<string>(OPEN_SETTINGS_EVENT, { detail: anchor ? `${section}#${anchor}` : section }))
+}
+
+/** Open the setup again (Settings, General). The Shell owns its dialogs. */
+export const OPEN_SETUP_EVENT = 'kryo:open-setup'
+export function openSetup() {
+  window.dispatchEvent(new CustomEvent(OPEN_SETUP_EVENT))
+}
+
+/** A game's page, and with `anchor` one part of it, lit (lib/settings-links.ts). */
+export const OPEN_GAME_EVENT = 'kryo:open-game'
+export function openGame(id: string, anchor?: string) {
+  window.dispatchEvent(new CustomEvent(OPEN_GAME_EVENT, { detail: { id, anchor } }))
+}
+
+/** Big Picture, from anywhere. */
+export const OPEN_BIG_PICTURE_EVENT = 'kryo:big-picture'
+export function openBigPicture() {
+  window.dispatchEvent(new CustomEvent(OPEN_BIG_PICTURE_EVENT))
+}
+
+/** Open the Library from anywhere. */
+export const OPEN_LIBRARY_EVENT = 'kryo:open-library'
+export function openLibrary() {
+  window.dispatchEvent(new CustomEvent(OPEN_LIBRARY_EVENT))
 }
 
 /** Go to a kryo.to path in the Store. */

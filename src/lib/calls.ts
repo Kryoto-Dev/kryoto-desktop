@@ -205,7 +205,7 @@ function analyse(stream: MediaStream | null): AnalyserNode | null {
   if (!stream || stream.getAudioTracks().length === 0) return null
   try {
     meter.ctx ??= new AudioContext()
-    if (meter.ctx.state === 'suspended') void meter.ctx.resume()
+    if (meter.ctx.state === 'suspended') void meter.ctx.resume().catch(() => {})
     const node = meter.ctx.createAnalyser()
     node.fftSize = 512
     meter.ctx.createMediaStreamSource(stream).connect(node)

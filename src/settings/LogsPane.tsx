@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Copy, FolderOpen, RotateCw, Send } from 'lucide-react'
+import { Copy, FolderOpen, RotateCw, Send } from '@/ui/pixel-icons'
 import { Button, Check, Section } from '@/ui'
 import { call, errorText } from '@/lib/bridge'
 import { library } from '@/lib/library'
 
 /**
- * Settings > Logs: what the client wrote down, and whether errors go to
+ * Settings > Troubleshooting: what the client wrote down, and whether errors go to
  * kryo.to. The same file is in the log folder for attaching to a support
  * message.
  */
@@ -49,7 +49,7 @@ export function LogsPane({ sendReports, onSendReports }: { sendReports: boolean;
           )}
         </pre>
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" onClick={() => void library.openFolder(folder, true)} disabled={!folder}>
+          <Button size="sm" onClick={() => library.openFolder(folder, true)} disabled={!folder}>
             <FolderOpen className="size-3" />
             Open log folder
           </Button>
@@ -65,7 +65,7 @@ export function LogsPane({ sendReports, onSendReports }: { sendReports: boolean;
             <Copy className="size-3" />
             Copy
           </Button>
-          <Button size="sm" onClick={() => void refresh()}>
+          <Button size="sm" onClick={() => refresh()}>
             <RotateCw className="size-3" />
             Refresh
           </Button>

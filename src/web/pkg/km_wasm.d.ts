@@ -84,7 +84,7 @@ export class Kryo {
      * of ids) and return the Send frame. Throws "nothing to send" if no
      * device could be reached.
      */
-    sendFrame(request_id: number, content: string, users: string, ephemeral: boolean, group_id: string): Uint8Array;
+    sendFrame(request_id: number, content: string, users: string, ephemeral: boolean, group_id: string, quiet: boolean): Uint8Array;
     setDeviceId(id: string): void;
     /**
      * Everything needed to restore this device. Secret: encrypt before storing.
@@ -128,7 +128,7 @@ export interface InitOutput {
     readonly kryo_restore: (a: number, b: number) => [number, number, number];
     readonly kryo_restoreBackup: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly kryo_sealFile: (a: number, b: number) => [number, number, number, number];
-    readonly kryo_sendFrame: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly kryo_sendFrame: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
     readonly kryo_setDeviceId: (a: number, b: number, c: number) => [number, number];
     readonly kryo_state: (a: number) => [number, number, number, number];
     readonly kryo_userId: (a: number) => [number, number];

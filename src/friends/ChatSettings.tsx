@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Download, Mic } from 'lucide-react'
+import { Download, Mic } from '@/ui/pixel-icons'
 import { errorText } from '@/lib/bridge'
 import { audioDevices, chooseInput, chooseOutput, testMicrophone, type AudioDevice, type AudioDevices } from '@/lib/calls'
 import { chatExportHistory, chatSettingsGet, chatSettingsSet, here, useChatStatus, type ChatSettings } from '@/lib/chat'
@@ -27,7 +27,7 @@ export function ChatSettingsPanel({ available, calls }: { available: boolean; ca
     let alive = true
     void chatSettingsGet()
       .then((s) => alive && setSettings(s))
-      .catch(() => {})
+      .catch((e) => alive && setError(errorText(e)))
     return () => {
       alive = false
     }
@@ -145,7 +145,7 @@ function CallDevices() {
   if (!d) return null
   const unnamed = d.inputs.length > 0 && d.inputs.every((x) => /^Microphone \d+$/.test(x.label))
   return (
-    <Section title="Calls" hint="Calls ring at the sound volume in Settings > Sounds, even with everyday sounds off.">
+    <Section title="Calls" hint="Calls ring at the sound volume in Settings > General, even with everyday sounds off.">
       <div className="grid gap-1.5">
         <span className="text-xs text-foreground">Microphone</span>
         <Dropdown
@@ -162,7 +162,7 @@ function CallDevices() {
         {unnamed ? <span className="text-[11px] text-muted-foreground">Test the microphone once to see the devices by name.</span> : null}
       </div>
       <div className="flex flex-wrap items-center gap-3">
-        <Button size="sm" onClick={() => void toggleTest()} aria-pressed={testing}>
+        <Button size="sm" onClick={() => toggleTest()} aria-pressed={testing}>
           <Mic className="size-3" aria-hidden />
           {testing ? 'Stop the test' : 'Test microphone'}
         </Button>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react'
+import { Copy, FolderOpen, RefreshCw } from '@/ui/pixel-icons'
 import { Button, Section } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { formatBytes } from '@/lib/downloads'
@@ -73,13 +73,13 @@ export function GameLogs({ id }: { id: string }) {
           </button>
         ))}
         <span className="ml-auto flex gap-2">
-          <Button size="sm" onClick={() => void load()} title="Look for new logs">
+          <Button size="sm" onClick={() => load()} title="Look for new logs">
             <RefreshCw className="size-3" aria-hidden />
           </Button>
-          <Button size="sm" disabled={!text} onClick={() => void copy()}>
+          <Button size="sm" disabled={!text} onClick={() => copy()}>
             <Copy className="size-3" aria-hidden /> {copied ? 'Copied' : 'Copy'}
           </Button>
-          <Button size="sm" onClick={() => void gameLogs.folder(id).then((dir) => library.openFolder(dir, true))}>
+          <Button size="sm" onClick={() => gameLogs.folder(id).then((dir) => library.openFolder(dir, true))}>
             <FolderOpen className="size-3" aria-hidden /> Open folder
           </Button>
         </span>

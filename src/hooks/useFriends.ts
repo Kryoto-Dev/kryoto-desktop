@@ -12,6 +12,8 @@ export type FriendFace = {
   displayName: string | null
   avatarUrl: string | null
   supporter: boolean
+  /** Their donation rank: which rank emoji and stickers in their messages are drawn. Missing from an older kryo.to. */
+  rank?: string | null
 }
 export type Friend = FriendFace & {
   favourite: boolean

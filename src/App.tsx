@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Shell } from '@/shell/Shell'
 import { Splash, Welcome } from '@/boot/Boot'
+import { FirstStart } from '@/setup/FirstStart'
 import { applyWindow, browserNavigate, exitApp, isTauri, mountStore, rememberWindowSize, setStoreVisible, STORE_HOME } from '@/lib/window'
 import { applyLook, effectiveLook, settingsApi, useSettings } from '@/lib/settings'
 import { errorText } from '@/lib/bridge'
@@ -8,6 +9,7 @@ import { Button } from '@/ui'
 import { setHideAdult, setShowAdult } from '@/lib/adult'
 import { GUEST, useAccount, useCatalogAppearance } from '@/hooks/useAccount'
 import { useBrowserPage } from '@/hooks/useBrowserPage'
+import { useInbox } from '@/hooks/useInbox'
 import { call, on } from '@/lib/bridge'
 import { emitTo } from '@tauri-apps/api/event'
 import { logInfo } from '@/lib/log'
@@ -76,6 +78,9 @@ export default function App() {
   const account = useAccount()
   const catalogAppearance = useCatalogAppearance()
   const browser = useBrowserPage()
+  // Here and not in the shell: the Store says what is new while the splash is up,
+  // and the bell's count and the news pill would miss it.
+  const inbox = useInbox()
   const online = useOnline()
   const [guest, setGuestState] = useState(loadGuest)
   const setGuest = useCallback((on: boolean) => {
@@ -104,7 +109,7 @@ export default function App() {
         const dark = document.documentElement.classList.contains('dark')
         // The window's own corners follow the reader's corner style (system.rs).
         void call('window_corners', { radius: look.radius }).catch(() => {})
-        void call('phone_report_look', { look: { theme: dark ? 'dark' : 'light', palette: look.palette, radius: look.radius, font: look.font, season: look.season ?? null, reducedMotion: look.reducedMotion === true } }).catch(() => {})
+        void call('phone_report_look', { look: { theme: dark ? 'dark' : 'light', palette: look.palette, radius: look.radius, font: look.font, season: look.season ?? null, reducedMotion: look.reducedMotion === true, classicIcons: look.classicIcons === true } }).catch(() => {})
         // The desktop pet (src/pet) wears the same palette.
         petLook = { palette: look.palette, dark, reducedMotion: look.reducedMotion === true }
         void emitTo('pet', 'pet-look', petLook).catch(() => {})
@@ -235,7 +240,7 @@ export default function App() {
       <p>Use defaults to save a backup of the original and choose fresh settings. To restore your own copy instead, close Kryoto and restore settings.json in its app data folder.</p>
       {recoveryFailure ? <p className="text-destructive">{recoveryFailure}</p> : null}
       <Button className="w-fit" onClick={() => { void settingsApi.recover().catch(e => setRecoveryFailure(errorText(e))) }}>Use defaults</Button>
-      <Button variant="outline" className="w-fit" onClick={() => void exitApp()}>Quit Kryoto</Button>
+      <Button variant="outline" className="w-fit" onClick={() => exitApp()}>Quit Kryoto</Button>
     </section>
   </main>
   if (phase === 'welcome' || (!account && !guest)) {
@@ -249,12 +254,15 @@ export default function App() {
       />
     )
   }
+  // A fresh install: the first-start setup, once, before the client itself.
+  if (settings && !settings.welcomed) return <FirstStart onDone={() => logInfo('app', 'first-start setup done')} />
   return (
     <>
     <Shell
       startPage={settings?.startPage === 'store' ? 'store' : 'library'}
       account={account ?? GUEST}
       browser={browser}
+      inbox={inbox}
     />
     </>
   )

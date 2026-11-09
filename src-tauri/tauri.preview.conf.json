@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Kryoto Desktop Preview",
+  "identifier": "to.kryo.desktop.preview",
+  "bundle": {
+    "shortDescription": "Kryoto Desktop Preview: the next update, for Kryoto Preview members",
+    "longDescription": "Kryoto Desktop Preview: the next version of Kryoto Desktop, for members of a Kryoto Preview. It installs beside Kryoto Desktop and talks to preview.kryo.to."
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Kryoto-Dev/kryoto-desktop/releases/download/preview/latest.json"
+      ]
+    }
+  }
+}

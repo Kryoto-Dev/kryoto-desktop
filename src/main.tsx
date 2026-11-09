@@ -9,6 +9,7 @@ import { installWindowDrag } from './lib/window-drag'
 import { call } from './lib/bridge'
 import { isTauri } from './lib/window'
 import './styles.css'
+import { PixelIconMotion } from '@/ui/pixel-icons-motion'
 
 /** The menu view (menus.rs) loads this same page; its label says which it is. */
 function windowLabel(): string {
@@ -39,6 +40,7 @@ createRoot(document.getElementById('root')!).render(
       <PetApp />
     ) : (
       <>
+        <PixelIconMotion />
         <App />
         {/* Every `title` as Kryoto's own tooltip. */}
         <GlobalTooltip />

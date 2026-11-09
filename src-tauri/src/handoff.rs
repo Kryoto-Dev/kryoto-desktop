@@ -86,13 +86,43 @@ impl Session {
                     }
                 }
             }
-            if let Err(e) = terminate(t) {
+            if let Err(e) = terminate(t).and_then(|()| self.end_the_rest(t.pid)) {
                 self.stopped.store(false, Ordering::SeqCst);
                 return Err(e);
             }
         }
         Ok(())
     }
+
+    /// What still runs from the game's folder once its process has gone: a game
+    /// that started something and left it, or one run as administrator, where
+    /// the process Kryoto holds is only the prompt's. Stop read as done with the
+    /// game still on screen. Refused for good, it says so.
+    fn end_the_rest(&self, ended: u32) -> Result<(), String> {
+        let tracking = self.tracking.lock().map_err(|_| "state lock poisoned")?;
+        let Some((dir, before)) = tracking.as_ref() else { return Ok(()) };
+        for _ in 0..4 {
+            let Some(pid) = find_in_folder(dir, ended, before) else { return Ok(()) };
+            terminate(Target { pid, group: pid })?;
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        Ok(())
+    }
+}
+
+/// taskkill speaks the PC's language and complains about every child it could
+/// not end, so what it printed says little. What counts is whether the game
+/// went: a process still there after a moment is one Kryoto may not touch (run
+/// as administrator, or by its own launcher's service).
+#[cfg(windows)]
+fn gone_soon(pid: u32) -> bool {
+    (0..20).any(|_| {
+        let gone = !alive(pid);
+        if !gone {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        gone
+    })
 }
 
 fn terminate(target: Target) -> Result<(), String> {
@@ -104,8 +134,9 @@ fn terminate(target: Target) -> Result<(), String> {
             .creation_flags(0x0800_0000)
             .output()
             .map_err(|e| e.to_string())?;
-        if !out.status.success() && alive(target.pid) {
-            return Err(format!("Could not stop the game: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        if !out.status.success() && !gone_soon(target.pid) {
+            crate::logging::warn("library", &format!("taskkill: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            return Err("Kryoto could not stop the game: Windows would not let it (it may be running as administrator). Close it from its own window, or end it in Task Manager.".into());
         }
     }
     #[cfg(unix)]
@@ -215,6 +246,33 @@ pub fn look_for(dir: &Path, not: u32, before: &HashSet<u32>, session: &Session) 
     None
 }
 
+/// Stay with a game until nothing new runs out of its folder: `first`, then
+/// whatever it hands over to, and so on. A `.bat` that starts a launcher that
+/// starts the game is two hand-overs, and stopping at the first ended the session
+/// (and the play time) while the game played on. Returns the last process.
+pub fn follow_chain(session: &Session, dir: &Path, first: u32, before: &HashSet<u32>) -> u32 {
+    let mut current = first;
+    loop {
+        let started = Instant::now();
+        wait_gone(current);
+        if session.stopped() {
+            return current;
+        }
+        // Gone quickly: it may have been a hand-over still starting up.
+        let next = find_in_folder(dir, current, before).or_else(|| {
+            (started.elapsed().as_secs() < HANDOFF_WITHIN_SECS)
+                .then(|| look_for(dir, current, before, session))
+                .flatten()
+        });
+        let Some(next) = next else { return current };
+        if let Err(e) = session.follow(next) {
+            crate::logging::error("library", &e);
+        }
+        crate::logging::info("library", &format!("followed the game on to process {next}"));
+        current = next;
+    }
+}
+
 /// Block until `pid` is gone. Polls: a process we did not start cannot be waited on.
 pub fn wait_gone(pid: u32) {
     while alive(pid) {
@@ -256,8 +314,33 @@ mod tests {
         }
     }
 
+    /// These two start helpers in one folder and look for what is new there, so
+    /// run side by side each would find the other's.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_second_handoff_is_followed_too() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let before = existing();
+        let root = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        let session = Session::default();
+        session.track(&root, &before);
+        // The launcher the first hand-over found, and the game it starts.
+        let mut launcher = helper("1").spawn().unwrap();
+        let first = launcher.id();
+        let reaper = std::thread::spawn(move || launcher.wait());
+        let mut game = helper("3").spawn().unwrap();
+        let game_pid = game.id();
+        let reaper_game = std::thread::spawn(move || game.wait());
+        let last = follow_chain(&session, &root, first, &before);
+        reaper.join().unwrap().unwrap();
+        reaper_game.join().unwrap().unwrap();
+        assert_eq!(last, game_pid);
+    }
+
     #[test]
     fn a_real_handoff_stops_the_new_process_and_preserves_existing_ones() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let mut unrelated = helper("30").spawn().unwrap();
         let before = existing();
         // Keep a new launcher thread alive during the scan. On Linux it has

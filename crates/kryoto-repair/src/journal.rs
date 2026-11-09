@@ -53,9 +53,19 @@ pub fn check_idle(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     let file = File::open(path).map_err(|e| e.to_string())?;
-    FileExt::try_lock_shared(&file)
-        .map_err(|_| "A repair is running. Wait for it to finish before starting the game.")?;
-    Ok(())
+    match FileExt::try_lock_shared(&file) {
+        Err(e) if held(&e) => {
+            Err("A repair is running. Wait for it to finish before starting the game.".into())
+        }
+        // A drive with no file locks (a network share, some FUSE mounts) has no
+        // repair to wait for: this used to say one was running, for good.
+        _ => Ok(()),
+    }
+}
+
+/// The lock is someone else's, rather than a drive that cannot lock at all.
+fn held(e: &std::io::Error) -> bool {
+    e.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 pub fn lock(root: &Path) -> Result<Lock, String> {
     fs::create_dir_all(safe_path(root, ".kryoto-repair")?).map_err(|e| e.to_string())?;
@@ -66,8 +76,11 @@ pub fn lock(root: &Path) -> Result<Lock, String> {
         .write(true)
         .open(safe_path(root, ".kryoto-repair/lock")?)
         .map_err(|e| e.to_string())?;
-    file.try_lock_exclusive()
-        .map_err(|_| "Another repair is already using this game folder.")?;
+    if let Err(e) = file.try_lock_exclusive() {
+        if held(&e) {
+            return Err("Another repair is already using this game folder.".into());
+        }
+    }
     Ok(Lock { _file: file })
 }
 
@@ -319,4 +332,23 @@ pub fn undo(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     record.restore(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_lock_really_held_means_a_repair_is_running() {
+        let dir = std::env::temp_dir().join(format!("kryoto-repair-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(check_idle(&dir).is_ok(), "no lock file yet");
+        let held = lock(&dir).unwrap();
+        assert!(check_idle(&dir).is_err());
+        assert!(lock(&dir).is_err());
+        drop(held);
+        assert!(check_idle(&dir).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

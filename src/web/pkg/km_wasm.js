@@ -434,16 +434,17 @@ export class Kryo {
      * @param {string} users
      * @param {boolean} ephemeral
      * @param {string} group_id
+     * @param {boolean} quiet
      * @returns {Uint8Array}
      */
-    sendFrame(request_id, content, users, ephemeral, group_id) {
+    sendFrame(request_id, content, users, ephemeral, group_id, quiet) {
         const ptr0 = passStringToWasm0(content, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(users, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(group_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.kryo_sendFrame(this.__wbg_ptr, request_id, ptr0, len0, ptr1, len1, ephemeral, ptr2, len2);
+        const ret = wasm.kryo_sendFrame(this.__wbg_ptr, request_id, ptr0, len0, ptr1, len1, ephemeral, ptr2, len2, quiet);
         if (ret[3]) {
             throw takeFromExternrefTable0(ret[2]);
         }

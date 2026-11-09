@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { ProfileLink, TeamName } from '@/ui/TeamName'
-import { Crown, LogOut, Shield, UserMinus } from 'lucide-react'
+import { Crown, LogOut, Shield, UserMinus } from '@/ui/pixel-icons'
 import { errorText } from '@/lib/bridge'
 import { chatGroupAdd, chatGroupCreate, chatGroupRemove, chatGroupRename, here, type GroupView } from '@/lib/chat'
 import { friendName, type FriendFace } from '@/hooks/useFriends'
@@ -81,7 +81,7 @@ export function GroupCreateDialog({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" disabled={busy || !name.trim() || picked.size === 0} onClick={() => void create()}>
+          <Button variant="primary" disabled={busy || !name.trim() || picked.size === 0} onClick={() => create()}>
             Create
           </Button>
         </>
@@ -153,7 +153,7 @@ export function GroupMembersDialog({
         footer={
           <>
             <Button onClick={() => setLeaving(false)}>Cancel</Button>
-            <Button variant="danger" disabled={busy} onClick={() => void act(() => chatGroupRemove(group.id, myId), onLeft)}>
+            <Button variant="danger" disabled={busy} onClick={() => act(() => chatGroupRemove(group.id, myId), onLeft)}>
               Leave
             </Button>
           </>
@@ -170,7 +170,7 @@ export function GroupMembersDialog({
       {canManage ? (
         <div className="flex gap-2">
           <input value={name} onChange={(e) => setName(e.target.value.slice(0, 64))} aria-label="Group name" className={inputCls} />
-          <Button size="sm" disabled={busy || !name.trim() || name.trim() === group.name} onClick={() => void act(() => chatGroupRename(group.id, name.trim()))}>
+          <Button size="sm" disabled={busy || !name.trim() || name.trim() === group.name} onClick={() => act(() => chatGroupRename(group.id, name.trim()))}>
             Rename
           </Button>
         </div>
@@ -184,7 +184,7 @@ export function GroupMembersDialog({
               {roleIcon(m.role)}
             </span>
             {canManage && m.userId !== myId && (group.myRole === 'owner' || m.role === 'member') ? (
-              <Button size="sm" variant="danger" disabled={busy} onClick={() => void act(() => chatGroupRemove(group.id, m.userId))} aria-label={`Remove ${nameOf(m.userId)}`}>
+              <Button size="sm" variant="danger" disabled={busy} onClick={() => act(() => chatGroupRemove(group.id, m.userId))} aria-label={`Remove ${nameOf(m.userId)}`}>
                 <UserMinus className="size-3" aria-hidden />
               </Button>
             ) : null}

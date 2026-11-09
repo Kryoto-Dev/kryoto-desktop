@@ -252,6 +252,12 @@ mod linux {
         for (k, v) in &p.set {
             std::env::set_var(k, v);
         }
+        // Not part of the desktop's saved session: KDE (and any XSMP session
+        // manager) restored Kryoto at login after a logout with it open, even
+        // with Start with my computer off (kryoto-bugs KB-0011). GTK registers
+        // only when SESSION_MANAGER is set; starting at login is the autostart
+        // entry's job (system.rs), which follows the switch.
+        std::env::remove_var("SESSION_MANAGER");
         if p.healed {
             // Sticky: a machine that failed twice keeps the mode that works,
             // until the person picks another one in Settings.

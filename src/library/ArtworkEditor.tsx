@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ImagePlus, Search } from 'lucide-react'
+import { ImagePlus, Search } from '@/ui/pixel-icons'
 import { Button, Section, inputCls } from '@/ui'
 import { errorText, isTauri } from '@/lib/bridge'
 import { pickPath } from '@/lib/pick'
@@ -71,7 +71,7 @@ export function ArtworkEditor({ title, value, adult = false, onChange, onBusy }:
           <div key={slot} className="grid min-w-0 gap-2">
             <Art src={src} fallback={slot === 'customCover' ? [value.cover, value.header] : [value.hero, value.header, coverFor(value)]} title={label} adult={adult} className={slot === 'customCover' ? 'aspect-[2/3] w-full object-cover' : 'aspect-[96/31] w-full object-cover'} />
             <span className="text-xs font-bold text-foreground">{label}</span>
-            <Button size="sm" disabled={busy || !isTauri()} aria-label={`Choose ${label.toLowerCase()} picture`} onClick={() => void choose(slot)}>
+            <Button size="sm" disabled={busy || !isTauri()} aria-label={`Choose ${label.toLowerCase()} picture`} onClick={() => choose(slot)}>
               <ImagePlus className="size-3.5" /> Choose picture
             </Button>
             {value[slot] ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => onChange({ [slot]: null })}>Use default {label.toLowerCase()}</Button> : null}
@@ -80,7 +80,7 @@ export function ArtworkEditor({ title, value, adult = false, onChange, onBusy }:
       </div>
       <div className="flex gap-2">
         <input aria-label="Game name for Steam artwork" className={inputCls} value={query} maxLength={120} placeholder="Game name on Steam" disabled={busy} onChange={(e) => setQuery(e.target.value)} />
-        <Button disabled={busy || query.trim().length < 2} onClick={() => void run(find)}><Search className="size-3.5" /> Find art</Button>
+        <Button disabled={busy || query.trim().length < 2} onClick={() => run(find)}><Search className="size-3.5" /> Find art</Button>
       </div>
       {matches?.length ? <ul className="grid gap-1">
         {matches.map((match) => <li key={match.appid}><button type="button" disabled={busy} onClick={() => void run((signal) => useSteam(match, signal))} className="kryo-radius flex w-full items-center gap-3 p-2 text-left text-xs text-foreground hover:bg-secondary disabled:opacity-40">

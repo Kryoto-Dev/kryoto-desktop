@@ -25,7 +25,13 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 /// Debug builds keep their own entries, like their own app data folder.
-const SERVICE: &str = if cfg!(debug_assertions) { "to.kryo.desktop.dev.chat" } else { "to.kryo.desktop.chat" };
+const SERVICE: &str = if cfg!(debug_assertions) {
+    "to.kryo.desktop.dev.chat"
+} else if crate::channel::PREVIEW {
+    "to.kryo.desktop.preview.chat"
+} else {
+    "to.kryo.desktop.chat"
+};
 
 pub const SESSION: &str = "session";
 

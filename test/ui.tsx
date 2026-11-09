@@ -8,6 +8,7 @@ import { useLibrary } from '@/hooks/useLibrary'
 import { DownloadsPage } from '@/downloads/DownloadsPage'
 import { LibraryHome } from '@/library/LibraryHome'
 import { AddGameDialog } from '@/library/AddGameDialog'
+import { holdPrompts, usePromptTurn } from '@/lib/prompts'
 import type { LibraryGame } from '@/lib/library'
 import '../src/styles.css'
 
@@ -43,7 +44,17 @@ const fixture = {
   emit: (event: string, value: unknown) => { listeners.get(event)?.forEach(fn => fn(value)) },
   game,
 }
-Object.assign(window, { fixture })
+Object.assign(window, { fixture, holdPrompts })
+
+/** One prompt that opens by itself: a question in a dialog, or the corner notice. */
+function Prompt({ id }: { id: Parameters<typeof usePromptTurn>[0] }) {
+  const [wanted, setWanted] = useState(false)
+  const turn = usePromptTurn(id, wanted)
+  return <>
+    <button id={`want-${id}`} onClick={() => setWanted(w => !w)}>Want {id}</button>
+    {!turn ? null : id === 'notice' ? <output id="notice-shown">Notice</output> : <Modal title={`Prompt ${id}`} onClose={() => setWanted(false)}><button>Answer</button></Modal>}
+  </>
+}
 
 function Harness() {
   const [dialog, setDialog] = useState(false)
@@ -56,6 +67,7 @@ function Harness() {
     <button id="open" onClick={() => setDialog(true)}>Open controls</button>
     <button id="background">Background</button>
     <button id="search" onClick={() => setSearch(true)}>Add fixture game</button>
+    <Prompt id="update" /><Prompt id="intro" /><Prompt id="found" /><Prompt id="notice" />
     <output id="library-error">{lib.error}</output>
     <output id="library-games">{lib.games.map(g => g.title).join(',')}</output>
     <button id="reload-library" onClick={() => void lib.reload()}>Reload library</button>

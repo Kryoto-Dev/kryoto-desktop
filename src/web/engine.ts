@@ -16,7 +16,7 @@
 import init, { Kryo } from './pkg/km_wasm'
 import { api, GATEWAY_HTTP, GATEWAY_WS } from './api'
 import { Store, type MessageRow } from './store'
-import { EMBEDDED, toSite } from './embed'
+import { DEVICE_NAME, EMBEDDED, nativePushEndpoint, toSite } from './embed'
 
 export type ChatStatus =
   | { state: 'off' }
@@ -34,6 +34,10 @@ export type Person = { id: string; name: string; supporter: boolean; muted: bool
 export type Settings = { readReceipts: boolean; typing: boolean; notificationContent: 'full' | 'name' | 'none'; gifsAuto: boolean }
 type Frame = Record<string, any> & { type: string; requestId: number }
 type Target = { dm: string } | { group: string }
+
+/** What shows as a new message. Anything else is stored but tells nobody. */
+const NOTICEABLE = new Set(['text', 'gif', 'invite', 'file', 'callLog'])
+const quietSend = (content: object) => !NOTICEABLE.has(String((content as { body?: { type?: unknown } }).body?.type))
 
 const DEFAULT_SETTINGS: Settings = { readReceipts: true, typing: true, notificationContent: 'name', gifsAuto: true }
 const LOW_WATER = 30
@@ -107,7 +111,7 @@ export class WebChat {
     await init()
     const saved = await store.get<string>('device')
     const kryo = saved ? Kryo.restore(saved) : Kryo.create(userId)
-    if (kryo.userId() !== userId) throw new Error('This browser holds chat for another account. Remove it first.')
+    if (kryo.userId() !== userId) throw new Error('This device holds chat for another account. Remove it first.')
     const chat = new WebChat(kryo, store, token, userId, emit)
     await chat.persist()
     return chat
@@ -209,7 +213,7 @@ export class WebChat {
             ws.send(this.kryo.proof(nonce))
             phase = 'ready'
           } else {
-            ws.send(this.kryo.register(nonce, 'Web browser'))
+            ws.send(this.kryo.register(nonce, DEVICE_NAME))
             phase = 'register'
           }
           return
@@ -377,7 +381,7 @@ export class WebChat {
       const rid = this.nextId++
       let frame: Uint8Array
       try {
-        frame = this.kryo.sendFrame(rid, JSON.stringify(content), JSON.stringify(reach), ephemeral, group ?? '')
+        frame = this.kryo.sendFrame(rid, JSON.stringify(content), JSON.stringify(reach), ephemeral, group ?? '', quietSend(content))
       } catch {
         if (group || users.every((u) => u === this.userId)) return
         throw new SendError('They have not turned on chat yet.')
@@ -470,7 +474,10 @@ export class WebChat {
     if (!up.ok) throw new SendError(`The upload was refused (${up.status}).`)
     const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')
     const name = file.name.replace(/[\u0000-\u001f/\\]/g, '').slice(0, 200) || 'file'
-    const meta = { id: ticket.id, token: ticket.downloadToken, key: hex(key), sha256: hex(sha), name, mime: file.type || 'application/octet-stream', size: file.size, width: 0, height: 0 }
+    // A picture's real size goes with it, so the reader's chat keeps the space before it loads.
+    const shape = file.type.startsWith('image/') ? await createImageBitmap(file).catch(() => null) : null
+    const meta = { id: ticket.id, token: ticket.downloadToken, key: hex(key), sha256: hex(sha), name, mime: file.type || 'application/octet-stream', size: file.size, width: shape?.width ?? 0, height: shape?.height ?? 0 }
+    shape?.close()
     return this.sendNew(t, { type: 'file', ...meta }, 'file', JSON.stringify(meta), null)
   }
 
@@ -520,6 +527,8 @@ export class WebChat {
     await this.control(t, { type: 'delete', target: msgId })
     const u = await this.store.update(msgId, (x) => ({ ...x, deleted: true, body: '' }))
     if (u) this.emit('chat-updated', this.shown(u))
+    // The file goes with the message. If this fails the server's own expiry takes it.
+    if (r.kind === 'file') await this.ask('attachmentDelete', { id: (JSON.parse(r.body) as { id: unknown }).id }).catch(() => {})
   }
 
   async react(msgId: string, emoji: string, remove: boolean) {
@@ -552,6 +561,9 @@ export class WebChat {
   async markRead(t: Target) {
     const conv = convOf(t, this.userId)
     const ids = await this.store.markRead(conv)
+    // The badge and the list count from the store: without this they kept the
+    // old number until something else happened. Only a read on another device said so.
+    if (ids.length > 0) this.emit('chat-read', { conversationId: conv })
     if (ids.length === 0 || !this.online) return
     const body = { type: 'receipt', receiptKind: 'read', msgIds: ids }
     if ('group' in t) {
@@ -946,6 +958,14 @@ export class WebChat {
   /** After each connect: a browser may have rotated its endpoint since we last told the gateway. */
   private async pushResync() {
     try {
+      // Kryoto Mobile has no Web Push: Android holds the endpoint.
+      const native = await nativePushEndpoint()
+      if (native !== undefined) {
+        if ((native ?? '') === ((await this.store.get<string>('push-endpoint')) ?? '')) return
+        await (native ? this.ask('pushSubscribe', { endpoint: native }) : this.ask('pushUnsubscribe'))
+        await this.store.set('push-endpoint', native ?? '')
+        return
+      }
       if (!this.pushKey || !('serviceWorker' in navigator) || Notification.permission !== 'granted') return
       const reg = await navigator.serviceWorker.getRegistration('/')
       const sub = reg ? await reg.pushManager.getSubscription() : null
@@ -1051,11 +1071,11 @@ export class WebChat {
   }
 
   /** Take this browser out of chat: revoke the device, forget everything. */
-  async removeDevice() {
+  async removeDevice(endSession = true) {
     const id = this.kryo.deviceId()
     if (id && this.online) await this.ask('revokeDevice', { deviceId: id }).catch(() => {})
     this.stop()
-    await api(this.token, 'POST', '/api/auth/logout').catch(() => {})
+    if (endSession) await api(this.token, 'POST', '/api/auth/logout').catch(() => {})
     await Store.wipe()
   }
 

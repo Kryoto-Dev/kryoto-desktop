@@ -50,6 +50,10 @@ export type Download = {
   etag?: string | null
   /** What it is waiting on right now ("Connection lost. Trying again in 8 s."). */
   notice?: string | null
+  /** The library folder picked for it; none is the default. */
+  libraryDir?: string | null
+  /** Waiting for the player to say which library folder it goes in. */
+  askFolder?: boolean
   meta: {
     title: string
     cover: string | null
@@ -80,6 +84,8 @@ export const downloads = {
   /** Install an archive that failed its checksum, at the player's word. */
   installAnyway: (id: string) => call<void>('download_install_anyway', { id }),
   cancel: (id: string) => call<void>('download_cancel', { id }),
+  /** Where a download waiting on `askFolder` goes; `alwaysDefault` stops asking. */
+  pickFolder: (id: string, folder: string, alwaysDefault: boolean) => call<void>('download_pick_folder', { id, folder, alwaysDefault }),
   remove: (id: string) => call<void>('download_remove', { id }),
   /** Reorder the queue. `now` puts it first and steps the running one aside, like Steam. */
   move: (id: string, to: 'up' | 'down' | 'top' | 'now') => call<void>('download_move', { id, to }),

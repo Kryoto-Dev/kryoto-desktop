@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, Library, Store, User, Users, type LucideIcon } from 'lucide-react'
-import { IconButton, MenuList, useDismiss, useNativeOpen, type MenuEntry } from '@/ui'
+import { ArrowLeft, ArrowRight, Library, Store, User, Users, type LucideIcon } from '@/ui/pixel-icons'
+import { Floating, IconButton, MENU_PANEL, MenuList, useDismiss, useNativeOpen, type MenuEntry } from '@/ui'
 import { isTauri } from '@/lib/bridge'
 import { closeMenu, onPopupHover, openMenu, popupOpen } from '@/lib/popup'
 import { cn } from '@/lib/utils'
+import { FOLD } from '@/shell/TitleBar'
 
 export type TopTab = 'store' | 'library' | 'community' | 'profile'
 
@@ -22,9 +23,10 @@ export type NavTabSpec = {
  * segmented pill - the white segment is where you are. Each tab opens its
  * section on click and shows its pages on hover, after a short pause so a
  * pointer sweeping across does not flash menus. Local pages keep menus in
- * the shell; over the Store they use the native menu view. The right side
- * carries whatever the current page adds: the Store's address, the Library's
- * actions.
+ * the shell; over the Store they use the native menu view. Then whatever the
+ * current page adds: the Store's address, which is the first thing to give up
+ * room on a narrow window. This is the left part of the window's one row
+ * (`TitleBar`), and takes no more of it than it uses: the rest drags the window.
  */
 export function NavBar({
   current,
@@ -35,6 +37,7 @@ export function NavBar({
   onForward,
   overStore = false,
   right,
+  fold = 0,
 }: {
   current: TopTab
   tabs: NavTabSpec[]
@@ -45,6 +48,8 @@ export function NavBar({
   /** Only the visible Store needs menus in a separate native web view. */
   overStore?: boolean
   right?: ReactNode
+  /** How much of the row has folded away (`useRowFold`). */
+  fold?: number
 }) {
   // The pill follows a press at once and stays on it while the page loads, so
   // the selection never lags behind the click; it lets go when the page has
@@ -74,10 +79,11 @@ export function NavBar({
     slots.current.forEach((el) => ro.observe(el))
     return () => ro.disconnect()
   }, [measure, tabs.length])
+  const shownTabs = fold >= FOLD.profile ? tabs.filter((t) => t.id !== 'profile') : tabs
 
   return (
-    <nav aria-label="Main" className="relative z-40 flex h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-3">
-      <div className="flex gap-1.5">
+    <nav aria-label="Main" className="no-drag flex min-w-0 items-center gap-2">
+      <div className="flex shrink-0 gap-1">
         <IconButton label="Back (Alt+Left)" disabled={!canBack} onClick={onBack}>
           <ArrowLeft className="size-4" />
         </IconButton>
@@ -85,7 +91,7 @@ export function NavBar({
           <ArrowRight className="size-4" />
         </IconButton>
       </div>
-      <div ref={track} className="kryo-pill relative flex items-center gap-1 border border-border bg-card p-1">
+      <div ref={track} className="kryo-pill relative flex shrink-0 items-center gap-1 border border-border bg-card p-1">
         {pill ? (
           <span
             aria-hidden
@@ -93,10 +99,12 @@ export function NavBar({
             style={{ left: pill.left, width: pill.width }}
           />
         ) : null}
-        {tabs.map((t) => (
+        {shownTabs.map((t) => (
           <NavTab
             key={t.id}
             tab={t}
+            iconOnly={fold >= FOLD.labels}
+            noIcon={fold >= FOLD.tabIcons && fold < FOLD.labels}
             current={active === t.id}
             native={overStore && isTauri()}
             slot={(el) => {
@@ -107,19 +115,24 @@ export function NavBar({
           />
         ))}
       </div>
-      <div className="flex min-w-0 grow items-center justify-end gap-2">{right}</div>
+      {right ? <div className={cn('flex w-xl items-center gap-2', fold >= FOLD.address ? 'min-w-40' : 'min-w-56')}>{right}</div> : null}
     </nav>
   )
 }
 
 function NavTab({
   tab,
+  iconOnly,
+  noIcon,
   current,
   native,
   slot,
   onPress,
 }: {
   tab: NavTabSpec
+  iconOnly: boolean
+  /** Short of room: the label alone. */
+  noIcon: boolean
   current: boolean
   native: boolean
   slot: (el: HTMLElement | null) => void
@@ -147,11 +160,11 @@ function NavTab({
     if (timer.current) window.clearTimeout(timer.current)
     timer.current = null
   }
-  const show = () => {
+  const show = (keyboard = false) => {
     if (!tab.items.length) return
     if (!native) return setDomOpen(true)
     const r = button.current?.getBoundingClientRect()
-    if (r) void openMenu(menuId, r, tab.items)
+    if (r) void openMenu(menuId, r, tab.items, 'left', undefined, keyboard)
   }
   const hideSoon = (delay: number) => {
     clear()
@@ -210,12 +223,14 @@ function NavTab({
         aria-current={current ? 'page' : undefined}
         aria-haspopup={tab.items.length ? 'menu' : undefined}
         aria-expanded={tab.items.length ? open : undefined}
+        aria-label={iconOnly ? tab.label : undefined}
+        title={iconOnly ? tab.label : undefined}
         onKeyDown={(e) => {
           if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
           e.preventDefault()
           clear()
           setByKeyboard(true)
-          show()
+          show(true)
         }}
         onClick={() => {
           clear()
@@ -225,22 +240,18 @@ function NavTab({
           tab.onOpen()
         }}
         className={cn(
-          'kryo-pill relative flex h-9 max-w-56 items-center gap-2 px-4 text-xs font-bold uppercase tracking-[0.2em] transition-colors duration-300',
+          'kryo-pill relative flex h-9 max-w-56 items-center gap-2 text-xs font-bold uppercase tracking-[0.16em] transition-colors duration-300',
+          iconOnly ? 'px-3' : 'px-3.5',
           current ? 'text-primary-foreground' : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
         )}
       >
-        <TabIcon className="size-3.5 shrink-0" />
-        <span className="truncate">{tab.label}</span>
+        {noIcon ? null : <TabIcon className="size-3.5 shrink-0" />}
+        {iconOnly ? null : <span className="truncate">{tab.label}</span>}
       </button>
       {!native && domOpen ? (
-        <div
-          role="menu"
-          className="absolute left-0 top-full z-[400] min-w-48 pt-2"
-        >
-          <div className="kryo-pop kryo-radius overflow-hidden border border-border bg-popover py-1 shadow-2xl shadow-black/60">
-            <MenuList items={tab.items} onDone={() => setDomOpen(false)} autoFocus={byKeyboard} />
-          </div>
-        </div>
+        <Floating role="menu" anchor={() => button.current?.getBoundingClientRect()} gap={8} className={MENU_PANEL}>
+          <MenuList items={tab.items} onDone={() => setDomOpen(false)} autoFocus={byKeyboard} />
+        </Floating>
       ) : null}
     </div>
   )

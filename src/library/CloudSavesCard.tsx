@@ -1,21 +1,27 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronDown, Cloud, CloudUpload, FolderOpen, FolderPlus, History, Plus, RotateCcw, ScanSearch, X } from 'lucide-react'
-import { AsciiBar, Button, Caption, Card, IconButton, Label, Modal } from '@/ui'
+import { Check, ChevronDown, Cloud, CloudUpload, FolderOpen, FolderPlus, History, Plus, RotateCcw, ScanSearch, X } from '@/ui/pixel-icons'
+import { AsciiBar, Busy, Button, Caption, Card, IconButton, Label, Modal, Tag } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { PHASE_LABEL, cloudSaves, formatAgo, formatBytes, useGameSaves, useSaveProgress, type SaveFinding, type SaveLocation, type SaveVersion } from '@/lib/cloud-saves'
 import { library, type LibraryGame } from '@/lib/library'
 import { pickPath } from '@/lib/pick'
+import { anchorId } from '@/lib/settings-links'
+import { useSettings } from '@/lib/settings'
 import { openSettingsSection, openStorePage } from '@/lib/window'
 import { cn } from '@/lib/utils'
+import { KryotoCloudCard, SavePlace, keptIn } from '@/settings/SavePlace'
 
 /**
- * A game's saves on the kryo.to account (src-tauri saves/): where this PC
- * keeps them, and why each place counts; when they were last backed up; the
- * account's versions to go back to. Locations found by watching the game are
- * offered to keep or ignore. Only shown where kryo.to has cloud saves on.
+ * A game's saves and their versions (src-tauri saves/), kept on this PC, on
+ * the player's own server or on the kryo.to account: where this PC keeps the
+ * saves, and why each place counts; when they were last backed up; the
+ * versions to go back to. Locations found by watching the game are offered to
+ * keep or ignore. Before a place is picked (no kryo.to perk), it offers the
+ * free ones.
  */
 export function CloudSavesCard({ game, running = false }: { game: LibraryGame; running?: boolean }) {
   const { data, error, reload } = useGameSaves(game.id)
+  const settings = useSettings()
   // A backup started anywhere (Back up now, a game closing, Play restoring)
   // shows here as it goes; a big one takes minutes and looked stuck.
   const progress = useSaveProgress(game.id)
@@ -23,8 +29,18 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
   const [message, setMessage] = useState<string | null>(null)
   const [versionsOpen, setVersionsOpen] = useState(false)
 
-  if (!data || !data.feature) {
-    return error && data?.feature ? <Card><p className="text-xs text-destructive">{error}</p></Card> : null
+  if (!data) return error ? <Card><p className="text-xs text-destructive">{error}</p></Card> : null
+  if (!data.feature) {
+    return (
+      <Card className="grid gap-3">
+        <div className="grid gap-1">
+          <Label>Save versions</Label>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">Keep versions of {game.title}'s saves to go back to, on this PC or on your own server.</p>
+        </div>
+        <SavePlace what="saves" compact />
+        <KryotoCloudCard />
+      </Card>
+    )
   }
 
   async function run(what: string, job: () => Promise<unknown>) {
@@ -42,8 +58,10 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
   }
 
   async function addFolder() {
-    const picked = await pickPath({ title: `Choose a folder ${game.title} saves in`, directory: true, defaultPath: game.installDir })
-    if (typeof picked === 'string') await run('add', () => cloudSaves.addFolder(game.id, picked))
+    await run('add', async () => {
+      const picked = await pickPath({ title: `Choose a folder ${game.title} saves in`, directory: true, defaultPath: game.installDir })
+      if (typeof picked === 'string') await cloudSaves.addFolder(game.id, picked)
+    })
   }
 
   const s = data.state
@@ -61,7 +79,10 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
   const overCap = s.tooBig || data.bytes > data.maxBackupBytes
   const leaveOut = (key: string, folder: string, on: boolean) => void run('leave', () => cloudSaves.leaveOut(game.id, key, folder, on))
 
+  const place = keptIn(settings, 'saves')
+
   return (
+    <div id={anchorId('game-saves')}>
     <Card className="grid gap-4">
       <div className="flex items-baseline justify-between gap-3">
         <Label>Saves</Label>
@@ -90,9 +111,9 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
             {s.cloudHead ? ` (the account's are from ${s.cloudHead.machine ?? 'another PC'}, ${formatAgo(s.cloudHead.createdAt)})` : ''}. Pick which to keep. The other is kept as a backup.
           </p>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" disabled={running || !!busy} onClick={() => void run('local', () => cloudSaves.backup(game.id, true))}>Keep this PC&apos;s</Button>
+            <Button size="sm" disabled={running || !!busy} onClick={() => run('local', () => cloudSaves.backup(game.id, true))}>Keep this PC&apos;s</Button>
             {s.cloudHead ? (
-              <Button size="sm" disabled={running || !!busy} onClick={() => void run('cloud', () => cloudSaves.restore(game.id, s.cloudHead!.id))}>Use the account&apos;s</Button>
+              <Button size="sm" disabled={running || !!busy} onClick={() => run('cloud', () => cloudSaves.restore(game.id, s.cloudHead!.id))}>Use the account&apos;s</Button>
             ) : null}
           </div>
         </div>
@@ -128,10 +149,13 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
         </details>
       ) : null}
 
-      {overCap && data.heavy.length ? (
-        <div className="grid gap-2">
-          <Caption>Too big to back up. These folders take the most room; leave out what is not your saves (downloaded maps, mods, replays)</Caption>
-          <ul className="grid gap-2">
+      {overCap ? (
+        <div id={anchorId('game-saves-fix')} role="alert" className="kryo-radius grid gap-3 border border-foreground/40 p-3">
+          <p className="text-xs leading-relaxed text-foreground">
+            Too big to back up: {formatBytes(data.bytes)} of saves, and a backup can be {formatBytes(data.maxBackupBytes)} here.
+          </p>
+          <Caption>{data.heavy.length ? 'Leave out what is not your saves (downloaded maps, mods, replays)' : 'Take a location that is not saves off the list above'}</Caption>
+          {data.heavy.length ? <ul className="grid gap-2">
             {data.heavy.map((h) => (
               <li key={`${h.location}|${h.folder}`} className="grid grid-cols-[1fr_auto] items-center gap-3">
                 <span className="min-w-0">
@@ -141,7 +165,25 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
                 <Button size="sm" disabled={!!busy} onClick={() => leaveOut(h.location, h.folder, true)}>Leave out</Button>
               </li>
             ))}
-          </ul>
+          </ul> : null}
+          {place === 'account' ? (
+            <div className="grid gap-2 border-t border-border pt-3">
+              <Caption>Or keep them where the limit is higher: 8 GB on this PC</Caption>
+              <SavePlace what="saves" compact />
+              {data.maxBackupBytes < 1024 ** 3 ? (
+                <Button size="sm" variant="ghost" className="w-fit" onClick={() => openStorePage('/perks#cloud')}>
+                  See bigger limits on kryo.to
+                </Button>
+              ) : null}
+            </div>
+          ) : place === 'patchbay' ? (
+            <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+              <Caption>Your own server sets this limit</Caption>
+              <Button size="sm" variant="ghost" onClick={() => openSettingsSection('patchbay')}>
+                Open Patchbay
+              </Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -177,7 +219,7 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
                   <span className="kryo-ascii-art block truncate text-[11px] text-muted-foreground" title={l.path ?? l.label}>{l.label}</span>
                   <span className="block text-[10px] text-muted-foreground">{l.sourceLabel}</span>
                 </span>
-                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void run('loc', () => cloudSaves.location(game.id, l.key, 'restore'))}>
+                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => run('loc', () => cloudSaves.location(game.id, l.key, 'restore'))}>
                   <RotateCcw className="size-3" aria-hidden />
                   Put back
                 </Button>
@@ -187,21 +229,27 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
         </details>
       ) : null}
 
-      {noPerk || off ? (
+      {noPerk ? (
+        <div className="grid gap-3 border-t border-border pt-3">
+          <p className="text-[11px] text-muted-foreground">Keep this game's save versions on this PC or on your own server, for free.</p>
+          <SavePlace what="saves" compact />
+          <KryotoCloudCard />
+        </div>
+      ) : off ? (
         <p className="flex items-center gap-2 border-t border-border pt-3 text-[11px] text-muted-foreground">
           <Cloud className="size-3.5 shrink-0" aria-hidden />
-          <span className="grow">{off ? 'Cloud saves are off in Settings.' : 'Supporters keep their saves on their kryo.to account, and get them back on any PC.'}</span>
+          <span className="grow">Save versions are off in Settings.</span>
           <button
             type="button"
-            onClick={() => (off ? openSettingsSection('cloud') : openStorePage('/donate'))}
+            onClick={() => openSettingsSection('cloud')}
             className="shrink-0 font-bold uppercase tracking-wider text-foreground hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
           >
-            {off ? 'Settings' : 'See how'}
+            Settings
           </button>
         </p>
       ) : (
         <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-          <Button size="sm" variant="primary" disabled={running || !!busy || !!progress || !hasSaves} onClick={() => void run('backup', () => cloudSaves.backup(game.id))}>
+          <Button size="sm" variant="primary" disabled={running || !!busy || !!progress || !hasSaves} onClick={() => run('backup', () => cloudSaves.backup(game.id))}>
             <CloudUpload className="size-3" aria-hidden />
             {busy === 'backup' || progress ? 'Backing up' : 'Back up now'}
           </Button>
@@ -209,7 +257,7 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
             <History className="size-3" aria-hidden />
             Versions
           </Button>
-          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void addFolder()}>
+          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => addFolder()}>
             <FolderPlus className="size-3" aria-hidden />
             Add folder
           </Button>
@@ -223,11 +271,11 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
         </div>
       )}
       {running && !noPerk && !off ? <p className="text-[11px] text-muted-foreground">Backed up when the game closes.</p> : null}
-      {s.tooBig && !data.heavy.length ? <p className="text-[11px] text-destructive">These saves are bigger than a backup can be. Take off a location that is not saves.</p> : null}
       {message ? <p className="text-[11px] text-muted-foreground">{message}</p> : s.error && !s.conflict ? <p className="text-[11px] text-destructive">{s.error}</p> : null}
 
       {versionsOpen ? <VersionsModal game={game} running={running} localBackups={data.localBackups} baseVersion={s.baseVersion} onClose={() => { setVersionsOpen(false); reload() }} /> : null}
     </Card>
+    </div>
   )
 }
 
@@ -288,9 +336,7 @@ function LocationRow({
     <li className={cn('grid grid-cols-[1fr_auto] items-center gap-3', suggestion && 'opacity-80')}>
       <span className="min-w-0">
         <span className="flex items-center gap-2">
-          <span className="kryo-pill shrink-0 border border-border px-1.5 text-[9px] uppercase tracking-wider text-muted-foreground" title={l.reasons.join(', ') || undefined}>
-            {l.sourceLabel}
-          </span>
+          <Tag title={l.reasons.join(', ') || undefined}>{l.sourceLabel}</Tag>
           <span className="kryo-ascii-art truncate text-[11px] text-foreground" title={l.path ?? l.label}>{l.label}</span>
         </span>
         <span className="block text-[10px] text-muted-foreground">
@@ -315,13 +361,13 @@ function LocationRow({
                 className="inline-flex items-center gap-0.5 underline-offset-2 hover:text-foreground hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
               >
                 {f}
-                <RotateCcw className="size-2.5" aria-hidden />
+                <RotateCcw className="size-3" aria-hidden />
               </button>
             ))}
           </span>
         ) : null}
       </span>
-      <span className="flex gap-1">
+      <span className="flex gap-2">
         {suggestion && onKeep ? (
           <IconButton label="Keep this location" onClick={onKeep} className="size-7">
             <Plus className="size-3.5" />
@@ -385,7 +431,7 @@ function VersionsModal({
         </p>
         <section className="grid gap-2">
           <Caption>On your kryo.to account</Caption>
-          {versions === null && !error ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
+          {versions === null && !error ? <Busy className="size-3.5 text-muted-foreground" label="Loading backups" /> : null}
           {versions && !versions.length ? <p className="text-xs text-muted-foreground">No backups yet.</p> : null}
           <ul className="grid gap-2">
             {(versions ?? []).map((v) => (
@@ -397,7 +443,7 @@ function VersionsModal({
                     {v.machine ?? 'A PC'} · {v.fileCount} file{v.fileCount === 1 ? '' : 's'} · {formatBytes(v.size)}
                   </span>
                 </span>
-                <Button size="sm" disabled={running || !!busy} onClick={() => void restore(v.id, () => cloudSaves.restore(game.id, v.id))}>
+                <Button size="sm" disabled={running || !!busy} onClick={() => restore(v.id, () => cloudSaves.restore(game.id, v.id))}>
                   {busy === v.id ? 'Restoring' : confirm === v.id ? 'Press again' : 'Restore'}
                 </Button>
               </li>
@@ -414,7 +460,7 @@ function VersionsModal({
                     <b className="text-foreground">{new Date(b.createdAt * 1000).toLocaleString()}</b>
                     <span className="block text-[10px] text-muted-foreground">Kept before a restore · {formatBytes(b.size)}</span>
                   </span>
-                  <Button size="sm" disabled={running || !!busy} onClick={() => void restore(b.file, () => cloudSaves.restoreLocal(game.id, b.file))}>
+                  <Button size="sm" disabled={running || !!busy} onClick={() => restore(b.file, () => cloudSaves.restoreLocal(game.id, b.file))}>
                     {busy === b.file ? 'Restoring' : confirm === b.file ? 'Press again' : 'Put back'}
                   </Button>
                 </li>

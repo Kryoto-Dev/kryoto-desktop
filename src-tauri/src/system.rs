@@ -17,7 +17,8 @@ use tauri::{
 
 /// Debug builds use their own port, so a development copy runs beside an
 /// installed one instead of handing over to it.
-const INSTANCE_PORT: u16 = if cfg!(debug_assertions) { 47_632 } else { 47_631 };
+/// Kryoto Desktop Preview has its own as well (src/channel.rs).
+const INSTANCE_PORT: u16 = if cfg!(debug_assertions) { 47_632 } else if crate::channel::PREVIEW { 47_633 } else { 47_631 };
 
 /// The port, which a debug build can move with `KRYOTO_INSTANCE_PORT` so two
 /// development copies (two sessions testing at once) never hand links or
@@ -50,7 +51,10 @@ pub fn claim_instance() -> Instance {
             else {
                 return Instance::Unguarded;
             };
-            let _ = s.set_read_timeout(Some(Duration::from_millis(1200)));
+            // A slow while: the first copy takes the port at once, but only
+            // answers once it has started, and on a hard disk that takes
+            // seconds. Giving up early started a second copy beside it.
+            let _ = s.set_read_timeout(Some(Duration::from_secs(6)));
             // A `kryoto://` link this copy was started for rides on the same
             // line, so the running copy opens it (see links.rs).
             let hello = match crate::links::from_args() {
@@ -173,8 +177,9 @@ pub fn shell_ready(ready: bool) {
 pub fn os_notify(app: AppHandle, title: String, body: Option<String>) {
     let mut note = notify_rust::Notification::new();
     note.summary(&title);
-    if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
-        note.body(&body);
+    let body = body.filter(|b| !b.trim().is_empty());
+    if let Some(body) = &body {
+        note.body(body);
     }
     note.auto_icon();
     // Windows files a toast under the installed app's ID; a build run from
@@ -183,11 +188,15 @@ pub fn os_notify(app: AppHandle, title: String, body: Option<String>) {
     if !cfg!(debug_assertions) {
         note.app_id(&app.config().identifier);
     }
-    #[cfg(not(windows))]
-    let _ = &app;
+    let fallback = crate::downloads::Notice::new(&title, body.as_deref().unwrap_or(""), None);
     tauri::async_runtime::spawn_blocking(move || {
         if let Err(e) = note.show() {
-            crate::logging::error("notify", &e.to_string());
+            // Windows without its notification platform (a stripped install,
+            // notifications turned off for the app) or a Linux desktop with no
+            // notification service: the app's own toast says it instead. This
+            // PC's log keeps the reason; it is not a fault to report.
+            crate::logging::warn("notify", &format!("{e}; shown in the app instead"));
+            let _ = tauri::Emitter::emit_to(&app, "main", "notify-fallback", fallback);
         }
     });
 }
@@ -202,6 +211,7 @@ pub async fn pick_path(
     directory: bool,
     default_path: Option<String>,
     extensions: Option<Vec<String>>,
+    filter_name: Option<String>,
 ) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let parent = window.clone();
@@ -217,7 +227,7 @@ pub async fn pick_path(
             }
             if let Some(ext) = extensions.filter(|e| !e.is_empty()) {
                 let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
-                dialog = dialog.add_filter("Games", &ext);
+                dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("Games"), &ext);
             }
             type Picked = std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>;
             let picked: Picked = if directory { Box::pin(dialog.pick_folder()) } else { Box::pin(dialog.pick_file()) };
@@ -232,12 +242,32 @@ pub async fn pick_path(
 
 #[tauri::command]
 pub fn app_exit(app: AppHandle) {
-    crate::presence::disconnect(&app);
+    quit(&app);
+}
+
+/// Every way out: friends stop seeing this PC online at once, rather than when
+/// its last beat runs out.
+fn quit<R: Runtime>(app: &AppHandle<R>) {
+    crate::presence::disconnect(app);
     crate::logging::info("app", "exit");
     app.exit(0);
 }
 
+/// The tray's indicator library. The tray crate panics when it finds none, which
+/// stopped the app at start on a Linux without it, so look first.
+#[cfg(target_os = "linux")]
+fn indicator_library_present() -> bool {
+    [c"libayatana-appindicator3.so.1", c"libappindicator3.so.1", c"libayatana-appindicator3.so", c"libappindicator3.so"]
+        .iter()
+        .any(|name| !unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY) }.is_null())
+}
+
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    #[cfg(target_os = "linux")]
+    if !indicator_library_present() {
+        crate::logging::info("tray", "no appindicator library on this system, so no tray icon");
+        return Ok(());
+    }
     // First, because on Linux the tray only opens its menu - a click on the
     // icon itself is not delivered there.
     let open = MenuItem::with_id(app, "tray-open", "Open Kryoto", true, None::<&str>)?;
@@ -246,17 +276,22 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let downloads = MenuItem::with_id(app, "tray-downloads", "Downloads", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "tray-settings", "Settings", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
+    let exit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
     let sep_top = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &exit])?;
     let mut builder = TrayIconBuilder::with_id("kryoto")
-        .tooltip(if cfg!(debug_assertions) { "Kryoto Desktop Dev" } else { "Kryoto Desktop" })
+        .tooltip(crate::channel::APP_NAME)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
+            // Every menu's clicks arrive here, the pet's right-click menu
+            // included: only the tray's own items bring Kryoto up.
+            if !id.starts_with("tray-") {
+                return;
+            }
             if id == "tray-exit" {
-                app.exit(0);
+                quit(app);
                 return;
             }
             show_main(app);
@@ -280,7 +315,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 /// Unread chat messages, on the tray icon's tooltip and (Windows) as a dot on
 /// the taskbar button; elsewhere as the dock/launcher badge where supported.
 pub fn set_unread_badge<R: Runtime>(app: &AppHandle<R>, unread: u32) {
-    let base = if cfg!(debug_assertions) { "Kryoto Desktop Dev" } else { "Kryoto Desktop" };
+    let base = crate::channel::APP_NAME;
     if let Some(tray) = app.tray_by_id("kryoto") {
         let tip = match unread {
             0 => base.to_string(),
@@ -294,7 +329,13 @@ pub fn set_unread_badge<R: Runtime>(app: &AppHandle<R>, unread: u32) {
     let Some(window) = app.get_window("main") else { return };
     #[cfg(windows)]
     {
-        let _ = window.set_overlay_icon((unread > 0).then(unread_dot));
+        // Only when the dot comes or goes. Every icon made here stays until the
+        // app closes, so making one per chat event ran the process out of window
+        // handles after hours open, and then no window could open at all.
+        static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if SHOWN.swap(unread > 0, Ordering::SeqCst) != (unread > 0) {
+            let _ = window.set_overlay_icon((unread > 0).then(unread_dot));
+        }
     }
     #[cfg(not(windows))]
     {
@@ -335,7 +376,7 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
                 let _ = window.hide();
                 rest_views(window, true);
             } else {
-                app.exit(0);
+                quit(app);
             }
         }
         // Only a real move or resize: Linux window managers send the same
@@ -349,7 +390,10 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
             rest_views(window, window.is_minimized().unwrap_or(false));
         }
         // Back from the taskbar or the tray without a resize.
-        WindowEvent::Focused(true) => rest_views(window, false),
+        WindowEvent::Focused(true) => {
+            rest_views(window, false);
+            crate::menus::window_focused(app);
+        }
         _ => {}
     }
 }
@@ -629,7 +673,7 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
     let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
-    let name = wide(if cfg!(debug_assertions) { "Kryoto Desktop Dev" } else { "Kryoto Desktop" });
+    let name = wide(crate::channel::APP_NAME);
     if on {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let value = wide(&format!("\"{}\" --tray", exe.display()));

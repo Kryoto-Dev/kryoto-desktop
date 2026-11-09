@@ -24,6 +24,8 @@
 //!   - Windows: through a virtual Xbox controller (ViGEmBus) while a game
 //!     runs, so every game that reads Xbox controllers gets the pad as set up
 //!     and remapped, rumble included ([`virt`]).
+//! - What a pad does in each game (off, a game's own remap, keyboard and
+//!   mouse) is `pad_games.rs`, which this thread drives while a game runs.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -221,8 +223,10 @@ fn sdl_line(prefs: &PadPrefs) -> Option<String> {
 ///   pads to Windows games raw (hidraw), around SDL.
 ///
 /// Windows games get the virtual controller instead ([`virt`]). Values in the
-/// game's own launch options win (`launch::set_default`).
-pub fn game_env<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, String)> {
+/// game's own launch options win (`launch::set_default`). A game set to off, or
+/// to keyboard and mouse, gets none of it; one with its own remap gets that
+/// instead of the pad's (`pad_games.rs`).
+pub fn game_env<R: Runtime>(app: &AppHandle<R>, game: &str) -> Vec<(String, String)> {
     if cfg!(windows) {
         return Vec::new();
     }
@@ -230,15 +234,73 @@ pub fn game_env<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, String)> {
     if !cfg.enabled || !cfg.games {
         return Vec::new();
     }
-    let lines: Vec<&str> = cfg.pads.values().filter_map(|p| p.sdl.as_deref()).collect();
-    if lines.is_empty() {
+    let profiles = crate::pad_games::load(app);
+    let profile = profiles.of(game);
+    if profile.mode != crate::pad_games::Mode::Gamepad {
         return Vec::new();
     }
-    vec![
-        ("SDL_GAMECONTROLLERCONFIG".into(), padmap::config_env(lines)),
-        ("SDL_JOYSTICK_HIDAPI".into(), "0".into()),
-        ("PROTON_PREFER_SDL".into(), "1".into()),
-    ]
+    sdl_env(&cfg.pads, profile)
+}
+
+/// A pad's USB ids, out of its SDL GUID (vendor at byte 4, product at byte 8,
+/// both little-endian), as SDL's ignore list writes them.
+fn ids_of_guid(guid: &str) -> Option<String> {
+    let word = |at: usize| Some(u16::from_str_radix(guid.get(at + 2..at + 4)?, 16).ok()? << 8 | u16::from_str_radix(guid.get(at..at + 2)?, 16).ok()?);
+    Some(format!("0x{:04X}/0x{:04X}", word(8)?, word(16)?))
+}
+
+/// The environment for a game in controller mode. SDL goes by model, so each
+/// model gets one line: its own remap in this game, or the game's, or the
+/// pad's. A model taken out of the game is put on SDL's ignore list, which
+/// hides it from SDL's controller support (not from a game reading devices
+/// another way).
+pub(crate) fn sdl_env(pads: &BTreeMap<String, PadPrefs>, profile: &crate::pad_games::GameProfile) -> Vec<(String, String)> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut ignore: Vec<String> = Vec::new();
+    for (guid, prefs) in pads {
+        let Some(for_pad) = profile.for_pad(guid) else {
+            ignore.extend(ids_of_guid(guid));
+            continue;
+        };
+        let remap = [for_pad, profile].into_iter().find(|p| !p.remap.is_identity()).map(|p| &p.remap);
+        match remap {
+            Some(r) => lines.extend(prefs.mapping.as_deref().or(prefs.base.as_deref()).and_then(|m| padmap::SdlMapping::parse(m).ok()).map(|m| m.remapped(r).to_line())),
+            None => lines.extend(prefs.sdl.clone()),
+        }
+    }
+    let mut env: Vec<(String, String)> = Vec::new();
+    if !lines.is_empty() {
+        env.push(("SDL_GAMECONTROLLERCONFIG".into(), padmap::config_env(lines.iter().map(String::as_str))));
+        env.push(("SDL_JOYSTICK_HIDAPI".into(), "0".into()));
+        env.push(("PROTON_PREFER_SDL".into(), "1".into()));
+    }
+    if !ignore.is_empty() {
+        env.push(("SDL_GAMECONTROLLER_IGNORE_DEVICES".into(), ignore.join(",")));
+    }
+    env
+}
+
+/// The pads plugged in now, by [`crate::pad_games::pad_keys`], and whether the
+/// virtual-controller driver answered, when last asked.
+pub fn connected<R: Runtime>(app: &AppHandle<R>) -> (Vec<crate::pad_games::PadFacts>, Option<bool>) {
+    let pads = app.state::<Pads>();
+    let list = pads.list.lock().map(|l| l.clone()).unwrap_or_default();
+    let keys = crate::pad_games::pad_keys(list.iter().map(|p| p.guid.as_str()));
+    // Two pads of one name are numbered so they can be told apart. (On Windows
+    // two Xbox pads can differ in GUID and still share a name.)
+    let mut names: HashMap<&str, u32> = HashMap::new();
+    let facts = list
+        .iter()
+        .zip(keys)
+        .map(|(p, key)| {
+            let n = names.entry(p.name.as_str()).or_insert(0);
+            *n += 1;
+            let name = if *n == 1 { p.name.clone() } else { format!("{} ({n})", p.name) };
+            crate::pad_games::PadFacts { key, name, xinput: p.xinput, mapped: p.mapped }
+        })
+        .collect();
+    let driver = pads.driver.lock().ok().and_then(|d| *d);
+    (facts, driver)
 }
 
 /* ── Commands ─────────────────────────────────────────────── */
@@ -503,10 +565,24 @@ struct Dev {
     info: PadInfo,
     /// The last value sent for each raw axis while capturing.
     raw_axes: Vec<f32>,
+    /// Where the system has it, lowercased; empty when SDL does not say.
+    path: String,
 }
 
-fn guid_of(joy: &Joystick) -> String {
-    joy.guid().string()
+/// The system's path for a device, lowercased: the same pad reads the same,
+/// whichever of SDL's drivers lists it.
+fn joystick_path(index: i32) -> String {
+    let raw = unsafe { sdl2::sys::SDL_JoystickPathForIndex(index) };
+    if raw.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().to_lowercase()
+}
+
+/// By its index: `Joystick::guid` panics on a device whose GUID reads as zero,
+/// which took the whole app down on some Windows PCs. Empty is "not saved under anything".
+fn guid_of(js: &sdl2::JoystickSubsystem, index: u32) -> String {
+    js.device_guid(index).map(|g| g.string()).unwrap_or_default()
 }
 
 /// Windows briefly enumerates a dead WGI copy of the wired Stratus+ while
@@ -547,11 +623,65 @@ struct Reader<'a, R: Runtime> {
     ignored: HashSet<u32>,
     capture: Option<u32>,
     focused: bool,
+    /// What the running game asks of the pads (`pad_games.rs`).
+    games: crate::pad_games::Driver,
     #[cfg(windows)]
     virt: virt::Virtual,
 }
 
 impl<R: Runtime> Reader<'_, R> {
+    /// The pads in connection order, each with its key: player 1 stays player 1.
+    fn keyed(&self) -> Vec<(u32, String)> {
+        let mut ids: Vec<u32> = self.devs.keys().copied().collect();
+        ids.sort_unstable();
+        let keys = crate::pad_games::pad_keys(ids.iter().map(|id| self.devs[id].info.guid.as_str()));
+        ids.into_iter().zip(keys).collect()
+    }
+
+    /// What each pad has down right now.
+    fn pad_states(&self) -> Vec<(String, crate::pad_games::PadState)> {
+        const BUTTONS: [SButton; 15] = [
+            SButton::A,
+            SButton::B,
+            SButton::X,
+            SButton::Y,
+            SButton::Back,
+            SButton::Guide,
+            SButton::Start,
+            SButton::LeftStick,
+            SButton::RightStick,
+            SButton::LeftShoulder,
+            SButton::RightShoulder,
+            SButton::DPadUp,
+            SButton::DPadDown,
+            SButton::DPadLeft,
+            SButton::DPadRight,
+        ];
+        self.keyed()
+            .into_iter()
+            .filter_map(|(id, key)| {
+                let c = self.devs.get(&id)?.ctl.as_ref()?;
+                let a = self.axes_of(id)?;
+                let pressed = BUTTONS.into_iter().filter(|b| c.button(*b)).map(control_of).collect();
+                Some((key, crate::pad_games::PadState { pressed, lx: a.lx, ly: a.ly, rx: a.rx, ry: a.ry, lt: a.lt, rt: a.rt }))
+            })
+            .collect()
+    }
+
+    /// Keys and mouse for the game in front. A short buzz says the pause
+    /// chord took.
+    fn feed_games(&mut self) {
+        self.games.refresh(self.app);
+        let keyboard = *self.games.plan() == crate::pad_games::Plan::Keyboard;
+        let states = if keyboard { self.pad_states() } else { Vec::new() };
+        if self.games.feed(self.app, states) {
+            let ids: Vec<u32> = self.devs.keys().copied().collect();
+            for id in ids {
+                self.rumble(id, 0x5000, 0x3000, 120);
+            }
+        }
+    }
+
     fn publish(&self) {
         let mut list: Vec<PadInfo> = self.devs.values().map(|d| d.info.clone()).collect();
         list.sort_by_key(|p| p.id);
@@ -579,13 +709,22 @@ impl<R: Runtime> Reader<'_, R> {
             self.ignored.insert(id);
             return None;
         }
+        // A device change (our own virtual pads cause them) can make SDL list
+        // a pad it already has again, under a new id: that would be a second
+        // virtual controller, and a player who does not exist.
+        let path = joystick_path(i);
+        if !path.is_empty() && self.devs.values().any(|d| d.path == path) {
+            crate::logging::info("pads", &format!("listed twice, ignored: {path}"));
+            self.ignored.insert(id);
+            return None;
+        }
         let kind = unsafe { sdl2::sys::SDL_GameControllerTypeForIndex(i) };
         let joy = self.js.open(index).ok()?;
         let ctl = if self.gc.is_game_controller(index) { self.gc.open(index).ok() } else { None };
         let system_name = ctl.as_ref().map(|c| c.name()).unwrap_or_else(|| joy.name());
         let some = |v: u16| (v != 0).then_some(v);
         let model = padmap::identify(some(vendor), some(product), &system_name);
-        let guid = guid_of(&joy);
+        let guid = guid_of(&self.js, index);
         #[cfg(windows)]
         if inactive_stratus_interface(vendor, product, &guid) {
             self.ignored.insert(id);
@@ -625,7 +764,8 @@ impl<R: Runtime> Reader<'_, R> {
             });
         }
         let axes = joy.num_axes() as usize;
-        self.devs.insert(id, Dev { joy, ctl, info: info.clone(), raw_axes: vec![0.0; axes] });
+        crate::logging::info("pads", &format!("opened {} ({}) at {path}", info.name, info.guid));
+        self.devs.insert(id, Dev { joy, ctl, info: info.clone(), raw_axes: vec![0.0; axes], path });
         if announce && load_config(self.app).notify {
             ask_to_configure(self.app, &info);
         }
@@ -833,6 +973,7 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
         ignored: HashSet::new(),
         capture: None,
         focused: false,
+        games: crate::pad_games::Driver::default(),
         #[cfg(windows)]
         virt: virt::Virtual::new(back),
     };
@@ -873,6 +1014,7 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
                 }
                 Req::Stop => {
                     active = false;
+                    r.games.stop(app);
                     r.close_all();
                 }
                 _ if !active => {}
@@ -939,6 +1081,7 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
             }
         }
 
+        r.feed_games();
         #[cfg(windows)]
         r.feed_virtual();
     }
@@ -947,25 +1090,39 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
 #[cfg(windows)]
 impl<R: Runtime> Reader<'_, R> {
     /// While a game runs: every set-up, non-Xbox pad plays as a virtual Xbox
-    /// controller, with its remap. Unplugged again when the games close.
+    /// controller, with the game's remap or its own, unless the game is set
+    /// otherwise (`pad_games.rs`). Unplugged again when the games close.
     fn feed_virtual(&mut self) {
         let cfg_on = self.virt.check_settings(|| load_config(self.app).virtual_pad);
         let playing = self.app.state::<crate::library::Running>().0.lock().map(|m| !m.is_empty()).unwrap_or(false);
-        if !(cfg_on && playing) {
+        if *self.games.plan() != crate::pad_games::Plan::Gamepad || !(cfg_on && playing) {
             self.virt.unplug_all();
             return;
         }
         let cfg = self.virt.cached_config(|| load_config(self.app));
-        for (id, d) in &self.devs {
+        // In connection order: Windows numbers the virtual pads as they are
+        // plugged in, so this is what keeps player 1 player 1.
+        let mut live: HashSet<u32> = HashSet::new();
+        let mut problem = None;
+        for (id, key) in self.keyed() {
+            let Some(d) = self.devs.get(&id) else { continue };
             let Some(ctl) = d.ctl.as_ref() else { continue };
             if d.info.xinput {
                 continue;
             }
-            let remap = cfg.pads.get(&d.info.guid).map(|p| p.remap.clone()).unwrap_or_default();
-            self.virt.feed(*id, ctl, &remap);
+            // Taken out of this game: no virtual pad for it.
+            let Some(remap) = self.games.pad_remap(&key) else { continue };
+            let own = remap.is_some();
+            let remap = remap.or_else(|| cfg.pads.get(&d.info.guid).map(|p| p.remap.clone())).unwrap_or_default();
+            live.insert(id);
+            if !self.virt.feed(id, ctl, &remap) && (own || !remap.is_identity()) {
+                problem = Some(format!("{} could not be plugged in as a virtual Xbox controller, so its remap does not reach this game. Check ViGEmBus in Settings, Devices.", d.info.name));
+            }
         }
-        let live: HashSet<u32> = self.devs.keys().copied().collect();
         self.virt.retain(&live);
+        if let Some(why) = problem {
+            self.games.tell(self.app, &why);
+        }
         if let Some(found) = self.virt.driver() {
             if let Ok(mut d) = self.app.state::<Pads>().driver.lock() {
                 *d = Some(found);
@@ -1072,13 +1229,14 @@ mod virt {
             self.client.clone()
         }
 
-        pub fn feed(&mut self, id: u32, ctl: &GameController, remap: &Remap) {
+        /// False when this pad has no virtual controller to feed.
+        pub fn feed(&mut self, id: u32, ctl: &GameController, remap: &Remap) -> bool {
             let report = report(ctl, remap);
             if !self.targets.contains_key(&id) {
-                let Some(client) = self.client() else { return };
+                let Some(client) = self.client() else { return false };
                 let mut target = Xbox360Wired::new(client, TargetId::XBOX360_WIRED);
                 if target.plugin().is_err() || target.wait_ready().is_err() {
-                    return;
+                    return false;
                 }
                 self.expecting.push(Instant::now());
                 // Rumble from the game goes to the real pad.
@@ -1095,6 +1253,7 @@ mod virt {
                     *last = report;
                 }
             }
+            true
         }
 
         pub fn unplug(&mut self, id: u32) {
@@ -1225,6 +1384,41 @@ mod tests {
         // A setup saved here is handed over even without a remap.
         let p = PadPrefs { mapping: Some("03008231110100003414000000000000,SteelSeries,a:b0,b:b1,".into()), ..Default::default() };
         assert!(sdl_line(&p).unwrap().contains("a:b0"));
+    }
+
+    #[test]
+    fn each_model_gets_its_own_line_and_a_removed_one_is_ignored() {
+        use crate::pad_games::{GameProfile, PadUse};
+        let sense = "030000004c050000e60c000011810000";
+        let other = "03000000d62000000228000010010000";
+        let line = |g: &str| format!("{g},Pad,a:b0,b:b1,x:b3,y:b2,platform:Linux,");
+        let pads: BTreeMap<String, PadPrefs> = [sense, other].map(|g| (g.to_string(), PadPrefs { base: Some(line(g)), ..Default::default() })).into();
+        let mut swap = Remap::new();
+        swap.assign(Control::South, Control::East);
+        let value = |env: &[(String, String)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+
+        // Nothing changed, nothing to hand over.
+        assert!(sdl_env(&pads, &GameProfile::default()).is_empty());
+
+        // One controller's own remap: only its model's line changes.
+        let mut p = GameProfile::default();
+        p.pads.insert(sense.into(), PadUse { off: false, own: Some(Box::new(GameProfile { remap: swap.clone(), ..Default::default() })) });
+        let env = sdl_env(&pads, &p);
+        let config = value(&env, "SDL_GAMECONTROLLERCONFIG").unwrap();
+        assert_eq!(config.lines().count(), 1);
+        let m = padmap::SdlMapping::parse(&config).unwrap();
+        assert_eq!((m.get("a"), m.get("b")), (Some("b1"), Some("b0")));
+
+        // The game's remap reaches both; the first's own beats it.
+        p.remap = swap.clone();
+        assert_eq!(value(&sdl_env(&pads, &p), "SDL_GAMECONTROLLERCONFIG").unwrap().lines().count(), 2);
+
+        // Taken out: on the ignore list, by its USB ids, and off the config.
+        let mut p = GameProfile { remap: swap, ..Default::default() };
+        p.pads.insert(sense.into(), PadUse { off: true, own: None });
+        let env = sdl_env(&pads, &p);
+        assert_eq!(value(&env, "SDL_GAMECONTROLLER_IGNORE_DEVICES").unwrap(), "0x054C/0x0CE6");
+        assert_eq!(value(&env, "SDL_GAMECONTROLLERCONFIG").unwrap().lines().count(), 1);
     }
 
     #[test]

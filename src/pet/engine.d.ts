@@ -28,6 +28,10 @@ export type Anim = {
   once?: boolean
   only?: MascotId
   progress?: boolean
+  /** The moment reduced motion holds, in seconds; the first frame otherwise. */
+  still?: number
+  /** One of the sponsor's golden bits (the taco break and its kin). */
+  sponsor?: boolean
 }
 
 export type Pose = Partial<{

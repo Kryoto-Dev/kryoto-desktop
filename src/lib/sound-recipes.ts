@@ -1,12 +1,15 @@
 /**
- * Kryoto Desktop's sounds, as recipes: which tones, when, how loud.
+ * Kryoto Desktop's sounds, as recipes: which notes, when, how loud.
  *
- * One family: soft, low mallet tones, like a wooden marimba heard from the
- * next room, never a sample and never shrill. Everything sits between about
- * 130 and 520 Hz, with a low body under the bigger moments. The app plays
- * these live (sound.ts) and `scripts/render-sounds.mts` renders the same
- * recipes to MP3 for review, so a preview is what the app plays. Kept free of
- * imports so Node can load it.
+ * One family: struck wooden bars, like a marimba played softly in a small
+ * room. Each note is the bar's low fundamental, a twin a hair out of tune
+ * (real bars beat slowly, an oscillator never does), the bar's own overtone
+ * near four times the pitch that dies almost at once, and the soft knock of a
+ * felt mallet. Nothing is tuned in octaves and nothing rings above G4 (392
+ * Hz), so it reads as wood, not as a beep. The app plays these live
+ * (sound.ts) and `scripts/render-sounds.mts` renders the same recipes to MP3
+ * for review, so a preview is what the app plays. Kept free of imports so
+ * Node can load it.
  *
  * Times and lengths are seconds; gains are per voice, before the master
  * volume.
@@ -39,93 +42,103 @@ export type Recipe = {
   /** What it is for, for the preview page and Settings. */
   label: string
   voices: Voice[]
-  /** A soft repeat, for space. */
-  echo?: { delay: number; feedback: number; mix: number }
+  /** A small room around it: how much of it is heard (0 to 1), and how big (1 is a small room). */
+  room?: { mix: number; size?: number }
 }
 
 /**
- * One struck note: a sine with a quieter octave on top that dies away faster,
- * which is what makes it sound like wood rather than a beep.
+ * The room both players build: four feedback delays side by side, each with
+ * a lowpass in its loop so the walls soak up the highs (a Schroeder comb
+ * bank). sound.ts builds it from DelayNodes, render-sounds.mts sample by
+ * sample.
  */
-function mallet(freq: number, at: number, gain: number, decay = 0.22): Voice[] {
+export const ROOM = { combs: [0.0297, 0.0371, 0.0411, 0.0437], feedback: 0.74, damp: 2400 }
+
+/**
+ * One struck wooden bar: the fundamental that rings, its slightly detuned
+ * twin, the bar's own overtone (3.93 times the pitch, as a marimba's is)
+ * dying away fast, and the felt mallet's knock, a short burst of filtered air.
+ */
+function bar(freq: number, at: number, gain: number, decay = 0.3): Voice[] {
   const dur = decay * 6
   return [
-    { wave: 'sine', freq, at, dur, gain, attack: 0.006, decay },
-    { wave: 'sine', freq: freq * 2, at, dur: dur * 0.5, gain: gain * 0.22, attack: 0.004, decay: decay * 0.4 },
+    { wave: 'sine', freq, at, dur, gain, attack: 0.003, decay },
+    { wave: 'sine', freq: freq * 1.0035, at, dur, gain: gain * 0.35, attack: 0.003, decay: decay * 0.8 },
+    { wave: 'sine', freq: freq * 3.93, at, dur: Math.max(0.12, decay * 1.2), gain: gain * 0.18, attack: 0.002, decay: decay * 0.12 },
+    { wave: 'noise', at, dur: 0.04, gain: gain * 0.45, attack: 0.001, decay: 0.007, filter: { type: 'bandpass', freq: Math.min(freq * 5, 1600), q: 1.1 } },
   ]
 }
 
-/** A held, warm tone under a moment: a sine that swells in and out. */
+/** A held, warm low tone under a bigger moment: a sine that swells in and out. */
 const body = (freq: number, at: number, dur: number, gain: number): Voice => ({ wave: 'sine', freq, at, dur, gain, attack: Math.min(0.08, dur / 3), release: dur * 0.6 })
 
-// Notes, from C3 up to C5. Nothing goes higher.
-const C3 = 130.81, G3 = 196, A3 = 220, C4 = 261.63, D4 = 293.66, E4 = 329.63, G4 = 392, A4 = 440, C5 = 523.25
+// Notes, from G2 up to G4. Nothing goes higher.
+const G2 = 98, A2 = 110, C3 = 130.81, D3 = 146.83, E3 = 164.81, G3 = 196, A3 = 220, B3 = 246.94, C4 = 261.63, D4 = 293.66, E4 = 329.63, G4 = 392
 
 export const SOUNDS = {
   ready: {
     label: 'A game is ready to play',
-    voices: [...mallet(D4, 0, 0.09), ...mallet(A4, 0.11, 0.08, 0.32), body(146.83, 0, 0.6, 0.035)],
-    echo: { delay: 0.16, feedback: 0.2, mix: 0.18 },
+    voices: [...bar(G3, 0, 0.11, 0.3), ...bar(D4, 0.12, 0.1, 0.5), body(G2, 0, 0.8, 0.035)],
+    room: { mix: 0.22 },
   },
   downloadStart: {
     label: 'A download starts',
-    voices: [...mallet(G3, 0, 0.08, 0.14), ...mallet(D4, 0.07, 0.06, 0.16)],
+    voices: [...bar(E3, 0, 0.1, 0.2), ...bar(B3, 0.08, 0.08, 0.26)],
+    room: { mix: 0.14 },
   },
   downloadFailed: {
     label: 'A download fails',
-    voices: [...mallet(E4, 0, 0.08, 0.16), ...mallet(C4, 0.15, 0.08, 0.26), body(110, 0.15, 0.4, 0.03)],
+    voices: [...bar(C4, 0, 0.09, 0.24), ...bar(A3, 0.16, 0.1, 0.36), body(A2, 0.16, 0.5, 0.03)],
+    room: { mix: 0.16 },
   },
   achievement: {
     label: 'An achievement unlocks',
     voices: [
-      ...mallet(C4, 0, 0.075, 0.18),
-      ...mallet(E4, 0.08, 0.075, 0.18),
-      ...mallet(G4, 0.16, 0.075, 0.2),
-      ...mallet(C5, 0.24, 0.08, 0.45),
-      body(C3, 0.24, 0.9, 0.04),
-      body(G3, 0.24, 0.9, 0.025),
+      ...bar(G3, 0, 0.09, 0.24),
+      ...bar(B3, 0.09, 0.09, 0.24),
+      ...bar(D4, 0.18, 0.09, 0.28),
+      ...bar(G4, 0.27, 0.09, 0.6),
+      body(G2, 0.27, 1.1, 0.04),
+      body(D3, 0.27, 1.1, 0.02),
     ],
-    echo: { delay: 0.18, feedback: 0.25, mix: 0.2 },
+    room: { mix: 0.26, size: 1.2 },
   },
   notify: {
     label: 'A notification',
-    voices: [...mallet(G4, 0, 0.075, 0.16), ...mallet(C5, 0.1, 0.06, 0.24)],
+    voices: [...bar(D4, 0, 0.09, 0.24), ...bar(G4, 0.1, 0.07, 0.34)],
+    room: { mix: 0.16 },
   },
   message: {
     label: 'A chat message',
-    voices: [...mallet(E4, 0, 0.07, 0.12), ...mallet(A4, 0.08, 0.06, 0.16)],
+    voices: [...bar(B3, 0, 0.08, 0.18), ...bar(E4, 0.08, 0.07, 0.24)],
+    room: { mix: 0.12 },
   },
   error: {
     label: 'Something went wrong',
-    voices: [
-      { wave: 'triangle', freq: A3, at: 0, dur: 0.12, gain: 0.07, attack: 0.005, release: 0.06, filter: { type: 'lowpass', freq: 700 } },
-      { wave: 'triangle', freq: A3, at: 0.16, dur: 0.18, gain: 0.07, attack: 0.005, release: 0.12, filter: { type: 'lowpass', freq: 600 } },
-    ],
+    voices: [...bar(E3, 0, 0.12, 0.12), ...bar(E3, 0.16, 0.11, 0.2), body(82.41, 0, 0.4, 0.03)],
+    room: { mix: 0.1 },
   },
 
   // ---- Calls (they ring whatever the everyday switch says; calls.ts) ----------
   ring: {
     label: 'Someone is calling (repeats)',
-    voices: [
-      ...mallet(G4, 0, 0.08, 0.14),
-      ...mallet(E4, 0.14, 0.075, 0.14),
-      ...mallet(G4, 0.28, 0.08, 0.14),
-      ...mallet(C5, 0.42, 0.07, 0.3),
-      body(C4, 0.42, 0.5, 0.025),
-    ],
-    echo: { delay: 0.14, feedback: 0.18, mix: 0.15 },
+    voices: [...bar(G3, 0, 0.09, 0.2), ...bar(E3, 0.14, 0.09, 0.2), ...bar(G3, 0.28, 0.09, 0.2), ...bar(C4, 0.42, 0.09, 0.4), body(C3, 0.42, 0.5, 0.025)],
+    room: { mix: 0.18 },
   },
   calling: {
     label: 'Calling someone (repeats)',
-    voices: [...mallet(C4, 0, 0.05, 0.2), ...mallet(E4, 0.22, 0.05, 0.28)],
+    voices: [...bar(G3, 0, 0.06, 0.28), ...bar(B3, 0.22, 0.06, 0.34)],
+    room: { mix: 0.14 },
   },
   callJoin: {
     label: 'A call connects',
-    voices: [...mallet(C4, 0, 0.07, 0.12), ...mallet(G4, 0.09, 0.07, 0.24)],
+    voices: [...bar(G3, 0, 0.08, 0.18), ...bar(D4, 0.09, 0.08, 0.3)],
+    room: { mix: 0.14 },
   },
   callEnd: {
     label: 'A call ends',
-    voices: [...mallet(G4, 0, 0.065, 0.12), ...mallet(C4, 0.1, 0.065, 0.26)],
+    voices: [...bar(D4, 0, 0.075, 0.18), ...bar(G3, 0.1, 0.08, 0.34)],
+    room: { mix: 0.14 },
   },
 
   // ---- Big Picture -----------------------------------------------------------
@@ -134,54 +147,57 @@ export const SOUNDS = {
     voices: [
       // Played so the chord lands as the mark lights (BigPictureIntro.tsx).
       // The cases start their spiral in: a low swell and air, rising.
-      { wave: 'sine', freq: 65.41, freqEnd: C3, at: 0, dur: 0.95, gain: 0.05, attack: 0.3, release: 0.3 },
-      { wave: 'noise', at: 0.05, dur: 0.85, gain: 0.025, attack: 0.5, release: 0.3, filter: { type: 'lowpass', freq: 300, freqEnd: 1400, q: 0.8 } },
+      { wave: 'sine', freq: 49, freqEnd: G2, at: 0, dur: 0.95, gain: 0.06, attack: 0.3, release: 0.3 },
+      { wave: 'noise', at: 0.05, dur: 0.85, gain: 0.022, attack: 0.5, release: 0.3, filter: { type: 'lowpass', freq: 250, freqEnd: 1000, q: 0.8 } },
       // They land in the mark, one soft knock each.
-      ...[C4, D4, E4, G4, A4].flatMap((f, i) => mallet(f, 0.42 + i * 0.09, 0.035, 0.08)),
+      ...[G3, A3, B3, D4, E4].flatMap((f, i) => bar(f, 0.42 + i * 0.09, 0.035, 0.1)),
       // The mark lights: one warm chord, with a low root.
-      ...mallet(C4, 0.9, 0.06, 0.6),
-      ...mallet(E4, 0.9, 0.05, 0.6),
-      ...mallet(G4, 0.91, 0.05, 0.6),
-      body(C3, 0.9, 1.4, 0.05),
-      { wave: 'square', freq: 65.41, at: 0.9, dur: 1.2, gain: 0.03, attack: 0.02, release: 0.9, filter: { type: 'lowpass', freq: 220 } },
+      ...bar(G3, 0.9, 0.07, 0.7),
+      ...bar(B3, 0.9, 0.055, 0.7),
+      ...bar(D4, 0.91, 0.055, 0.7),
+      body(G2, 0.9, 1.4, 0.05),
+      { wave: 'square', freq: 49, at: 0.9, dur: 1.2, gain: 0.025, attack: 0.02, release: 0.9, filter: { type: 'lowpass', freq: 180 } },
     ],
-    echo: { delay: 0.2, feedback: 0.25, mix: 0.18 },
+    room: { mix: 0.28, size: 1.3 },
   },
   bpMove: {
     label: 'Big Picture: move',
-    voices: [...mallet(G4, 0, 0.04, 0.04)],
+    voices: [...bar(G3, 0, 0.05, 0.05)],
   },
   bpSelect: {
     label: 'Big Picture: open',
-    voices: [...mallet(E4, 0, 0.07, 0.1), ...mallet(A4, 0.06, 0.06, 0.16)],
+    voices: [...bar(B3, 0, 0.08, 0.12), ...bar(E4, 0.06, 0.07, 0.18)],
+    room: { mix: 0.1 },
   },
   bpBack: {
     label: 'Big Picture: back',
-    voices: [...mallet(A4, 0, 0.06, 0.1), ...mallet(E4, 0.06, 0.06, 0.14)],
+    voices: [...bar(E4, 0, 0.07, 0.12), ...bar(B3, 0.06, 0.07, 0.16)],
+    room: { mix: 0.1 },
   },
   bpTab: {
     label: 'Big Picture: switch row',
-    voices: [...mallet(D4, 0, 0.05, 0.06), ...mallet(G4, 0.05, 0.05, 0.08)],
+    voices: [...bar(A3, 0, 0.06, 0.07), ...bar(D4, 0.05, 0.055, 0.09)],
   },
   bpLaunch: {
     label: 'Big Picture: play a game',
     voices: [
-      { wave: 'sine', freq: 110, freqEnd: G3, at: 0, dur: 0.4, gain: 0.05, attack: 0.08, release: 0.15 },
-      { wave: 'noise', at: 0, dur: 0.38, gain: 0.02, attack: 0.2, release: 0.15, filter: { type: 'lowpass', freq: 250, freqEnd: 1100 } },
-      ...mallet(C4, 0.34, 0.065, 0.4),
-      ...mallet(E4, 0.36, 0.055, 0.4),
-      ...mallet(G4, 0.38, 0.055, 0.45),
-      body(C3, 0.34, 0.9, 0.04),
+      { wave: 'sine', freq: 82.41, freqEnd: G3, at: 0, dur: 0.4, gain: 0.05, attack: 0.08, release: 0.15 },
+      { wave: 'noise', at: 0, dur: 0.38, gain: 0.018, attack: 0.2, release: 0.15, filter: { type: 'lowpass', freq: 220, freqEnd: 900 } },
+      ...bar(G3, 0.34, 0.075, 0.45),
+      ...bar(B3, 0.36, 0.06, 0.45),
+      ...bar(D4, 0.38, 0.06, 0.5),
+      body(G2, 0.34, 0.9, 0.045),
     ],
-    echo: { delay: 0.18, feedback: 0.22, mix: 0.16 },
+    room: { mix: 0.22, size: 1.2 },
   },
   bpExit: {
     label: 'Big Picture closes',
     voices: [
-      ...mallet(G4, 0, 0.055, 0.12),
-      ...mallet(C4, 0.1, 0.06, 0.3),
-      { wave: 'noise', at: 0, dur: 0.35, gain: 0.015, attack: 0.05, release: 0.25, filter: { type: 'lowpass', freq: 1000, freqEnd: 250 } },
+      ...bar(D4, 0, 0.065, 0.14),
+      ...bar(G3, 0.1, 0.07, 0.34),
+      { wave: 'noise', at: 0, dur: 0.35, gain: 0.014, attack: 0.05, release: 0.25, filter: { type: 'lowpass', freq: 800, freqEnd: 220 } },
     ],
+    room: { mix: 0.14 },
   },
 } satisfies Record<string, Recipe>
 
@@ -193,5 +209,5 @@ export const BIG_PICTURE_SOUNDS: readonly SoundName[] = ['bpIntro', 'bpMove', 'b
 /** How long a recipe lasts, tail included. */
 export function lengthOf(r: Recipe): number {
   const end = Math.max(...r.voices.map((v) => v.at + v.dur))
-  return end + (r.echo ? r.echo.delay * 4 : 0) + 0.05
+  return end + (r.room ? 0.9 * (r.room.size ?? 1) : 0) + 0.05
 }

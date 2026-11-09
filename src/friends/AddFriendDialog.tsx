@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AtSign, Check, Copy, Link2, UserPlus } from 'lucide-react'
+import { AtSign, Check, Copy, Link2, UserPlus } from '@/ui/pixel-icons'
 import { errorText } from '@/lib/bridge'
 import { friendAction } from '@/lib/friends'
 import { QrCode } from '@/settings/QrCode'
@@ -40,7 +40,7 @@ export function AddFriendForm({ initial = '', autoFocus = false }: { initial?: s
   }
   return (
     <form
-      className="grid gap-2"
+      className="grid min-w-0 gap-2"
       onSubmit={(e) => {
         e.preventDefault()
         void send()
@@ -49,8 +49,8 @@ export function AddFriendForm({ initial = '', autoFocus = false }: { initial?: s
       <label htmlFor="add-friend-username">
         <Caption>Their username</Caption>
       </label>
-      <div className="flex gap-2">
-        <span className="kryo-pill flex h-9 grow items-center gap-2 border border-border bg-background px-3 focus-within:border-foreground">
+      <div className="flex min-w-0 gap-2">
+        <span className="kryo-pill flex h-9 min-w-0 grow items-center gap-2 border border-border bg-background px-3 focus-within:border-foreground">
           <AtSign className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
           <input
             id="add-friend-username"
@@ -124,7 +124,7 @@ function InviteLink() {
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-3">
-          <Button size="sm" disabled={busy} onClick={() => void make()}>
+          <Button size="sm" disabled={busy} onClick={() => make()}>
             <Link2 className="size-3" aria-hidden />
             Make an invite link
           </Button>

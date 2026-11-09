@@ -33,6 +33,17 @@ export async function api<T>(token: string | null, method: string, path: string,
   return data as T
 }
 
+/** Saves a file the browser's way. Kryoto Mobile's api.ts asks Android instead. False when the player backs out. */
+export async function saveFile(name: string, data: BlobPart, mime: string): Promise<boolean> {
+  const url = URL.createObjectURL(new Blob([data], { type: mime }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  return true
+}
+
 // ---- device sign-in (RFC 8628, client "chat-web") ----
 
 export type DeviceStart = { device_code: string; user_code: string; verification_uri_complete: string; interval: number; expires_in: number }

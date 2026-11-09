@@ -1,11 +1,13 @@
 {
   "name": "kryoto-desktop",
   "private": true,
-  "version": "0.2.35",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "check:styles": "node scripts/check-styles.mjs",
+    "check": "node scripts/check-styles.mjs && tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "app:dev": "node scripts/dev.mjs",
     "app:dev:plain": "node scripts/dev.mjs -- --no-default-features --features dev-plain-chat-store",

@@ -229,6 +229,44 @@ try {
     await expectText('[role="dialog"]', 'Nothing on kryo.to by that name')
     await page.keyboard.press('Escape')
   })
+  await check('prompts that open by themselves take turns and never land on a dialog', async () => {
+    const want = id => page.evaluate(i => document.getElementById(`want-${i}`).click(), id)
+    const only = async title => {
+      await page.getByRole('dialog', { name: title }).waitFor()
+      assert.equal(await page.getByRole('dialog').count(), 1)
+    }
+    const notice = page.locator('#notice-shown')
+    await want('notice')
+    await notice.waitFor()
+    await want('found')
+    await only('Prompt found')
+    assert.equal(await notice.count(), 0)
+    await want('intro')
+    await want('update')
+    await only('Prompt found')
+    await page.keyboard.press('Escape')
+    await only('Prompt update')
+    await page.keyboard.press('Escape')
+    await only('Prompt intro')
+    await page.keyboard.press('Escape')
+    await notice.waitFor()
+    await page.locator('#open').click()
+    await only('Fixture controls')
+    assert.equal(await notice.count(), 0)
+    await want('found')
+    await page.waitForTimeout(100)
+    await only('Fixture controls')
+    await page.keyboard.press('Escape')
+    await only('Prompt found')
+    await page.evaluate(() => window.holdPrompts(true))
+    await page.getByRole('dialog').waitFor({ state: 'detached' })
+    assert.equal(await notice.count(), 0)
+    await page.evaluate(() => window.holdPrompts(false))
+    await only('Prompt found')
+    await page.keyboard.press('Escape')
+    await notice.waitFor()
+    await want('notice')
+  })
   await check('native and web bridges never load preview fixtures or start simulation timers', async () => {
     for (const mode of ['native', 'web', 'preview']) {
       const probe = await browser.newPage()
@@ -273,11 +311,112 @@ try {
       await game.getByText('Captain Hardcore Desktop Mode', { exact: true }).waitFor()
       await game.keyboard.press('Escape')
       await region.getByRole('button', { name: 'Play', exact: true }).click()
+      // The sample game has hours its folder remembers: Play asks about those first.
+      await game.getByRole('dialog', { name: 'Welcome back', exact: true }).getByRole('button', { name: 'Later', exact: true }).click()
       await region.getByRole('button', { name: 'Stop', exact: true }).waitFor()
       assert.equal(await game.getByRole('dialog', { name: 'Play Captain Hardcore', exact: true }).count(), 0)
       await game.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Stop Captain Hardcore', exact: true }).click()
       await region.getByRole('button', { name: 'Play', exact: true }).waitFor()
     } finally { await game.close() }
+  })
+  await check('a failed Play is told where it was pressed, and only its own game page keeps it', async () => {
+    const game = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+    game.on('pageerror', e => failures.push(e.message))
+    await game.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await game.goto(base)
+      const rail = game.getByRole('complementary', { name: 'Your games' })
+      await rail.waitFor()
+      await game.evaluate(async () => {
+        // The addresses the app loaded: an edit gives them a ?t= and a plain import a second copy.
+        const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(`/src/lib/${name}.ts`))
+        const bridge = await import(loaded('bridge'))
+        const preview = await import(loaded('preview'))
+        bridge.useWebBackend({
+          call: (c, a) => (c === 'game_launch' ? Promise.reject(`Synthetic ${c} failure`) : preview.previewCall(c, a)),
+          on: (e, h) => preview.previewBus.on(e, h),
+        })
+      })
+      await game.getByRole('button', { name: 'Play Hades', exact: true }).click()
+      const notice = game.locator('.kryo-toast').filter({ hasText: 'Synthetic game_launch failure' })
+      await notice.getByText('Hades', { exact: true }).waitFor()
+      await rail.getByRole('button', { name: 'Celeste', exact: true }).click()
+      const other = game.getByRole('region', { name: 'Celeste', exact: true })
+      await other.waitFor()
+      assert.equal(await other.getByText('Synthetic game_launch failure').count(), 0)
+      await notice.getByRole('button').first().click()
+      await game.getByRole('region', { name: 'Hades', exact: true }).getByText('Synthetic game_launch failure').waitFor()
+    } finally { await game.close() }
+  })
+  await check('a question Play asks in Big Picture opens over it and B answers the question', async () => {
+    const game = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+    game.on('pageerror', e => failures.push(e.message))
+    await game.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await game.goto(base)
+      await game.getByRole('complementary', { name: 'Your games' }).waitFor()
+      await game.getByRole('button', { name: 'View', exact: true }).click()
+      await game.getByRole('menuitem', { name: 'Big Picture' }).click()
+      const couch = game.getByRole('dialog', { name: 'Big Picture', exact: true })
+      await couch.waitFor()
+      await game.keyboard.press('Shift')
+      await couch.getByRole('region', { name: 'All games' }).getByRole('button', { name: /Captain Hardcore/ }).click()
+      await couch.getByRole('button', { name: /Play/ }).click()
+      const question = game.getByRole('dialog', { name: 'Welcome back', exact: true })
+      await question.waitFor()
+      const open = name => game.evaluate(n => window.dispatchEvent(new CustomEvent(n, { cancelable: true })), name)
+      assert.equal(await open('kryo-pad-back'), true)
+      assert.equal(await open('kryo-pad-guide'), false)
+      assert.equal(await game.locator('[aria-label="Big Picture"]').count(), 1)
+      // Inert layers do not take hits, so what is on top only shows with the app's lifted.
+      assert(await question.evaluate(dialog => {
+        const root = document.getElementById('root')
+        const box = dialog.getBoundingClientRect()
+        root.inert = false
+        const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+        root.inert = true
+        return dialog.contains(top)
+      }))
+      await question.getByRole('button', { name: 'Later', exact: true }).click()
+      await couch.getByRole('button', { name: /Stop/ }).click()
+      await couch.getByRole('button', { name: /Play/ }).waitFor()
+    } finally { await game.close() }
+  })
+  await check('Controller settings: a failed save says so, and a pad asked for opens its setup', async () => {
+    const pads = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+    pads.on('pageerror', e => failures.push(e.message))
+    await pads.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await pads.goto(base)
+      await pads.getByRole('complementary', { name: 'Your games' }).waitFor()
+      await pads.evaluate(async () => {
+        const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(name))
+        const bridge = await import(loaded('/src/lib/bridge.ts'))
+        const preview = await import(loaded('/src/lib/preview.ts'))
+        window.padFails = new Set()
+        window.padStore = await import(loaded('/src/hooks/usePads.ts'))
+        bridge.useWebBackend({
+          call: (c, a) => (window.padFails.has(c) ? Promise.reject(`Synthetic ${c} failure`) : preview.previewCall(c, a)),
+          on: (e, h) => preview.previewBus.on(e, h),
+        })
+      })
+      const open = async () => {
+        await pads.getByRole('button', { name: 'Account menu' }).click()
+        await pads.getByRole('menuitem', { name: /Settings/ }).click()
+        await pads.getByRole('button', { name: 'Controller', exact: true }).click()
+      }
+      await pads.evaluate(() => window.padStore.requestPad('03008231110100003414000000000000'))
+      await open()
+      const setup = pads.getByRole('dialog', { name: 'Set up SteelSeries controller' })
+      await setup.waitFor()
+      await setup.getByRole('button', { name: 'Close' }).click()
+      assert.equal(await pads.getByRole('tab', { name: /SteelSeries/ }).getAttribute('aria-selected'), 'true')
+      await pads.evaluate(() => window.padFails.add('pad_config_set'))
+      const notify = pads.getByRole('checkbox', { name: 'Show a notification when a controller connects' })
+      await notify.click()
+      await pads.getByRole('alert').getByText('Synthetic pad_config_set failure').waitFor()
+      assert.equal(await notify.isChecked(), false)
+    } finally { await pads.close() }
   })
   await check('achievement repair offers gbe_fork and every RUNE profile with Undo between attempts', async () => {
     const achievements = await browser.newPage({ viewport: { width: 1100, height: 860 } })
@@ -322,7 +461,7 @@ try {
       assert.equal(await dialog.count(), 0)
     } finally { await achievements.close() }
   })
-  await check('a game shows its Linux compatibility and setup as text, and an untested game shows none', async () => {
+  await check('a game shows its Linux compatibility and setup through the shared renderer, and an untested game shows none', async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' })
     const linux = await context.newPage()
     linux.on('pageerror', e => failures.push(e.message))
@@ -336,7 +475,7 @@ try {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
         summary: { headline: 'Works on Windows and Linux.', platforms: { windows: { ...empty, status: 'works', reports: 1 }, linux: { ...empty, status: 'setup', reports: 2 }, steamdeck: empty, macos: empty }, unspecified: empty },
         reports: [
-          report('2', { instructions: 'Set PROTON_USE_WINED3D=1\n![shot](https://evil.example/x.png) <img src="https://evil.example/y.png">', tester: { name: 'Anonymous tester', username: null } }),
+          report('2', { instructions: 'Set **PROTON_USE_WINED3D=1**\n![shot](https://evil.example/x.png) <img src="https://evil.example/y.png">', tester: { name: 'Anonymous tester', username: null } }),
           report('1', { current: false, instructions: 'older steps' }),
         ],
       }) })
@@ -350,7 +489,8 @@ try {
       await region.getByText('Working, setup needed', { exact: true }).waitFor()
       await region.getByText('Works on Windows and Linux.', { exact: true }).waitFor()
       assert.equal(await region.getByRole('link', { name: '2 reports', exact: true }).getAttribute('href'), 'https://kryo.to/game/hollow-knight#compatibility-linux')
-      await region.getByText(/Set PROTON_USE_WINED3D=1/).waitFor()
+      await region.locator('strong', { hasText: 'PROTON_USE_WINED3D=1' }).waitFor()
+      assert.equal(await region.getByText(/\*\*PROTON/).count(), 0)
       assert.equal(await region.locator('img[src*="evil.example"]').count(), 0)
       assert.equal(await region.getByRole('link', { name: 'Anonymous tester' }).count(), 0)
       await region.getByText(/GE-Proton 9-20, Arch Linux, build b1/).waitFor()

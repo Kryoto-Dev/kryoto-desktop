@@ -35,6 +35,8 @@ export function CompatPicker({
   const tools = useCompatTools()
   const known = tools?.some((t) => t.path === value)
   const [custom, setCustom] = useState(!!value && tools !== null && !known)
+  /** Picked just now (not restored from a saved path): the field takes the cursor. */
+  const [picked, setPicked] = useState(false)
   useEffect(() => {
     if (tools && value && !tools.some((t) => t.path === value)) setCustom(true)
   }, [tools, value])
@@ -54,7 +56,10 @@ export function CompatPicker({
         value={current}
         options={options}
         onChange={(v) => {
-          if (v === CUSTOM) return setCustom(true)
+          if (v === CUSTOM) {
+            setPicked(true)
+            return setCustom(true)
+          }
           setCustom(false)
           onChange(v === AUTO ? null : v)
         }}
@@ -62,6 +67,7 @@ export function CompatPicker({
       {custom ? (
         <input
           className={inputCls}
+          autoFocus={picked}
           value={value ?? ''}
           placeholder="/path/to/proton or /usr/bin/wine"
           onChange={(e) => onChange(e.target.value || null)}

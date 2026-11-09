@@ -5,14 +5,28 @@
  */
 
 import type { Backend } from '@/lib/bridge'
-import { api } from './api'
+import { api, GATEWAY_HTTP, saveFile } from './api'
 import { parseTarget, WebChat, type ChatStatus, type Person } from './engine'
 import { Store } from './store'
 import { EMBEDDED, sitePermission } from './embed'
 
 type Handler = (payload: unknown) => void
 
-export function createBackend(token: string, userId: string, onSignedOut: () => void) {
+/**
+ * `onRemoved`: for an app around chat with a sign-in of its own (Kryoto Mobile).
+ * Removing chat leaves that sign-in alone, and this runs in place of `onSignedOut`.
+ */
+/** The gateway's own HTTP routes, with the account's session token. */
+async function gatewayHttp(token: string, method: 'GET' | 'DELETE', path: string): Promise<unknown> {
+  const r = await fetch(`${GATEWAY_HTTP}${path}`, { method, headers: { authorization: `Bearer ${token}` } }).catch(() => null)
+  if (!r) throw new Error('Could not reach the chat server. Check your connection.')
+  if (r.status === 401) throw new Error('Sign in again.')
+  if (r.status === 404) throw new Error('That device is not on your account any more.')
+  if (!r.ok) throw new Error(`The chat server answered ${r.status}. Try again in a moment.`)
+  return r.status === 204 ? undefined : r.json()
+}
+
+export function createBackend(token: string, userId: string, onSignedOut: () => void, onRemoved?: () => void) {
   const listeners = new Map<string, Set<Handler>>()
   const emit = (event: string, payload: unknown) => listeners.get(event)?.forEach((fn) => fn(payload))
   let chat: WebChat | null = null
@@ -45,7 +59,7 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
         api<Record<string, any>>(token, 'GET', '/api/friends'),
         api<{ usernames: string[] }>(token, 'GET', '/api/blocks/hidden').catch(() => ({ usernames: [] })),
       ])
-      const face = (p: any) => ({ id: p.id, username: p.username, displayName: p.displayName ?? null, avatarUrl: p.avatarUrl ?? null, supporter: !!p.supporter })
+      const face = (p: any) => ({ id: p.id, username: p.username, displayName: p.displayName ?? null, avatarUrl: p.avatarUrl ?? null, supporter: !!p.supporter, rank: typeof p.rank === 'string' ? p.rank : null })
       emit('friends-state', {
         hidden: (h.usernames ?? []).map(String),
         friends: (f.friends ?? []).map((p: any) => ({ ...face(p), favourite: !!p.favourite, nickname: p.nickname ?? null, muted: !!p.muted, online: !!p.online, playing: p.playing ?? null })),
@@ -64,15 +78,6 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
   }
   void refreshFriends()
   friendsTimer = window.setInterval(() => void refreshFriends(), 30_000)
-
-  const download = (name: string, data: BlobPart, mime: string) => {
-    const url = URL.createObjectURL(new Blob([data], { type: mime }))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = name
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 10_000)
-  }
 
   const pickFile = (): Promise<File | null> =>
     new Promise((resolve) => {
@@ -93,11 +98,16 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
     },
     chat_unlock: () => status,
     chat_remove_device: async () => {
-      const c = await need()
-      await c.removeDevice()
+      const c = await ready
+      // Chat that never opened here (another account's, still stored) has nothing to sign out of.
+      if (c) await c.removeDevice(!onRemoved)
+      else await Store.wipe()
       window.clearInterval(friendsTimer)
-      onSignedOut()
+      ;(onRemoved ?? onSignedOut)()
     },
+    // Without a chat device: a browser or phone turned away at the limit makes room with these.
+    chat_account_devices: () => gatewayHttp(token, 'GET', '/v1/devices'),
+    chat_account_device_remove: (a) => gatewayHttp(token, 'DELETE', `/v1/devices/${encodeURIComponent(String(a.id))}`),
     chat_set_context: async (a) => {
       const c = await need()
       c.people = new Map((a.people as Person[]).map((p) => [p.id, p]))
@@ -113,8 +123,7 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
       pickFile().then(async (f) => (f ? (await need()).sendFile(parseTarget(a.peer), f) : null)),
     chat_file_save: async (a) => {
       const f = await (await need()).fetchFile(a.msg)
-      download(f.name, f.bytes as BlobPart, f.mime)
-      return f.name
+      return (await saveFile(f.name, f.bytes as BlobPart, f.mime)) ? f.name : null
     },
     chat_file_preview: async (a) => {
       const f = await (await need()).fetchFile(a.msg)
@@ -126,13 +135,15 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
     chat_react: async (a) => (await need()).react(a.msg, a.emoji, a.remove),
     chat_typing: async (a) => (await need()).typing(parseTarget(a.peer), a.active).catch(() => {}),
     chat_mark_read: async (a) => (await need()).markRead(parseTarget(a.peer)),
-    chat_search: async (a) => (await need()).search(a.query),
     chat_settings_get: async () => (await need()).settings(),
     chat_settings_set: async (a) => (await need()).setSettings(a.settings),
     chat_gif_search: (a) => api(token, 'GET', `/api/gifs/search?q=${encodeURIComponent(a.query ?? '')}`),
     chat_message_request: (a) => api(token, 'POST', '/api/chat/message-requests', { username: a.username }),
     chat_message_request_respond: (a) => api(token, 'POST', `/api/chat/message-requests/${encodeURIComponent(a.user)}`, { action: a.accept ? 'accept' : 'decline' }),
     chat_people: (a) => api(token, 'GET', `/api/chat/people?ids=${(a.ids as string[]).join(',')}`),
+    chat_mention_search: (a) => api(token, 'GET', `/api/mentions?q=${encodeURIComponent(String(a.query ?? '').slice(0, 32))}`),
+    chat_mention_lookup: (a) => api(token, 'GET', `/api/mentions?ids=${(a.ids as string[]).slice(0, 64).join(',')}`),
+    chat_mention_notify: (a) => api(token, 'POST', '/api/chat/mentions', { ids: a.ids, message: a.message, group: !!a.group }),
     chat_verify_info: async (a) => (await need()).verifyInfo(a.peer),
     chat_verify_mark: async (a) => (await need()).verifyMark(a.peer, a.verified),
     chat_identity_ack: async (a) => (await need()).identityAck(a.peer),
@@ -168,14 +179,14 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
       return api(token, 'POST', '/api/chat/reports', { userId: r.peer, reason: r.reason, note: r.note ?? '', messages, block: !!r.block })
     },
     chat_export_history: async () => {
-      download('kryoto-chat-history.json', JSON.stringify(await (await need()).exportHistory(), null, 2), 'application/json')
-      return 'your downloads'
+      const name = 'kryoto-chat-history.json'
+      return (await saveFile(name, JSON.stringify(await (await need()).exportHistory(), null, 2), 'application/json')) ? name : null
     },
     chat_call_signal: async (a) => (await need()).sendCall(a.peer, a.callId, a.kind, a.payload),
     chat_ice_servers: () => api(token, 'GET', '/api/chat/ice'),
     online_lobby: () => null,
     room_list: (a) => api(token, 'GET', a.after ? `/api/chat/room?after=${encodeURIComponent(a.after)}` : '/api/chat/room'),
-    room_post: (a) => api(token, 'POST', '/api/chat/room', { text: a.text }),
+    room_post: (a) => api(token, 'POST', '/api/chat/room', { text: a.text, replyTo: a.replyTo ?? null }),
     room_delete: (a) => api(token, 'DELETE', `/api/chat/room/${encodeURIComponent(a.id)}`),
     store_refresh_account: () => refreshFriends(),
     // The friends list's own actions (src/lib/friends.ts builds the route).

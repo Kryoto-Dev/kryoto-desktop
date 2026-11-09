@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, Cloud, EyeOff, Trophy, Wrench } from 'lucide-react'
+import { ChevronDown, Cloud, EyeOff, Trophy, Wrench } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Card, Label, Modal } from '@/ui'
 import { call, errorText, on } from '@/lib/bridge'
 import type { LibraryGame } from '@/lib/library'

@@ -27,7 +27,7 @@ Debug builds run as `to.kryo.desktop.dev`, beside an installed copy, without sha
 | Path | What's there |
 |---|---|
 | `src-tauri/src/` | native side: downloads, launching, library, storage, tray, updater, logs |
-| `src/` | the UI: `shell`, `library`, `downloads`, `settings`, `community`, `friends`, `boot` |
+| `src/` | the UI: `shell`, `library`, `downloads`, `settings`, `friends`, `boot` |
 | `crates/kryoto-repair` | the game repair engine (shared with the auto-fixer) |
 | `scripts/` | build, brand art and UI checks |
 | `docs/` | [development guide](docs/development.md), logo and screenshots |

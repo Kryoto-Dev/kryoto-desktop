@@ -275,6 +275,9 @@ pub struct RemoteCommand {
     /// That release's version, so it installs as that build.
     #[serde(default)]
     version: Option<String>,
+    /// A collection sent from a phone: what it holds now.
+    #[serde(default)]
+    collection: Option<crate::collections::Collection>,
 }
 
 fn game_id_of(c: &RemoteCommand) -> Result<String, String> {
@@ -313,7 +316,23 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
                 if c.url.is_none() && !c.mirrors.is_empty() {
                     // Only on mirrors: the first one this app can download
                     // from, the way its own Store would.
-                    let page = c.mirrors.iter().find(|m| crate::resolvers::classify(m).is_some()).ok_or("None of this game's mirrors can be downloaded from here. Open its page in the Store.")?;
+                    // Which hosts it is on, so the answer says what to do
+                    // (open one of them in a browser) rather than only no.
+                    let page = c.mirrors.iter().find(|m| crate::resolvers::classify(m).is_some()).ok_or_else(|| {
+                        let mut hosts: Vec<String> = c
+                            .mirrors
+                            .iter()
+                            .map(|m| crate::resolvers::hostname(m))
+                            .map(|h| h.strip_prefix("www.").unwrap_or(&h).to_string())
+                            .filter(|h| !h.is_empty())
+                            .collect();
+                        hosts.sort();
+                        hosts.dedup();
+                        let named = if hosts.is_empty() { "its mirrors".to_string() } else { hosts.join(", ") };
+                        let text = format!("Kryoto Desktop cannot download this game by itself: it is only on {named}. Open its page in the Store and take a mirror in your browser.");
+                        let _ = tauri::Emitter::emit(&app, "notify", downloads::Notice::new("Download needs your browser", &text, None));
+                        text
+                    })?;
                     let version = c.version.filter(|v| !v.is_empty() && v.len() <= 120);
                     downloads::enqueue_remote_mirror(&app, &id, page.clone(), slug, title, version)?;
                     return Ok(());
@@ -323,6 +342,10 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
                     return Err("This download does not come from Kryoto.".into());
                 }
                 downloads::enqueue_remote(&app, &id, url.to_string(), slug, title)?;
+            }
+            // A collection sent from a phone: every game of it this PC lacks.
+            "collection" => {
+                crate::collections::install_all(&app, c.collection.ok_or("That collection did not arrive whole.")?)?;
             }
             "pause" | "resume" | "cancel" => {
                 let download_id = c.download_id.filter(|i| !i.is_empty() && i.len() <= 80).ok_or("Invalid download ID.")?;
@@ -367,9 +390,15 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
                     }
                 });
             }
+            // A game already closed is stopped, which is what was asked. As a
+            // failure it came back every poll until the command ran out:
+            // thousands of tries from one PC.
             "stop" => {
                 let game = game_id_of(&c)?;
-                library::game_stop(app.state::<library::Running>(), game)?;
+                match library::game_stop(app.state::<library::Running>(), game) {
+                    Err(e) if e == library::NOT_RUNNING => crate::logging::info("remote", "asked to stop a game that had already closed"),
+                    other => other?,
+                }
             }
             "uninstall" | "unlist" => {
                 let game = game_id_of(&c)?;

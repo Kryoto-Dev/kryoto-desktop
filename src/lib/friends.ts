@@ -1,4 +1,5 @@
-import { call, isTauri, on } from '@/lib/bridge'
+import { call, isTauri, isWeb, on } from '@/lib/bridge'
+import { syncEmojiUsage } from '@/rich/emoji-usage'
 
 /**
  * Managing friends from the friends list itself: requests, answers, removing,
@@ -19,7 +20,7 @@ export type FriendAction =
   | { kind: 'mute'; userId: string; on: boolean }
   | { kind: 'invite' }
 
-export type FriendFetch = { method: 'POST' | 'PATCH' | 'DELETE'; path: string; body?: Record<string, unknown> }
+export type FriendFetch = { method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; path: string; body?: Record<string, unknown> }
 
 const id = (v: string) => {
   if (!/^\d{1,20}$/.test(v)) throw new Error('Not an account.')
@@ -50,7 +51,12 @@ export function friendFetch(a: FriendAction): FriendFetch {
 
 type Done = { id: string; ok: boolean; status: number; data?: Record<string, unknown> | null }
 
-function viaStore(f: FriendFetch): Promise<Record<string, unknown>> {
+/**
+ * One request through the Store's kryo.to page, with its session, answered
+ * by `store-friend-done`. The native side allows only the friends list's
+ * routes, the account's play-time read and whether it wrote a game up (lib.rs `friend_route_allowed`).
+ */
+export function viaStore(f: FriendFetch): Promise<Record<string, unknown>> {
   const ticket = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
   return new Promise((resolve, reject) => {
     let stop: (() => void) | undefined
@@ -81,9 +87,34 @@ function viaStore(f: FriendFetch): Promise<Record<string, unknown>> {
 /** Run one action; resolves kryo.to's answer, rejects with its error in words. */
 export async function friendAction(a: FriendAction): Promise<Record<string, unknown>> {
   const f = friendFetch(a)
-  const data = isTauri() ? await viaStore(f) : await call<Record<string, unknown>>('friends_fetch', f)
+  const data = isTauri() && !isWeb() ? await viaStore(f) : await call<Record<string, unknown>>('friends_fetch', f)
   // The lists change with every action: ask for them again (the Store page
   // also does this itself once its request settles).
   void call('store_refresh_account').catch(() => {})
   return data ?? {}
+}
+
+let usageFor: string | null = null
+
+/**
+ * The emoji picker's "Frequently used" row follows the signed-in account
+ * (rich/emoji-usage.ts, kryo.to `/api/account/emoji-usage`), through the same
+ * door as the friends list: the Store's page in the app, the token in the web
+ * chat. Once per account; signing out stops saving.
+ */
+export function followEmojiUsage(username: string | null): void {
+  if (username === usageFor) return
+  usageFor = username
+  if (!username) {
+    syncEmojiUsage(null)
+    return
+  }
+  const go = (f: FriendFetch) => (isTauri() && !isWeb() ? viaStore(f) : call<Record<string, unknown>>('friends_fetch', f))
+  syncEmojiUsage({
+    load: () =>
+      go({ method: 'GET', path: '/api/account/emoji-usage' }).then((d) =>
+        d && typeof d.tally === 'object' && d.tally ? (d.tally as Record<string, number>) : null,
+      ),
+    save: (tally) => go({ method: 'PUT', path: '/api/account/emoji-usage', body: { tally } }),
+  })
 }

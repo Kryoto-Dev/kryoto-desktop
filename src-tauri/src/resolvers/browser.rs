@@ -250,6 +250,8 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str, mode:
         app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("mirror-browser"),
     );
     let window = builder.build().map_err(|e| format!("could not open its page ({e})"))?;
+    #[cfg(target_os = "linux")]
+    crate::adblock::install_mirror(&window);
     #[cfg(windows)]
     {
         if let Err(error) = super::ublock::install(&window).await {
@@ -361,9 +363,125 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str, mode:
     outcome
 }
 
+/// filez.stream's verification, passed in its own page.
+pub struct FilezAccess {
+    /// Its access cookies (`__Host-fz-download`, `__Host-fz-preview`).
+    pub cookie: String,
+    pub user_agent: String,
+}
+
+/// filez.stream's own check, run in its page the way its file page runs it
+/// (`src/lib/turnstile.ts` there): ask whether this browser already has a
+/// download pass; if not, render its Turnstile with its site key and action
+/// and trade the token at `/api/turnstile`, which sets the pass as a cookie.
+/// Nothing is skipped; the pass is the host's, for a day, on this network.
+fn filez_js() -> String {
+    r#"(function(){if(window.__kryFz)return;window.__kryFz=1;
+var box=document.createElement('div');box.style.cssText='position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483647;padding:18px;border-radius:14px;background:#141414;border:1px solid #2a2a2a;box-shadow:0 20px 60px #000a;font:13px system-ui;color:#ddd;text-align:center;min-width:300px';
+box.innerHTML='<div>Kryoto is getting your file from filez.stream</div><div id="kry-fz" style="margin-top:10px"></div>';(document.body||document.documentElement).appendChild(box);
+function say(m){box.firstChild.textContent=m}
+function render(key){window.turnstile.render('#kry-fz',{sitekey:key,action:'download',theme:'dark',retry:'never',callback:function(t){say('Checked. Starting the download...');fetch('/api/turnstile',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({action:'download','cf-turnstile-response':t})}).then(function(r){if(!r.ok)say('filez.stream did not accept the check ('+r.status+'). Close this window and press Retry.')}).catch(function(e){say('filez.stream did not answer: '+e)})}})}
+fetch('/api/turnstile?action=download',{credentials:'same-origin'}).then(function(r){return r.json()}).then(function(s){if(s.expiresAt&&s.expiresAt>Date.now()/1000+60){say('Starting the download...');return}
+var go=function(){render(s.sitekey)};if(window.turnstile&&window.turnstile.render)go();else{var sc=document.createElement('script');sc.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';sc.onload=function(){var n=0,i=setInterval(function(){if(window.turnstile&&window.turnstile.render){clearInterval(i);go()}else if(++n>80)clearInterval(i)},125)};document.head.appendChild(sc)}}).catch(function(e){say('filez.stream did not answer: '+e)})})()"#.to_string()
+}
+
+/// The filez.stream download pass, from its own page in a window of ours:
+/// hidden while its check passes by itself, shown when it wants a person.
+pub async fn filez_access<R: Runtime>(app: &AppHandle<R>, page: &str, origin: &str) -> Result<FilezAccess, String> {
+    let home: Url = format!("{origin}/").parse().map_err(|_| "not a valid link".to_string())?;
+    let _ = page;
+    let _slot = tokio::time::timeout(BUDGET, SLOT.lock()).await.map_err(|_| "another mirror is still being opened".to_string())?;
+    if let Some(w) = app.get_webview_window(LABEL) {
+        let _ = w.destroy();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let shared = Arc::new(Shared::default());
+    if let Ok(mut a) = ACTIVE.lock() {
+        *a = Some(shared.clone());
+    }
+    let _active_reset = ActiveReset;
+    let host = "filez.stream";
+    let _ = app.emit("resolver-status", serde_json::json!({ "state": "solving", "host": host }));
+    let on_title = shared.clone();
+    let builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(home.clone()))
+        .title("Kryoto: filez.stream download")
+        .inner_size(520.0, 420.0)
+        .center()
+        .visible(false)
+        .focused(false)
+        .on_document_title_changed(move |_, title| {
+            if let Ok(mut t) = on_title.title.lock() {
+                *t = Some(title);
+            }
+        })
+        // Nothing on this page is a download of ours; the file comes natively.
+        .on_download(|_, _| false)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+    // A profile of its own: no extensions (an ad blocker has nothing to do on
+    // the host's own page), and the pass kept for its day between downloads.
+    #[cfg(windows)]
+    let builder = builder.data_directory(app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("filez-browser"));
+    let window = builder.build().map_err(|e| format!("could not open filez.stream ({e})"))?;
+
+    let started = Instant::now();
+    let mut ran = false;
+    let mut shown = false;
+    let mut user_agent: Option<String> = None;
+    let mut interactive_since: Option<Instant> = None;
+    let outcome = loop {
+        tokio::time::sleep(TICK).await;
+        if shared.cancelled.load(std::sync::atomic::Ordering::SeqCst) || app.get_webview_window(LABEL).is_none() {
+            break Err("the filez.stream window was closed before its check passed".to_string());
+        }
+        let cookies = window.cookies_for_url(home.clone()).unwrap_or_default();
+        if cookies.iter().any(|c| c.name().ends_with("fz-download")) && user_agent.is_some() {
+            let cookie = cookies.iter().filter(|c| c.name().contains("fz-")).map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; ");
+            break Ok(FilezAccess { cookie, user_agent: user_agent.clone().unwrap_or_else(|| super::UA.into()) });
+        }
+        let _ = window.eval(probe_js());
+        tokio::time::sleep(TICK / 2).await;
+        if let Some(p) = shared.title.lock().ok().and_then(|mut t| t.take()).and_then(|t| decode_probe(&t)) {
+            if !p.u.is_empty() {
+                user_agent = Some(p.u);
+            }
+            interactive_since = if p.t { Some(interactive_since.unwrap_or_else(Instant::now)) } else { None };
+            if p.r == "complete" && !ran {
+                ran = true;
+                let _ = window.eval(filez_js());
+            }
+        }
+        if started.elapsed() >= BUDGET {
+            break Err("filez.stream's check did not pass in time".to_string());
+        }
+        let due = interactive_since.is_some_and(|t| t.elapsed() >= INTERACTIVE_GRACE) || started.elapsed() >= HIDDEN_FOR;
+        if due && !shown {
+            shown = true;
+            let _ = window.show();
+            let _ = window.set_focus();
+            let _ = app.emit("resolver-status", serde_json::json!({ "state": "interactive", "host": host }));
+            let _ = app.emit(
+                "notify",
+                crate::downloads::Notice::new("filez.stream wants a quick check", "Its page is open in a window of its own. Pass the check there and the download carries on in Kryoto.", None),
+            );
+        }
+    };
+    let _ = window.destroy();
+    let state = if outcome.is_ok() { "captured" } else { "failed" };
+    let _ = app.emit("resolver-status", serde_json::json!({ "state": state, "host": host }));
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filez_check_is_the_hosts_own() {
+        let js = filez_js();
+        assert!(js.contains("/api/turnstile?action=download"));
+        assert!(js.contains("action:'download'"));
+        assert!(!js.contains("http://"), "only the host's own page and Cloudflare's script");
+    }
 
     #[test]
     fn presses_download_buttons_only() {

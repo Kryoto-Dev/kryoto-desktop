@@ -1,7 +1,7 @@
-import { Bell, Download, Play, Plus, Users } from 'lucide-react'
+import { Bell, Download, Play, Plus, Users } from '@/ui/pixel-icons'
 import { asciiTrack } from '@/ui'
 import { formatBytes, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
-import type { Toast } from '@/shell/Toasts'
+import { ToastActionButton, type Toast } from '@/shell/Toasts'
 import { useSocialBadge } from '@/hooks/useSocialBadge'
 
 const chip =
@@ -16,6 +16,7 @@ export function BottomBar({
   downloads,
   notice,
   onNotice,
+  onDismissNotice,
   onAddGame,
   onDownloads,
   onFriends,
@@ -24,14 +25,17 @@ export function BottomBar({
   downloads: Dl[]
   notice: Toast | null
   onNotice: (t: Toast) => void
+  onDismissNotice: (key: number) => void
   onAddGame: () => void
   onDownloads: () => void
-  onFriends: () => void
+  /** None for an account friends and chat are not on for. */
+  onFriends?: () => void
   friendsActive?: boolean
 }) {
   const waitingSocial = useSocialBadge().total
   const active = downloads.find(isWorking)
-  const waiting = downloads.filter((d) => d.status === 'queued' || d.status === 'paused').length
+  const count = (status: Dl['status']) => downloads.filter((d) => d.status === status).length
+  const waiting = [`${count('failed')} failed`, `${count('paused')} paused`, `${count('queued')} queued`].filter((s) => !s.startsWith('0 '))
   return (
     <footer className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-t border-border bg-background px-2">
       <div className="flex">
@@ -50,7 +54,8 @@ export function BottomBar({
             <span aria-hidden className="kryo-ascii-art text-[11px] tracking-normal text-foreground">
               {asciiTrack(progressOf(active), 16)}
             </span>
-            <span className="tabular-nums">
+            {/* A fixed width: the whole group is centred, so a figure changing length would slide it. */}
+            <span className="w-32 text-left tabular-nums">
               {Math.round(progressOf(active) * 100)}%
               {active.status === 'downloading' && active.speed ? ` · ${formatBytes(active.speed)}/s` : ''}
             </span>
@@ -58,7 +63,7 @@ export function BottomBar({
         ) : (
           <>
             <Download className="size-3" />
-            {waiting ? `Downloads · ${waiting} paused` : 'Downloads'}
+            {['Downloads', ...waiting].join(' · ')}
           </>
         )}
       </button>
@@ -74,7 +79,9 @@ export function BottomBar({
             <span className="truncate">{notice.title}</span>
           </button>
         ) : null}
-        <button
+        {notice?.action ? <ToastActionButton toast={notice} onDismiss={onDismissNotice} className="kryo-pill h-7 px-3" /> : null}
+        {notice?.decline ? <ToastActionButton toast={notice} which="decline" onDismiss={onDismissNotice} className="kryo-pill h-7 px-3 text-muted-foreground" /> : null}
+        {onFriends ? <button
           type="button"
           className={`${chip} ${friendsActive ? 'bg-secondary text-foreground' : ''}`}
           aria-current={friendsActive ? 'page' : undefined}
@@ -89,7 +96,7 @@ export function BottomBar({
           ) : (
             <Users className="size-3" />
           )}
-        </button>
+        </button> : null}
       </div>
     </footer>
   )
