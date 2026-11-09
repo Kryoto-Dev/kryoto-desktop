@@ -147,7 +147,11 @@ const settings: Record<string, unknown> = {
   seenNotices:
     typeof location !== 'undefined' && location.search.includes('whatsnew')
       ? []
-      : ['setup', 'intro', 'found-games'].map((n) => `${n}-${__APP_VERSION__.replace(/\./g, '-')}`),
+      : [
+          ...['setup', 'intro', 'found-games'].map((n) => `${n}-${__APP_VERSION__.replace(/\./g, '-')}`),
+          // What's new is the 0.3.0 one until a version brings its own (FirstStart's SETUP_ID).
+          'setup-0-3-0',
+        ],
   // `?firststart` in the preview shows the first-start setup (setup/FirstStart.tsx).
   welcomed: typeof location === 'undefined' || !location.search.includes('firststart'),
   vrRuntime: '',
