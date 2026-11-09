@@ -539,7 +539,7 @@ export function ChatPane({
   const counter = limit - text.length
 
   return (
-    <section className="grid min-h-0 grid-rows-[auto_1fr_auto]">
+    <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
       <header className={cn('flex items-center justify-between gap-3 border-b border-border py-3', onBack ? 'px-3' : 'px-5')}>
         <div className="flex min-w-0 items-center gap-3">
           {onBack ? (

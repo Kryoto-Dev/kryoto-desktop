@@ -22,7 +22,7 @@ import { CompatibilityFacts } from '@/library/Compatibility'
 import { LibraryWriteups } from '@/library/Writeups'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
 import { automaticArtwork } from '@/lib/game-artwork'
-import { BranchTag } from '@/library/BranchTag'
+import { BranchTag, branchLabel } from '@/library/BranchTag'
 import { launcherName } from '@/lib/launchers'
 import { DiscordChip } from '@/library/DiscordChip'
 import { SourceSplitButton, useReleases } from '@/library/Versions'
@@ -83,8 +83,11 @@ export function GamePage({
   onSetStatus,
   onGameChanged,
   onContext,
+  copy = null,
 }: {
   game: LibraryGame
+  /** A second copy of the same game is in the Library: this one's folder (BranchTag's `copyLabel`). */
+  copy?: string | null
   running: boolean
   error: string | null
   onDismissError: () => void
@@ -266,9 +269,9 @@ export function GamePage({
         title={game.title}
         adult={game.nsfw}
         caption={
-          (game.steamBranch && game.steamBranch !== 'public') || vr || game.launcher ? (
+          branchLabel(game.steamBranch, game.title) || copy || vr || game.launcher ? (
             <span className="flex gap-1.5 justify-self-start">
-              <BranchTag branch={game.steamBranch} launcher={game.launcher} />
+              <BranchTag branch={game.steamBranch} launcher={game.launcher} title={game.title} copy={copy} className="px-2 py-1 text-[10px]" />
               <VrTag vr={vr} />
             </span>
           ) : undefined

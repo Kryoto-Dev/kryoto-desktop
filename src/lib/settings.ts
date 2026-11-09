@@ -295,7 +295,7 @@ function publish(s: Settings) {
 
 /** How the Linux build draws its window (src-tauri/src/display_env.rs). */
 export type DisplayMode = 'auto' | 'compatible' | 'full'
-export type DisplayState = { mode: DisplayMode; reason: string; healed: boolean }
+export type DisplayState = { mode: DisplayMode; reason: string; healed: boolean; appimage?: boolean }
 
 export const displayApi = {
   /** Null outside the Linux build. */

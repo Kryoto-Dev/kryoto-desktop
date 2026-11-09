@@ -120,11 +120,24 @@ export function FriendsPage({
   useLayoutEffect(() => {
     const el = root.current
     if (!el) return
-    const measure = () => setNarrow(el.getBoundingClientRect().width < NARROW)
+    const measure = () => {
+      const next = el.getBoundingClientRect().width < NARROW
+      setNarrow((was) => (was === next ? was : next))
+    }
     measure()
-    const ro = new ResizeObserver(measure)
+    // Changing the layout inside the observer's own callback is what browsers
+    // report as "ResizeObserver loop completed with undelivered notifications"
+    // (KB-0251): the change waits for the next frame instead.
+    let frame = 0
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(measure)
+    })
     ro.observe(el)
-    return () => ro.disconnect()
+    return () => {
+      cancelAnimationFrame(frame)
+      ro.disconnect()
+    }
   }, [])
 
   // Chat: who this device is in chat (kept through a short disconnect), which
@@ -393,12 +406,12 @@ export function FriendsPage({
   const chatReady = chat?.state === 'online'
 
   return (
-    <div ref={root} className={cn('grid min-h-0 min-w-0 grow', narrow ? 'grid-cols-1' : 'grid-cols-[300px_1fr]')}>
+    <div ref={root} className={cn('grid h-full min-h-0 min-w-0 grow grid-rows-[minmax(0,1fr)] overflow-hidden', narrow ? 'grid-cols-[minmax(0,1fr)]' : 'grid-cols-[300px_minmax(0,1fr)]')}>
       {showList ? (
-        <aside className={cn('grid min-h-0', list === 'chats' ? 'grid-rows-[auto_auto_1fr]' : 'grid-rows-[auto_auto_auto_1fr]', narrow ? 'bg-background' : 'border-r border-border bg-card/40')}>
+        <aside className={cn('grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] overflow-hidden', list === 'chats' ? 'grid-rows-[auto_auto_1fr]' : 'grid-rows-[auto_auto_auto_1fr]', narrow ? 'bg-background' : 'border-r border-border bg-card/40')}>
           {list === 'friends' ? <SelfCard account={account} chat={chat} onProfile={onProfile} /> : null}
-          <div className="flex gap-2 border-b border-border p-3">
-            <label className={`kryo-pill flex h-8 min-w-0 grow items-center gap-2 border border-border px-3 text-[11px] text-muted-foreground focus-within:border-foreground${live ? '' : ' opacity-60'}`}>
+          <div className="flex min-w-0 gap-2 border-b border-border p-3">
+            <label className={`kryo-pill flex h-8 w-0 min-w-0 grow items-center gap-2 border border-border px-3 text-[11px] text-muted-foreground focus-within:border-foreground${live ? '' : ' opacity-60'}`}>
               <Search className="size-3 shrink-0" aria-hidden />
               <input
                 value={search}
@@ -702,7 +715,7 @@ export function FriendsPage({
           onBack={back}
         />
       ) : narrow ? null : (
-        <section className="grid min-h-0 place-content-center justify-items-center gap-6 overflow-auto p-10 text-center">
+        <section className="grid min-h-0 min-w-0 place-content-center justify-items-center gap-6 overflow-auto p-10 text-center">
           <AsciiArt lines={CHAT} mode="reveal" revealMs={800} className="h-24 text-muted-foreground" />
           {!account.friends ? (
             <div className="grid max-w-sm gap-2">

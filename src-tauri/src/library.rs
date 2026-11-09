@@ -159,6 +159,46 @@ struct GameEvent {
     stopped: bool,
 }
 
+/// A Steam branch's name the way people say it ("Public beta", "GB27"), or None
+/// for the public branch and for a title that already names it. The same rule
+/// as the Library's BranchTag (src/library/BranchTag.tsx) and kryo.to's
+/// `lib/steam-branch.ts`.
+pub fn branch_label(branch: Option<&str>, title: &str) -> Option<String> {
+    let name = branch.map(str::trim).filter(|b| !b.is_empty() && !b.eq_ignore_ascii_case("public"))?;
+    let plain = |s: &str| {
+        let words: Vec<String> = s.to_lowercase().split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect();
+        format!(" {} ", words.join(" "))
+    };
+    if plain(title).contains(&plain(name)) {
+        return None;
+    }
+    let words: Vec<String> = name
+        .split(['-', '_', ' '])
+        .filter(|w| !w.is_empty())
+        .enumerate()
+        .map(|(i, w)| {
+            if w.chars().any(|c| c.is_ascii_digit()) && w.chars().count() <= 6 {
+                w.to_uppercase()
+            } else if i == 0 {
+                let mut c = w.chars();
+                c.next().map(|f| f.to_uppercase().chain(c.flat_map(char::to_lowercase)).collect()).unwrap_or_default()
+            } else {
+                w.to_lowercase()
+            }
+        })
+        .collect();
+    Some(words.join(" "))
+}
+
+/// "GoreBox (Public beta branch)": the name with its branch, for notifications
+/// and Discord, where no tag can be drawn.
+pub fn title_with_branch(title: &str, branch: Option<&str>) -> String {
+    match branch_label(branch, title) {
+        Some(label) => format!("{title} ({label} branch)"),
+        None => title.to_string(),
+    }
+}
+
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -1928,7 +1968,17 @@ pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{added_place, from_folder, hidden_differences, parse, prepare_launch, set_hidden, slugify, LibraryGame, MARKER};
+    use super::{added_place, from_folder, hidden_differences, parse, prepare_launch, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
+
+    #[test]
+    fn a_beta_branch_is_named_where_no_tag_can_be_drawn() {
+        assert_eq!(title_with_branch("GoreBox", Some("public-beta")), "GoreBox (Public beta branch)");
+        assert_eq!(title_with_branch("GoreBox", Some("gb27")), "GoreBox (GB27 branch)");
+        assert_eq!(title_with_branch("GoreBox", Some("public")), "GoreBox");
+        assert_eq!(title_with_branch("GoreBox", None), "GoreBox");
+        // A title that already names its branch is left alone.
+        assert_eq!(title_with_branch("GoreBox GB27", Some("gb27")), "GoreBox GB27");
+    }
 
     #[test]
     fn a_hidden_game_follows_the_account_unless_it_changed_here_first() {

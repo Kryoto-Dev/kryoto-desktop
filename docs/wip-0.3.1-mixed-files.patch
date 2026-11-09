@@ -1,0 +1,499 @@
+diff --git a/src-tauri/src/downloads.rs b/src-tauri/src/downloads.rs
+index 3ed2bb3..3ce0cfd 100644
+--- a/src-tauri/src/downloads.rs
++++ b/src-tauri/src/downloads.rs
+@@ -119,6 +119,10 @@ pub struct Download {
+     /// The release picked under a game's Versions, when it is not the
+     /// current one: its version string, recorded on the installed game.
+     pub release: Option<String>,
++    /// Added from a game's Add-ons & DLC card (addons.rs `addons_get`): the
++    /// add-on's release id on kryo.to. Its link is minted for that release at
++    /// its turn, and it is an add-on of `game_id` whatever its file is called.
++    pub addon_release: Option<String>,
+     /// Place in the queue: the lowest waiting one goes next. Changed by
+     /// moving it up or down, or "Download now" (`download_move`).
+     pub queue_order: u64,
+@@ -995,6 +999,90 @@ pub fn enqueue_collection<R: Runtime>(app: &AppHandle<R>, games: &[crate::collec
+     Ok(added.len())
+ }
+ 
++/// What a row added from a game's Add-ons & DLC card says when kryo.to wants
++/// the check only its page can pass (a new account, say). The card offers the
++/// game's download window for it.
++pub const ADDON_CHALLENGE: &str = "kryo.to wants a check only its download window can pass for this account. Open the download window to add it there.";
++
++/// One of a game's add-ons, as its Add-ons & DLC card asks for it.
++pub struct AddonRequest {
++    /// The add-on's release id on kryo.to.
++    pub release: String,
++    /// Its label there ("DLC: Firebird", "Japanese language pack").
++    pub label: String,
++    /// kind `repair`: applied under the repair journal (`addons::install_fix`).
++    pub repair: bool,
++    /// Only on mirrors: the page Kryoto downloads it from.
++    pub mirror: Option<Mirror>,
++    pub total: Option<u64>,
++}
++
++/// Queue an add-on for an installed game, straight from its card: no page,
++/// no game to pick. Its link is minted at its turn, like a collection's games,
++/// and it applies to `game` when it lands. Asked again while it is still
++/// going (or after it failed), the same row carries on. Its download id.
++pub fn enqueue_addon<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, req: AddonRequest) -> Result<String, String> {
++    let state = app.state::<Downloads>();
++    let slug = game.slug.clone().ok_or("This game is not from kryo.to.")?;
++    let found = {
++        let list = state.list.lock().map_err(|_| "download list lock poisoned")?;
++        list.iter()
++            .find(|d| d.slug.as_deref() == Some(slug.as_str()) && d.addon_release.as_deref() == Some(req.release.as_str()) && !matches!(d.status, Status::Installed | Status::Canceled))
++            .map(|d| (d.id.clone(), d.status))
++    };
++    if let Some((id, status)) = found {
++        if matches!(status, Status::Failed | Status::Paused) {
++            requeue(app, &id)?;
++        }
++        return Ok(id);
++    }
++    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
++    let id = format!("dl-{stamp}-addon-{}", req.release);
++    let queue_order = state.list.lock().map(|l| l.iter().map(|d| d.queue_order).max().unwrap_or(0) + 1).unwrap_or(1);
++    // Named as a DLC fetched from the Store is ("Forts DLC - Firebird"), so a
++    // row in Downloads and the side rail says which add-on it is, not only
++    // whose: seven DLC queued at once read as seven rows of the game itself.
++    let title = match req.label.strip_prefix("DLC:").or_else(|| req.label.strip_prefix("dlc:")) {
++        Some(name) => format!("{} DLC - {}", game.title, name.trim()),
++        None => format!("{} - {}", game.title, req.label),
++    };
++    let item = Download {
++        id: id.clone(),
++        queue_order,
++        slug: Some(slug),
++        game_id: Some(game.id.clone()),
++        added_at: now(),
++        total: req.total,
++        addon: Some(req.label),
++        repair: req.repair,
++        addon_release: Some(req.release),
++        mint_at_turn: req.mirror.is_none(),
++        url: req.mirror.as_ref().map(|m| m.page.clone()).unwrap_or_default(),
++        mirror: req.mirror,
++        // The game's own details: a version here means kryo.to is not asked
++        // for the game's page (fill_meta), whose size is not this file's.
++        meta: CatalogMeta {
++            title,
++            cover: game.cover.clone(),
++            hero: game.hero.clone(),
++            version: Some(game.version.clone().unwrap_or_default()),
++            nsfw: game.nsfw,
++            ..Default::default()
++        },
++        ..Default::default()
++    };
++    state.list.lock().map_err(|_| "download list lock poisoned")?.insert(0, item);
++    if let Err(e) = persist_checked(app) {
++        if let Ok(mut list) = state.list.lock() {
++            list.retain(|d| d.id != id);
++        }
++        return Err(format!("Could not save the download queue: {e}"));
++    }
++    emit(app, true);
++    start(app.clone(), id.clone());
++    Ok(id)
++}
++
+ /// Whether a new download asks where to install. Pure, for the tests.
+ pub fn asks_for_folder(settings: &crate::settings::Settings, installed: bool) -> bool {
+     settings.ask_install_folder && !installed && crate::settings::all_folders(settings).len() > 1
+@@ -1587,7 +1675,7 @@ pub fn replaced(json: &serde_json::Value, installed: Option<&str>, release: Opti
+ }
+ 
+ fn row_kind(d: &Download, json: Option<&serde_json::Value>) -> FileKind {
+-    if is_dlc_link(&d.url) {
++    if d.addon_release.is_some() || is_dlc_link(&d.url) {
+         return FileKind::Addon(String::new());
+     }
+     let file = file_name_in_link(&d.url);
+@@ -1605,6 +1693,22 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
+     if d.mirror.is_some() {
+         return Ok(());
+     }
++    // An add-on from a game's Add-ons & DLC card: that release's own link.
++    if let Some(release) = &d.addon_release {
++        let minted = match crate::phone::session(app) {
++            Ok(session) => crate::phone::mint_release(app, &session, release, None).await,
++            Err(e) => Err(crate::phone::MintError::Other(e)),
++        };
++        match minted {
++            Ok(url) => {
++                edit(app, id, |d| d.url = url);
++            }
++            Err(crate::phone::MintError::Other(e)) => return Err(e),
++            Err(crate::phone::MintError::Challenge) => return Err(ADDON_CHALLENGE.into()),
++        }
++        persist(app);
++        return Ok(());
++    }
+     let slug = d.slug.ok_or("This download has no game to ask kryo.to about.")?;
+     match crate::phone::mint(app, &slug, None, true).await {
+         Ok(crate::phone::Minted::Link { url, .. }) => {
+@@ -2232,8 +2336,12 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
+         // kryo.to's answer now, whatever an earlier try was told: a hash that
+         // was wrong for this file (another build's) must not outlive a Retry.
+         d.sha256 = found.sha;
+-        d.addon = found.addon;
+-        d.repair = found.repair;
++        // Added from its game's card, it is that add-on even when kryo.to's
++        // answer does not name the file (links left out, renamed by a host).
++        if found.addon.is_some() || d.addon_release.is_none() {
++            d.addon = found.addon;
++            d.repair = found.repair;
++        }
+         // A build other than the current one, whichever way it was picked:
+         // it installs as that build.
+         if let Some(v) = found.release {
+@@ -3672,6 +3780,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
+     }
+     let _ = app.emit("library-changed", ());
+     if settings.notify_downloads {
++        let title = library::title_with_branch(&title, item.meta.steam_branch.as_deref());
+         let _ = app.emit(
+             "notify",
+             match &warning {
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 5920d8c..a5d06f9 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -436,11 +436,30 @@ fn disable_browser_menu(view: &tauri::Webview) {
+ ///   games list, which can be long, only when the account changes, when asked
+ ///   (`__kryoDesktopRefresh`) or every ten minutes.
+ /// * Clicks, so an open menu closes like it would over any other page.
++/// BROWSER_STATE_SCRIPT for a page, `kryo` when it is kryo.to's.
++fn store_script(kryo: bool) -> String {
++    BROWSER_STATE_SCRIPT
++        .replace("__KRYO__", if kryo { "true" } else { "false" })
++        .replace("__STILL_WALL__", if cfg!(target_os = "linux") { "true" } else { "false" })
++}
++
+ const BROWSER_STATE_SCRIPT: &str = r#"
+ (() => {
+   if (window.__kryoDesktop) return;
+   window.__kryoDesktop = true;
+   const KRYO = __KRYO__;
++  // Linux: kryo.to's home page drifts a wall of covers behind the search
++  // (components/home/landing/backdrop.tsx). WebKitGTK repaints it on every
++  // frame: measured on Fedora 44's WebKitGTK 2.54, the page ran at 8 fps with
++  // it moving and 62 fps with it still, and players filmed 20 fps on real GPUs
++  // (KB-0012). Here it holds still, as it does under reduced motion.
++  if (KRYO && __STILL_WALL__) {
++    try {
++      const still = document.createElement('style');
++      still.textContent = '.kryo-landing-track{animation:none!important}';
++      (document.head || document.documentElement).appendChild(still);
++    } catch (_) {}
++  }
+   const key = '__kryo_desktop_history__';
+   const invoke = (command, payload) => {
+     try {
+@@ -1533,13 +1552,15 @@ fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, secon
+         return Err("Open kryo.to first.".into());
+     }
+     view.eval(format!(
+-        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',startedAt:{started_at},seconds:{seconds},sessionKey:'{key}'}})}}).then(r=>{{if(r.ok||(r.status>=400&&r.status<500&&r.status!==429))window.__TAURI_INTERNALS__.invoke('store_play_done',{{key:'{key}'}})}}).catch(()=>{{}})"
++        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',startedAt:{started_at},seconds:{seconds},sessionKey:'{key}'}})}}).then(r=>{{if(r.ok||(r.status>=400&&r.status<500&&r.status!==401&&r.status!==429))window.__TAURI_INTERNALS__.invoke('store_play_done',{{key:'{key}'}})}}).catch(()=>{{}})"
+     ))
+     .map_err(|e| e.to_string())
+ }
+ 
+-/// kryo.to's answer to `store_report_play`: taken, or refused for good. A guest
+-/// has no account to count it on (401); too many (429) or a server error is tried again.
++/// kryo.to's answer to `store_report_play`: taken, or refused for good. Signed
++/// out on the page (401: an expired session), too many (429) or a server error
++/// is tried again, for up to 14 days (lib/play-reports.ts); until 0.3.1 a 401
++/// dropped the session. Guests' sessions are never queued (Shell).
+ #[tauri::command]
+ fn store_play_done(app: tauri::AppHandle, webview: tauri::Webview, key: String) -> Result<(), String> {
+     from_kryoto_store(&app, &webview)?;
+@@ -1924,13 +1945,13 @@ pub fn run() {
+                         }
+                         let Ok(url) = view.url() else { return };
+                         let kryo = is_kryoto(&url, view.app_handle());
+-                        let script = BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" });
++                        let script = store_script(kryo);
+                         let _ = view.eval(format!("if (document.readyState !== 'loading' && !window.__kryoDesktop && location.href !== 'about:blank') {{ {script} }}"));
+                     }
+                 });
+             } else {
+                 let kryo = is_kryoto(payload.url(), webview.app_handle());
+-                let _ = webview.eval(BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" }));
++                let _ = webview.eval(store_script(kryo));
+                 if kryo {
+                     presence::beat(webview.app_handle());
+                     if sign_out_is_due() {
+@@ -2169,6 +2190,8 @@ pub fn run() {
+             compat::compat_install,
+             compat::compat_remove,
+             addons::addon_undo,
++            addons::addons_list,
++            addons::addons_get,
+             online::online_check,
+             online::online_apply,
+             online::online_undo,
+diff --git a/src/lib/downloads.ts b/src/lib/downloads.ts
+index 7899623..f4cb05e 100644
+--- a/src/lib/downloads.ts
++++ b/src/lib/downloads.ts
+@@ -38,6 +38,8 @@ export type Download = {
+   hashMismatch?: boolean
+   /** Set when the file is one of the game's add-ons: its name. */
+   addon: string | null
++  /** Added from a game's Add-ons & DLC card: the add-on's id on kryo.to. */
++  addonRelease?: string | null
+   /** Installed, but the unpacker reported damaged files: what to tell the player. */
+   warning?: string | null
+   /** From a mirror rather than our own copy. */
+@@ -66,6 +68,8 @@ export type Download = {
+     version: string | null
+     sizeBytes: number | null
+     nsfw?: boolean
++    /** The Steam branch the listing builds from (`public`, or a beta such as `gb27`). */
++    steamBranch?: string | null
+   }
+ }
+ 
+diff --git a/src/lib/preview.ts b/src/lib/preview.ts
+index c906f97..3ffd594 100644
+--- a/src/lib/preview.ts
++++ b/src/lib/preview.ts
+@@ -80,13 +80,28 @@ const games = [
+     nsfw: true,
+     version: 'b20488383',
+   }),
+-  game(367520, 'Hollow Knight', { playtimeSeconds: 162000, lastPlayed: now() - 3600 * 3, source: 'Steam (DRM-free)' }),
++  game(367520, 'Hollow Knight', {
++    playtimeSeconds: 162000,
++    lastPlayed: now() - 3600 * 3,
++    source: 'Steam (DRM-free)',
++    // One of its DLC already in (the Add-ons & DLC card, previewAddons below).
++    addons: [{ label: 'DLC: Hidden Dreams', file: 'Hollow Knight DLC - Hidden Dreams - Kryoto.7z', files: ['DLC/hidden_dreams.pak'], replaced: [], installedAt: now() - 86400 * 5 }],
++  }),
+   game(504230, 'Celeste', { playtimeSeconds: 30000, lastPlayed: now() - 86400 * 9 }),
+   game(1145360, 'Hades', { playtimeSeconds: 72000, lastPlayed: now() - 86400 * 30, source: 'Steam + Kryoto Online', launcher: 'steam' }),
+   game(413150, 'Stardew Valley', { playtimeSeconds: 0 }),
+   // One Steam game, two listings: the public build and the gb27 beta.
+   game(2027330, 'GoreBox', { steamBranch: 'public', playtimeSeconds: 7200, lastPlayed: now() - 86400 * 2 }),
+   game(2027330, 'GoreBox27 (early access)', { steamBranch: 'gb27', playtimeSeconds: 3600, lastPlayed: now() - 86400 }),
++  // A beta listed under the very same name: only its tag tells them apart.
++  game(2027330, 'GoreBox', {
++    id: 'gorebox-public-beta',
++    slug: 'gorebox-public-beta',
++    steamBranch: 'public-beta',
++    installDir: 'C:\\Users\\you\\Kryoto Games\\GoreBox (public beta)',
++    playtimeSeconds: 1080,
++    lastPlayed: now() - 86400 * 3,
++  }),
+   game(105600, 'Terraria', {
+     launcher: 'steam',
+     playtimeSeconds: 900,
+@@ -267,6 +282,48 @@ const downloadList: Record<string, unknown>[] = [
+   }),
+ ]
+ 
++/**
++ * kryo.to's add-ons for the sample games (`addons` in /api/games/<slug>/downloads):
++ * Hollow Knight's DLC, more than the card shows unfolded and one with a long
++ * name, and Terraria's language pack and Online-Fix repair. `?addonchallenge`
++ * makes kryo.to want its own check for every add-on (a new account).
++ */
++const addonFixture = (id: number, label: string, size: string, extra: Record<string, unknown> = {}) => ({
++  id,
++  label,
++  note: null,
++  source: 'DLC',
++  version: 'b1',
++  download_size: size,
++  kind: 'addon',
++  offered: true,
++  links: [{ name: `${label.replace(/^DLC: /, 'Hollow Knight DLC - ')} - Kryoto.7z` }],
++  pages: [],
++  hashes: [],
++  ...extra,
++})
++const previewAddons: Record<string, Record<string, unknown>[]> = {
++  'hollow-knight': [
++    addonFixture(9001, 'DLC: Hidden Dreams', '120 MB'),
++    addonFixture(9002, 'DLC: The Grimm Troupe', '340 MB'),
++    addonFixture(9003, 'DLC: Lifeblood', '210 MB'),
++    addonFixture(9004, 'DLC: Godmaster', '480 MB'),
++    addonFixture(9005, 'DLC: Official Soundtrack and Digital Art Book with Concept Sketches', '1.1 GB'),
++    addonFixture(9006, 'DLC: Silksong Preview Pack', '95 MB'),
++    addonFixture(9007, 'DLC: Gods and Glory Costume Set', '60 MB'),
++    addonFixture(9008, 'DLC: Voidheart Edition Extras', '150 MB'),
++  ],
++  terraria: [
++    addonFixture(9101, 'Japanese language pack', '45 MB', { source: 'Language', note: 'Menus and dialogue in Japanese.' }),
++    addonFixture(9102, 'Online-Fix', '12 MB', { source: 'OnlineFix', kind: 'repair', note: 'Online play through Steam.' }),
++  ],
++}
++const SIZE_UNIT: Record<string, number> = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }
++const sizeOf = (text: unknown) => {
++  const [n, unit] = String(text ?? '').split(' ')
++  return Math.round(Number(n) * (SIZE_UNIT[unit ?? ""] ?? 0)) || 200_000_000
++}
++
+ // Initialized only by the browser-preview backend, never by native/web chat.
+ let simulation: ReturnType<typeof setInterval> | undefined
+ export function stopPreview() {
+@@ -293,7 +350,16 @@ export function startPreview() {
+       if (d.extracted === d.extractTotal) {
+         d.status = 'installed'
+         d.finishedAt = now()
+-        previewBus.emit('notify', { title: `${(d.meta as { title: string }).title} is ready to play`, body: 'Installed. Press Play.', gameId: d.gameId ?? null })
++        const owner = d.addon ? games.find((g) => g.id === d.gameId) : undefined
++        if (owner) {
++          // An add-on goes into its game (addons.rs `install`).
++          const list = ((owner.addons as Record<string, unknown>[] | undefined) ?? []).filter((a) => a.file !== d.fileName)
++          if (!d.repair) owner.addons = [...list, { label: d.addon, file: d.fileName, files: [`DLC/${String(d.fileName)}.pak`], replaced: [], installedAt: now() }]
++          previewBus.emit('library-changed', null)
++          previewBus.emit('notify', { title: `${String(d.addon).replace(/^DLC: /, '')} applied`, body: `Added to ${String(owner.title)}.`, gameId: owner.id })
++        } else {
++          previewBus.emit('notify', { title: `${(d.meta as { title: string }).title} is ready to play`, body: 'Installed. Press Play.', gameId: d.gameId ?? null })
++        }
+       }
+       moved = true
+     }
+@@ -764,6 +830,69 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
+   settings_get: () => ({ ...settings }),
+   // Every sample game can use Kryoto Online, so the add-ons card shows it.
+   online_check: () => null,
++  addons_list: (a) => clone(previewAddons[String(a.slug)] ?? []),
++  // Add on a game's Add-ons & DLC card: a row per add-on, for that game, minted at its turn.
++  addons_get: (a) => {
++    const g = games.find((x) => x.id === a.gameId)
++    if (!g) throw new Error('That game is no longer in the library.')
++    if (running.has(String(g.id))) throw new Error(`Close ${String(g.title)} first: its files are in use.`)
++    const challenge = typeof location !== 'undefined' && location.search.includes('addonchallenge')
++    const queued: string[] = []
++    for (const want of a.ids as string[]) {
++      const addon = (previewAddons[String(g.slug)] ?? []).find((x) => String(x.id) === want)
++      if (!addon) continue
++      const same = downloadList.find((d) => d.addonRelease === want && d.slug === g.slug && d.status !== 'installed' && d.status !== 'canceled')
++      if (same) {
++        queued.push(String(same.id))
++        continue
++      }
++      const id = `dl-${Date.now()}-addon-${want}`
++      const total = sizeOf(addon.download_size)
++      const item = dl({
++        id,
++        slug: g.slug,
++        gameId: g.id,
++        url: '',
++        fileName: (addon.links as { name: string }[])[0]?.name ?? `${String(addon.label)} - Kryoto.7z`,
++        status: 'queued',
++        received: 0,
++        total,
++        speed: 0,
++        addedAt: now() + queued.length,
++        addon: addon.label,
++        addonRelease: want,
++        repair: addon.kind === 'repair',
++        meta: { ...dl({}).meta, title: /^DLC: /.test(String(addon.label)) ? `${String(g.title)} DLC - ${String(addon.label).slice(5)}` : `${String(g.title)} - ${String(addon.label)}`, cover: g.cover, hero: g.hero, version: g.version, sizeBytes: null },
++      })
++      downloadList.unshift(item)
++      queued.push(id)
++      // One at a time, as the native queue runs them: each starts when the one before is done.
++      const begin = () => {
++        if (downloadList.some((d) => d !== item && ['resolving', 'downloading', 'extracting'].includes(String(d.status)) && d.addon)) return setTimeout(begin, 700)
++        item.status = 'resolving'
++        previewBus.emit('downloads', clone(downloadList))
++        setTimeout(() => {
++          if (challenge) {
++            Object.assign(item, { status: 'failed', error: 'kryo.to wants a check only its download window can pass for this account. Open the download window to add it there.' })
++          } else {
++            Object.assign(item, { status: 'downloading', speed: 30_000_000 })
++          }
++          previewBus.emit('downloads', clone(downloadList))
++        }, 700)
++      }
++      setTimeout(begin, 400)
++    }
++    previewBus.emit('downloads', clone(downloadList))
++    return { queued, store: false }
++  },
++  addon_undo: (a) => {
++    const g = games.find((x) => x.id === a.gameId)
++    if (!g) throw new Error('That game is no longer in the library.')
++    if (running.has(String(g.id))) throw new Error('Close the game first.')
++    g.addons = ((g.addons as Record<string, unknown>[] | undefined) ?? []).filter((x) => x.file !== a.file)
++    previewBus.emit('library-changed', null)
++    return clone(g)
++  },
+   settings_save: (a) => ({ ...Object.assign(settings, a.settings) }),
+   downloads_list: () => clone(downloadList),
+   storage_overview: () => ({
+diff --git a/src/shell/Shell.tsx b/src/shell/Shell.tsx
+index bde295e..8c9ba91 100644
+--- a/src/shell/Shell.tsx
++++ b/src/shell/Shell.tsx
+@@ -39,6 +39,7 @@ import { KryoAscii } from '@/ui/ascii/KryoAscii'
+ import { EmptyState } from '@/ui/EmptyState'
+ import { SHELF } from '@/ui/ascii/scenes'
+ import { FriendsPage } from '@/friends/FriendsPage'
++import { branchLabel, copyLabel, titleWithBranch } from '@/library/BranchTag'
+ import { CallOverlay } from '@/friends/CallOverlay'
+ import { friendName, useFriends } from '@/hooks/useFriends'
+ import { FOLD, TitleBar, useRowFold } from '@/shell/TitleBar'
+@@ -95,6 +96,7 @@ import { startActiveBeacon } from '@/lib/chat'
+ import { getCurrentWindow } from '@tauri-apps/api/window'
+ import { logError, logWarn } from '@/lib/log'
+ import { flushPlays, isExpectedReportError, reportPlay } from '@/lib/play-reports'
++import { syncPlaytime } from '@/lib/playtime-sync'
+ import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
+ import { entryIsVr, entryLabel, folderName, gameLogs, isWindowsHost, knowsBuild, library, plainPath, playTarget, type LibraryGame } from '@/lib/library'
+ import {
+@@ -585,6 +587,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
+       // Sessions that ended while kryo.to was not open go now.
+       void flushPlays()
+       flushCarried()
++      // Hours this PC counted that never reached the account (playtime-sync.ts).
++      void syncPlaytime(gamesRef.current, [...runningRef.current])
+     }, 4 * 60_000)
+     return () => window.clearInterval(t)
+   }, [])
+@@ -774,7 +778,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
+     () =>
+       lib.games
+         .filter((g): g is LibraryGame & { slug: string } => !!g.slug)
+-        .map((g) => ({ id: g.id, slug: g.slug, title: g.title, cover: g.cover, running: lib.running.has(g.id) })),
++        .map((g) => ({ id: g.id, slug: g.slug, title: titleWithBranch(g.title, g.steamBranch), cover: g.cover, running: lib.running.has(g.id) })),
+     [lib.games, lib.running],
+   )
+ 
+@@ -933,6 +937,10 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
+     { label: 'Uninstall', icon: <Trash2 />, danger: true, onSelect: () => setOverlay({ kind: 'uninstall', id: g.id }) },
+   ]
+   const gameMenu = (g: LibraryGame): MenuEntry[] => [
++    // A beta branch or a second copy says which one this menu is for.
++    ...(branchLabel(g.steamBranch, g.title) || copyLabel(g, lib.games)
++      ? [{ heading: [branchLabel(g.steamBranch, g.title) ? titleWithBranch(g.title, g.steamBranch) : g.title, copyLabel(g, lib.games)].filter(Boolean).join(' · ') } as MenuEntry]
++      : []),
+     lib.running.has(g.id)
+       ? { label: 'Stop', icon: <Square />, onSelect: () => void lib.stop(g.id) }
+       : { label: 'Play', icon: <Play />, onSelect: () => play(g) },
+@@ -1227,7 +1235,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
+         { label: 'Add a game on this PC', icon: <Plus />, onSelect: () => setOverlay({ kind: 'add', slug: null }) },
+         { label: 'Bridge', icon: <FolderInput />, onSelect: () => setOverlay({ kind: 'bridge' }) },
+         ...(recent.length
+-          ? [{ separator: true } as MenuEntry, { heading: 'Recent' } as MenuEntry, ...recent.map((g) => ({ label: g.title, icon: <Play />, onSelect: () => play(g) }))]
++          ? [{ separator: true } as MenuEntry, { heading: 'Recent' } as MenuEntry, ...recent.map((g) => ({ label: titleWithBranch(g.title, g.steamBranch), icon: <Play />, onSelect: () => play(g) }))]
+           : []),
+       ],
+     },
+@@ -1418,6 +1426,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
+           <GamePage
+             key={selected.id}
+             game={selected}
++            copy={copyLabel(selected, lib.games)}
+             onContext={(x, y) => setCtx({ game: selected, x, y })}
+             running={lib.running.has(selected.id)}
+             error={lib.errorGame === selected.id ? lib.error : null}

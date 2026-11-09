@@ -384,6 +384,7 @@ pub fn command(plan: &LaunchPlan) -> std::process::Command {
 /// entries under its mount are removed; host paths and explicit launch options
 /// survive. Never mutate Kryoto's own environment while other threads use it.
 pub fn clean_appimage_env(cmd: &mut std::process::Command) {
+    crate::display_env::remove_font_shim(cmd);
     #[cfg(target_os = "linux")]
     if let Some(root) = std::env::var_os("APPDIR").map(PathBuf::from) {
         apply_appimage_env(cmd, &root, std::env::vars_os());
