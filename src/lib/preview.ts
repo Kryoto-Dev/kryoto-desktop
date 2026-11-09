@@ -87,6 +87,15 @@ const games = [
   // One Steam game, two listings: the public build and the gb27 beta.
   game(2027330, 'GoreBox', { steamBranch: 'public', playtimeSeconds: 7200, lastPlayed: now() - 86400 * 2 }),
   game(2027330, 'GoreBox27 (early access)', { steamBranch: 'gb27', playtimeSeconds: 3600, lastPlayed: now() - 86400 }),
+  // A beta listed under the very same name: only its tag tells them apart.
+  game(2027330, 'GoreBox', {
+    id: 'gorebox-public-beta',
+    slug: 'gorebox-public-beta',
+    steamBranch: 'public-beta',
+    installDir: 'C:\\Users\\you\\Kryoto Games\\GoreBox (public beta)',
+    playtimeSeconds: 1080,
+    lastPlayed: now() - 86400 * 3,
+  }),
   game(105600, 'Terraria', {
     launcher: 'steam',
     playtimeSeconds: 900,

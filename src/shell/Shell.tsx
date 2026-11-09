@@ -39,6 +39,7 @@ import { KryoAscii } from '@/ui/ascii/KryoAscii'
 import { EmptyState } from '@/ui/EmptyState'
 import { SHELF } from '@/ui/ascii/scenes'
 import { FriendsPage } from '@/friends/FriendsPage'
+import { branchLabel, copyLabel, titleWithBranch } from '@/library/BranchTag'
 import { CallOverlay } from '@/friends/CallOverlay'
 import { friendName, useFriends } from '@/hooks/useFriends'
 import { FOLD, TitleBar, useRowFold } from '@/shell/TitleBar'
@@ -777,7 +778,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     () =>
       lib.games
         .filter((g): g is LibraryGame & { slug: string } => !!g.slug)
-        .map((g) => ({ id: g.id, slug: g.slug, title: g.title, cover: g.cover, running: lib.running.has(g.id) })),
+        .map((g) => ({ id: g.id, slug: g.slug, title: titleWithBranch(g.title, g.steamBranch), cover: g.cover, running: lib.running.has(g.id) })),
     [lib.games, lib.running],
   )
 
@@ -936,6 +937,10 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     { label: 'Uninstall', icon: <Trash2 />, danger: true, onSelect: () => setOverlay({ kind: 'uninstall', id: g.id }) },
   ]
   const gameMenu = (g: LibraryGame): MenuEntry[] => [
+    // A beta branch or a second copy says which one this menu is for.
+    ...(branchLabel(g.steamBranch, g.title) || copyLabel(g, lib.games)
+      ? [{ heading: [branchLabel(g.steamBranch, g.title) ? titleWithBranch(g.title, g.steamBranch) : g.title, copyLabel(g, lib.games)].filter(Boolean).join(' · ') } as MenuEntry]
+      : []),
     lib.running.has(g.id)
       ? { label: 'Stop', icon: <Square />, onSelect: () => void lib.stop(g.id) }
       : { label: 'Play', icon: <Play />, onSelect: () => play(g) },
@@ -1230,7 +1235,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         { label: 'Add a game on this PC', icon: <Plus />, onSelect: () => setOverlay({ kind: 'add', slug: null }) },
         { label: 'Bridge', icon: <FolderInput />, onSelect: () => setOverlay({ kind: 'bridge' }) },
         ...(recent.length
-          ? [{ separator: true } as MenuEntry, { heading: 'Recent' } as MenuEntry, ...recent.map((g) => ({ label: g.title, icon: <Play />, onSelect: () => play(g) }))]
+          ? [{ separator: true } as MenuEntry, { heading: 'Recent' } as MenuEntry, ...recent.map((g) => ({ label: titleWithBranch(g.title, g.steamBranch), icon: <Play />, onSelect: () => play(g) }))]
           : []),
       ],
     },
@@ -1421,6 +1426,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
           <GamePage
             key={selected.id}
             game={selected}
+            copy={copyLabel(selected, lib.games)}
             onContext={(x, y) => setCtx({ game: selected, x, y })}
             running={lib.running.has(selected.id)}
             error={lib.errorGame === selected.id ? lib.error : null}

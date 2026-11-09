@@ -3672,6 +3672,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     }
     let _ = app.emit("library-changed", ());
     if settings.notify_downloads {
+        let title = library::title_with_branch(&title, item.meta.steam_branch.as_deref());
         let _ = app.emit(
             "notify",
             match &warning {

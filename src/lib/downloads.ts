@@ -66,6 +66,8 @@ export type Download = {
     version: string | null
     sizeBytes: number | null
     nsfw?: boolean
+    /** The Steam branch the listing builds from (`public`, or a beta such as `gb27`). */
+    steamBranch?: string | null
   }
 }
 
