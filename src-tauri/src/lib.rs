@@ -2190,6 +2190,8 @@ pub fn run() {
             system::window_state_get,
             pet::pet_menu,
             pet::pet_drag,
+            addons::addons_list,
+            addons::addons_get,
             pet::pet_mascot,
             menus::menu_open,
             menus::menu_warm,

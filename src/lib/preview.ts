@@ -80,7 +80,13 @@ const games = [
     nsfw: true,
     version: 'b20488383',
   }),
-  game(367520, 'Hollow Knight', { playtimeSeconds: 162000, lastPlayed: now() - 3600 * 3, source: 'Steam (DRM-free)' }),
+  game(367520, 'Hollow Knight', {
+    playtimeSeconds: 162000,
+    lastPlayed: now() - 3600 * 3,
+    source: 'Steam (DRM-free)',
+    // One of its DLC already in (the Add-ons & DLC card, previewAddons below).
+    addons: [{ label: 'DLC: Hidden Dreams', file: 'Hollow Knight DLC - Hidden Dreams - Kryoto.7z', files: ['DLC/hidden_dreams.pak'], replaced: [], installedAt: now() - 86400 * 5 }],
+  }),
   game(504230, 'Celeste', { playtimeSeconds: 30000, lastPlayed: now() - 86400 * 9 }),
   game(1145360, 'Hades', { playtimeSeconds: 72000, lastPlayed: now() - 86400 * 30, source: 'Steam + Kryoto Online', launcher: 'steam' }),
   game(413150, 'Stardew Valley', { playtimeSeconds: 0 }),
@@ -276,6 +282,48 @@ export function stopPreview() {
 export function startPreview() {
   if (simulation !== undefined) return
   simulation = setInterval(() => {
+/**
+ * kryo.to's add-ons for the sample games (`addons` in /api/games/<slug>/downloads):
+ * Hollow Knight's DLC, more than the card shows unfolded and one with a long
+ * name, and Terraria's language pack and Online-Fix repair. `?addonchallenge`
+ * makes kryo.to want its own check for every add-on (a new account).
+ */
+const addonFixture = (id: number, label: string, size: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  label,
+  note: null,
+  source: 'DLC',
+  version: 'b1',
+  download_size: size,
+  kind: 'addon',
+  offered: true,
+  links: [{ name: `${label.replace(/^DLC: /, 'Hollow Knight DLC - ')} - Kryoto.7z` }],
+  pages: [],
+  hashes: [],
+  ...extra,
+})
+const previewAddons: Record<string, Record<string, unknown>[]> = {
+  'hollow-knight': [
+    addonFixture(9001, 'DLC: Hidden Dreams', '120 MB'),
+    addonFixture(9002, 'DLC: The Grimm Troupe', '340 MB'),
+    addonFixture(9003, 'DLC: Lifeblood', '210 MB'),
+    addonFixture(9004, 'DLC: Godmaster', '480 MB'),
+    addonFixture(9005, 'DLC: Official Soundtrack and Digital Art Book with Concept Sketches', '1.1 GB'),
+    addonFixture(9006, 'DLC: Silksong Preview Pack', '95 MB'),
+    addonFixture(9007, 'DLC: Gods and Glory Costume Set', '60 MB'),
+    addonFixture(9008, 'DLC: Voidheart Edition Extras', '150 MB'),
+  ],
+  terraria: [
+    addonFixture(9101, 'Japanese language pack', '45 MB', { source: 'Language', note: 'Menus and dialogue in Japanese.' }),
+    addonFixture(9102, 'Online-Fix', '12 MB', { source: 'OnlineFix', kind: 'repair', note: 'Online play through Steam.' }),
+  ],
+}
+const SIZE_UNIT: Record<string, number> = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }
+const sizeOf = (text: unknown) => {
+  const [n, unit] = String(text ?? '').split(' ')
+  return Math.round(Number(n) * (SIZE_UNIT[unit ?? ""] ?? 0)) || 200_000_000
+}
+
   let moved = false
   for (const d of downloadList) {
     if (d.status === 'downloading') {
@@ -293,7 +341,16 @@ export function startPreview() {
       if (d.extracted === d.extractTotal) {
         d.status = 'installed'
         d.finishedAt = now()
-        previewBus.emit('notify', { title: `${(d.meta as { title: string }).title} is ready to play`, body: 'Installed. Press Play.', gameId: d.gameId ?? null })
+        const owner = d.addon ? games.find((g) => g.id === d.gameId) : undefined
+        if (owner) {
+          // An add-on goes into its game (addons.rs `install`).
+          const list = ((owner.addons as Record<string, unknown>[] | undefined) ?? []).filter((a) => a.file !== d.fileName)
+          if (!d.repair) owner.addons = [...list, { label: d.addon, file: d.fileName, files: [`DLC/${String(d.fileName)}.pak`], replaced: [], installedAt: now() }]
+          previewBus.emit('library-changed', null)
+          previewBus.emit('notify', { title: `${String(d.addon).replace(/^DLC: /, '')} applied`, body: `Added to ${String(owner.title)}.`, gameId: owner.id })
+        } else {
+          previewBus.emit('notify', { title: `${(d.meta as { title: string }).title} is ready to play`, body: 'Installed. Press Play.', gameId: d.gameId ?? null })
+        }
       }
       moved = true
     }
@@ -773,6 +830,69 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
         drive: 'C:',
         isDefault: true,
         exists: true,
+  addons_list: (a) => clone(previewAddons[String(a.slug)] ?? []),
+  // Add on a game's Add-ons & DLC card: a row per add-on, for that game, minted at its turn.
+  addons_get: (a) => {
+    const g = games.find((x) => x.id === a.gameId)
+    if (!g) throw new Error('That game is no longer in the library.')
+    if (running.has(String(g.id))) throw new Error(`Close ${String(g.title)} first: its files are in use.`)
+    const challenge = typeof location !== 'undefined' && location.search.includes('addonchallenge')
+    const queued: string[] = []
+    for (const want of a.ids as string[]) {
+      const addon = (previewAddons[String(g.slug)] ?? []).find((x) => String(x.id) === want)
+      if (!addon) continue
+      const same = downloadList.find((d) => d.addonRelease === want && d.slug === g.slug && d.status !== 'installed' && d.status !== 'canceled')
+      if (same) {
+        queued.push(String(same.id))
+        continue
+      }
+      const id = `dl-${Date.now()}-addon-${want}`
+      const total = sizeOf(addon.download_size)
+      const item = dl({
+        id,
+        slug: g.slug,
+        gameId: g.id,
+        url: '',
+        fileName: (addon.links as { name: string }[])[0]?.name ?? `${String(addon.label)} - Kryoto.7z`,
+        status: 'queued',
+        received: 0,
+        total,
+        speed: 0,
+        addedAt: now() + queued.length,
+        addon: addon.label,
+        addonRelease: want,
+        repair: addon.kind === 'repair',
+        meta: { ...dl({}).meta, title: /^DLC: /.test(String(addon.label)) ? `${String(g.title)} DLC - ${String(addon.label).slice(5)}` : `${String(g.title)} - ${String(addon.label)}`, cover: g.cover, hero: g.hero, version: g.version, sizeBytes: null },
+      })
+      downloadList.unshift(item)
+      queued.push(id)
+      // One at a time, as the native queue runs them: each starts when the one before is done.
+      const begin = () => {
+        if (downloadList.some((d) => d !== item && ['resolving', 'downloading', 'extracting'].includes(String(d.status)) && d.addon)) return setTimeout(begin, 700)
+        item.status = 'resolving'
+        previewBus.emit('downloads', clone(downloadList))
+        setTimeout(() => {
+          if (challenge) {
+            Object.assign(item, { status: 'failed', error: 'kryo.to wants a check only its download window can pass for this account. Open the download window to add it there.' })
+          } else {
+            Object.assign(item, { status: 'downloading', speed: 30_000_000 })
+          }
+          previewBus.emit('downloads', clone(downloadList))
+        }, 700)
+      }
+      setTimeout(begin, 400)
+    }
+    previewBus.emit('downloads', clone(downloadList))
+    return { queued, store: false }
+  },
+  addon_undo: (a) => {
+    const g = games.find((x) => x.id === a.gameId)
+    if (!g) throw new Error('That game is no longer in the library.')
+    if (running.has(String(g.id))) throw new Error('Close the game first.')
+    g.addons = ((g.addons as Record<string, unknown>[] | undefined) ?? []).filter((x) => x.file !== a.file)
+    previewBus.emit('library-changed', null)
+    return clone(g)
+  },
         total: 953 * GB,
         free: 212 * GB,
         games: [stored('captain-hardcore', 22.1 * GB), stored('stardew-valley', 0.6 * GB), stored('celeste', 1.2 * GB)],

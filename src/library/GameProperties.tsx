@@ -403,7 +403,7 @@ export function GameProperties({
 
         {tab === 'repair' ? (
           <>
-            {game.slug ? <KryoFix slug={game.slug} onGet={() => onOurs(null)} /> : null}
+            {game.slug ? <KryoFix gameId={game.id} slug={game.slug} onGet={() => onOurs(null)} /> : null}
             <GameRepair gameId={game.id} />
           </>
         ) : null}
