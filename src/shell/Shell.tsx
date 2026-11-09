@@ -95,6 +95,7 @@ import { startActiveBeacon } from '@/lib/chat'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { logError, logWarn } from '@/lib/log'
 import { flushPlays, isExpectedReportError, reportPlay } from '@/lib/play-reports'
+import { syncPlaytime } from '@/lib/playtime-sync'
 import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
 import { entryIsVr, entryLabel, folderName, gameLogs, isWindowsHost, knowsBuild, library, plainPath, playTarget, type LibraryGame } from '@/lib/library'
 import {
@@ -585,6 +586,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
       // Sessions that ended while kryo.to was not open go now.
       void flushPlays()
       flushCarried()
+      // Hours this PC counted that never reached the account (playtime-sync.ts).
+      void syncPlaytime(gamesRef.current, [...runningRef.current])
     }, 4 * 60_000)
     return () => window.clearInterval(t)
   }, [])
