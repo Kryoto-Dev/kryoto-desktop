@@ -142,6 +142,7 @@ pub fn defender_hits(dir: &Path, since: u64) -> Vec<Hit> {
 
 /// The log's entries that name a file under `dir`, one per file (its latest),
 /// newest first. Pure, for tests.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn hits_in(events: &serde_json::Value, dir: &Path) -> Vec<Hit> {
     let root = dir.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
     let mut out: Vec<Hit> = Vec::new();

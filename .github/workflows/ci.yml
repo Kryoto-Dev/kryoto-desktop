@@ -144,6 +144,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
+      - name: Test manifests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        shell: pwsh
+        run: ../scripts/test-manifests.ps1
+
       - name: Tests
         working-directory: src-tauri
         run: cargo test --locked

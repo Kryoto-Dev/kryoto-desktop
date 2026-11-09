@@ -403,7 +403,7 @@ try {
       const open = async () => {
         await pads.getByRole('button', { name: 'Account menu' }).click()
         await pads.getByRole('menuitem', { name: /Settings/ }).click()
-        await pads.getByRole('button', { name: 'Controller', exact: true }).click()
+        await pads.getByRole('button', { name: 'Devices', exact: true }).click()
       }
       await pads.evaluate(() => window.padStore.requestPad('03008231110100003414000000000000'))
       await open()
@@ -435,15 +435,15 @@ try {
       const labels = ['gbe_fork', 'RUNE', 'RUNE (Steakclient)', 'RUNE (Steamclient)']
       await dropdown.getByText('gbe_fork', { exact: true }).waitFor()
       await dropdown.focus(); await achievements.keyboard.press('ArrowDown')
-      await dialog.getByRole('listbox', { name: 'Achievement emulator', exact: true }).waitFor()
-      await dialog.getByRole('option', { name: 'RUNE (Steamclient)', exact: true }).waitFor()
-      assert.deepEqual(await dialog.getByRole('option').allTextContents(), labels)
+      await achievements.getByRole('listbox', { name: 'Achievement emulator', exact: true }).waitFor()
+      await achievements.getByRole('option', { name: 'RUNE (Steamclient)', exact: true }).waitFor()
+      assert.deepEqual(await achievements.getByRole('option').allTextContents(), labels)
       await achievements.keyboard.press('Home'); await achievements.keyboard.press('ArrowDown'); await achievements.keyboard.press('Enter')
       await dropdown.getByText('RUNE', { exact: true }).waitFor()
       assert.equal(await dropdown.innerText(), 'RUNE')
       for (const label of ['RUNE', 'gbe_fork', 'RUNE (Steakclient)', 'RUNE (Steamclient)']) {
         await dropdown.click()
-        await dialog.getByRole('option', { name: label, exact: true }).click()
+        await achievements.getByRole('option', { name: label, exact: true }).click()
         const apply = dialog.getByRole('button', { name: `Switch to ${label}`, exact: true })
         await apply.click()
         const undo = dialog.getByRole('button', { name: 'Undo repair', exact: true })

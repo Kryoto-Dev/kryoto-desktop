@@ -1158,6 +1158,7 @@ impl Driver {
     /// In controller mode, what this pad goes by: `None` when it is taken out
     /// of the game, else the remap for it, inner `None` being the pad's own
     /// from Settings.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn pad_remap(&self, key: &str) -> Option<Option<Remap>> {
         let use_it = self.profile.for_pad(key)?;
         Some([use_it, &self.profile].into_iter().find(|p| !p.remap.is_identity()).map(|p| p.remap.clone()))

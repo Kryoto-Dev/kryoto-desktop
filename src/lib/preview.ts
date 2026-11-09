@@ -133,7 +133,12 @@ const settings: Record<string, unknown> = {
   achievementsEndpoint: '',
   debrid: '',
   extractInPlace: false,
-  seenNotices: [],
+  // An everyday player: this version's What's new (setup/FirstStart.tsx) and
+  // found-games check are behind them. `?whatsnew` in the preview shows them.
+  seenNotices:
+    typeof location !== 'undefined' && location.search.includes('whatsnew')
+      ? []
+      : ['setup', 'intro', 'found-games'].map((n) => `${n}-${__APP_VERSION__.replace(/\./g, '-')}`),
   // `?firststart` in the preview shows the first-start setup (setup/FirstStart.tsx).
   welcomed: typeof location === 'undefined' || !location.search.includes('firststart'),
   vrRuntime: '',
@@ -218,7 +223,11 @@ const collectionsPreview: { collections: { id: string; name: string; href: strin
     { id: '201', name: 'Best of the decade', href: '/user/ren/c/decade', role: 'following', games: [collectionGame('hades-ii', 'Hades II', 9.8), collectionGame('tunic', 'TUNIC', 1.9), collectionGame('outer-wilds', 'Outer Wilds', null), collectionGame('after-dark', 'After Dark', 2.2, true)] },
   ],
   installed: ['201'],
-  updates: [{ id: '201', name: 'Best of the decade', href: '/user/ren/c/decade', added: [collectionGame('outer-wilds', 'Outer Wilds', 6.3)] }],
+  // The followed list's new game asks on start (library/CollectionInstall.tsx); `?collectionupdate` shows it.
+  updates:
+    typeof location !== 'undefined' && location.search.includes('collectionupdate')
+      ? [{ id: '201', name: 'Best of the decade', href: '/user/ren/c/decade', added: [collectionGame('outer-wilds', 'Outer Wilds', 6.3)] }]
+      : [],
 }
 
 const downloadList: Record<string, unknown>[] = [
@@ -1016,7 +1025,7 @@ Object.assign(HANDLERS, {
     preview: {
       details: 'Hollow Knight',
       state: '45 hours played',
-      assets: { large_image: games[0]?.cover ?? null },
+      assets: { large_image: games.find((g) => g.title === 'Hollow Knight')?.cover ?? null },
       timestamps: { start: Math.floor(Date.now() / 1000) },
       buttons: [{ label: 'Get Kryoto Desktop', url: 'https://kryo.to/desktop' }, { label: 'Open in Kryoto', url: 'https://kryo.to/game/hollow-knight' }],
     },

@@ -190,6 +190,7 @@ jobs:
           pnpm build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cd src-tauri
+          if ($IsWindows) { ../scripts/test-manifests.ps1; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
           cargo test --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --locked --all-targets -- -D warnings
