@@ -152,7 +152,9 @@ function NavTab({
   const wrapper = useRef<HTMLDivElement | null>(null)
   const closeLocal = () => {
     setDomOpen(false)
-    if (wrapper.current?.contains(document.activeElement)) button.current?.focus({ preventScroll: true })
+    // The menu floats outside the tab (`Floating`), so focus in it counts too.
+    const at = document.activeElement
+    if (wrapper.current?.contains(at) || at?.closest('[data-kryo-float]')) button.current?.focus({ preventScroll: true })
   }
   useDismiss(!native && domOpen, wrapper, closeLocal)
 
