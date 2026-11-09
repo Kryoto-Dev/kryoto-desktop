@@ -2341,8 +2341,8 @@ mod tests {
         let ours: Vec<u32> = (0..js.num_joysticks().unwrap()).filter(|i| is_ours(&js, *i)).collect();
         let opened: Vec<_> = ours.iter().map(|i| gc.open(*i).unwrap()).collect();
         let mut mapper = Mapper::default();
-        for n in 0..2 {
-            pads[n].button(BTN_SOUTH, true);
+        for (n, pad) in pads.iter_mut().enumerate().take(2) {
+            pad.button(BTN_SOUTH, true);
             std::thread::sleep(Duration::from_millis(120));
             gc.update();
             let states: Vec<(String, PadState)> = opened
@@ -2355,7 +2355,7 @@ mod tests {
             mapper.step_all(&playing, 0.01, &mut events);
             println!("  pad {} presses its bottom button: sends {:?}", n + 1, keys(&events));
             output.send(&events).unwrap();
-            pads[n].button(BTN_SOUTH, false);
+            pad.button(BTN_SOUTH, false);
             std::thread::sleep(Duration::from_millis(120));
             gc.update();
             let mut events = Vec::new();

@@ -618,7 +618,10 @@ function makeIcon(name: PixelIconName, classic: string): LucideIcon {
         data-kp-loop={loop}
       >
         {title ? <title>{title}</title> : null}
-        <svg className="kp-p" viewBox={pixelViewBox(boxOf(size, classes), offset)} data-kp-o={offset[0] || offset[1] ? offset.join(' ') : undefined} width="24" height="24" fill="currentColor" stroke="none" shapeRendering="crispEdges">
+        {/* suppressHydrationWarning: pixel-icons-motion.tsx fits this viewBox to the
+            device pixels as soon as the icon is in the page, which for streamed
+            HTML can be before React hydrates it. */}
+        <svg suppressHydrationWarning className="kp-p" viewBox={pixelViewBox(boxOf(size, classes), offset)} data-kp-o={offset[0] || offset[1] ? offset.join(' ') : undefined} width="24" height="24" fill="currentColor" stroke="none" shapeRendering="crispEdges">
           <path d={full} />
           <path d={dim} opacity={0.45} />
         </svg>
