@@ -37,6 +37,9 @@ pub struct Settings {
     pub radius: String,
     /// `teletext` (the house face) or `mono`.
     pub font: String,
+    /// How large everything is drawn, in percent (text_size.rs): 90, 100,
+    /// 110, 125 or 150. Its own commands change it; a page save keeps it.
+    pub text_size: u32,
     /// Show adult games' art unblurred. Off by default, as on kryo.to.
     pub show_adult: bool,
     /// Take palette, corners, typeface and the adult blur from the signed-in
@@ -250,6 +253,7 @@ impl Default for Settings {
             theme: "account".into(),
             radius: "pill".into(),
             font: "teletext".into(),
+            text_size: crate::text_size::DEFAULT,
             show_adult: false,
             follow_account: true,
             library_folders: Vec::new(),
@@ -588,6 +592,9 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     settings.phone_lan = before.phone_lan;
     // Where the pet stands is the pet's to remember (pet.rs), not the page's.
     settings.pet_pos = before.pet_pos;
+    // So is the text size (text_size.rs): a key can change it while this page's
+    // copy is a moment old.
+    settings.text_size = before.text_size;
     write(&app, &settings)?;
     if before.discord != settings.discord {
         crate::discord_rpc::refresh(&app);

@@ -459,6 +459,13 @@ pub fn corner() -> i32 {
     RADIUS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The same corner as the page draws it, grown or shrunk with the text size
+/// (text_size.rs): what a shape or region cut around the page must follow.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn corner_drawn() -> i32 {
+    (f64::from(corner()) * crate::text_size::factor()).round() as i32
+}
+
 /// A corner style as pixels: the same `--kryo-radius` the pages use (styles.css).
 pub fn radius_for(style: &str) -> i32 {
     match style {
@@ -522,8 +529,8 @@ pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
     apply_corners(window);
 }
 
-/// Draw the corners at the current style.
-fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
+/// Draw the corners at the current style (and text size, which sizes them).
+pub fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE};
@@ -602,7 +609,7 @@ pub fn refresh_corners<R: Runtime>(window: &tauri::Window<R>) {
         let square = corner() == 0 || window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false);
         let Ok(size) = window.outer_size() else { return };
         let scale = window.scale_factor().unwrap_or(1.0);
-        let d = (f64::from(corner() * 2) * scale).round() as i32;
+        let d = (f64::from(corner_drawn() * 2) * scale).round() as i32;
         // SAFETY: a live window handle; SetWindowRgn takes ownership of the region.
         unsafe {
             if square {
@@ -642,7 +649,7 @@ pub mod linux_shape {
     pub fn window(win: &impl IsA<gtk::Widget>) {
         const SQUARE: WindowState = WindowState::MAXIMIZED.union(WindowState::FULLSCREEN).union(WindowState::TILED);
         let widget = win.as_ref();
-        let radius = super::corner();
+        let radius = super::corner_drawn();
         let square = radius == 0 || widget.window().is_none_or(|g| g.state().intersects(SQUARE));
         let (w, h) = (widget.allocated_width(), widget.allocated_height());
         if square || w <= 2 * radius || h <= 2 * radius {
@@ -653,6 +660,13 @@ pub mod linux_shape {
     }
 
     /// A child view (the menu): rounded at `radius` at the size it was given.
+    ///
+    /// KB-0273: the view's GDK window is client-side, and WebKit's drawing does
+    /// not honour this shape, so it cuts nothing; the menu page fills its corners
+    /// with the window's background instead (styles.css). Making the window
+    /// native so X cuts it was tried: on WebKitGTK 2.50 and 2.52 nothing redrew
+    /// what it uncovered and the corners came out black. Kept for any system
+    /// that does honour it.
     pub fn view(widget: &gtk::Widget, w: i32, h: i32, radius: i32) {
         if radius > 0 && w > 2 * radius && h > 2 * radius {
             widget.shape_combine_region(Some(&rounded(w, h, radius)));
