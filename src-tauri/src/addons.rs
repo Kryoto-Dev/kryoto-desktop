@@ -235,7 +235,7 @@ fn size_bytes(text: &str) -> Option<u64> {
         "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
         _ => return None,
     };
-    (n.is_finite() && n > 0.0).then(|| (n * unit) as u64)
+    (n.is_finite() && n > 0.0).then_some((n * unit) as u64)
 }
 
 /// The rows to queue for `ids` from kryo.to's `addons` list. Ours (kryo.to's
