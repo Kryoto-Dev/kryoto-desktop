@@ -158,6 +158,8 @@ pub struct Chat {
     pub client: StdMutex<Option<Arc<Client>>>,
     pub emit: Emit,
     pub context: StdMutex<Context>,
+    /// History transfers to and from this account's other devices (KB-0254).
+    pub history: super::history::HistoryRuntime,
 }
 
 impl Chat {
@@ -167,6 +169,7 @@ impl Chat {
             client: StdMutex::new(None),
             emit,
             context: StdMutex::new(Context::default()),
+            history: Default::default(),
         })
     }
 
@@ -226,7 +229,7 @@ async fn read_raw(ws: &mut Ws) -> Result<S, Outcome> {
     }
 }
 
-fn host_name() -> String {
+pub(super) fn host_name() -> String {
     sysinfo::System::host_name().map(|h| h.chars().take(48).collect()).unwrap_or_else(|| "This PC".into())
 }
 
@@ -271,6 +274,7 @@ async fn handshake(engine: &Mutex<Engine>, token: &str, url: &str) -> Result<(Ws
                     let mut eng = engine.lock().await;
                     eng.device.set_device_id(r.device_id).map_err(|e| Outcome::Stop(ChatStatus::Unavailable { reason: e.to_string() }))?;
                     eng.save().map_err(|e| Outcome::Stop(ChatStatus::Unavailable { reason: e }))?;
+                    super::history::mark_new_device(&eng.store);
                     logging::info("chat", "registered this PC as a chat device");
                 }
                 S::Error(e) => return Err(refusal(&e.code, &e.message)),
@@ -401,6 +405,9 @@ async fn session(chat: &Arc<Chat>, token: &str, url: &str) -> Outcome {
         let chat = chat.clone();
         Owned(tokio::spawn(async move { chat.resend_pending().await }))
     };
+
+    // Past messages to or from this account's other devices (KB-0254).
+    let _history = Owned(tokio::spawn(chat.clone().history_loop(host_name())));
 
     // Group changes (someone added or removed): refresh, tell the shell.
     let _groups = {

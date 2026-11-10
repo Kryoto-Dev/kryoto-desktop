@@ -33,6 +33,23 @@ const SERVICE: &str = if cfg!(debug_assertions) {
     "to.kryo.desktop.chat"
 };
 
+/// The secure store's service name. Every debug build shares one, so a test
+/// run signed in to another account would take over every other dev build's
+/// chat: a debug build can name its own with `KRYOTO_DEV_CHAT_KEYRING`.
+fn service() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| {
+        if cfg!(debug_assertions) {
+            if let Ok(v) = std::env::var("KRYOTO_DEV_CHAT_KEYRING") {
+                if !v.trim().is_empty() {
+                    return v;
+                }
+            }
+        }
+        SERVICE.to_string()
+    })
+}
+
 pub const SESSION: &str = "session";
 
 /// Shown when something needs the passphrase and it has not been typed yet.
@@ -86,7 +103,7 @@ pub fn backend() -> Backend {
 // ---- OS store -----------------------------------------------------------------
 
 fn entry(name: &str) -> Result<Entry, String> {
-    Entry::new(SERVICE, name).map_err(|e| format!("The secure store is not available: {e}"))
+    Entry::new(service(), name).map_err(|e| format!("The secure store is not available: {e}"))
 }
 
 fn keyring_read(name: &str) -> Result<Option<Zeroizing<String>>, String> {

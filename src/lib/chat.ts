@@ -290,6 +290,58 @@ export type AccountDevices = { devices: AccountDevice[]; limit: number; expireDa
 export const chatAccountDevices = () => call<AccountDevices>('chat_account_devices')
 export const chatAccountDeviceRemove = (id: string) => call<void>('chat_account_device_remove', { id })
 export const chatDeviceRevoke = (device: string) => call<void>('chat_device_revoke', { device })
+// ---- history from another of your devices (KB-0254) ----------------------------
+//
+// Nothing is kept on the server, so a new device starts empty. It asks the
+// account's other devices; one whose player says yes sends its history,
+// end-to-end encrypted to this device only (src/web/engine.ts and
+// src-tauri/src/chat/history.rs, km-core `history`).
+
+/** On the new device: the history it asked for. */
+export type HistoryIncoming = {
+  transferId: string
+  /** waiting: no other device has answered yet; receiving: one is sending. */
+  state: 'waiting' | 'receiving' | 'done'
+  /** The device it comes from, by name, once one sends. */
+  from: string | null
+  received: number
+  total: number
+}
+/** On an older device: a new device of yours asked for its history. */
+export type HistoryOutgoing = {
+  transferId: string
+  deviceId: string
+  deviceName: string
+  createdAtMs: number
+  /** Set up in the last 10 minutes: "Send" is the default answer. */
+  fresh: boolean
+  /** waiting: it went offline mid-way; the rest goes when it is back. */
+  state: 'asking' | 'sending' | 'waiting' | 'done'
+  sent: number
+  total: number
+}
+export type HistoryState = { incoming: HistoryIncoming | null; outgoing: HistoryOutgoing[] }
+
+export const chatHistory = () => call<HistoryState>('chat_history')
+export const chatHistoryAnswer = (transferId: string, send: boolean) => call<void>('chat_history_answer', { transferId, send })
+/** Put away a finished notice. */
+export const chatHistoryDismiss = (transferId: string) => call<void>('chat_history_dismiss', { transferId })
+
+export function useChatHistory(on_: boolean): HistoryState {
+  const [state, setState] = useState<HistoryState>({ incoming: null, outgoing: [] })
+  useEffect(() => {
+    if (!on_) return
+    let alive = true
+    void chatHistory().then((s) => alive && setState(s)).catch(() => {})
+    const off = on<HistoryState>('chat-history', (s) => alive && setState(s))
+    return () => {
+      alive = false
+      void off.then((f) => f())
+    }
+  }, [on_])
+  return state
+}
+
 /** Save all conversations on this PC to a file (plain text). Null when cancelled. */
 export const chatExportHistory = () => call<string | null>('chat_export_history')
 /** Send picked messages (by id; their text is read on the native side) to staff. */

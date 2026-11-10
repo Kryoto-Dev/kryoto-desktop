@@ -44,7 +44,21 @@ export class Kryo {
     deviceId(): string | undefined;
     forgetDevices(user_id: string): void;
     hello(token: string): Uint8Array;
+    /**
+     * This device's history (stored rows, JSON) cut into the bodies of the
+     * chunks that carry it to another device: `[{type:"historyChunk",...}]`.
+     */
+    historyChunks(transfer_id: string, rows: string, groups: string): string;
+    /**
+     * Received history rows against the stored ones with the same ids:
+     * the rows to write (new or completed), each once, oldest first.
+     */
+    historyMerge(incoming: string, stored: string): string;
     knownDevices(user_id: string): number;
+    /**
+     * Whether one of this account's own devices is known (checked) here.
+     */
+    knowsOwnDevice(device_id: string): boolean;
     markVerified(peer: string, verified: boolean): void;
     masterPublic(): string;
     /**
@@ -80,6 +94,12 @@ export class Kryo {
      */
     static sealFile(bytes: Uint8Array): Uint8Array;
     /**
+     * Like `sendFrame`, but to one device of one user only (history goes to
+     * the one device that asked for it). Throws "nothing to send" if that
+     * device is not known or cannot be reached.
+     */
+    sendFrameTo(request_id: number, content: string, user_id: string, device_id: string, ephemeral: boolean): Uint8Array;
+    /**
      * Encrypt `content` (JSON) for every known device of `users` (JSON array
      * of ids) and return the Send frame. Throws "nothing to send" if no
      * device could be reached.
@@ -114,7 +134,10 @@ export interface InitOutput {
     readonly kryo_deviceId: (a: number) => [number, number];
     readonly kryo_forgetDevices: (a: number, b: number, c: number) => void;
     readonly kryo_hello: (a: number, b: number, c: number) => [number, number];
+    readonly kryo_historyChunks: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly kryo_historyMerge: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly kryo_knownDevices: (a: number, b: number, c: number) => number;
+    readonly kryo_knowsOwnDevice: (a: number, b: number, c: number) => number;
     readonly kryo_markVerified: (a: number, b: number, c: number, d: number) => [number, number];
     readonly kryo_masterPublic: (a: number) => [number, number];
     readonly kryo_needsClaim: (a: number, b: number, c: number) => number;
@@ -129,6 +152,7 @@ export interface InitOutput {
     readonly kryo_restoreBackup: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly kryo_sealFile: (a: number, b: number) => [number, number, number, number];
     readonly kryo_sendFrame: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
+    readonly kryo_sendFrameTo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly kryo_setDeviceId: (a: number, b: number, c: number) => [number, number];
     readonly kryo_state: (a: number) => [number, number, number, number];
     readonly kryo_userId: (a: number) => [number, number];
