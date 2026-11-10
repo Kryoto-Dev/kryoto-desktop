@@ -56,6 +56,7 @@ function RankHeading({ label, rank, locked }: { label: string; rank: RankId | nu
 }
 import { STANDARD_TEXT_EFFECTS, TEXT_EFFECT_LABEL } from './text-effects'
 import { useAssetBase } from './asset-base'
+import { useAccount } from '@/hooks/useAccount'
 
 /**
  * The editor for chat (and anything else Desktop lets people write), the
@@ -656,8 +657,8 @@ function PickArt({ item, size, base }: { item: PickItem; size: number; base: str
  * The emoji and sticker picker beside a text box, the counterpart of
  * kryo.to's: Kryoto's own emoji first, then everybody's standard ones by
  * Unicode's groups (./emoji-standard.ts), with the ones picked most on top.
- * The standard ones are text, so they are offered where the pick goes into
- * text (`value` given); a reaction (`onPick` alone) is one of ours.
+ * The standard ones are offered where the pick goes into text (`value`
+ * given) and to a reaction that asks for them (`standard`).
  */
 export function EmojiButton({
   target,
@@ -668,7 +669,7 @@ export function EmojiButton({
   onPick,
   className,
   align = 'right',
-  rank = null,
+  rank: rankGiven,
 }: {
   target?: RefObject<HTMLTextAreaElement | HTMLInputElement | null>
   value?: string
@@ -676,19 +677,22 @@ export function EmojiButton({
   stickers?: boolean
   /** Offer the standard emoji too. On wherever the pick is inserted into text. */
   standard?: boolean
-  onPick?: (token: string, kind: 'emoji' | 'sticker') => void
+  /** Take the pick instead of inserting it ('char' is a standard emoji, itself: a reaction that asks for `standard`). */
+  onPick?: (token: string, kind: 'emoji' | 'sticker' | 'char') => void
   className?: string
   align?: 'left' | 'right'
-  /** The writer's supporter rank: the rank sets it covers are offered too. */
+  /** The writer's supporter rank: the rank sets it covers are offered too. The signed-in account's when not given. */
   rank?: string | null
 }) {
+  const account = useAccount()
+  const rank = rankGiven !== undefined ? rankGiven : account?.rank !== undefined ? account.rank : account?.supporter ? 'supporter' : null
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<'emoji' | 'sticker'>('emoji')
   const [q, setQ] = useState('')
   const [shown, setShown] = useState<PickItem | null>(null)
   const [nav, setNav] = useState<string | null>(null)
   const [table, setTable] = useState<StandardModule | null>(standardTable)
-  const withStandard = (standard ?? true) && value !== undefined
+  const withStandard = standard ?? value !== undefined
   const box = useRef<HTMLDivElement>(null)
   const scroller = useRef<HTMLDivElement>(null)
   const base = useAssetBase()
@@ -728,7 +732,7 @@ export function EmojiButton({
   function insert(token: string, kind: 'emoji' | 'sticker' | 'char') {
     if (kind === 'emoji') noteEmojiUse(token.slice(1, -1))
     if (kind === 'char') noteEmojiUse(token)
-    if (onPick && kind !== 'char' && (kind === 'sticker' || value === undefined)) {
+    if (onPick && (kind === 'sticker' || value === undefined)) {
       onPick(token, kind)
       if (kind === 'sticker') setOpen(false)
       return

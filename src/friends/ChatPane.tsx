@@ -52,6 +52,8 @@ import {
   chatFilePreview,
   type FileInfo,
   QUICK_REACTIONS,
+  chatReactionEmoji,
+  chatReactionFor,
   textLimit,
   type ChatMessage,
   type ChatSettings,
@@ -71,6 +73,7 @@ import { cn } from '@/lib/utils'
 import { artSrc } from '@/lib/art'
 import { call } from '@/lib/bridge'
 import { RichText } from '@/rich/RichText'
+import { EmojiGlyph } from '@/rich/EmojiGlyph'
 import { EmojiButton, RichTextarea, editableMentions, storedMentions, withShortcodes, type MentionCandidate } from '@/rich/RichEditor'
 import { plainRich } from '@/rich/rich-text'
 import { mediaRatio, singleMediaWidth } from '@/rich/attachment-layout'
@@ -723,11 +726,9 @@ export function ChatPane({
                           'kryo-pill inline-flex h-8 items-center gap-1 border px-2 text-xs tabular-nums',
                           r.userIds.includes(myId) ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground',
                         )}
-                        aria-label={`${r.emoji} ${r.userIds.length}`}
+                        aria-label={`${chatReactionEmoji(r.emoji) ? `:${chatReactionEmoji(r.emoji)}:` : r.emoji} ${r.userIds.length}`}
                       >
-                        <span className="text-base leading-none">
-                          <span className="kryo-emoji-char">{r.emoji}</span>
-                        </span>
+                        <EmojiGlyph emoji={chatReactionEmoji(r.emoji) ?? r.emoji} size={20} />
                         {r.userIds.length > 1 ? r.userIds.length : null}
                       </button>
                     ))}
@@ -773,6 +774,8 @@ export function ChatPane({
                         <span className="kryo-emoji-char">{e}</span>
                       </button>
                     ))}
+                    {/* Everything else, from the same picker as the message box: ours travel as a short code (lib/chat.ts). */}
+                    <EmojiButton standard stickers={false} rank={meRank} align="left" onPick={(token, kind) => toggleReaction(m, kind === 'char' ? token : chatReactionFor(token.slice(1, -1)))} />
                   </span>
                 ) : null}
               </div>

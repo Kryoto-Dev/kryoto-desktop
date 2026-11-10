@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { call, isWeb, on } from '@/lib/bridge'
+import { EMOJI } from '@/rich/rich-catalog'
 
 let device: string | null = null
 /** What this device calls itself in chat's words, when it is neither of the two below. */
@@ -173,6 +174,31 @@ export const chatMessageRequestRespond = (user: string, accept: boolean) => call
 export const textLimit = (supporter: boolean) => (supporter ? 8000 : 2000)
 
 export const QUICK_REACTIONS = ['👍', '😂', '🔥', '❤️', '😮', '😢']
+
+/**
+ * One of Kryoto's own emoji as a chat reaction. The messaging protocol keeps a
+ * reaction to 16 characters (kryoto-messaging REACTION_LIMIT) and most of our
+ * names are longer, so ours travel as a short code of the name, `:k<hash>:`
+ * (unique across the catalog, at most 10 characters); a standard emoji is
+ * itself. An app from before this shows the code as text.
+ */
+const reactionCode = (name: string) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(36)
+}
+export const chatReactionFor = (name: string) => `:k${reactionCode(name)}:`
+let byReactionCode: Map<string, string> | null = null
+/** Which of our emoji a stored reaction is, or null for a standard one. */
+export function chatReactionEmoji(stored: string): string | null {
+  const code = /^:k([0-9a-z]{1,7}):$/.exec(stored)?.[1]
+  if (!code) return null
+  byReactionCode ??= new Map(EMOJI.map((e) => [reactionCode(e.name), e.name]))
+  return byReactionCode.get(code) ?? null
+}
 
 /** A finished call in the conversation (`call` rows): who called, and how it went. */
 export type CallRecord = { callId: string; answered: boolean; seconds: number; caller: string }

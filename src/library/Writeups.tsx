@@ -8,8 +8,8 @@ import { cn } from '@/lib/utils'
 import { useAccount } from '@/hooks/useAccount'
 import { RichText } from '@/rich/RichText'
 import { EmojiButton } from '@/rich/RichEditor'
-import { emojiPath, isMascotEmoji } from '@/rich/rich-catalog'
-import { useAssetBase } from '@/rich/asset-base'
+import { isEmojiName } from '@/rich/rich-catalog'
+import { EmojiGlyph } from '@/rich/EmojiGlyph'
 
 /**
  * What players thought of a game, in its About card on the Library page: the
@@ -40,7 +40,6 @@ export function LibraryWriteups({ slug, onWeb, own = false }: { slug: string; on
   const account = useAccount()
   const signedIn = !!account && !account.guest
   const rank = account?.rank !== undefined ? account.rank : account?.supporter ? 'supporter' : null
-  const base = useAssetBase()
   const [list, setList] = useState<Writeup[]>([])
   const [reactions, setReactions] = useState<Record<string, Reaction[]>>({})
   const [busy, setBusy] = useState(false)
@@ -133,18 +132,18 @@ export function LibraryWriteups({ slug, onWeb, own = false }: { slug: string; on
                   type="button"
                   disabled={!signedIn || busy}
                   aria-pressed={r.mine}
-                  title={`${r.people.map((p) => p.name).join(', ') || 'Somebody'} reacted with :${r.emoji}:`}
+                  title={`${r.people.map((p) => p.name).join(', ') || 'Somebody'} reacted with ${isEmojiName(r.emoji) ? `:${r.emoji}:` : r.emoji}`}
                   onClick={() => void react(w.id, r.emoji, !r.mine)}
                   className={cn(
                     'kryo-pill inline-flex h-8 items-center gap-1 border px-2 text-xs tabular-nums transition-colors disabled:cursor-default',
                     r.mine ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground enabled:hover:text-foreground',
                   )}
                 >
-                  <img src={`${base}${emojiPath(r.emoji)}`} alt={`:${r.emoji}:`} width={22} height={22} className={cn('size-[22px]', isMascotEmoji(r.emoji) && 'kryo-emoji-mascot')} />
+                  <EmojiGlyph emoji={r.emoji} size={22} />
                   {r.count}
                 </button>
               ))}
-              {signedIn ? <EmojiButton stickers={false} rank={rank} align="left" onPick={(token) => void react(w.id, token.slice(1, -1), true)} /> : null}
+              {signedIn ? <EmojiButton stickers={false} standard rank={rank} align="left" onPick={(token, kind) => void react(w.id, kind === 'char' ? token : token.slice(1, -1), true)} /> : null}
             </div>
           </article>
         )
