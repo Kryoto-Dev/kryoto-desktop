@@ -716,11 +716,22 @@ impl From<String> for MintError {
     }
 }
 
-/// Ask kryo.to for a game's current release with the account signed in here,
-/// as this PC's install (the same checks as a press in the Store): the link
-/// it mints for this PC, or a mirror when `mirrors` allows one. Links run
-/// out, so a queue asks for each one when its turn comes (downloads.rs).
-pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: Option<&str>, mirrors: bool) -> Result<Minted, MintError> {
+/// kryo.to as the account signed in to the Store: a client, the site's
+/// address and the Store's cookie, so a request counts as this PC's app.
+pub struct Session {
+    pub client: reqwest::Client,
+    pub endpoint: String,
+    cookie: String,
+}
+
+impl Session {
+    pub fn get(&self, path: &str) -> reqwest::RequestBuilder {
+        self.client.get(format!("{}{path}", self.endpoint)).header(reqwest::header::COOKIE, &self.cookie)
+    }
+}
+
+/// The Store's sign-in, or why there is none.
+pub fn session<R: Runtime>(app: &AppHandle<R>) -> Result<Session, String> {
     let endpoint = settings::catalog_endpoint(&settings::load(app));
     let base = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
     let cookie = app
@@ -735,9 +746,14 @@ pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: O
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?;
+    Ok(Session { client, endpoint, cookie })
+}
 
-    let listing: serde_json::Value = client
-        .get(format!("{endpoint}/api/games/{slug}/downloads"))
+/// `/api/games/<slug>/downloads` as the signed-in app, which kryo.to answers
+/// with the links (an anonymous caller may get the metadata only).
+pub async fn listing(session: &Session, slug: &str) -> Result<serde_json::Value, String> {
+    session
+        .get(&format!("/api/games/{slug}/downloads"))
         .send()
         .await
         .map_err(|e| format!("Could not reach kryo.to: {e}"))?
@@ -745,28 +761,19 @@ pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: O
         .map_err(|e| if e.status() == Some(reqwest::StatusCode::NOT_FOUND) { "kryo.to has no such game.".to_string() } else { format!("kryo.to answered {}.", e.status().map_or(0, |s| s.as_u16())) })?
         .json()
         .await
-        .map_err(|e| e.to_string())?;
-    let title = listing["title"].as_str().unwrap_or(slug).to_string();
-    // The release players get now.
-    let release = listing["releases"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|r| r["primary"].as_bool() == Some(true) && r["archived"].as_bool() != Some(true))
-        .ok_or("This game has no release to download right now.".to_string())?;
-    let links: Vec<&str> = release["links"].as_array().into_iter().flatten().filter_map(|l| l["url"].as_str()).collect();
-    if !links.iter().any(|u| u.starts_with("/api/download/v/")) {
-        if !mirrors {
-            return Err("This game is only on mirrors. Download it in Kryoto Desktop itself.".to_string().into());
-        }
-        let page = links.iter().find(|u| crate::resolvers::classify(u).is_some()).ok_or("This game is only on mirrors Kryoto cannot download from by itself. Open its page in the Store.".to_string())?;
-        return Ok(Minted::Mirror { page: page.to_string() });
-    }
-    let release_id = release["id"].as_str().filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())).ok_or("kryo.to sent a release without an ID.".to_string())?;
+        .map_err(|e| e.to_string())
+}
 
-    let response = client
-        .post(format!("{endpoint}/api/download/v/{release_id}"))
-        .header(reqwest::header::COOKIE, cookie)
+/// A link to one release of ours (a game's build or one of its add-ons),
+/// minted for this PC's network: the same checks as a press in the Store.
+pub async fn mint_release<R: Runtime>(app: &AppHandle<R>, session: &Session, release_id: &str, turnstile_token: Option<&str>) -> Result<String, MintError> {
+    if release_id.is_empty() || !release_id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("kryo.to sent a release without an ID.".to_string().into());
+    }
+    let response = session
+        .client
+        .post(format!("{}/api/download/v/{release_id}", session.endpoint))
+        .header(reqwest::header::COOKIE, &session.cookie)
         .header("x-kryo-install", logging::install_id(app))
         .json(&match turnstile_token {
             Some(token) => serde_json::json!({ "turnstileToken": token }),
@@ -794,7 +801,35 @@ pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: O
     if !crate::downloads::is_ours(&link, &settings::load(app)) {
         return Err("That download does not come from Kryoto.".to_string().into());
     }
-    Ok(Minted::Link { url: link.to_string(), title })
+    Ok(link.to_string())
+}
+
+/// Ask kryo.to for a game's current release with the account signed in here,
+/// as this PC's install (the same checks as a press in the Store): the link
+/// it mints for this PC, or a mirror when `mirrors` allows one. Links run
+/// out, so a queue asks for each one when its turn comes (downloads.rs).
+pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: Option<&str>, mirrors: bool) -> Result<Minted, MintError> {
+    let session = session(app)?;
+    let listing = listing(&session, slug).await?;
+    let title = listing["title"].as_str().unwrap_or(slug).to_string();
+    // The release players get now.
+    let release = listing["releases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["primary"].as_bool() == Some(true) && r["archived"].as_bool() != Some(true))
+        .ok_or("This game has no release to download right now.".to_string())?;
+    let links: Vec<&str> = release["links"].as_array().into_iter().flatten().filter_map(|l| l["url"].as_str()).collect();
+    if !links.iter().any(|u| u.starts_with("/api/download/v/")) {
+        if !mirrors {
+            return Err("This game is only on mirrors. Download it in Kryoto Desktop itself.".to_string().into());
+        }
+        let page = links.iter().find(|u| crate::resolvers::classify(u).is_some()).ok_or("This game is only on mirrors Kryoto cannot download from by itself. Open its page in the Store.".to_string())?;
+        return Ok(Minted::Mirror { page: page.to_string() });
+    }
+    let release_id = release["id"].as_str().unwrap_or_default();
+    let url = mint_release(app, &session, release_id, turnstile_token).await?;
+    Ok(Minted::Link { url, title })
 }
 
 /// What the phone's Download does: exactly what Download does in Kryoto

@@ -119,6 +119,10 @@ pub struct Download {
     /// The release picked under a game's Versions, when it is not the
     /// current one: its version string, recorded on the installed game.
     pub release: Option<String>,
+    /// Added from a game's Add-ons & DLC card (addons.rs `addons_get`): the
+    /// add-on's release id on kryo.to. Its link is minted for that release at
+    /// its turn, and it is an add-on of `game_id` whatever its file is called.
+    pub addon_release: Option<String>,
     /// Place in the queue: the lowest waiting one goes next. Changed by
     /// moving it up or down, or "Download now" (`download_move`).
     pub queue_order: u64,
@@ -995,6 +999,90 @@ pub fn enqueue_collection<R: Runtime>(app: &AppHandle<R>, games: &[crate::collec
     Ok(added.len())
 }
 
+/// What a row added from a game's Add-ons & DLC card says when kryo.to wants
+/// the check only its page can pass (a new account, say). The card offers the
+/// game's download window for it.
+pub const ADDON_CHALLENGE: &str = "kryo.to wants a check only its download window can pass for this account. Open the download window to add it there.";
+
+/// One of a game's add-ons, as its Add-ons & DLC card asks for it.
+pub struct AddonRequest {
+    /// The add-on's release id on kryo.to.
+    pub release: String,
+    /// Its label there ("DLC: Firebird", "Japanese language pack").
+    pub label: String,
+    /// kind `repair`: applied under the repair journal (`addons::install_fix`).
+    pub repair: bool,
+    /// Only on mirrors: the page Kryoto downloads it from.
+    pub mirror: Option<Mirror>,
+    pub total: Option<u64>,
+}
+
+/// Queue an add-on for an installed game, straight from its card: no page,
+/// no game to pick. Its link is minted at its turn, like a collection's games,
+/// and it applies to `game` when it lands. Asked again while it is still
+/// going (or after it failed), the same row carries on. Its download id.
+pub fn enqueue_addon<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, req: AddonRequest) -> Result<String, String> {
+    let state = app.state::<Downloads>();
+    let slug = game.slug.clone().ok_or("This game is not from kryo.to.")?;
+    let found = {
+        let list = state.list.lock().map_err(|_| "download list lock poisoned")?;
+        list.iter()
+            .find(|d| d.slug.as_deref() == Some(slug.as_str()) && d.addon_release.as_deref() == Some(req.release.as_str()) && !matches!(d.status, Status::Installed | Status::Canceled))
+            .map(|d| (d.id.clone(), d.status))
+    };
+    if let Some((id, status)) = found {
+        if matches!(status, Status::Failed | Status::Paused) {
+            requeue(app, &id)?;
+        }
+        return Ok(id);
+    }
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let id = format!("dl-{stamp}-addon-{}", req.release);
+    let queue_order = state.list.lock().map(|l| l.iter().map(|d| d.queue_order).max().unwrap_or(0) + 1).unwrap_or(1);
+    // Named as a DLC fetched from the Store is ("Forts DLC - Firebird"), so a
+    // row in Downloads and the side rail says which add-on it is, not only
+    // whose: seven DLC queued at once read as seven rows of the game itself.
+    let title = match req.label.strip_prefix("DLC:").or_else(|| req.label.strip_prefix("dlc:")) {
+        Some(name) => format!("{} DLC - {}", game.title, name.trim()),
+        None => format!("{} - {}", game.title, req.label),
+    };
+    let item = Download {
+        id: id.clone(),
+        queue_order,
+        slug: Some(slug),
+        game_id: Some(game.id.clone()),
+        added_at: now(),
+        total: req.total,
+        addon: Some(req.label),
+        repair: req.repair,
+        addon_release: Some(req.release),
+        mint_at_turn: req.mirror.is_none(),
+        url: req.mirror.as_ref().map(|m| m.page.clone()).unwrap_or_default(),
+        mirror: req.mirror,
+        // The game's own details: a version here means kryo.to is not asked
+        // for the game's page (fill_meta), whose size is not this file's.
+        meta: CatalogMeta {
+            title,
+            cover: game.cover.clone(),
+            hero: game.hero.clone(),
+            version: Some(game.version.clone().unwrap_or_default()),
+            nsfw: game.nsfw,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    state.list.lock().map_err(|_| "download list lock poisoned")?.insert(0, item);
+    if let Err(e) = persist_checked(app) {
+        if let Ok(mut list) = state.list.lock() {
+            list.retain(|d| d.id != id);
+        }
+        return Err(format!("Could not save the download queue: {e}"));
+    }
+    emit(app, true);
+    start(app.clone(), id.clone());
+    Ok(id)
+}
+
 /// Whether a new download asks where to install. Pure, for the tests.
 pub fn asks_for_folder(settings: &crate::settings::Settings, installed: bool) -> bool {
     settings.ask_install_folder && !installed && crate::settings::all_folders(settings).len() > 1
@@ -1587,7 +1675,7 @@ pub fn replaced(json: &serde_json::Value, installed: Option<&str>, release: Opti
 }
 
 fn row_kind(d: &Download, json: Option<&serde_json::Value>) -> FileKind {
-    if is_dlc_link(&d.url) {
+    if d.addon_release.is_some() || is_dlc_link(&d.url) {
         return FileKind::Addon(String::new());
     }
     let file = file_name_in_link(&d.url);
@@ -1603,6 +1691,22 @@ fn row_kind(d: &Download, json: Option<&serde_json::Value>) -> FileKind {
 async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     if d.mirror.is_some() {
+        return Ok(());
+    }
+    // An add-on from a game's Add-ons & DLC card: that release's own link.
+    if let Some(release) = &d.addon_release {
+        let minted = match crate::phone::session(app) {
+            Ok(session) => crate::phone::mint_release(app, &session, release, None).await,
+            Err(e) => Err(crate::phone::MintError::Other(e)),
+        };
+        match minted {
+            Ok(url) => {
+                edit(app, id, |d| d.url = url);
+            }
+            Err(crate::phone::MintError::Other(e)) => return Err(e),
+            Err(crate::phone::MintError::Challenge) => return Err(ADDON_CHALLENGE.into()),
+        }
+        persist(app);
         return Ok(());
     }
     let slug = d.slug.ok_or("This download has no game to ask kryo.to about.")?;
@@ -2232,8 +2336,12 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
         // kryo.to's answer now, whatever an earlier try was told: a hash that
         // was wrong for this file (another build's) must not outlive a Retry.
         d.sha256 = found.sha;
-        d.addon = found.addon;
-        d.repair = found.repair;
+        // Added from its game's card, it is that add-on even when kryo.to's
+        // answer does not name the file (links left out, renamed by a host).
+        if found.addon.is_some() || d.addon_release.is_none() {
+            d.addon = found.addon;
+            d.repair = found.repair;
+        }
         // A build other than the current one, whichever way it was picked:
         // it installs as that build.
         if let Some(v) = found.release {
