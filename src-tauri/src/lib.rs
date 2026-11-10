@@ -436,6 +436,7 @@ fn disable_browser_menu(view: &tauri::Webview) {
 ///   games list, which can be long, only when the account changes, when asked
 ///   (`__kryoDesktopRefresh`) or every ten minutes.
 /// * Clicks, so an open menu closes like it would over any other page.
+///
 /// BROWSER_STATE_SCRIPT for a page, `kryo` when it is kryo.to's.
 fn store_script(kryo: bool) -> String {
     BROWSER_STATE_SCRIPT
