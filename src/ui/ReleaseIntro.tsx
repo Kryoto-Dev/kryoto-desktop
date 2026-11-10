@@ -26,7 +26,7 @@ export type ReleaseIntroData = {
 }
 
 /** Is it a file on kryo.to (played here) rather than a YouTube id? */
-const isFile = (video: string) => video.startsWith('/') || video.startsWith('https://')
+const isFile = (video: string) => video.startsWith('/') || /^https?:\/\//.test(video)
 
 /** Its id in `settings.seenNotices`, which only takes letters, digits and hyphens. */
 export const introId = (version: string = __APP_VERSION__) => `intro-${version.replace(/\./g, '-')}`
