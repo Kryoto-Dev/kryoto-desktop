@@ -212,6 +212,8 @@ pub async fn restore(engine: &Mutex<Engine>, token: &str, url: &str, code: &str)
     })?;
     adopt(&mut eng, master, Some(trust))?;
     eng.store.set_setting(BACKUP_CODE, &key.to_code()).map_err(|e| e.to_string())?;
+    // The past messages come from the account's other devices.
+    super::history::mark_new_device(&eng.store);
     logging::info("chat", "restored the chat identity from the key backup");
     Ok(())
 }
@@ -225,6 +227,7 @@ pub async fn reset_identity(engine: &Mutex<Engine>, token: &str, url: &str) -> R
     {
         let mut eng = engine.lock().await;
         adopt(&mut eng, fresh, None)?;
+        super::history::forget(&eng.store);
     }
     let mut conn = OneOff::open(engine, token, url).await?;
     let result = async {

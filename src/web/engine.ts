@@ -17,6 +17,7 @@ import init, { Kryo } from './pkg/km_wasm'
 import { api, GATEWAY_HTTP, GATEWAY_WS } from './api'
 import { Store, type MessageRow } from './store'
 import { DEVICE_NAME, EMBEDDED, nativePushEndpoint, toSite } from './embed'
+import type { HistoryIncoming, HistoryOutgoing, HistoryState } from '@/lib/chat'
 
 export type ChatStatus =
   | { state: 'off' }
@@ -45,6 +46,26 @@ const TARGET = 100
 const REQUEST_TIMEOUT = 20_000
 const EDIT_WINDOW_MS = 24 * 3600 * 1000
 const INVITE_TTL_MS = 15 * 60 * 1000
+/** History transfer (KB-0254): a new device counts as just set up for this long. */
+const HISTORY_FRESH_MS = 10 * 60 * 1000
+/** Between two chunks at least this long: 20 sends in the gateway's 10 s window, 10 left for chatting. */
+const HISTORY_PACE_MS = 500
+/** How long a chunk waits for its acknowledgement, and how many tries before the new device counts as gone. */
+const HISTORY_ACK_MS = 15_000
+const HISTORY_TRIES = 3
+
+/** An answered (or unanswered) request from a new device, on this one. */
+type Offer = HistoryOutgoing & {
+  /** "Not now": hidden until the app starts again. */
+  later: boolean
+  chunks: object[] | null
+  next: number
+  tries: number
+  lastSend: number
+  pumping: boolean
+  acked: ((ok: boolean) => void) | null
+}
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export class SendError extends Error {}
 
@@ -98,6 +119,10 @@ export class WebChat {
    * `active`): that one shows the notifications, this one keeps quiet.
    */
   private activeElsewhereUntil = 0
+  /** Requests for this device's history from the account's new devices, by transfer id. */
+  private offers = new Map<string, Offer>()
+  /** Names of this account's devices, by id (for "from <device>"). */
+  private deviceNames = new Map<string, string>()
 
   private constructor(
     private kryo: Kryo,
@@ -220,6 +245,8 @@ export class WebChat {
         }
         if (phase === 'register' && f.type === 'registered') {
           this.kryo.setDeviceId(f.deviceId)
+          // A new device: once online, it asks the account's other devices for their history.
+          void this.store.set('history-start', true)
           void this.persist()
           phase = 'ready'
           return
@@ -233,6 +260,7 @@ export class WebChat {
               this.setStatus({ state: 'online', userId: f.userId, deviceId: f.deviceId })
               void this.resendPending()
               void this.pushResync()
+              void this.historyOnline()
             })
             .catch((e: unknown) => finish(e && typeof e === 'object' && 'stop' in e ? (e as { stop: ChatStatus }) : { retry: String(e) }))
           return
@@ -732,6 +760,15 @@ export class WebChat {
           this.emit('chat-group-changed', { groupId: t.group })
         }
         return
+      case 'historyRequest':
+        if (fromMe && 'dm' in t && t.dm === me) await this.onHistoryRequest(senderDevice, b)
+        return
+      case 'historyChunk':
+        if (fromMe && 'dm' in t && t.dm === me) await this.onHistoryChunk(senderDevice, b)
+        return
+      case 'historyAck':
+        if (fromMe && 'dm' in t && t.dm === me) await this.onHistoryAck(senderDevice, b)
+        return
       case 'active':
         if (fromMe) this.activeElsewhereUntil = Date.now() + 75_000
         return
@@ -1055,6 +1092,9 @@ export class WebChat {
       const f = await this.ask('backupGet')
       if (!f.blob) throw new SendError('Your account has no key backup. Start a new chat identity instead, or turn on a backup on your other device first.')
       this.kryo.restoreBackup(code, f.blob)
+      // Restored: the past messages come from the account's other devices.
+      await this.store.del('history-want')
+      await this.store.set('history-start', true)
       await this.store.set('backup-code', code)
     })
   }
@@ -1062,6 +1102,9 @@ export class WebChat {
   resetIdentity() {
     return this.oneOff(async () => {
       this.kryo.resetIdentity()
+      // A new identity: the old devices cannot vouch for this one, so no history comes.
+      await this.store.del('history-want')
+      await this.store.del('history-start')
       await this.persist()
       await this.ask('publishMasterKey')
       await this.ask('certify')
@@ -1077,6 +1120,291 @@ export class WebChat {
     this.stop()
     if (endSession) await api(this.token, 'POST', '/api/auth/logout').catch(() => {})
     await Store.wipe()
+  }
+
+  // ---- history from another of this account's devices (KB-0254) ------------
+  //
+  // The new device asks (`historyRequest`, stored for devices that are
+  // offline, live again on each reconnect while it waits). A device whose
+  // player says yes sends its rows in chunks (km-core `history`), live and to
+  // that one device only, one at a time: each waits for the new device's
+  // `historyAck`. Nothing of it is ever stored on the server. The last ack,
+  // `done`, goes stored to every device, so the others stop asking.
+
+  async historyState(): Promise<HistoryState> {
+    const want = await this.store.get<HistoryIncoming & { announced?: boolean }>('history-want')
+    const incoming = want ? { transferId: want.transferId, state: want.state, from: want.from, received: want.received, total: want.total } : null
+    const outgoing = [...this.offers.values()]
+      .filter((o) => !o.later)
+      .map(({ transferId, deviceId, deviceName, createdAtMs, fresh, state, sent, total }) => ({ transferId, deviceId, deviceName, createdAtMs, fresh, state, sent, total }))
+    return { incoming, outgoing }
+  }
+
+  private emitHistory() {
+    void this.historyState().then((s) => this.emit('chat-history', s))
+  }
+
+  /** The player's answer to "Send your chat history to ...?" */
+  async historyAnswer(transferId: string, send: boolean) {
+    const o = this.offers.get(transferId)
+    if (!o) throw new SendError('That request is gone.')
+    if (!send) {
+      o.later = true
+      this.emitHistory()
+      return
+    }
+    o.later = false
+    await this.startOffer(o)
+  }
+
+  async historyDismiss(transferId: string) {
+    const want = await this.store.get<HistoryIncoming>('history-want')
+    if (want?.transferId === transferId && want.state === 'done') await this.store.del('history-want')
+    const o = this.offers.get(transferId)
+    if (o?.state === 'done') this.offers.delete(transferId)
+    this.emitHistory()
+  }
+
+  private async rememberTransfer(key: 'history-sent' | 'history-closed', transferId: string) {
+    const list = (await this.store.get<string[]>(key)) ?? []
+    if (!list.includes(transferId)) await this.store.set(key, [...list, transferId].slice(-50))
+  }
+
+  private async deviceName(id: string): Promise<string> {
+    if (!this.deviceNames.has(id)) {
+      for (const d of (await this.myDevices().catch(() => [])) as Frame[]) this.deviceNames.set(String(d.deviceId), String(d.name || ''))
+    }
+    return this.deviceNames.get(id) || 'your other device'
+  }
+
+  private historyContent(body: object) {
+    return this.content({ dm: this.userId }, body)
+  }
+
+  /** On each connect: start asking (a new device), ask again (still waiting), or carry on sending. */
+  private async historyOnline() {
+    try {
+      let want = await this.store.get<HistoryIncoming & { announced?: boolean }>('history-want')
+      // "History restored" was said when it happened; it does not come back on the next start.
+      if (want?.state === 'done') {
+        await this.store.del('history-want')
+        want = null
+        this.emitHistory()
+      }
+      if (!want && (await this.store.get<boolean>('history-start'))) {
+        await this.store.del('history-start')
+        const others = ((await this.myDevices()) as Frame[]).filter((d) => !d.current && d.certified)
+        // The account's first chat device: there is nothing to restore.
+        if (others.length > 0) {
+          want = { transferId: Kryo.newMessageId(), state: 'waiting', from: null, received: 0, total: 0, announced: false }
+          await this.store.set('history-want', want)
+          this.emitHistory()
+        }
+      }
+      if (want && want.state !== 'done') {
+        const body = { type: 'historyRequest', transferId: want.transferId, deviceName: DEVICE_NAME }
+        // Stored once, for devices that are offline now; live after that.
+        await this.deliver([this.userId], this.historyContent(body), !!want.announced, null)
+        if (!want.announced) await this.store.set('history-want', { ...want, announced: true })
+      }
+    } catch {
+      // The next connect tries again.
+    }
+    for (const o of this.offers.values()) {
+      if (o.state === 'waiting') {
+        o.state = 'sending'
+        o.tries = 0
+        void this.pump(o)
+      }
+    }
+  }
+
+  private async onHistoryRequest(senderDevice: string, b: any) {
+    if (senderDevice === this.kryo.deviceId() || typeof b.transferId !== 'string') return
+    if (((await this.store.get<string[]>('history-closed')) ?? []).includes(b.transferId)) return
+    const known = this.offers.get(b.transferId)
+    if (known) {
+      if (known.deviceId !== senderDevice) return
+      // It is back: carry on where it stopped.
+      if (known.state === 'waiting' || known.state === 'sending') {
+        known.state = 'sending'
+        known.tries = 0
+        this.emitHistory()
+        void this.pump(known)
+      }
+      return
+    }
+    const dev = ((await this.myDevices().catch(() => [])) as Frame[]).find((d) => String(d.deviceId) === senderDevice)
+    // Only to a device that is still on the account.
+    if (!dev) return
+    const createdAtMs = Number(dev.createdAtMs) || 0
+    const o: Offer = {
+      transferId: b.transferId,
+      deviceId: senderDevice,
+      deviceName: String(dev.name || b.deviceName || 'your new device').slice(0, 48),
+      createdAtMs,
+      fresh: Date.now() - createdAtMs < HISTORY_FRESH_MS,
+      state: 'asking',
+      sent: 0,
+      total: 0,
+      later: false,
+      chunks: null,
+      next: 0,
+      tries: 0,
+      lastSend: 0,
+      pumping: false,
+      acked: null,
+    }
+    this.offers.set(o.transferId, o)
+    // Said yes before this app restarted: no second question.
+    if (((await this.store.get<string[]>('history-sent')) ?? []).includes(o.transferId)) {
+      void this.startOffer(o)
+      return
+    }
+    this.emitHistory()
+    if (document.hidden) void this.notifyText(`Send your chat history to ${o.deviceName}?`, 'Open Kryoto chat to answer.')
+  }
+
+  private async startOffer(o: Offer) {
+    await this.rememberTransfer('history-sent', o.transferId)
+    const rows = await this.store.all()
+    const groups: { groupId: string; name: string }[] = []
+    try {
+      for (const g of (await this.ask('groupList')).groups as Frame[]) {
+        const name = await this.store.get<string>(`group-name-${g.groupId}`)
+        if (name) groups.push({ groupId: String(g.groupId), name })
+      }
+    } catch {
+      // Names are a nicety: the messages go without them.
+    }
+    o.chunks = JSON.parse(this.kryo.historyChunks(o.transferId, JSON.stringify(rows), JSON.stringify(groups))) as object[]
+    o.total = o.chunks.length
+    o.next = 0
+    o.sent = 0
+    o.tries = 0
+    o.state = 'sending'
+    this.emitHistory()
+    void this.pump(o)
+  }
+
+  /** One message to one of this account's own devices, live. */
+  private async sendToOwn(deviceId: string, body: object): Promise<'ok' | 'slow' | 'gone'> {
+    if (!this.kryo.knowsOwnDevice(deviceId)) await this.devicesOf(this.userId, true)
+    if (!this.kryo.knowsOwnDevice(deviceId)) return 'gone'
+    if (this.kryo.needsClaim(this.userId)) {
+      const k = await this.ask('keysClaim', { userId: this.userId }).catch(() => null)
+      if (k) this.kryo.addClaims(JSON.stringify(k))
+    }
+    const rid = this.nextId++
+    let frame: Uint8Array
+    try {
+      frame = this.kryo.sendFrameTo(rid, JSON.stringify(this.historyContent(body)), this.userId, deviceId, true)
+    } catch {
+      return 'gone'
+    }
+    await this.persist()
+    const ack = await this.raw(rid, frame)
+    if (ack.status === 'accepted') return 'ok'
+    if (ack.status === 'rateLimited') return 'slow'
+    // Its keys changed or it was removed: look again before the next try.
+    this.kryo.forgetDevices(this.userId)
+    return 'slow'
+  }
+
+  /** Send an offer's chunks, each once its predecessor is acknowledged. */
+  private async pump(o: Offer) {
+    if (o.pumping || !o.chunks) return
+    o.pumping = true
+    try {
+      while (o.state === 'sending' && o.next < o.total) {
+        if (!this.online) {
+          o.state = 'waiting'
+          break
+        }
+        const wait = o.lastSend + HISTORY_PACE_MS - Date.now()
+        if (wait > 0) await sleep(wait)
+        const index = o.next
+        const acked = new Promise<boolean>((res) => {
+          o.acked = res
+          setTimeout(() => res(false), HISTORY_ACK_MS)
+        })
+        const sent = await this.sendToOwn(o.deviceId, o.chunks[index]!).catch(() => 'slow' as const)
+        o.lastSend = Date.now()
+        if (sent === 'gone') {
+          // No longer one of this account's devices.
+          this.offers.delete(o.transferId)
+          break
+        }
+        if (sent === 'slow' || !(await acked)) {
+          if (sent === 'slow') await sleep(3000)
+          if (++o.tries >= HISTORY_TRIES) o.state = 'waiting'
+          this.emitHistory()
+          continue
+        }
+        o.tries = 0
+      }
+    } finally {
+      o.pumping = false
+      o.acked = null
+      this.emitHistory()
+    }
+  }
+
+  private async onHistoryAck(senderDevice: string, b: any) {
+    if (typeof b.transferId !== 'string') return
+    const o = this.offers.get(b.transferId)
+    if (b.done) {
+      // It has its history (from here or another device): nothing more to ask or send.
+      await this.rememberTransfer('history-closed', b.transferId)
+      if (o && o.deviceId === senderDevice && o.chunks) {
+        o.state = 'done'
+        o.sent = o.total
+        o.acked?.(true)
+        // "History sent" stays a minute, then the list is the list again.
+        setTimeout(() => {
+          if (this.offers.get(b.transferId)?.state !== 'done') return
+          this.offers.delete(b.transferId)
+          this.emitHistory()
+        }, 60_000)
+      } else if (o) {
+        this.offers.delete(b.transferId)
+      }
+      this.emitHistory()
+      return
+    }
+    if (!o || o.deviceId !== senderDevice || !o.chunks) return
+    const next = Math.min(Number(b.next) || 0, o.total)
+    o.next = next
+    o.sent = next
+    o.acked?.(true)
+    this.emitHistory()
+  }
+
+  private async onHistoryChunk(senderDevice: string, b: any) {
+    const want = await this.store.get<HistoryIncoming & { announced?: boolean }>('history-want')
+    if (!want || want.transferId !== b.transferId || want.state === 'done' || senderDevice === this.kryo.deviceId()) return
+    const total = Number(b.total) || 0
+    const index = Number(b.index) || 0
+    if (total < 1 || index >= total) return
+    const incoming = (b.items ?? []) as MessageRow[]
+    const stored = (await Promise.all(incoming.map((r) => this.store.message(String(r.msgId))))).filter((r): r is MessageRow => !!r)
+    const rows = JSON.parse(this.kryo.historyMerge(JSON.stringify(incoming), JSON.stringify(stored))) as MessageRow[]
+    if (rows.length > 0) await this.store.putMany(rows)
+    for (const g of (b.groups ?? []) as { groupId: string; name: string }[]) {
+      if (!(await this.store.get<string>(`group-name-${g.groupId}`))) await this.store.set(`group-name-${g.groupId}`, String(g.name).slice(0, 64))
+    }
+    const done = index + 1 >= total
+    const from = want.from ?? (await this.deviceName(senderDevice))
+    await this.store.set('history-want', { ...want, state: done ? 'done' : 'receiving', from, received: index + 1, total })
+    if (rows.length > 0) this.emit('chat-history-merged', { conversations: [...new Set(rows.map((r) => r.conversationId))] })
+    this.emitHistory()
+    const ack = { type: 'historyAck', transferId: want.transferId, next: index + 1, done }
+    if (done) {
+      // Stored, to every device: the others stop asking their players.
+      await this.deliver([this.userId], this.historyContent(ack), false, null).catch(() => {})
+    } else {
+      await this.sendToOwn(senderDevice, ack).catch(() => {})
+    }
   }
 
   async exportHistory() {

@@ -350,7 +350,7 @@ fn to_user_devices(u: &gw::UserDevicesInfo) -> Option<UserDevices> {
     })
 }
 
-fn prekey(p: &gw::Prekey) -> Option<SignedPrekey> {
+pub(super) fn prekey(p: &gw::Prekey) -> Option<SignedPrekey> {
     Some(SignedPrekey {
         key_id: p.key_id.clone(),
         key: p.key.as_slice().try_into().ok()?,
@@ -495,7 +495,7 @@ impl Chat {
     /// (`group`), members who cannot be reached right now (no chat devices,
     /// a block, a security key waiting to be accepted) are left out instead
     /// of stopping the message for everyone.
-    async fn deliver(&self, users: &[u64], content: &Content, ephemeral: bool, group: Option<u64>) -> Result<(), SendError> {
+    pub(super) async fn deliver(&self, users: &[u64], content: &Content, ephemeral: bool, group: Option<u64>) -> Result<(), SendError> {
         let client = self.client().ok_or(SendError::Offline)?;
         let me = self.my_id().await;
         for attempt in 0..2 {
@@ -1204,6 +1204,10 @@ impl Chat {
                     }
                 }
             }
+            // Past messages between this account's devices (KB-0254), only ever in its own conversation.
+            Some(Body::HistoryRequest(r)) if from_me && target == Target::Dm(me) => self.on_history_request(inbound.sender.device_id, r).await,
+            Some(Body::HistoryChunk(c)) if from_me && target == Target::Dm(me) => self.on_history_chunk(inbound.sender.device_id, c).await,
+            Some(Body::HistoryAck(a)) if from_me && target == Target::Dm(me) => self.on_history_ack(inbound.sender.device_id, a).await,
             Some(Body::Active(_)) if from_me => {
                 ACTIVE_ELSEWHERE_UNTIL.store(now_ms() + ACTIVE_FOR_MS, std::sync::atomic::Ordering::Relaxed);
             }

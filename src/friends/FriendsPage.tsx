@@ -7,6 +7,7 @@ import {
   Check,
   Ellipsis,
   Globe,
+  History,
   MessageSquare,
   MessageSquarePlus,
   Phone,
@@ -23,7 +24,7 @@ import {
   X,
 } from '@/ui/pixel-icons'
 import { artSrc } from '@/lib/art'
-import { Button, Caption, ContextMenu, IconButton, inputCls, Label, Modal, type MenuEntry } from '@/ui'
+import { AsciiBar, Button, Caption, ContextMenu, IconButton, inputCls, Label, Modal, type MenuEntry } from '@/ui'
 import type { Account } from '@/hooks/useAccount'
 import { friendName, useFriends, type Friend, type FriendFace } from '@/hooks/useFriends'
 import { AsciiArt } from '@/ui/ascii/AsciiArt'
@@ -35,6 +36,9 @@ import { ChatSettingsDialog } from './ChatSettings'
 import {
   chatConversations,
   chatGroups,
+  chatHistoryAnswer,
+  chatHistoryDismiss,
+  useChatHistory,
   chatMessageRequest,
   chatMessageRequestRespond,
   chatPeople,
@@ -51,6 +55,7 @@ import {
   type ChatStatus,
   type Conversation,
   type GroupView,
+  type HistoryState,
   type Invite,
 } from '@/lib/chat'
 import { startCall } from '@/lib/calls'
@@ -133,6 +138,7 @@ export function FriendsPage({
   const myIdRef = useRef<string | null>(null)
   if (chat?.state === 'online') myIdRef.current = chat.userId
   const chatOn = chat != null && ['online', 'connecting', 'offline'].includes(chat.state) && myIdRef.current != null
+  const history = useChatHistory(chatOn)
   const [selected, setSelected] = useState<string | null>(null)
   const [unread, setUnread] = useState<Record<string, number>>({})
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -314,7 +320,7 @@ export function FriendsPage({
         })
         .catch((e) => alive && setChatsError(errorText(e)))
     refresh()
-    const stops = [on('chat-message', refresh), on('chat-updated', refresh), on('chat-read', refresh)]
+    const stops = [on('chat-message', refresh), on('chat-updated', refresh), on('chat-read', refresh), on('chat-history-merged', refresh)]
     return () => {
       alive = false
       stops.forEach((p) => void p.then((f) => f()))
@@ -457,6 +463,7 @@ export function FriendsPage({
                 <p className="text-[11px] text-muted-foreground">Not a friend? They get a message request, if they accept messages from everyone.</p>
               </form>
             ) : null}
+            {chatOn ? <HistoryNotice history={history} /> : null}
             {narrow && live && !chatReady && account.chat ? (
               <div className="border-b border-border p-3">
                 <ChatSetup available />
@@ -769,6 +776,91 @@ export function FriendsPage({
         </Modal>
       ) : null}
     </div>
+  )
+}
+
+/** "Set up 4 min ago", "Set up on 3 Nov": when a device joined the account. */
+function setUpWhen(ms: number): string {
+  const ago = Date.now() - ms
+  if (!ms || ago < 0) return 'Set up'
+  if (ago < 60_000) return 'Set up just now'
+  if (ago < 3_600_000) return `Set up ${Math.round(ago / 60_000)} min ago`
+  return `Set up on ${new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
+}
+
+/**
+ * Past messages between this account's devices (KB-0254): on a new device,
+ * that they are on their way; on an older one, the question whether to send
+ * them, then how far it got. One line each, in the list's own space.
+ */
+function HistoryNotice({ history }: { history: HistoryState }) {
+  const { incoming, outgoing } = history
+  if (!incoming && outgoing.length === 0) return null
+  const row = 'grid gap-2 border-b border-border p-3 text-[11px] text-muted-foreground'
+  const head = (text: string, done?: string) => (
+    <div className="flex items-start gap-2">
+      <History className="mt-px size-3.5 shrink-0 text-foreground" aria-hidden />
+      <p className="min-w-0 grow text-foreground" role="status">{text}</p>
+      {done ? (
+        <IconButton label="Close" className="size-6 shrink-0" onClick={() => void chatHistoryDismiss(done)}>
+          <X className="size-3" />
+        </IconButton>
+      ) : null}
+    </div>
+  )
+  return (
+    <>
+      {incoming ? (
+        <div className={row} data-history="incoming">
+          {incoming.state === 'waiting' ? (
+            <>
+              {head('Your past messages are on your other devices.')}
+              <p>They arrive here as soon as one of them is online with chat, after you say yes there. You can chat meanwhile.</p>
+            </>
+          ) : incoming.state === 'receiving' ? (
+            <>
+              {head(`Restoring your history from ${incoming.from ?? 'your other device'}`)}
+              <AsciiBar fraction={incoming.total ? incoming.received / incoming.total : null} cells={22} className="text-foreground/80" />
+            </>
+          ) : (
+            head(`History restored from ${incoming.from ?? 'your other device'}.`, incoming.transferId)
+          )}
+        </div>
+      ) : null}
+      {outgoing.map((o) => (
+        <div key={o.transferId} className={row} data-history="outgoing">
+          {o.state === 'asking' ? (
+            <>
+              {head(`Send your chat history to ${o.deviceName}?`)}
+              <p>
+                {setUpWhen(o.createdAtMs)} on your account. It goes end-to-end encrypted, from this device to that one only.
+                {o.fresh ? '' : ' Only say yes if you set it up.'}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant={o.fresh ? 'primary' : 'outline'} onClick={() => chatHistoryAnswer(o.transferId, true)}>
+                  Send
+                </Button>
+                <Button size="sm" variant={o.fresh ? 'outline' : 'primary'} onClick={() => chatHistoryAnswer(o.transferId, false)}>
+                  Not now
+                </Button>
+              </div>
+            </>
+          ) : o.state === 'sending' ? (
+            <>
+              {head(`Sending your history to ${o.deviceName}`)}
+              <AsciiBar fraction={o.total ? o.sent / o.total : null} cells={22} className="text-foreground/80" />
+            </>
+          ) : o.state === 'waiting' ? (
+            <>
+              {head(`${o.deviceName} went offline.`)}
+              <p>The rest of your history goes when it is back. Keep chat open here.</p>
+            </>
+          ) : (
+            head(`History sent to ${o.deviceName}.`, o.transferId)
+          )}
+        </div>
+      ))}
+    </>
   )
 }
 

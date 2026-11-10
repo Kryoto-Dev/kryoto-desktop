@@ -422,6 +422,11 @@ export function ChatPane({
         if (m.conversationId !== conversationId) return
         setMessages((list) => list.map((x) => (x.msgId === m.msgId ? m : x)))
       }),
+      // Past messages from another of this account's devices (KB-0254).
+      on<{ conversations: string[] }>('chat-history-merged', (h) => {
+        if (!h.conversations.includes(conversationId)) return
+        void chatMessages(peer.id).then((m) => alive && setMessages(m)).catch(() => {})
+      }),
       on<{ conversationId: string; active: boolean }>('chat-typing', (t) => {
         if (t.conversationId !== conversationId) return
         setTyping(t.active)
