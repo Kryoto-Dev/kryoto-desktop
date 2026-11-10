@@ -286,15 +286,6 @@ const downloadList: Record<string, unknown>[] = [
   }),
 ]
 
-// Initialized only by the browser-preview backend, never by native/web chat.
-let simulation: ReturnType<typeof setInterval> | undefined
-export function stopPreview() {
-  clearInterval(simulation)
-  simulation = undefined
-}
-export function startPreview() {
-  if (simulation !== undefined) return
-  simulation = setInterval(() => {
 /**
  * kryo.to's add-ons for the sample games (`addons` in /api/games/<slug>/downloads):
  * Hollow Knight's DLC, more than the card shows unfolded and one with a long
@@ -337,6 +328,15 @@ const sizeOf = (text: unknown) => {
   return Math.round(Number(n) * (SIZE_UNIT[unit ?? ""] ?? 0)) || 200_000_000
 }
 
+// Initialized only by the browser-preview backend, never by native/web chat.
+let simulation: ReturnType<typeof setInterval> | undefined
+export function stopPreview() {
+  clearInterval(simulation)
+  simulation = undefined
+}
+export function startPreview() {
+  if (simulation !== undefined) return
+  simulation = setInterval(() => {
   let moved = false
   for (const d of downloadList) {
     if (d.status === 'downloading') {
@@ -834,15 +834,6 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   settings_get: () => ({ ...settings }),
   // Every sample game can use Kryoto Online, so the add-ons card shows it.
   online_check: () => null,
-  settings_save: (a) => ({ ...Object.assign(settings, a.settings) }),
-  downloads_list: () => clone(downloadList),
-  storage_overview: () => ({
-    folders: [
-      {
-        path: String(settings.libraryDir),
-        drive: 'C:',
-        isDefault: true,
-        exists: true,
   addons_list: (a) => clone(previewAddons[String(a.slug)] ?? []),
   // Add on a game's Add-ons & DLC card: a row per add-on, for that game, minted at its turn.
   addons_get: (a) => {
@@ -906,6 +897,15 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     previewBus.emit('library-changed', null)
     return clone(g)
   },
+  settings_save: (a) => ({ ...Object.assign(settings, a.settings) }),
+  downloads_list: () => clone(downloadList),
+  storage_overview: () => ({
+    folders: [
+      {
+        path: String(settings.libraryDir),
+        drive: 'C:',
+        isDefault: true,
+        exists: true,
         total: 953 * GB,
         free: 212 * GB,
         games: [stored('captain-hardcore', 22.1 * GB), stored('stardew-valley', 0.6 * GB), stored('celeste', 1.2 * GB)],
