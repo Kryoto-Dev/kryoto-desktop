@@ -17,6 +17,7 @@ import init, { Kryo } from './pkg/km_wasm'
 import { api, GATEWAY_HTTP, GATEWAY_WS } from './api'
 import { Store, type MessageRow } from './store'
 import { DEVICE_NAME, EMBEDDED, nativePushEndpoint, toSite } from './embed'
+import { afterNothingEncrypted, NO_CHAT, RETRY_MS, STILL_STARTING } from './send-rules'
 
 export type ChatStatus =
   | { state: 'off' }
@@ -370,7 +371,7 @@ export class WebChat {
         }
         if (n === 0 && u !== this.userId) {
           if (group) continue
-          throw new SendError('They have not turned on chat yet.')
+          throw new SendError(NO_CHAT)
         }
         if (this.kryo.needsClaim(u)) {
           const b = await this.ask('keysClaim', { userId: u }).catch((e: unknown) => {
@@ -386,16 +387,17 @@ export class WebChat {
       try {
         frame = this.kryo.sendFrame(rid, JSON.stringify(content), JSON.stringify(reach), ephemeral, group ?? '', quietSend(content))
       } catch (e) {
-        if (group || users.every((u) => u === this.userId)) return
         // They have a device (checked above), so chat is not off: it cannot
         // take a message yet (a device still uploading its keys, a key claim
         // that failed). Once more with fresh devices and keys (KB-0256).
+        const next = afterNothingEncrypted(!!group, users.every((u) => u === this.userId), attempt)
+        if (next === 'done') return
         console.warn('[chat] nothing could be encrypted:', e)
-        if (attempt === 0) {
-          await new Promise((r) => setTimeout(r, 1500))
+        if (next === 'retry') {
+          await new Promise((r) => setTimeout(r, RETRY_MS))
           continue
         }
-        throw new SendError('Their chat is still starting. Try again in a moment.')
+        throw new SendError(STILL_STARTING)
       }
       await this.persist()
       const ack = await this.raw(rid, frame)
