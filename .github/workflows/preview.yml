@@ -86,6 +86,20 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
             librsvg2-dev patchelf libxdo-dev libssl-dev libudev-dev
 
+      # The same AppImage as a release (release.yml, KB-0116): its WebKit
+      # cannot draw COLRv1 emoji, so it carries a bitmap Noto Color Emoji.
+      - name: Emoji font for the AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get install -y fonts-noto-color-emoji
+          font=/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf
+          [ -f "$font" ] || { echo "::error::$font is missing from fonts-noto-color-emoji."; exit 1; }
+          mkdir -p .tmp/appimage
+          cp "$font" .tmp/appimage/NotoColorEmoji.ttf
+          node -e "const p = require('path'); require('fs').writeFileSync('.tmp/appimage/conf.json', JSON.stringify({ bundle: { linux: { appimage: { files: { '/usr/share/kryoto/fonts/NotoColorEmoji.ttf': p.resolve('.tmp/appimage/NotoColorEmoji.ttf') } } } } }))"
+          echo "APPIMAGE_CONFIG=--config .tmp/appimage/conf.json" >> "$GITHUB_ENV"
+
       - run: pnpm install --frozen-lockfile
 
       # No updater artifacts: they need the signing key, which a PR build must
@@ -96,7 +110,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: |
           echo '{"bundle":{"createUpdaterArtifacts":false}}' > preview.conf.json
-          pnpm app:build --config preview.conf.json
+          pnpm app:build --config preview.conf.json $APPIMAGE_CONFIG
 
       - name: Collect them
         shell: bash
@@ -106,7 +120,7 @@ jobs:
           if [ "${{ matrix.platform }}" = "windows" ]; then
             cp "$bundle"/nsis/*-setup.exe out/
           else
-            cp "$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb out/
+            cp "$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb "$bundle"/rpm/*.rpm out/
           fi
           ls -la out
 
