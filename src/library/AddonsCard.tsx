@@ -46,6 +46,9 @@ export function AddonsCard({
   const [allDlc, setAllDlc] = useState(false)
   const [confirm, setConfirm] = useState<{ kind: 'addon'; file: string; label: string; count: number; replaced?: number } | { kind: 'online' } | null>(null)
   const { list: rows } = useDownloads()
+  // When an add-on was last removed here (unix seconds): its download, finished
+  // before that, no longer says Installed.
+  const [removedAt, setRemovedAt] = useState(0)
 
   useEffect(() => {
     setAvailable(null)
@@ -99,7 +102,13 @@ export function AddonsCard({
 
   // Each add-on's download, wherever it was started: from this card (by its
   // id on kryo.to) or from the Store's download window (by its label).
-  const mine = rows.filter((d) => d.addon && d.slug === game.slug && (!d.gameId || d.gameId === game.id) && d.status !== 'canceled')
+  // A finished download says Installed only until the library's own record of
+  // it arrives (a moment): one from before a Remove, or from long ago, says nothing.
+  const landed = (d: Dl) => {
+    const at = d.finishedAt ?? d.addedAt
+    return at > removedAt && Date.now() / 1000 - at < 60
+  }
+  const mine = rows.filter((d) => d.addon && d.slug === game.slug && (!d.gameId || d.gameId === game.id) && d.status !== 'canceled' && (d.status !== 'installed' || landed(d)))
   const rowFor = (a: KryoAddon): Dl | undefined => {
     const label = (a.label ?? '').toLowerCase()
     return mine
@@ -320,7 +329,12 @@ export function AddonsCard({
                   const c = confirm
                   setConfirm(null)
                   if (c.kind === 'online') void run('online', () => library.onlineUndo(game.id))
-                  else void run(c.file, () => library.addonUndo(game.id, c.file))
+                  else
+                    void run(c.file, async () => {
+                      const g = await library.addonUndo(game.id, c.file)
+                      setRemovedAt(Date.now() / 1000)
+                      return g
+                    })
                 }}
               >
                 Remove
