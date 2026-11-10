@@ -44,10 +44,21 @@ impl LaunchEntry {
     /// launcher link. Steam lists `link2ea://launchgame/...` entries for EA
     /// games; stored as the exe, they made Play "close again straight away"
     /// (1,252 reports in two weeks), since nothing at that path can run.
+    ///
+    /// And a program: Steam opens anything with the system, so a game can
+    /// list a page (`Cosplay DLC/index.html`, a DLC's artbook) as an entry.
+    /// Started as the game it failed with "%1 is not a valid Win32
+    /// application" (KB-0263).
     pub fn is_windows(&self) -> bool {
         let os = self.oslist.to_ascii_lowercase();
-        (os.is_empty() || os.contains("windows")) && !is_url_scheme(&self.executable)
+        (os.is_empty() || os.contains("windows")) && !is_url_scheme(&self.executable) && is_program(&self.executable)
     }
+}
+
+/// A file Play can start: an `.exe`, or a batch file a game ships to be
+/// started with. Not a page, a document or a picture.
+pub fn is_program(executable: &str) -> bool {
+    Path::new(executable.trim()).extension().is_some_and(|e| ["exe", "bat", "cmd", "com"].iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
 /// A launcher link (`link2ea://`, `steam://`, `com.epicgames.launcher://`)
@@ -694,6 +705,19 @@ mod tests {
         let mut i = input(None, "", true);
         i.executable = "link2ea://launchgame/1234";
         assert!(plan(&i).unwrap_err().contains("launcher link"));
+    }
+
+    /// KB-0263: Living With Sister lists its Cosplay DLC's artbook page as a
+    /// Steam entry; Play started it as the game (os error 193).
+    #[test]
+    fn a_page_listed_as_an_entry_is_never_started() {
+        let page = LaunchEntry { executable: "Cosplay DLC/index.html".into(), description: "Cosplay DLC".into(), ..Default::default() };
+        assert!(!page.is_windows());
+        assert!(LaunchEntry { executable: "Game.exe".into(), ..Default::default() }.is_windows());
+        assert!(LaunchEntry { executable: "Run Me.BAT".into(), ..Default::default() }.is_windows());
+        for not in ["manual.pdf", "readme.txt", "Soundtrack/cover.png", ""] {
+            assert!(!is_program(not), "{not}");
+        }
     }
 
     #[test]

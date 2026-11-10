@@ -222,6 +222,7 @@ pub(crate) fn load<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<LibraryGame>, S
                 for g in games.iter_mut().filter(|g| g.install_dir.starts_with(r"\\?\")) {
                     g.install_dir = dunce::simplified(Path::new(&g.install_dir)).to_string_lossy().into_owned();
                 }
+                games.iter_mut().for_each(drop_unstartable_entries);
                 keep_private(&games);
                 Ok(games)
             }
@@ -230,6 +231,18 @@ pub(crate) fn load<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<LibraryGame>, S
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Steam entries Play cannot start (KB-0263: a DLC's `index.html`), saved by
+/// an older version, go; the entry picked in Properties keeps pointing at the
+/// same one, or goes back to the game's own exe when it was one of those.
+fn drop_unstartable_entries(g: &mut LibraryGame) {
+    if g.entries.iter().all(LaunchEntry::is_windows) {
+        return;
+    }
+    let picked = g.preferred_entry.and_then(|i| g.entries.get(i)).filter(|e| e.is_windows()).cloned();
+    g.entries.retain(LaunchEntry::is_windows);
+    g.preferred_entry = picked.and_then(|p| g.entries.iter().position(|e| *e == p));
 }
 
 /// The names, folders and exes of games kryo.to does not list, for the error
@@ -1391,7 +1404,7 @@ pub(crate) fn default_entry<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<
 /// The plan, and the compatibility tool it uses (for the game's log).
 pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<usize>) -> Result<(LaunchPlan, Option<PathBuf>), String> {
     let entry = match entry {
-        Some(i) => Some(game.entries.get(i).ok_or("That launch entry no longer exists.")?),
+        Some(i) => Some(game.entries.get(i).filter(|e| e.is_windows()).ok_or("That launch entry no longer exists.")?),
         None => None,
     };
     let prefix = data_dir(app)?.join("prefixes").join(&game.id);
@@ -1968,7 +1981,22 @@ pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{added_place, from_folder, hidden_differences, parse, prepare_launch, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
+    use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
+    use crate::launch::LaunchEntry;
+
+    /// KB-0263: a library saved before the fix keeps the DLC page as an
+    /// entry; it goes on load, and the picked entry follows its own.
+    #[test]
+    fn a_saved_page_entry_goes_and_the_pick_follows() {
+        let e = |exe: &str| LaunchEntry { executable: exe.into(), ..Default::default() };
+        let mut g = LibraryGame { entries: vec![e("Game.exe"), e("Cosplay DLC/index.html"), e("Editor.exe")], preferred_entry: Some(2), ..Default::default() };
+        drop_unstartable_entries(&mut g);
+        assert_eq!(g.entries, vec![e("Game.exe"), e("Editor.exe")]);
+        assert_eq!(g.preferred_entry, Some(1), "still Editor.exe");
+        let mut picked_page = LibraryGame { entries: vec![e("Game.exe"), e("Cosplay DLC/index.html")], preferred_entry: Some(1), ..Default::default() };
+        drop_unstartable_entries(&mut picked_page);
+        assert_eq!(picked_page.preferred_entry, None, "back to the game's own exe");
+    }
 
     #[test]
     fn a_beta_branch_is_named_where_no_tag_can_be_drawn() {
