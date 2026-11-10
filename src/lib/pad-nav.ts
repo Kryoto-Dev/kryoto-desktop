@@ -11,11 +11,15 @@ import type { PadControl, PadFamily } from '@/lib/pad-art'
  * - A (on Nintendo pads, the A on the right): press what is selected.
  * - B: close the open menu or dialog, else go back.
  * - LB / RB: the previous or next page in the top bar.
- * - Home: Big Picture, in or out.
+ * - Home (the Xbox button): opens Big Picture. It never closes it: Windows'
+ *   Game Bar opens on the same button, and one press must not do both. Big
+ *   Picture is left from its own menu (B at the top, its Leave button) or by
+ *   holding View and Menu together (`kryo-pad-leave`).
  *
  * A page that has its own idea of back, page and Home (Big Picture) claims
- * them first: `kryo-pad-back`, `kryo-pad-tab` and `kryo-pad-guide` are sent on
- * the window as cancelable events, and only an unclaimed one does the default.
+ * them first: `kryo-pad-back`, `kryo-pad-tab`, `kryo-pad-guide` and
+ * `kryo-pad-leave` are sent on the window as cancelable events, and only an
+ * unclaimed one does the default.
  * - Right stick: scroll.
  *
  * With `haptics`, the pad answers: a light tick as the selection moves, a
@@ -184,6 +188,9 @@ export function usePadNavigation({
     const keep = (fn: () => void) => (cancelled ? fn() : stops.push(fn))
     const repeat = new Map<Dir, { wait: number; every?: number }>()
     let backHeld: number | undefined
+    // View and Menu held together, for a moment: leave Big Picture.
+    const both = new Set<PadControl>()
+    let bothHeld: number | undefined
     let stickDir: Dir | null = null
     let lastPad = 0
     // One bump at an edge, not one per repeat while the stick is held there.
@@ -222,6 +229,12 @@ export function usePadNavigation({
       const { paused, family, onBack, onTab, onGuide, forward } = live.current
       // The pad is in use: the hint bar and the selection's ring show.
       document.documentElement.classList.add('kryo-pad')
+      if (control === 'back' || control === 'start') {
+        if (pressed) both.add(control)
+        else both.delete(control)
+        window.clearTimeout(bothHeld)
+        if (both.size === 2) bothHeld = window.setTimeout(() => claimed('kryo-pad-leave') && feel('select'), 700)
+      }
       if (!paused && forward && !['leftshoulder', 'rightshoulder', 'guide'].includes(control)) {
         void padApi.forward({ type: 'button', control, pressed, family }).catch(() => {})
         if (pressed) feel('tick')
@@ -287,6 +300,7 @@ export function usePadNavigation({
       stops.forEach((f) => f())
       for (const d of [...repeat.keys()]) release(d)
       window.clearTimeout(backHeld)
+      window.clearTimeout(bothHeld)
       window.removeEventListener('pointerdown', pointer)
       window.removeEventListener('pointermove', pointer)
       document.documentElement.classList.remove('kryo-pad')

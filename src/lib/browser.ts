@@ -6,8 +6,10 @@
  * typing "hollow knight" just works instead of producing an error state.
  */
 
+import { SITE_ORIGIN } from '@/lib/endpoint'
+
 /** Home page for the embedded browser (also the catalog root). */
-export const BROWSER_HOME = 'https://kryo.to/'
+export const BROWSER_HOME = `${SITE_ORIGIN}/`
 
 /** Default search engine used when the address input is not a URL. */
 export const SEARCH_ENGINE = {
@@ -78,37 +80,4 @@ function isBareHostCandidate(value: string): boolean {
   if (/^[^/\s]+:\d+$/.test(host)) return true
   // Dotted domain with a plausible TLD.
   return /^[^/\s]+\.[^/\s:]{2,}(\/\S*)?$/.test(value)
-}
-
-export type UrlSecurity = 'secure' | 'insecure' | 'native'
-
-/** Classify a URL for the address-bar security indicator. */
-export function securityOf(url: string): UrlSecurity {
-  try {
-    const parsed = new URL(url)
-    if (parsed.protocol === 'https:') return 'secure'
-    if (parsed.protocol === 'http:') return 'insecure'
-    return 'native'
-  } catch {
-    return 'native'
-  }
-}
-
-/** Host portion used for compact display and tooltips. */
-export function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname
-  } catch {
-    return url
-  }
-}
-
-/** Kryoto first-party check, used to label in-app destinations. */
-export function isKryotoUrl(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.toLowerCase()
-    return host === 'kryo.to' || host.endsWith('.kryo.to')
-  } catch {
-    return false
-  }
 }

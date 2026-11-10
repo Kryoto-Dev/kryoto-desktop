@@ -16,6 +16,12 @@ export type CloudSavesStatus = {
   usage: Usage | null
   lastSync: number | null
   conflicts: string[]
+  /** Your own server (Settings > Cloud, Patchbay), by host; none for kryo.to. */
+  endpoint?: string | null
+  /** Where versions are kept: the kryo.to account, a folder on this PC, or your own server. */
+  mode?: 'account' | 'local' | 'patchbay'
+  /** On this PC: the folder. */
+  localDir?: string | null
 }
 
 export type SaveSource = 'player' | 'emulator' | 'engine' | 'known' | 'community' | 'staff' | 'detected'

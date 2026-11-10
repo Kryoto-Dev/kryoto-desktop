@@ -1,0 +1,243 @@
+/*
+ * Rich text: text effects (the perk, lib/text-effects.ts) and the marks of
+ * lib/rich-text.ts, drawn by each app's renderer (kryo.to:
+ * components/rich-text.tsx). Copied byte for byte into Kryoto Desktop and
+ * Kryoto Mobile with the rest of rich text (`pnpm sync:rich-text`), so it uses
+ * only the colour tokens all three apps define. Every animation stops under
+ * prefers-reduced-motion; each app's own motion setting stops them too.
+ */
+
+/* ---- Text effects ------------------------------------------------------------------ */
+
+.kryo-fx { display: inline; }
+
+.kryo-fx-rainbow,
+.kryo-fx-gold,
+.kryo-fx-frost,
+.kryo-fx-fire,
+.kryo-fx-aurora,
+.kryo-fx-prism,
+.kryo-fx-hologram {
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  background-size: 200% 100%;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+@keyframes fx-slide { to { background-position: -200% 0; } }
+@keyframes fx-flicker {
+  0%, 18%, 22%, 25%, 53%, 57%, 100% { opacity: 1; }
+  20%, 24%, 55% { opacity: 0.55; }
+}
+@keyframes fx-wave {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-0.22em); }
+}
+@keyframes fx-glitch-a {
+  0%, 100% { clip-path: inset(0 0 80% 0); transform: translate(-0.06em, 0); }
+  25% { clip-path: inset(40% 0 30% 0); transform: translate(0.06em, 0); }
+  50% { clip-path: inset(70% 0 5% 0); transform: translate(-0.04em, 0); }
+  75% { clip-path: inset(15% 0 60% 0); transform: translate(0.05em, 0); }
+}
+@keyframes fx-glitch-b {
+  0%, 100% { clip-path: inset(60% 0 10% 0); transform: translate(0.06em, 0); }
+  33% { clip-path: inset(10% 0 70% 0); transform: translate(-0.06em, 0); }
+  66% { clip-path: inset(35% 0 40% 0); transform: translate(0.04em, 0); }
+}
+@keyframes fx-prism { to { filter: hue-rotate(360deg); } }
+@keyframes fx-eclipse {
+  0%, 100% { text-shadow: 0 0 0.35em rgb(255 207 90 / 0.65), 0 0 0.08em rgb(255 207 90 / 0.9); }
+  50% { text-shadow: 0 0 0.6em rgb(255 207 90 / 0.85), 0 0 0.12em rgb(255 230 160 / 1); }
+}
+
+.kryo-fx-rainbow {
+  background-image: linear-gradient(90deg, #ff5f6d, #ffc371, #f9f871, #5fd38d, #4ea8ff, #b26bff, #ff5f6d);
+  animation: fx-slide 4s linear infinite;
+}
+.kryo-fx-neon {
+  color: var(--primary);
+  text-shadow: 0 0 0.2em color-mix(in oklab, var(--primary) 80%, transparent), 0 0 0.6em color-mix(in oklab, var(--primary) 55%, transparent);
+  animation: fx-flicker 5s linear infinite;
+}
+.kryo-fx-gold {
+  background-image: linear-gradient(100deg, #a8741a 0%, #f6d77a 25%, #fff6cf 35%, #e2b23f 50%, #a8741a 70%, #f6d77a 90%);
+  animation: fx-slide 5s linear infinite;
+}
+.kryo-fx-frost {
+  background-image: linear-gradient(90deg, #7fd3ff, #e6f7ff, #9fd3f5, #ffffff, #7fd3ff);
+  animation: fx-slide 6s linear infinite;
+  filter: drop-shadow(0 0 0.12em rgb(127 211 255 / 0.55));
+}
+.kryo-fx-glitch {
+  position: relative;
+  display: inline-block;
+}
+.kryo-fx-glitch-a,
+.kryo-fx-glitch-b {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+}
+.kryo-fx-glitch-a { color: #ff3d7f; animation: fx-glitch-a 1.6s steps(1) infinite; opacity: 0.8; }
+.kryo-fx-glitch-b { color: #3df2ff; animation: fx-glitch-b 2.1s steps(1) infinite; opacity: 0.8; }
+.kryo-fx-wave > span {
+  display: inline-block;
+  animation: fx-wave 1.4s ease-in-out infinite;
+  animation-delay: calc(var(--i) * 70ms);
+}
+.kryo-fx-fire {
+  background-image: linear-gradient(0deg, #ff3b1f, #ff8a2b 45%, #ffd35a 75%, #fff2b0);
+  background-size: 100% 200%;
+  animation: fx-slide 1.6s ease-in-out infinite alternate;
+  filter: drop-shadow(0 0 0.18em rgb(255 110 40 / 0.6));
+}
+.kryo-fx-aurora {
+  background-image: linear-gradient(90deg, #3fc7a6, #7cf7c8, #6ab8ff, #b26bff, #3fc7a6);
+  animation: fx-slide 7s ease-in-out infinite;
+  filter: drop-shadow(0 0 0.2em rgb(124 247 200 / 0.45));
+}
+.kryo-fx-prism {
+  background-image: conic-gradient(from 0deg, #ff6b9d, #ffd36b, #6bffb8, #6bc4ff, #c06bff, #ff6b9d);
+  background-size: 100% 100%;
+  animation: fx-prism 3s linear infinite;
+}
+.kryo-fx-hologram {
+  background-image:
+    repeating-linear-gradient(0deg, rgb(255 255 255 / 0.28) 0 1px, transparent 1px 3px),
+    linear-gradient(90deg, #8fe9ff, #c9b8ff, #8fffd8, #8fe9ff);
+  background-size: 100% 100%, 200% 100%;
+  animation: fx-slide 4s linear infinite, fx-flicker 6s linear infinite;
+  filter: drop-shadow(0 0 0.15em rgb(143 233 255 / 0.6));
+}
+.kryo-fx-eclipse {
+  color: #17131f;
+  animation: fx-eclipse 2.8s ease-in-out infinite;
+}
+
+/* ---- Marks ------------------------------------------------------------------------- */
+
+.kryo-rich-block { display: block; }
+.kryo-rich-block + .kryo-rich-block { margin-top: 0.35em; }
+
+.kryo-quote {
+  display: block;
+  border-left: 3px solid var(--border);
+  padding-left: 0.6em;
+  color: var(--muted-foreground);
+}
+
+.kryo-code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.9em;
+  padding: 0.05em 0.3em;
+  background: var(--muted);
+  border-radius: var(--kryo-radius, 0);
+  overflow-wrap: anywhere;
+}
+
+.kryo-codeblock {
+  display: block;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0.5em 0.7em;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--kryo-radius, 0);
+}
+
+/* Hidden until it is focused (a click or Tab) or pointed at. */
+.kryo-spoiler {
+  border-radius: var(--kryo-radius, 0);
+  background: var(--foreground);
+  color: transparent;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.kryo-spoiler * { visibility: hidden; }
+.kryo-spoiler:focus,
+.kryo-spoiler:focus-within,
+.kryo-spoiler[data-shown] {
+  background: var(--muted);
+  color: inherit;
+  outline: none;
+}
+.kryo-spoiler:focus *,
+.kryo-spoiler:focus-within *,
+.kryo-spoiler[data-shown] * { visibility: visible; }
+.kryo-spoiler:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.kryo-mention {
+  font-weight: 600;
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  padding: 0 0.2em;
+  border-radius: var(--kryo-radius, 0);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+a.kryo-mention:hover { background: color-mix(in oklab, var(--primary) 22%, transparent); }
+a.kryo-mention:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.kryo-mention-quiet {
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-weight: 500;
+}
+
+.kryo-emoji {
+  display: inline-block;
+  height: 1.375em;
+  width: 1.375em;
+  object-fit: contain;
+  vertical-align: -0.3em;
+  margin: 0 0.05em;
+}
+.kryo-emoji-jumbo .kryo-emoji { height: 2.75em; width: 2.75em; vertical-align: middle; }
+
+.kryo-sticker {
+  display: block;
+  width: 128px;
+  height: 128px;
+  object-fit: contain;
+  margin: 0.25em 0;
+}
+
+/* ---- Attachments (lib/attachment-layout.ts) ----------------------------------------- */
+
+/* Each file whole, at its real shape. A row's max-width and a cell's flex and
+   aspect-ratio come from the layout, so the space is held before it loads. */
+.kryo-media { display: grid; gap: 4px; max-width: 100%; }
+.kryo-media-row { display: flex; gap: 4px; width: 100%; }
+.kryo-media-cell {
+  position: relative;
+  display: block;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  background: var(--muted);
+  border-radius: var(--kryo-radius, 0);
+}
+button.kryo-media-cell { cursor: zoom-in; }
+button.kryo-media-cell:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.kryo-media-cell > img,
+.kryo-media-cell > video { display: block; width: 100%; height: 100%; object-fit: contain; }
+
+/* The line over a reply: who it answers, and what they said. */
+.kryo-reply-quote { display: flex; align-items: center; gap: 0.375rem; min-width: 0; font-size: 0.75rem; line-height: 1.25rem; color: var(--muted-foreground); }
+.kryo-reply-quote .kryo-emoji { height: 1.1em; width: 1.1em; vertical-align: -0.2em; }
+
+@media (prefers-reduced-motion: reduce) {
+  .kryo-fx-rainbow, .kryo-fx-neon, .kryo-fx-gold, .kryo-fx-frost, .kryo-fx-glitch-a,
+  .kryo-fx-glitch-b, .kryo-fx-wave > span, .kryo-fx-fire, .kryo-fx-aurora, .kryo-fx-prism,
+  .kryo-fx-hologram, .kryo-fx-eclipse {
+    animation: none !important;
+  }
+}

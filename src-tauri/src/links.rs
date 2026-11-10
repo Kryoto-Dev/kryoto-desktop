@@ -3,7 +3,11 @@
 //!
 //!   kryoto://game/<slug>   the game's page in the Store
 //!   kryoto://play/<slug>   start it when it is installed, else its page
+//!   kryoto://library/<id>  start this library game, a shortcut in another
+//!                          launcher (Bridge); never goes to kryo.to
 //!   kryoto://chat/<user>   open (or start) a chat with that kryo.to username
+//!   kryoto://settings/<section>[/<setting>]   Settings, scrolled to one setting
+//!                          (`#<setting>` works too; src/lib/settings-links.ts)
 //!
 //! The scheme is registered for the current user at start (no admin rights).
 //! Windows starts a new copy of the app for every link; that copy hands the
@@ -21,9 +25,9 @@ pub const EVENT: &str = "deep-link";
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
-    /// `game`, `play` or `chat`.
+    /// `game`, `play`, `chat` or `settings`.
     pub action: String,
-    /// A game slug, or for `chat` a username.
+    /// A game slug, for `chat` a username, for `settings` `section` or `section/setting`.
     pub slug: String,
 }
 
@@ -32,7 +36,21 @@ pub fn parse(raw: &str) -> Option<Link> {
     let rest = raw.trim().strip_prefix(&format!("{SCHEME}://"))?;
     let mut parts = rest.trim_end_matches('/').splitn(2, '/');
     let action = parts.next()?.to_ascii_lowercase();
-    let target = parts.next()?.split(['?', '#']).next()?;
+    let raw_target = parts.next()?;
+    if action == "settings" {
+        // Which sections exist is the shell's to know; here only the shape.
+        let path = raw_target.split('?').next()?.replace('#', "/").to_ascii_lowercase();
+        let mut bits = path.split('/').filter(|b| !b.is_empty());
+        let section = bits.next()?;
+        let setting = bits.next();
+        let ok = |s: &str| (1..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if bits.next().is_some() || !ok(section) || setting.is_some_and(|s| !ok(s)) {
+            return None;
+        }
+        let slug = setting.map_or_else(|| section.to_string(), |s| format!("{section}/{s}"));
+        return Some(Link { action, slug });
+    }
+    let target = raw_target.split(['?', '#']).next()?;
     if action == "chat" {
         // kryo.to's username rule: 3-32 of letters, digits, _ . - (and never
         // only dots, so it can never read as a path).
@@ -45,7 +63,7 @@ pub fn parse(raw: &str) -> Option<Link> {
     let slug_ok = !slug.is_empty()
         && slug.len() <= 160
         && slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if !slug_ok || !(action == "game" || action == "play") {
+    if !slug_ok || !matches!(action.as_str(), "game" | "play" | "library") {
         return None;
     }
     Some(Link { action, slug })
@@ -90,6 +108,10 @@ pub fn register() {
     if cfg!(debug_assertions) && std::env::var("KRYOTO_REGISTER_SCHEME").as_deref() != Ok("1") {
         return;
     }
+    // Kryoto Desktop Preview never takes the normal app's links (src/channel.rs).
+    if crate::channel::PREVIEW {
+        return;
+    }
     if let Err(e) = register_os() {
         crate::logging::error("links", &format!("could not register kryoto:// links: {e}"));
     }
@@ -125,15 +147,21 @@ fn register_os() -> Result<(), String> {
     set(&format!(r"{base}\shell\open\command"), None, &format!("\"{}\" \"%1\"", exe.display()))
 }
 
+/// This program, as something outside it can start it. An AppImage runs from
+/// a temporary mount; $APPIMAGE is the file itself.
+#[cfg(not(windows))]
+pub fn this_app() -> Result<std::path::PathBuf, String> {
+    match std::env::var_os("APPIMAGE") {
+        Some(p) => Ok(std::path::PathBuf::from(p)),
+        None => std::env::current_exe().map_err(|e| e.to_string()),
+    }
+}
+
 #[cfg(not(windows))]
 fn register_os() -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "No home folder.".to_string())?;
     let dir = std::path::Path::new(&home).join(".local/share/applications");
-    // An AppImage runs from a temporary mount; $APPIMAGE is the file itself.
-    let exe = match std::env::var_os("APPIMAGE") {
-        Some(p) => std::path::PathBuf::from(p),
-        None => std::env::current_exe().map_err(|e| e.to_string())?,
-    };
+    let exe = this_app()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name = "kryoto-desktop-links.desktop";
     std::fs::write(
@@ -167,6 +195,16 @@ mod tests {
         assert_eq!(parse("kryoto://chat/Mira_99"), Some(Link { action: "chat".into(), slug: "Mira_99".into() }));
         assert_eq!(parse("kryoto://chat/a.b-c/").map(|l| l.slug), Some("a.b-c".into()));
         for bad in ["kryoto://chat/ab", "kryoto://chat/...", "kryoto://chat/a b c", "kryoto://chat/<script>", &format!("kryoto://chat/{}", "a".repeat(33))] {
+            assert_eq!(parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn parses_settings_with_or_without_a_setting() {
+        assert_eq!(parse("kryoto://settings/general"), Some(Link { action: "settings".into(), slug: "general".into() }));
+        assert_eq!(parse("kryoto://settings/General/desktop-pet/").map(|l| l.slug), Some("general/desktop-pet".into()));
+        assert_eq!(parse("kryoto://settings/general#desktop-pet").map(|l| l.slug), Some("general/desktop-pet".into()));
+        for bad in ["kryoto://settings/", "kryoto://settings/a/b/c", "kryoto://settings/gen eral", "kryoto://settings/../etc", "kryoto://settings/general/<b>"] {
             assert_eq!(parse(bad), None, "{bad}");
         }
     }

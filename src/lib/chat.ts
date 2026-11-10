@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react'
 import { call, isWeb, on } from '@/lib/bridge'
 
+let device: string | null = null
+/** What this device calls itself in chat's words, when it is neither of the two below. */
+export const nameThisDevice = (name: string) => {
+  device = name
+}
+
 /** "this PC" in the app, "this browser" in the web chat. */
-export const here = () => (isWeb() ? 'this browser' : 'this PC')
-export const Here = () => (isWeb() ? 'This browser' : 'This PC')
+export const here = () => `this ${device ?? (isWeb() ? 'browser' : 'PC')}`
+export const Here = () => `This ${device ?? (isWeb() ? 'browser' : 'PC')}`
 
 /**
  * Chat on this PC, as the native side reports it (src-tauri/src/chat).
@@ -126,7 +132,8 @@ export const chatSendGif = (peer: string, gif: Gif) => call<ChatMessage>('chat_s
 export const chatSendFile = (peer: string) => call<ChatMessage | null>('chat_send_file', { peer })
 export const chatFileSave = (msg: string) => call<string | null>('chat_file_save', { msg })
 export const chatFilePreview = (msg: string) => call<string>('chat_file_preview', { msg })
-export type FileInfo = { name: string; mime: string; size: number }
+/** `width` and `height` are a picture's real size; 0 or absent on older messages. */
+export type FileInfo = { name: string; mime: string; size: number; width?: number; height?: number }
 export function parseFile(body: string): FileInfo | null {
   try {
     const f = JSON.parse(body) as FileInfo
@@ -144,7 +151,6 @@ export const chatDelete = (msg: string) => call<void>('chat_delete', { msg })
 export const chatReact = (msg: string, emoji: string, remove: boolean) => call<void>('chat_react', { msg, emoji, remove })
 export const chatTyping = (peer: string, active: boolean) => call<void>('chat_typing', { peer, active })
 export const chatMarkRead = (peer: string) => call<void>('chat_mark_read', { peer })
-export const chatSearch = (query: string) => call<ChatMessage[]>('chat_search', { query })
 export const chatSettingsGet = () => call<ChatSettings>('chat_settings_get')
 export const chatSettingsSet = (settings: ChatSettings) => call<void>('chat_settings_set', { settings })
 export const chatGifSearch = (query: string) => call<{ gifs: Gif[]; attribution?: string }>('chat_gif_search', { query })
@@ -215,7 +221,7 @@ export type GroupView = {
   members: { userId: string; role: 'owner' | 'admin' | 'member' }[]
   myRole: 'owner' | 'admin' | 'member' | ''
 }
-export type ChatPersonInfo = { id: string; username: string; displayName: string | null; avatarUrl: string | null; supporter: boolean }
+export type ChatPersonInfo = { id: string; username: string; displayName: string | null; avatarUrl: string | null; supporter: boolean; rank?: string | null }
 
 /** How the native side names a group conversation. */
 export const groupTarget = (id: string) => `g:${id}`
@@ -273,6 +279,16 @@ export const chatPushDisable = () => call<void>('chat_push_disable')
 export const chatBackupCreate = () => call<string>('chat_backup_create')
 export const chatBackupDelete = () => call<void>('chat_backup_delete')
 export const chatDevices = () => call<MyDevice[]>('chat_devices')
+
+/** One of the account's chat devices, as the gateway lists them (kryoto-gateway src/devices.rs). */
+export type AccountDevice = { id: string; kind: 'desktop' | 'web'; name: string; createdMs: number; lastSeenMs: number; online: boolean }
+export type AccountDevices = { devices: AccountDevice[]; limit: number; expireDays: number }
+/**
+ * The account's chat devices with no chat device here, only the sign-in: how
+ * a device turned away at the limit makes room.
+ */
+export const chatAccountDevices = () => call<AccountDevices>('chat_account_devices')
+export const chatAccountDeviceRemove = (id: string) => call<void>('chat_account_device_remove', { id })
 export const chatDeviceRevoke = (device: string) => call<void>('chat_device_revoke', { device })
 /** Save all conversations on this PC to a file (plain text). Null when cancelled. */
 export const chatExportHistory = () => call<string | null>('chat_export_history')

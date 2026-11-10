@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { emit } from '@tauri-apps/api/event'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window'
 import { call, on } from '@/lib/bridge'
 import type { Download, Notice } from '@/lib/downloads'
+import { isOnline, onOnlineChange } from '@/lib/online'
 import type { MascotId, ThemeId } from '@/pet/engine'
 import { Stage, petDetector } from '@/pet/stage'
 
@@ -18,8 +19,12 @@ const ACTIVE = new Set(['resolving', 'downloading', 'verifying', 'extracting'])
  * achievement, the cloud for a save backup. It steps out of the way while a
  * game runs, since it sits above every other window.
  *
- * Drag it anywhere; click or pet it; double-click it to open Kryoto;
- * right-click it for the native menu (pick another mascot, or hide it).
+ * It behaves as the site's mascot does (kryo.to components/mascot): only its
+ * drawn pixels take the pointer, its eyes follow the pointer, a stroke over
+ * its head pets it, a click pokes it (now and then it takes the sponsor's
+ * taco break), a double-click spins it into a dance, and it dangles its legs
+ * while it is carried. Right-click it for the native menu (another mascot,
+ * open Kryoto, or hide it).
  */
 export function PetApp() {
   const ref = useRef<HTMLCanvasElement>(null)
@@ -29,16 +34,21 @@ export function PetApp() {
     if (!canvas) return
     const win = getCurrentWindow()
     const stage = new Stage(canvas, { mascot: 'telly', scale: 3, theme: { theme: 'monochrome', mode: 'dark' } })
+    // Every message to the native side can fail while this window is being
+    // closed (the pet put away, Kryoto quitting): "failed to send message to
+    // the webview", 357 reports in two weeks. None of them matters then.
+    const quiet = <T,>(p: Promise<T>) => p.catch(() => undefined as T)
     const offs: Promise<() => void>[] = []
     let shown = false
     const show = () => {
       if (shown) return
       shown = true
-      void win.show()
+      void quiet(win.show())
     }
 
     void call<string>('pet_mascot')
       .then((m) => stage.setMascot(m as MascotId))
+      .catch(() => {})
       .finally(show)
     offs.push(
       on<string>('pet-mascot', (m) => {
@@ -55,7 +65,13 @@ export function PetApp() {
         stage.redraw()
       }),
     )
-    void emit('pet-hello')
+    void quiet(emit('pet-hello'))
+
+    // Being carried: nothing else plays until it lands.
+    let held = false
+    // The loop it was busy with (a download, a save backup), to go back to
+    // after it has been carried and landed.
+    let task: (() => void) | null = null
 
     // Downloads: the busiest one's progress, then how it ended.
     let progress = 0
@@ -67,6 +83,7 @@ export function PetApp() {
           const before = seen.get(d.id)
           seen.set(d.id, d.status)
           if (!before || before === d.status) continue
+          if (held) continue
           if (d.status === 'installed') stage.play('success', { for: 2.2 })
           else if (d.status === 'failed') stage.play('error', { for: 2.4 })
         }
@@ -80,11 +97,14 @@ export function PetApp() {
                 : 0
           if (!downloading) {
             downloading = true
+            task = () => stage.play('download', { loop: true, progress: () => progress })
             stage.busy = true
-            stage.play('download', { loop: true, progress: () => progress })
+            if (!held) task()
           }
         } else if (downloading) {
           downloading = false
+          task = null
+          if (held) return
           stage.busy = false
           if (stage.anim === 'download') stage.back()
         }
@@ -98,67 +118,130 @@ export function PetApp() {
         if (e.running) {
           const first = running.size === 0
           running.add(e.id)
-          if (first) stage.play('playing', { for: 2.4, then: () => void win.hide() })
+          if (first && held) void quiet(win.hide())
+          else if (first) stage.play('playing', { for: 2.4, then: () => void quiet(win.hide()) })
         } else if (running.delete(e.id) && running.size === 0) {
-          void win.show()
-          stage.play('happy', { for: 2 })
+          void quiet(win.show())
+          if (!held) stage.play('happy', { for: 2 })
         }
       }),
     )
-    offs.push(on('achievement-unlocked', () => stage.play('achievement', { for: 3 })))
+    offs.push(
+      on('achievement-unlocked', () => {
+        if (!held) stage.play('achievement', { for: 3 })
+      }),
+    )
     let saving = 0
+    let backingUp = false
     offs.push(
       on<{ phase: string; done: number; total: number }>('cloud-saves-progress', (e) => {
         if (e.phase === 'done') {
-          stage.busy = false
-          stage.play('success', { for: 2 })
+          backingUp = false
+          if (!downloading) task = null
+          if (held) return
+          stage.busy = task !== null
+          stage.play('success', { for: 2, then: () => (task ? task() : stage.back()) })
           return
         }
         saving = e.total ? e.done / e.total : 0
-        if (stage.anim !== 'syncing') {
+        if (!backingUp) {
+          backingUp = true
+          task = () => stage.play('syncing', { loop: true, progress: () => saving })
           stage.busy = true
-          stage.play('syncing', { loop: true, progress: () => saving })
+          if (!held) task()
         }
+      }),
+    )
+    // The PC's memory nearly full (pet.rs reads it): it eats some, when it
+    // is not busy with something of Kryoto's.
+    offs.push(
+      on('pet-hungry', () => {
+        if (stage.busy || held) return
+        stage.play('ramsnack')
       }),
     )
     offs.push(
       on<Notice>('notify', (n) => {
-        if (stage.busy) return
+        if (stage.busy || held) return
         stage.play(n.sound === 'error' || n.sound === 'downloadFailed' ? 'error' : 'notify', { for: 2 })
       }),
     )
 
-    // The pointer.
+    // Gone offline, as the site's mascot shows it.
+    const offline = () => {
+      if (held) return
+      stage.busy = true
+      stage.play('offline', { loop: true })
+    }
+    const online = () => {
+      if (stage.anim !== 'offline') return
+      stage.busy = task !== null
+      stage.play('success', { for: 2, then: () => (task ? task() : stage.back()) })
+    }
+    // Through lib/online.ts, which confirms "offline" with a real request:
+    // WebKitGTK says offline on Linux without NetworkManager while the
+    // network works, and the pet sat in its offline loop for good.
+    const stopOnline = onOnlineChange((up) => (up ? online() : offline()))
+    if (!isOnline()) offline()
+
+    // Carried: the system moves the window (so it works on Wayland too) and
+    // pet.rs says when the button comes up. Should that command be missing
+    // (a page newer than the app around it), the window still moves, and it
+    // lands at the first pointer move after.
+    const drop = () => {
+      if (!held) return
+      held = false
+      stage.busy = task !== null
+      stage.play('landed', { then: () => (task ? task() : stage.back()) })
+    }
+    const pickUp = () => {
+      held = true
+      stage.busy = true
+      stage.play('dragged', { loop: true })
+      void call('pet_drag').catch(() => quiet(win.startDragging()))
+    }
+    offs.push(on('pet-dropped', drop))
+
+    // The pointer. Only the drawn pixels take it, as on the site. The page
+    // hears it only over its own small window, so the eyes ask where it is.
     const pet = petDetector(stage)
     let press: { x: number; y: number } | null = null
     const down = (e: PointerEvent) => {
-      if (e.button === 0) press = { x: e.clientX, y: e.clientY }
+      if (held) return drop()
+      if (e.button === 0 && stage.opaqueAt(e.clientX, e.clientY)) press = { x: e.clientX, y: e.clientY }
     }
     const move = (e: PointerEvent) => {
+      // The pointer moving with no button down: the carrying is over.
+      if (held) return e.buttons === 0 ? drop() : undefined
       stage.lookAt(e.clientX, e.clientY)
+      const over = stage.opaqueAt(e.clientX, e.clientY)
+      canvas.style.cursor = over || press ? 'grab' : 'default'
       if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 4) {
         press = null
-        const wasBusy = stage.busy
-        stage.busy = true
-        stage.play('dragged', { loop: true })
-        // The system moves the window from here, until the button comes up.
-        void win.startDragging().finally(() => {
-          stage.busy = wasBusy
-          stage.play('landed')
-        })
-        return
+        return pickUp()
       }
-      if (!press && e.clientY < canvas.getBoundingClientRect().height * 0.7) pet(e.clientX)
+      if (!press && over && e.clientY < canvas.getBoundingClientRect().height * 0.7) pet(e.clientX)
     }
     const up = () => {
       if (press) stage.poke()
       press = null
     }
-    const dbl = () => void call('pet_open_app').catch(() => {})
+    const dbl = (e: MouseEvent) => {
+      if (stage.opaqueAt(e.clientX, e.clientY)) stage.play('spin', { then: () => stage.play('dance', { for: 3 }) })
+    }
     const menu = (e: MouseEvent) => {
       e.preventDefault()
       void call('pet_menu').catch(() => {})
     }
+    let scale = window.devicePixelRatio || 1
+    void quiet(win.scaleFactor()).then((f) => (scale = f || scale))
+    offs.push(win.onScaleChanged(({ payload }) => (scale = payload.scaleFactor)))
+    const follow = window.setInterval(() => {
+      if (held || press || document.hidden) return
+      void Promise.all([cursorPosition(), win.innerPosition()])
+        .then(([c, at]) => stage.lookAt((c.x - at.x) / scale, (c.y - at.y) / scale))
+        .catch(() => {})
+    }, 150)
     canvas.addEventListener('pointerdown', down)
     canvas.addEventListener('pointermove', move)
     canvas.addEventListener('pointerup', up)
@@ -166,8 +249,10 @@ export function PetApp() {
     canvas.addEventListener('contextmenu', menu)
 
     return () => {
+      window.clearInterval(follow)
+      stopOnline()
       stage.destroy()
-      offs.forEach((off) => void off.then((f) => f()))
+      offs.forEach((off) => void quiet(off.then((f) => f())))
       canvas.removeEventListener('pointerdown', down)
       canvas.removeEventListener('pointermove', move)
       canvas.removeEventListener('pointerup', up)

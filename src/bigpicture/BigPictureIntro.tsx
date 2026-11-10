@@ -10,9 +10,6 @@ import { play } from '@/lib/sound'
  * it; with reduced motion it moves straight on.
  */
 
-/** The start box the scene was drawn for (lib/window.ts, `splash`). */
-const BOX_W = 340
-const BOX_H = 380
 /** How long BIG PICTURE holds once the mark is lit, then the fade. */
 const HOLD_MS = 650
 const FADE_MS = 350
@@ -21,7 +18,7 @@ const LIGHTS_AT_MS = 1745
 /** Where the sound's chord sits (sound-recipes.ts, `bpIntro`). */
 const CHORD_AT_MS = 900
 
-export function reducedMotion() {
+function reducedMotion() {
   return typeof window !== 'undefined' && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || document.documentElement.dataset.motion === 'reduced')
 }
 
@@ -35,8 +32,9 @@ export function BigPictureIntro({ onDone }: { onDone: () => void }) {
     done.current = true
     onDone()
   }
-  // Big enough to fill the screen the way it fills the start box.
-  const [cell] = useState(() => Math.max(1, Math.min(window.innerWidth / BOX_W, window.innerHeight / BOX_H) * 0.85))
+  // Where BIG PICTURE goes, from where the scene says the mark ends: it follows
+  // the window, which is still growing as Big Picture opens.
+  const [label, setLabel] = useState(0)
 
   useEffect(() => {
     if (reducedMotion()) {
@@ -75,15 +73,14 @@ export function BigPictureIntro({ onDone }: { onDone: () => void }) {
   return (
     <div
       aria-hidden
-      className="pointer-events-auto fixed inset-0 z-[660] bg-black text-foreground transition-opacity ease-out"
+      className="kryo-night pointer-events-auto fixed inset-0 z-[660] bg-black text-foreground transition-opacity ease-out"
       style={{ opacity: leaving ? 0 : 1, transitionDuration: `${FADE_MS}ms` }}
     >
-      <SplashScene cell={cell} onRevealed={() => setLit(true)} />
+      <SplashScene fit={0.85} onMark={(bottom, cell) => setLabel(bottom + cell * 14)} onRevealed={() => setLit(true)} />
       {lit ? (
         <p
           className="kryo-in pointer-events-none absolute inset-x-0 pl-[0.6em] text-center text-sm font-bold uppercase tracking-[0.6em] text-foreground"
-          // Under the mark, which the scene centres 42% of the way down.
-          style={{ top: `calc(42% + ${Math.round(cell * 44)}px)` }}
+          style={{ top: label }}
         >
           Big Picture
         </p>

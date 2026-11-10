@@ -9,7 +9,8 @@
  * default, like a console's, with their own switch. Synthesised rather than
  * files, so there is nothing to ship and nothing to load before the first one.
  */
-import { BIG_PICTURE_SOUNDS, SOUNDS, type Recipe, type SoundName, type Voice } from './sound-recipes'
+import { call } from '@/lib/bridge'
+import { BIG_PICTURE_SOUNDS, ROOM, SOUNDS, lengthOf, type Recipe, type SoundName, type Voice } from './sound-recipes'
 
 export { SOUNDS, BIG_PICTURE_SOUNDS, type SoundName }
 
@@ -87,12 +88,88 @@ export function play(name: SoundName, { force = false }: { force?: boolean; bigP
   if (volume <= 0) return
   try {
     ctx ??= new AudioContext()
-    if (ctx.state === 'suspended') void ctx.resume()
-    render(ctx, SOUNDS[name], ctx.currentTime + 0.01, volume)
+    // A PC with no output device, or one Windows has just unplugged, rejects
+    // this ("Failed to start the audio device"): silence, not a report.
+    if (ctx.state === 'suspended') void ctx.resume().catch(() => {})
+    const own = custom.get(name)
+    if (own) void playOwn(ctx, name, own, volume)
+    else render(ctx, SOUNDS[name], ctx.currentTime + 0.01, volume)
   } catch {
     /* no audio device: silence is the fallback */
   }
 }
+
+// ---- The player's own sounds (custom_sounds.rs) -----------------------------
+
+export type CustomSound = { name: SoundName; file: string }
+
+/** Longer files are cut here: a sound, not a song. */
+const MAX_OWN_SECONDS = 8
+/** By sound: the file's bytes until it first plays, then the decoded audio. */
+const custom = new Map<SoundName, ArrayBuffer | AudioBuffer>()
+let customList: CustomSound[] = []
+const customListeners = new Set<() => void>()
+
+/** Which sounds are the player's own: read at start, and again after every change. */
+export async function loadCustomSounds(): Promise<void> {
+  try {
+    const list = (await call<CustomSound[]>('sound_custom_list')).filter((c) => c.name in SOUNDS)
+    const read = await Promise.all(
+      list.map((c) =>
+        call<ArrayBuffer>('sound_custom_read', { name: c.name })
+          .then((bytes) => [c.name, bytes] as const)
+          .catch(() => null),
+      ),
+    )
+    custom.clear()
+    for (const r of read) if (r) custom.set(r[0], r[1])
+    customList = list
+  } catch {
+    /* outside Kryoto Desktop, or the folder is unreadable: Kryoto's own sounds play */
+  }
+  customListeners.forEach((f) => f())
+}
+
+export function customSounds(): CustomSound[] {
+  return customList
+}
+
+export function onCustomSounds(f: () => void): () => void {
+  customListeners.add(f)
+  return () => customListeners.delete(f)
+}
+
+/** Play the file at `path` instead of `name`. It is copied into Kryoto's custom sounds folder. */
+export async function setCustomSound(name: SoundName, path: string): Promise<void> {
+  await call('sound_custom_set', { name, path })
+  await loadCustomSounds()
+}
+
+/** Back to Kryoto's own sound for `name`. */
+export async function clearCustomSound(name: SoundName): Promise<void> {
+  await call('sound_custom_clear', { name })
+  await loadCustomSounds()
+}
+
+async function playOwn(c: AudioContext, name: SoundName, own: ArrayBuffer | AudioBuffer, volume: number) {
+  try {
+    // decodeAudioData takes the bytes over, so it gets a copy.
+    const audio = own instanceof AudioBuffer ? own : await c.decodeAudioData(own.slice(0))
+    custom.set(name, audio)
+    const src = c.createBufferSource()
+    const gain = c.createGain()
+    src.buffer = audio
+    gain.gain.value = volume
+    src.connect(gain).connect(c.destination)
+    src.start()
+    src.stop(c.currentTime + Math.min(audio.duration, MAX_OWN_SECONDS))
+  } catch {
+    // A file the system cannot decode: Kryoto's own sound, not silence.
+    render(c, SOUNDS[name], c.currentTime + 0.01, volume)
+  }
+}
+
+if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) void loadCustomSounds()
 
 function noise(c: AudioContext): AudioBuffer {
   if (noiseBuffer && noiseBuffer.sampleRate === c.sampleRate) return noiseBuffer
@@ -108,24 +185,31 @@ function render(c: AudioContext, recipe: Recipe, at: number, volume: number) {
   master.gain.value = volume
   master.connect(c.destination)
   let bus: AudioNode = master
-  if (recipe.echo) {
-    // A soft repeat: dry straight to the master, wet through a feedback delay.
+  if (recipe.room) {
+    // The room (ROOM in sound-recipes.ts): dry straight to the master, and
+    // into four damped feedback delays whose sum is the wet part.
     const dry = c.createGain()
-    const delay = c.createDelay(1)
-    const feedback = c.createGain()
     const wet = c.createGain()
-    delay.delayTime.value = recipe.echo.delay
-    feedback.gain.value = recipe.echo.feedback
-    wet.gain.value = recipe.echo.mix
+    wet.gain.value = recipe.room.mix / ROOM.combs.length
     dry.connect(master)
-    dry.connect(delay)
-    delay.connect(feedback).connect(delay)
-    delay.connect(wet).connect(master)
+    wet.connect(master)
+    for (const d of ROOM.combs) {
+      const delay = c.createDelay(1)
+      const damp = c.createBiquadFilter()
+      const feedback = c.createGain()
+      delay.delayTime.value = d * (recipe.room.size ?? 1)
+      damp.type = 'lowpass'
+      damp.frequency.value = ROOM.damp
+      feedback.gain.value = ROOM.feedback
+      dry.connect(delay)
+      delay.connect(damp).connect(feedback).connect(delay)
+      delay.connect(wet)
+    }
     bus = dry
   }
   for (const v of recipe.voices) voice(c, v, at, bus)
   // Let go of the graph once the tail has rung out.
-  const end = Math.max(...recipe.voices.map((v) => v.at + v.dur)) + (recipe.echo ? recipe.echo.delay * 6 : 0) + 0.1
+  const end = lengthOf(recipe) + 0.1
   window.setTimeout(() => master.disconnect(), end * 1000 + 50)
 }
 

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { closeTip, openTip, underStore } from '@/lib/popup'
 import { cn } from '@/lib/utils'
 
 /**
@@ -21,6 +22,8 @@ export function GlobalTooltip() {
   const [active, setActive] = useState<Active | null>(null)
   const [present, setPresent] = useState<Active | null>(null)
   const [leaving, setLeaving] = useState(false)
+  /** Over the Store, where this page is covered: the menu view has drawn it instead. */
+  const [native, setNative] = useState(false)
   const [position, setPosition] = useState({ left: 0, top: 0 })
   const ref = useRef<HTMLDivElement>(null)
   const activeRef = useRef<Active | null>(null)
@@ -143,14 +146,23 @@ export function GlobalTooltip() {
     const above = a.top - h - m
     const top = above >= m ? above : Math.min(a.bottom + m, Math.max(m, window.innerHeight - h - m))
     setPosition({ left: Math.round(left), top: Math.round(top) })
+    const over = underStore({ left, right: left + w, top, bottom: top + h })
+    setNative(over)
+    if (over) openTip(cur.text, a, top)
   }, [active, present])
+  useEffect(() => {
+    if (native && !active) {
+      closeTip()
+      setNative(false)
+    }
+  }, [native, active])
 
   if (!present) return null
   return createPortal(
     <div
       ref={ref}
       role="tooltip"
-      style={{ left: position.left, top: position.top }}
+      style={{ left: position.left, top: position.top, visibility: native ? 'hidden' : undefined }}
       className={cn(
         'kryo-global-tooltip kryo-radius fixed z-[900] max-w-64 border border-border bg-popover px-2 py-1 text-[10px] leading-snug text-foreground shadow-xl [overflow-wrap:anywhere]',
         leaving && 'kryo-tooltip-out',

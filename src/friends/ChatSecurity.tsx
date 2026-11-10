@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Copy, KeyRound, Laptop, Globe, Trash2 } from 'lucide-react'
+import { Copy, KeyRound, Laptop, Globe, Trash2 } from '@/ui/pixel-icons'
 import { errorText } from '@/lib/bridge'
 import {
   chatBackupCreate,
@@ -13,7 +13,7 @@ import {
   type BackupStatus,
   type MyDevice,
 } from '@/lib/chat'
-import { Button, Caption, Check, Modal } from '@/ui'
+import { Busy, Button, Caption, Check, Modal } from '@/ui'
 
 function day(ms: number): string {
   return ms ? new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'never'
@@ -71,14 +71,14 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
         }
       >
         <p className="text-sm text-foreground">
-          Write this down and keep it somewhere safe. With it, a new PC can take over your chat identity, so your
+          Write this down and keep it somewhere safe. With it, a new device can take over your chat identity, so your
           friends keep trusting you. It is shown only now.
         </p>
         <code className="kryo-radius block select-all border border-border bg-background p-3 font-mono text-sm leading-relaxed tracking-wider text-foreground">
           {code}
         </code>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <Button size="sm" onClick={() => void navigator.clipboard.writeText(code).catch(() => {})}>
+          <Button size="sm" onClick={() => navigator.clipboard.writeText(code).catch(() => {})}>
             <Copy className="size-3" aria-hidden /> Copy
           </Button>
           <Check checked={wroteDown} onChange={setWroteDown} label="I saved my recovery code" />
@@ -99,7 +99,7 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
           <KeyRound className="size-3" aria-hidden /> Key backup
         </Caption>
         <p className="text-xs text-muted-foreground">
-          An encrypted copy of your chat identity, locked with a recovery code only you have. Without it, a new PC or a
+          An encrypted copy of your chat identity, locked with a recovery code only you have. Without it, a new device or a
           reinstall means a new identity, and your friends see a security warning.
         </p>
         {backup == null ? (
@@ -126,7 +126,7 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
 
       <section className="grid gap-2">
         <Caption>Devices with chat</Caption>
-        {devices == null ? <p className="text-xs text-muted-foreground">Loading...</p> : null}
+        {devices == null && !error ? <Busy className="size-3.5 text-muted-foreground" label="Loading devices" /> : null}
         <ul className="grid gap-1.5">
           {devices?.map((d) => (
             <li key={d.deviceId} className="kryo-radius flex items-center justify-between gap-3 border border-border px-3 py-2">
@@ -183,7 +183,7 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
           footer={
             <>
               <Button onClick={() => setConfirm(null)}>Cancel</Button>
-              <Button variant="danger" onClick={() => void act(chatBackupDelete)}>
+              <Button variant="danger" onClick={() => act(chatBackupDelete)}>
                 Delete
               </Button>
             </>
@@ -199,7 +199,7 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
           footer={
             <>
               <Button onClick={() => setConfirm(null)}>Cancel</Button>
-              <Button variant="primary" onClick={() => void create()}>
+              <Button variant="primary" onClick={() => create()}>
                 Make a new code
               </Button>
             </>
@@ -215,14 +215,14 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
           footer={
             <>
               <Button onClick={() => setConfirm(null)}>Cancel</Button>
-              <Button variant="danger" onClick={() => void act(() => chatDeviceRevoke(confirm.deviceId))}>
+              <Button variant="danger" onClick={() => act(() => chatDeviceRevoke(confirm.deviceId))}>
                 Remove
               </Button>
             </>
           }
         >
           <p className="text-sm text-foreground">
-            It is signed out of chat at once and stops receiving messages. Use this for a lost or old PC.
+            It is signed out of chat at once and stops receiving messages. Use this for a lost or old device.
           </p>
         </Modal>
       ) : null}

@@ -49,7 +49,7 @@ const PREVIEW_INBOX: Inbox = {
  */
 export function useInbox() {
   const [inbox, setInbox] = useState<Inbox>(isTauri() ? { unreadCount: 0, notifications: [] } : PREVIEW_INBOX)
-  const [news, setNews] = useState<News | null>(isTauri() ? null : { version: '0.4.1', date: null })
+  const [news, setNews] = useState<News | null>(isTauri() ? null : { version: '0.17.0', date: null })
   useEffect(() => {
     const stops: Array<() => void> = []
     let cancelled = false

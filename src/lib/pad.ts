@@ -72,6 +72,82 @@ export type PadConfig = {
   pads: Record<string, PadPrefs>
 }
 
+/** A game's use of the pad (src-tauri pad_games.rs). */
+export type PadMode = 'off' | 'gamepad' | 'keyboard'
+export type StickUse = 'off' | 'wasd' | 'arrows' | 'steer' | 'mouse'
+
+export type GamePadProfile = {
+  mode: PadMode
+  /** The layout it started from, by id. */
+  template: string
+  /** Controller mode: this game's own remap. Empty uses the pad's own. */
+  remap: PadRemap
+  /** Keyboard mode: what each control presses, by key name. */
+  binds: Partial<Record<PadControl, string>>
+  leftStick: StickUse
+  rightStick: StickUse
+  /** Pixels a second with a stick fully over. */
+  sensitivity: number
+  deadzone: number
+  invertY: boolean
+  /** One controller's own say in this game, by `padKeys`. */
+  pads: Record<string, PadUse>
+}
+
+/** What one controller does in a game, when it differs from the others. */
+export type PadUse = { off: boolean; own: GamePadProfile | null }
+
+/** What a game gets from one connected controller, in plain words (pad_games.rs `describe`). */
+export type PadLine = { key: string; name: string; sees: string; player: number | null; removed: boolean; canRemove: boolean; own: boolean; canOwn: boolean }
+export type PadSeen = { pads: PadLine[]; summary: string }
+
+/** A key per pad, in connection order: the second of a model is `guid#2`, as in pad_games.rs. */
+export function padKeys(pads: { guid: string }[]): string[] {
+  const seen = new Map<string, number>()
+  return pads.map(({ guid }) => {
+    const n = (seen.get(guid) ?? 0) + 1
+    seen.set(guid, n)
+    return n === 1 ? guid : `${guid}#${n}`
+  })
+}
+
+export type GamePadView = {
+  profile: GamePadProfile
+  /** False while the game follows the shared default. */
+  own: boolean
+  default: GamePadProfile
+  /** The anti-cheat in its folder: Kryoto injects nothing into it. */
+  antiCheat: string | null
+  /** Why keyboard and mouse cannot work on this system. */
+  outputProblem: string | null
+  runAsAdmin: boolean
+  templates: { id: string; label: string; hint: string }[]
+  keys: { name: string; label: string }[]
+  layouts: Record<string, GamePadProfile>
+}
+
+export const padGames = {
+  get: (gameId: string) => call<GamePadView>('pad_game_get', { gameId }),
+  /** `null` follows the shared default again. */
+  set: (gameId: string, profile: GamePadProfile | null) => call<void>('pad_game_set', { gameId, profile }),
+  setDefault: (profile: GamePadProfile) => call<void>('pad_game_default_set', { profile }),
+  /** What a game would see with these settings and the pads plugged in now. */
+  seen: (profile: GamePadProfile) => call<PadSeen>('pad_game_seen', { profile }),
+  /** The games with a controller setup of their own. */
+  configured: () => call<string[]>('pad_game_configured'),
+}
+
+/** The layout that fits a game's kryo.to genres and tags, if one clearly does. */
+export function layoutFor(words: string[]): string | null {
+  const all = words.join(' ').toLowerCase()
+  if (/\b(fps|first[- ]person|shooter)\b/.test(all)) return 'shooter'
+  if (/\b(racing|driving)\b/.test(all)) return 'racing'
+  if (/\b(strategy|rts|point (and|&) click|visual novel|city builder|card)\b/.test(all)) return 'strategy'
+  if (/\bplatformer\b/.test(all)) return 'platformer'
+  if (/\b(action|adventure|rpg|third[- ]person)\b/.test(all)) return 'action'
+  return null
+}
+
 /** tick: the selection moved; select: pressed, or the page changed; edge: nothing further that way. */
 export type PadHaptic = 'tick' | 'select' | 'edge'
 

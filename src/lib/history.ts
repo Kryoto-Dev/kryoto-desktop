@@ -77,7 +77,7 @@ export function step(h: History, by: -1 | 1): History {
   return index === h.index ? h : { ...h, index }
 }
 
-function replaceCurrent(h: History, view: View): History {
+export function replaceCurrent(h: History, view: View): History {
   const stack = h.stack.slice()
   stack[h.index] = view
   return { ...h, stack }

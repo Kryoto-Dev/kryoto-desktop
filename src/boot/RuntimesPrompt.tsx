@@ -77,11 +77,17 @@ export function RuntimesPrompt({ missing, onDone }: { missing: Runtime[]; onDone
   return (
     <div className="grid justify-items-center gap-3 text-center">
       <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-muted-foreground">Game runtimes</p>
-      <p className="max-w-[17rem] text-[11px] leading-relaxed text-foreground/85">
-        {missing.length === 1 ? `${missing[0]!.name} is` : `${namesOf(missing)} runtimes are`} missing. Most Windows games need {missing.length === 1 ? 'it' : 'them'} to start.
-        {mb ? ` About ${mb} MB from Microsoft.` : ''}
-      </p>
-      {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
+      {/* In the sentence's place: the box has no room for both under the mark. */}
+      {error ? (
+        <p role="alert" title={error} className="line-clamp-3 max-w-[17rem] text-[11px] leading-relaxed text-destructive">
+          {error}
+        </p>
+      ) : (
+        <p className="max-w-[17rem] text-[11px] leading-relaxed text-foreground/85">
+          {missing.length === 1 ? `${missing[0]!.name} is` : `${namesOf(missing)} runtimes are`} missing. Most Windows games need {missing.length === 1 ? 'it' : 'them'} to start.
+          {mb ? ` About ${mb} MB from Microsoft.` : ''}
+        </p>
+      )}
       <div className="flex gap-2">
         <Button
           size="sm"

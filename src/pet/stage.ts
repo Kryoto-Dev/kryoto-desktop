@@ -11,7 +11,8 @@ import {
  * Every stage on the page shares one animation frame loop, which skips stages
  * that are off screen or in a hidden tab. With reduced motion (the site's
  * switch or the system's) a stage holds the first frame of whatever it is
- * doing instead of animating it.
+ * doing (or the frame the animation names as its `still`) instead of
+ * animating it.
  */
 
 export type StageTheme = { theme: ThemeId; mode: Mode }
@@ -54,6 +55,20 @@ const IDLE_POOL = ['blink', 'look', 'bored', 'stretch', 'yawn', 'dance', 'sing',
 // Animations calm enough for the eyes to follow the pointer.
 const LOOKABLE = new Set(['idle', 'blink', 'bored', 'shy', 'love', 'happy', 'wave', 'sing', 'nod'])
 const POKES = ['poke', 'laugh', 'surprised', 'happy', 'wink', 'hiccup', 'tickle', 'jump']
+// The sponsor's golden bits (taco break, juggling, shimmer, nap, dance) share
+// one rare slot, so the egg is no more common than the taco alone was. A nap
+// is no answer to a click.
+const GOLDEN = Object.values(ANIMS).filter((a) => a.sponsor).map((a) => a.id)
+const GOLDEN_POKES = GOLDEN.filter((id) => id !== 'taconap')
+const any = (list: string[]) => list[Math.floor(Math.random() * list.length)]!
+
+/**
+ * A pinned routine instead of the idle director (a profile pet the owner set):
+ * plays these in turn, never the same twice running when there is a choice,
+ * with `rest` seconds of idle between. `hold` stays on through all of it, so
+ * the sponsor's pet keeps its gold between tricks.
+ */
+export type Pin = { anims: string[]; rest: number; hold?: Pose }
 
 type PlayOptions = {
   /** Repeat until something else plays. */
@@ -78,6 +93,7 @@ export class Stage {
   anim = 'idle'
   /** While true the idle director keeps its hands off (dragging, a transfer). */
   busy = false
+  private pin: Pin | null = null
   private ctx: CanvasRenderingContext2D
   private scratch = document.createElement('canvas')
   private t0 = 0
@@ -88,10 +104,12 @@ export class Stage {
   private lastInput = performance.now() / 1000
   private nextIdle = this.lastInput + 6
   private clicks: number[] = []
+  private calmPokes = 0
+  private last = ''
   private io: IntersectionObserver | null = null
   private cleanup: (() => void)[] = []
 
-  constructor(canvas: HTMLCanvasElement, o: { mascot: MascotId; scale: number; autoIdle?: boolean; theme?: StageTheme; onState?: (anim: string) => void }) {
+  constructor(canvas: HTMLCanvasElement, o: { mascot: MascotId; scale: number; autoIdle?: boolean; theme?: StageTheme; onState?: (anim: string) => void; pin?: Pin | null }) {
     this.canvas = canvas
     this.mascot = o.mascot
     this.autoIdle = o.autoIdle ?? true
@@ -103,6 +121,7 @@ export class Stage {
     this.scratch.width = W
     this.scratch.height = H
     this.play('idle', { loop: true })
+    this.setPin(o.pin ?? null)
     if (typeof IntersectionObserver !== 'undefined') {
       this.io = new IntersectionObserver((entries) => {
         for (const e of entries) {
@@ -138,6 +157,15 @@ export class Stage {
     this.back()
   }
 
+  /** Pin a routine, or null to hand it back to the idle director. Starts at once. */
+  setPin(pin: Pin | null) {
+    const now = performance.now() / 1000
+    this.pin = pin?.anims.length ? pin : null
+    this.back()
+    this.nextIdle = this.pin ? 0 : now + 6
+    if (this.pin) this.pinned(now)
+  }
+
   play(anim: string, opts: PlayOptions = {}) {
     const a = ANIMS[anim]
     if (!a || (a.only && a.only !== this.mascot)) return
@@ -163,7 +191,10 @@ export class Stage {
 
   tick(now: number) {
     const a = ANIMS[this.anim]!
-    const t = now - this.t0
+    // The frame's clock starts before the input that began this animation, so
+    // its first frame can fall a moment before it, and the engine's frame
+    // tables have nothing at a negative time.
+    const t = Math.max(0, now - this.t0)
     const total = this.opts.for ?? (this.opts.loop ? Infinity : a.dur)
     if (t >= total) {
       const then = this.opts.then
@@ -179,9 +210,9 @@ export class Stage {
     this.lastFrame = frame
     const raw = this.opts.progress
     const progress = typeof raw === 'function' ? raw() : raw
-    const override: Pose = { ...this.override }
+    const override: Pose = { ...this.pin?.hold, ...this.override }
     if (this.look && LOOKABLE.has(this.anim) && !override.look) override.look = this.look
-    const at = still ? 0 : a.once ? Math.min(t, a.dur) : t
+    const at = still ? (a.still ?? 0) : a.once ? Math.min(t, a.dur) : t
     const theme = this.theme ?? pageTheme()
     const grid = render(this.mascot, this.anim, at, { ...theme, progress, override })
     this.grid = grid
@@ -193,11 +224,18 @@ export class Stage {
 
   private idle(now: number) {
     if (this.busy || this.anim !== 'idle') return
+    if (this.pin) return this.pinned(now)
     if (now - this.lastInput > 45) {
       this.play('sleep', { loop: true })
       return
     }
     if (now < this.nextIdle) return
+    if (Math.random() < 1 / 40) {
+      const gold = any(GOLDEN)
+      this.play(gold)
+      this.nextIdle = now + ANIMS[gold]!.dur + 8 + Math.random() * 10
+      return
+    }
     // Kubi's refreeze only follows a melt, which never ends on a puddle.
     const own = animsFor(this.mascot).filter((a) => a.cat === 'own' && a.id !== 'refreeze').map((a) => a.id)
     const pool = [...IDLE_POOL, ...own]
@@ -206,6 +244,24 @@ export class Stage {
     if (pick === 'melt') this.play('melt', { then: () => this.play('refreeze') })
     else this.play(pick, { for: a.once ? a.dur : Math.max(a.dur, 2.5) })
     this.nextIdle = now + a.dur + 8 + Math.random() * 10
+  }
+
+  private pinned(now: number) {
+    const pin = this.pin!
+    if (now < this.nextIdle) return
+    const own = pin.anims.filter((id) => {
+      const a = ANIMS[id]
+      return a && (!a.only || a.only === this.mascot)
+    })
+    const choice = own.length > 1 ? own.filter((id) => id !== this.last) : own
+    if (!choice.length) return
+    const pick = any(choice)
+    this.last = pick
+    // Reduced motion never runs the director again, so it holds this pose.
+    if (reducedMotion()) return this.play(pick, { loop: true })
+    this.play(pick, { for: ANIMS[pick]!.dur })
+    // Back to back when there is no rest; the next one starts as this ends.
+    this.nextIdle = now + ANIMS[pick]!.dur + (pin.rest ? pin.rest * (0.75 + Math.random() * 0.5) : 0)
   }
 
   /** Is there a drawn pixel under this point of the page? */
@@ -246,6 +302,11 @@ export class Stage {
     this.clicks.push(now)
     if (this.clicks.length >= 7) return this.play('dizzy', { for: 3 })
     if (this.clicks.length >= 5) return this.play('angry', { for: 1.8 })
+    // The sponsor's gold: a small chance per calm click, certain by the 15th.
+    if (++this.calmPokes >= 15 || Math.random() < 1 / 12) {
+      this.calmPokes = 0
+      return this.play(any(GOLDEN_POKES))
+    }
     this.play(POKES[Math.floor(Math.random() * POKES.length)]!, { for: 1.5 })
   }
 }

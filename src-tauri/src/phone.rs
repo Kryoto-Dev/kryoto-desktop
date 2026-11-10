@@ -22,7 +22,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 
 use crate::achievements::{game_achievements, GameAchievement};
 use crate::downloads::{self, Downloads};
@@ -47,6 +47,8 @@ pub struct PhoneGame {
     pub last_played: Option<u64>,
     pub added_at: u64,
     pub nsfw: bool,
+    /// In the Library's Hidden group: out of the main list on the phone too.
+    pub hidden: bool,
 }
 
 /// One of the PC's downloads (the fields Downloads shows, plus
@@ -114,6 +116,9 @@ pub struct PhoneLook {
     pub season: Option<String>,
     #[serde(default)]
     pub reduced_motion: bool,
+    /// Classic line icons instead of Kryoto's pixel ones (kryo.to, Appearance > Icons).
+    #[serde(default)]
+    pub classic_icons: bool,
 }
 
 static PROFILE: Mutex<Option<PhoneProfile>> = Mutex::new(None);
@@ -160,6 +165,7 @@ pub fn phone_report_look(look: PhoneLook) {
         font: token(&look.font).unwrap_or_else(|| "teletext".into()),
         season: look.season.as_deref().and_then(token),
         reduced_motion: look.reduced_motion,
+        classic_icons: look.classic_icons,
     };
     if let Ok(mut slot) = LOOK.lock() {
         *slot = Some(clean);
@@ -182,6 +188,7 @@ fn to_phone(g: library::LibraryGame) -> PhoneGame {
         last_played: g.last_played,
         added_at: g.added_at,
         nsfw: g.nsfw,
+        hidden: g.hidden,
     }
 }
 
@@ -578,7 +585,7 @@ pub fn check_removable(app: &AppHandle, id: &str) -> Result<(), String> {
 /// not install into is only unlisted).
 pub async fn remove_game(app: &AppHandle, id: &str, delete_files: bool) -> Result<bool, String> {
     check_removable(app, id)?;
-    library::library_remove(app.clone(), id.to_string(), delete_files).await
+    library::library_remove(app.clone(), id.to_string(), delete_files, None).await
 }
 
 async fn downloads_control(AxumState(app): AxumState<AppHandle>, headers: HeaderMap, body: String) -> Reply {
@@ -689,12 +696,31 @@ async fn download(AxumState(app): AxumState<AppHandle>, headers: HeaderMap, body
     }
 }
 
-/// What the phone's Download does: exactly what Download does in Kryoto
-/// Desktop's own Store. This PC asks kryo.to for the game's current release
-/// with the account signed in here (so the same checks apply as for the
-/// desktop's own press), gets the link kryo.to mints for this PC, and queues
-/// it in Downloads. Returns the game's title.
-pub async fn start_download(app: &AppHandle, slug: &str, turnstile_token: Option<&str>) -> Result<String, String> {
+/// What kryo.to hands this PC for a game's current release.
+pub enum Minted {
+    /// Our own file: a link minted for this PC's network.
+    Link { url: String, title: String },
+    /// Only on mirrors: the first page this app can download from.
+    Mirror { page: String },
+}
+
+/// Why no link came back. `Challenge` is the check only a window can pass.
+pub enum MintError {
+    Challenge,
+    Other(String),
+}
+
+impl From<String> for MintError {
+    fn from(e: String) -> Self {
+        MintError::Other(e)
+    }
+}
+
+/// Ask kryo.to for a game's current release with the account signed in here,
+/// as this PC's install (the same checks as a press in the Store): the link
+/// it mints for this PC, or a mirror when `mirrors` allows one. Links run
+/// out, so a queue asks for each one when its turn comes (downloads.rs).
+pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: Option<&str>, mirrors: bool) -> Result<Minted, MintError> {
     let endpoint = settings::catalog_endpoint(&settings::load(app));
     let base = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
     let cookie = app
@@ -702,7 +728,7 @@ pub async fn start_download(app: &AppHandle, slug: &str, turnstile_token: Option
         .and_then(|view| view.cookies_for_url(base.clone()).ok())
         .map(|jar| jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
         .filter(|c| !c.is_empty())
-        .ok_or("Sign in to kryo.to in Kryoto Desktop first.")?;
+        .ok_or("Sign in to kryo.to in Kryoto Desktop first.".to_string())?;
     let client = reqwest::Client::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
@@ -720,20 +746,28 @@ pub async fn start_download(app: &AppHandle, slug: &str, turnstile_token: Option
         .json()
         .await
         .map_err(|e| e.to_string())?;
-    // The release players get now, if it is on Kryoto's own filehost.
+    let title = listing["title"].as_str().unwrap_or(slug).to_string();
+    // The release players get now.
     let release = listing["releases"]
         .as_array()
         .into_iter()
         .flatten()
         .find(|r| r["primary"].as_bool() == Some(true) && r["archived"].as_bool() != Some(true))
-        .filter(|r| r["links"].as_array().is_some_and(|l| l.iter().any(|l| l["url"].as_str().is_some_and(|u| u.starts_with("/api/download/v/")))))
-        .ok_or("This game is only on mirrors. Download it in Kryoto Desktop itself.")?;
-    let release_id = release["id"].as_str().filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())).ok_or("kryo.to sent a release without an ID.")?;
-    let title = listing["title"].as_str().unwrap_or(slug).to_string();
+        .ok_or("This game has no release to download right now.".to_string())?;
+    let links: Vec<&str> = release["links"].as_array().into_iter().flatten().filter_map(|l| l["url"].as_str()).collect();
+    if !links.iter().any(|u| u.starts_with("/api/download/v/")) {
+        if !mirrors {
+            return Err("This game is only on mirrors. Download it in Kryoto Desktop itself.".to_string().into());
+        }
+        let page = links.iter().find(|u| crate::resolvers::classify(u).is_some()).ok_or("This game is only on mirrors Kryoto cannot download from by itself. Open its page in the Store.".to_string())?;
+        return Ok(Minted::Mirror { page: page.to_string() });
+    }
+    let release_id = release["id"].as_str().filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())).ok_or("kryo.to sent a release without an ID.".to_string())?;
 
     let response = client
         .post(format!("{endpoint}/api/download/v/{release_id}"))
         .header(reqwest::header::COOKIE, cookie)
+        .header("x-kryo-install", logging::install_id(app))
         .json(&match turnstile_token {
             Some(token) => serde_json::json!({ "turnstileToken": token }),
             None => serde_json::json!({}),
@@ -745,34 +779,49 @@ pub async fn start_download(app: &AppHandle, slug: &str, turnstile_token: Option
     let body: serde_json::Value = response.json().await.unwrap_or_default();
     if !status.is_success() {
         return Err(match (status.as_u16(), body["error"].as_str()) {
-            (403, _) => {
-                // Only a browser that renders kryo.to's challenge can pass it, so
-                // this PC cannot ask for the link itself. Put the game's page
-                // in front of the player on the PC: its Download button solves
-                // the check, and the Store's download is queued by the app.
-                let opened = crate::navigate_catalog(app.clone(), format!("/game/{slug}")).is_ok();
-                if opened {
-                    crate::system::show_main(app);
-                }
-                if opened {
-                    "kryo.to wants a check only the PC's own window can pass. The game's page is open in Kryoto Desktop: press Download there.".into()
-                } else {
-                    "kryo.to wants a check only the PC's own window can pass. Press Download on the game's page in Kryoto Desktop.".into()
-                }
-            }
-            (429, _) => "Too many downloads started. Wait a moment.".into(),
-            (404, _) => "That build is no longer on Kryoto's filehost.".into(),
-            (_, Some(text)) => text.to_string(),
-            (code, None) => format!("kryo.to answered {code}."),
+            // Direct downloads turned off for everyone but supporters (an
+            // owner switch while the servers are full): the site's own words,
+            // and the game's mirrors are still there in Kryoto Desktop.
+            (403, Some("supporter_required")) => MintError::Other(crate::downloads::SUPPORTER_REQUIRED.to_string()),
+            (403, _) => MintError::Challenge,
+            (429, _) => MintError::Other("Too many downloads started. Wait a moment.".into()),
+            (404, _) => MintError::Other("That build is no longer on Kryoto's filehost.".into()),
+            (_, Some(text)) => MintError::Other(text.to_string()),
+            (code, None) => MintError::Other(format!("kryo.to answered {code}.")),
         });
     }
-    let link = body["url"].as_str().and_then(|u| url::Url::parse(u).ok()).ok_or("kryo.to did not send a download link.")?;
+    let link = body["url"].as_str().and_then(|u| url::Url::parse(u).ok()).ok_or("kryo.to did not send a download link.".to_string())?;
     if !crate::downloads::is_ours(&link, &settings::load(app)) {
-        return Err("That download does not come from Kryoto.".into());
+        return Err("That download does not come from Kryoto.".to_string().into());
     }
-    crate::downloads::enqueue_url(app, link.to_string(), Some(slug.to_string()), Some(title.clone()))?;
-    logging::info("phone", &format!("download queued from a phone: {title}"));
-    Ok(title)
+    Ok(Minted::Link { url: link.to_string(), title })
+}
+
+/// What the phone's Download does: exactly what Download does in Kryoto
+/// Desktop's own Store. Returns the game's title.
+pub async fn start_download(app: &AppHandle, slug: &str, turnstile_token: Option<&str>) -> Result<String, String> {
+    match mint(app, slug, turnstile_token, false).await {
+        Ok(Minted::Link { url, title }) => {
+            crate::downloads::enqueue_url(app, url, Some(slug.to_string()), Some(title.clone()))?;
+            logging::info("phone", &format!("download queued from a phone: {title}"));
+            Ok(title)
+        }
+        Ok(Minted::Mirror { .. }) => Err("This game is only on mirrors. Download it in Kryoto Desktop itself.".into()),
+        Err(MintError::Other(e)) => Err(e),
+        Err(MintError::Challenge) => {
+            // Only a browser that renders kryo.to's challenge can pass it, so
+            // this PC cannot ask for the link itself. Put the game's page
+            // in front of the player on the PC: its Download button solves
+            // the check, and the Store's download is queued by the app.
+            let opened = crate::navigate_catalog(app.clone(), format!("/game/{slug}")).is_ok();
+            if opened {
+                crate::system::show_main(app);
+                Err("kryo.to wants a check only the PC's own window can pass. The game's page is open in Kryoto Desktop: press Download there.".into())
+            } else {
+                Err("kryo.to wants a check only the PC's own window can pass. Press Download on the game's page in Kryoto Desktop.".into())
+            }
+        }
+    }
 }
 
 fn router(app: AppHandle) -> Router {
@@ -1104,7 +1153,7 @@ mod tests {
 
     #[test]
     fn the_look_a_phone_follows_is_cleaned() {
-        phone_report_look(PhoneLook { theme: "dark".into(), palette: "amber".into(), radius: "x\"><script>".into(), font: "".into(), season: Some("bad season".into()), reduced_motion: true });
+        phone_report_look(PhoneLook { theme: "dark".into(), palette: "amber".into(), radius: "x\"><script>".into(), font: "".into(), season: Some("bad season".into()), reduced_motion: true, classic_icons: false });
         let look = LOOK.lock().unwrap().clone().unwrap();
         assert_eq!((look.palette.as_str(), look.radius.as_str(), look.font.as_str()), ("amber", "pill", "teletext"));
         assert_eq!(look.season, None);

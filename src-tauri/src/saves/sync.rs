@@ -14,7 +14,7 @@
 //! (otherwise it answers with a conflict rather than overwrite another PC's).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
@@ -129,6 +129,8 @@ pub(crate) struct Local {
     pub registry: Vec<RegValue>,
     /// None when the game has no saves here.
     pub hash: Option<String>,
+    /// Who made it, when not this PC (a backup another launcher left).
+    pub machine: Option<String>,
 }
 
 /// What the game's saves are on this PC right now. Reads files (hashing only
@@ -152,7 +154,7 @@ pub(crate) fn local<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, roots: &
     #[cfg(not(windows))]
     let registry: Vec<RegValue> = Vec::new();
     let hash = (!files.is_empty() || !registry.is_empty()).then(|| bundle::content_hash(&files, &registry));
-    Local { rules, found, files, registry, hash }
+    Local { rules, found, files, registry, hash, machine: None }
 }
 
 fn machine() -> String {
@@ -168,7 +170,7 @@ fn template(game: &LibraryGame, local: &Local, parent: Option<String>) -> Manife
         rules: local.rules.clone(),
         registry: local.registry.clone(),
         steam_id: None,
-        machine: machine(),
+        machine: local.machine.clone().unwrap_or_else(machine),
         created_at: now(),
         parent_version: parent,
         ..Default::default()
@@ -261,7 +263,7 @@ pub async fn backup<R: Runtime>(app: &AppHandle<R>, id: &str, manual: bool) -> R
         Err(e) => {
             note_error(app, &mut state, e);
             if matches!(e, ApiError::Conflict(_)) {
-                notice(app, "Saves differ from your account", &format!("{} has newer saves from another PC. Pick which to keep on its page.", game.title), &game);
+                notice(app, "Saves differ", &format!("{} has newer saves from another PC in {}. Pick which to keep on its page.", game.title, super::where_kept(app)), &game);
             }
         }
     }
@@ -270,7 +272,7 @@ pub async fn backup<R: Runtime>(app: &AppHandle<R>, id: &str, manual: bool) -> R
     match result {
         Ok(()) => {
             if manual {
-                notice(app, "Saves backed up", &format!("{}'s saves are on your kryo.to account.", game.title), &game);
+                notice(app, "Saves backed up", &format!("{}'s saves are in {}.", game.title, super::where_kept(app)), &game);
             }
             Ok("Backed up.".into())
         }
@@ -333,6 +335,97 @@ async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Loca
     Ok(())
 }
 
+/* ── a game brought over from Hydra ─────────────────────────────────── */
+
+/// Right after a game is brought over from Hydra: its saves become versions
+/// here at once. First the backup Hydra left (Ludusavi's, under
+/// `hydralauncher/Backups/<shop>-<objectId>`), as an older version of its own,
+/// then the saves on this PC now, found the way every backup finds them.
+/// Everything of Hydra's is only read. Returns how many versions were made.
+pub async fn bring_from_hydra<R: Runtime>(app: &AppHandle<R>, id: &str, hydra_backup: Option<PathBuf>) -> Result<usize, String> {
+    if !super::enabled(app) {
+        return Ok(0);
+    }
+    let game = game(app, id)?;
+    let roots = roots(app, &game);
+    let mut made = 0;
+    if let Some(dir) = hydra_backup.filter(|d| d.is_dir()) {
+        let app2 = app.clone();
+        let game2 = game.clone();
+        let roots2 = roots.clone();
+        let local = tauri::async_runtime::spawn_blocking(move || -> Option<Local> {
+            let found: Vec<kryoto_saves::scan::Found> = kryoto_saves::ludusavi::game_folders(&dir).iter().flat_map(|f| kryoto_saves::ludusavi::files(f, &roots2).0).collect();
+            if found.is_empty() {
+                return None;
+            }
+            // Where Hydra's backup says the game saves becomes one of its
+            // locations here, so every later backup includes it too.
+            learn_folders(&app2, &game2.id, &found);
+            let files: Vec<BundleFile> = found
+                .iter()
+                .filter_map(|f| Some(BundleFile { root: f.root, path: f.path.clone(), size: f.size, sha256: kryoto_saves::scan::sha256_file(&f.abs).ok()?, mtime: f.mtime, rule: f.rule.clone() }))
+                .collect();
+            let hash = Some(bundle::content_hash(&files, &[]));
+            let bytes = found.iter().map(|f| f.size).sum();
+            let (rules, _) = locations(&app2, &game2, &roots2);
+            Some(Local { rules, found: Collected { files: found, bytes, ..Default::default() }, files, registry: Vec::new(), hash, machine: Some("Hydra's backup".into()) })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        if let Some(local) = local {
+            let _busy = Busy::take(id)?;
+            let progress = Progress::new(app, id);
+            let mut state = load_state(app, id);
+            match upload(app, &game, &local, &mut state, &progress).await {
+                Ok(()) => made += 1,
+                Err(e) => crate::logging::warn("saves", &format!("{}: Hydra's backup was not kept: {e}", game.title)),
+            }
+            save_state(app, id, &state);
+        }
+    }
+    // The saves here now; nothing new when they are what Hydra's backup held.
+    if backup(app, id, false).await.is_ok_and(|m| m == "Backed up.") {
+        made += 1;
+    }
+    let _ = app.emit("cloud-saves", super::status_of(app, &account(app)));
+    Ok(made)
+}
+
+/// The folders a backup another launcher made holds files in, as locations
+/// of the game (the innermost folders; one inside another counts once).
+fn learn_folders<R: Runtime>(app: &AppHandle<R>, id: &str, found: &[kryoto_saves::scan::Found]) {
+    let rules = folder_rules(found);
+    if rules.is_empty() {
+        return;
+    }
+    let mut stored = load_rules(app, id);
+    for rule in rules {
+        if !stored.player.iter().any(|r| r.key() == rule.key() || r.contains(&rule)) {
+            stored.ignored.retain(|k| *k != rule.key());
+            stored.player.push(rule);
+        }
+    }
+    save_rules(app, id, &stored);
+}
+
+/// Each file's folder, as a rule, without folders inside another's. Pure.
+pub(crate) fn folder_rules(found: &[kryoto_saves::scan::Found]) -> Vec<Rule> {
+    let mut rules: Vec<Rule> = Vec::new();
+    for f in found {
+        let parent = f.path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        if parent.is_empty() {
+            continue;
+        }
+        let rule = Rule::files(f.root, parent, kryoto_saves::Source::Known);
+        if rule.problem().is_none() && !rules.iter().any(|r| r.key() == rule.key()) {
+            rules.push(rule);
+        }
+    }
+    let all = rules.clone();
+    rules.retain(|r| !all.iter().any(|o| o.key() != r.key() && o.contains(r)));
+    rules
+}
+
 /* ── putting saves back ──────────────────────────────────────────────── */
 
 /// Pack what is on this PC now into a local backup (kept `cloud_saves_keep_local`).
@@ -381,7 +474,7 @@ async fn fetch_and_put<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, versi
     let got = bundle::digest(&file)?;
     if !link.sha256.is_empty() && got.sha256 != link.sha256 {
         let _ = std::fs::remove_file(&file);
-        return Err("The downloaded backup is not the one on your account. Nothing was changed.".into());
+        return Err("The backup that came back is not the one that was kept. Nothing was changed.".into());
     }
     progress.report("restoring", 0, 0);
     let (app2, game2, file2) = (app.clone(), game.clone(), file.clone());
@@ -409,8 +502,15 @@ async fn restore_checked<R: Runtime>(app: &AppHandle<R>, id: &str, version_id: &
     }
     let progress = Progress::new(app, id);
     let manifest = fetch_and_put(app, &game, version_id, &progress).await?;
+    // An older version put back is what this PC has now, but the next backup
+    // still goes on top of the newest one: its parent is the head, not the
+    // version restored (every place refuses a parent that is not the newest).
+    let head = match Api::new(app) {
+        Ok(api) => api.head(&identity(&game).key).await.ok().and_then(|h| h.head).map(|h| h.id),
+        Err(_) => None,
+    };
     let mut state = load_state(app, id);
-    state.base_version = Some(version_id.to_string());
+    state.base_version = Some(head.unwrap_or_else(|| version_id.to_string()));
     state.base_hash = Some(manifest.content_hash);
     state.last_restore_at = Some(now());
     state.conflict = false;
@@ -847,6 +947,61 @@ pub fn after_exit<R: Runtime>(app: AppHandle<R>, game_id: String, tracer: Option
         }
         if let Err(e) = tauri::async_runtime::block_on(backup(&app, &game.id, false)) {
             crate::logging::warn("saves", &format!("{}: {e}", game.title));
+            let mut state = load_state(&app, &game.id);
+            state.owed = true;
+            save_state(&app, &game.id, &state);
         }
     });
+}
+
+/// Backups that did not get through when their game closed, now that kryo.to
+/// answers (health.rs). A conflict or a save too big waits for the player.
+pub fn catch_up<R: Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || {
+        if !super::enabled(&app) || !crate::settings::load(&app).cloud_saves_on_exit || account(&app).perk == Some(false) {
+            return;
+        }
+        let Ok(games) = crate::library::load(&app) else { return };
+        for game in games {
+            let state = load_state(&app, &game.id);
+            if !state.owed || state.conflict || state.too_big || running(&app, &game) {
+                continue;
+            }
+            match tauri::async_runtime::block_on(backup(&app, &game.id, false)) {
+                Ok(_) => {
+                    let mut state = load_state(&app, &game.id);
+                    state.owed = false;
+                    save_state(&app, &game.id, &state);
+                    crate::logging::info("saves", &format!("{}: caught up", game.title));
+                    let _ = app.emit("cloud-saves-game", json!({ "gameId": game.id }));
+                }
+                Err(e) => crate::logging::warn("saves", &format!("{}: still owed: {e}", game.title)),
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::folder_rules;
+    use kryoto_saves::scan::Found;
+    use kryoto_saves::Root;
+
+    fn found(root: Root, path: &str) -> Found {
+        Found { root, path: path.into(), abs: Default::default(), size: 1, mtime: 0, rule: String::new() }
+    }
+
+    #[test]
+    fn a_launchers_backup_teaches_the_folders_once() {
+        let rules = folder_rules(&[
+            found(Root::SavedGames, "Hades/Profile1.sav"),
+            found(Root::SavedGames, "Hades/Profile2.sav"),
+            found(Root::SavedGames, "Hades/Backups/Profile1.bak"),
+            found(Root::GameDir, "saves/slot1.sav"),
+            // A file straight in a root names no folder of the game's own.
+            found(Root::Documents, "loose.sav"),
+        ]);
+        let got: Vec<(Root, &str)> = rules.iter().map(|r| (r.root, r.path.as_str())).collect();
+        assert_eq!(got, vec![(Root::SavedGames, "Hades"), (Root::GameDir, "saves")]);
+    }
 }

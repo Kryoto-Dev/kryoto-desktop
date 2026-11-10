@@ -1,7 +1,7 @@
 import { TeamName } from '@/ui/TeamName'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Play, Square } from 'lucide-react'
+import { Play, Square } from '@/ui/pixel-icons'
 import { Matrix } from '@/ui'
 import { KryoMark } from '@/ui/ascii/KryoMark'
 import { Art } from '@/library/Art'
@@ -14,6 +14,7 @@ import { isTauri } from '@/lib/window'
 import { cn } from '@/lib/utils'
 import { gameContext } from '@/library/context'
 import { play } from '@/lib/sound'
+import { dialogCount } from '@/ui/dialog-focus'
 import { BigPictureIntro } from './BigPictureIntro'
 
 /**
@@ -28,7 +29,9 @@ import { BigPictureIntro } from './BigPictureIntro'
  * open, back and launch has its sound (lib/sound.ts, Big Picture's own switch).
  */
 
-type Tab = 'library' | 'recent'
+type Tab = 'library' | 'recent' | 'hidden'
+
+const TAB_LABEL: Record<Tab, string> = { library: 'Library', recent: 'Recently played', hidden: 'Hidden' }
 
 export function BigPicture({
   games,
@@ -79,11 +82,18 @@ export function BigPicture({
   }
   const clock = useClock()
 
-  const recent = useMemo(() => games.filter((g) => g.lastPlayed).sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0)), [games])
+  // Games the player hid have a row of their own, offered only while there are any.
+  const inView = useMemo(() => games.filter((g) => !g.hidden), [games])
+  const secret = useMemo(() => games.filter((g) => g.hidden), [games])
+  const tabs: Tab[] = secret.length ? ['library', 'recent', 'hidden'] : ['library', 'recent']
+  useEffect(() => {
+    if (tab === 'hidden' && !secret.length) setTab('library')
+  }, [tab, secret.length])
+  const recent = useMemo(() => inView.filter((g) => g.lastPlayed).sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0)), [inView])
   const shown = useMemo(() => {
     if (tab === 'recent') return recent
-    return games.slice().sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }))
-  }, [tab, games, recent])
+    return (tab === 'hidden' ? secret : inView).slice().sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }))
+  }, [tab, inView, secret, recent])
   const hero = recent[0] ?? shown[0] ?? null
 
   // Full screen while it is open, as it was before afterwards.
@@ -125,6 +135,8 @@ export function BigPicture({
   // plays, these only skip it (BigPictureIntro listens for them itself).
   useEffect(() => {
     const back = (e: Event) => {
+      // A dialog over Big Picture (a question Play asks) takes B itself.
+      if (dialogCount()) return
       if (introOn.current) return e.preventDefault()
       if (document.activeElement?.closest('[role="menu"], [role="listbox"]')) return
       e.preventDefault()
@@ -133,12 +145,16 @@ export function BigPicture({
     }
     const page = (e: Event) => {
       e.preventDefault()
-      if (introOn.current) return
-      switchTab(tab === 'library' ? 'recent' : 'library')
+      if (introOn.current || dialogCount()) return
+      switchTab(tabs[(tabs.indexOf(tab) + 1) % tabs.length] ?? 'library')
     }
-    const guide = (e: Event) => {
+    // Home is Big Picture's way in only (lib/pad-nav.ts): Game Bar opens on
+    // the same press, and Big Picture stays put under it.
+    const guide = (e: Event) => e.preventDefault()
+    // View and Menu held together: the way out from anywhere in it.
+    const hold = (e: Event) => {
       e.preventDefault()
-      if (introOn.current) return
+      if (introOn.current || dialogCount()) return
       leave()
     }
     const key = (e: KeyboardEvent) => {
@@ -151,16 +167,18 @@ export function BigPicture({
     window.addEventListener('kryo-pad-back', back)
     window.addEventListener('kryo-pad-tab', page)
     window.addEventListener('kryo-pad-guide', guide)
+    window.addEventListener('kryo-pad-leave', hold)
     window.addEventListener('keydown', key)
     return () => {
       window.removeEventListener('kryo-pad-back', back)
       window.removeEventListener('kryo-pad-tab', page)
       window.removeEventListener('kryo-pad-guide', guide)
+      window.removeEventListener('kryo-pad-leave', hold)
       window.removeEventListener('keydown', key)
     }
     // setOpen, switchTab and leave only read refs and setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, tab])
+  }, [open, tab, tabs.length])
 
   const hint = (c: PadControl, what: string) => (
     <span className="flex items-center gap-2">
@@ -175,13 +193,13 @@ export function BigPicture({
       role="dialog"
       aria-modal="true"
       aria-label="Big Picture"
-      className="kryo-bp fixed inset-0 z-[650] grid grid-rows-[auto_1fr_auto] overflow-hidden bg-background text-foreground"
+      className="kryo-bp fixed inset-0 z-[450] grid grid-rows-[auto_1fr_auto] overflow-hidden bg-background text-foreground"
     >
       {/* Top: the mark, the rows, the time. */}
       <header className="flex items-center gap-8 px-12 pb-4 pt-8">
         <KryoMark className="h-6" />
         <nav aria-label="Big Picture rows" className="flex gap-2">
-          {(['library', 'recent'] as const).map((t) => (
+          {tabs.map((t) => (
             <button
               key={t}
               type="button"
@@ -194,7 +212,7 @@ export function BigPicture({
                 tab === t ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground',
               )}
             >
-              {t === 'library' ? 'Library' : 'Recently played'}
+              {TAB_LABEL[t]}
             </button>
           ))}
         </nav>
@@ -244,7 +262,7 @@ export function BigPicture({
               </button>
             ) : null}
             {shown.length ? (
-              <section aria-label={tab === 'library' ? 'All games' : 'Recently played'} className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-6">
+              <section aria-label={tab === 'library' ? 'All games' : TAB_LABEL[tab]} className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-6">
                 {shown.map((g, i) => (
                   <button
                     key={g.id}
@@ -259,7 +277,7 @@ export function BigPicture({
                       {g.title}
                     </span>
                     {running.has(g.id) ? (
-                      <span className="kryo-pill absolute right-2 top-2 flex items-center gap-1.5 bg-success px-2.5 py-1 text-[10px] font-bold uppercase text-black">
+                      <span className="kryo-pill absolute right-2 top-2 flex items-center gap-1.5 bg-success px-2.5 py-1 text-[10px] font-bold uppercase text-background">
                         <Matrix state="busy" className="size-2.5" />
                         Running
                       </span>
@@ -289,8 +307,9 @@ export function BigPicture({
         )}
         <span className="grow" />
         <button type="button" onClick={leave} className="flex items-center gap-2 hover:text-foreground">
-          <PadBadge family={family} control="guide" label={padLabel(family, 'guide').long} className="h-7 min-w-7 text-[11px]" />
-          Leave
+          <PadBadge family={family} control="back" label={padLabel(family, 'back').long} className="h-7 min-w-7 text-[11px]" />
+          <PadBadge family={family} control="start" label={padLabel(family, 'start').long} className="h-7 min-w-7 text-[11px]" />
+          Hold to leave
         </button>
       </footer>
       {intro ? <BigPictureIntro onDone={() => setIntro(false)} /> : null}

@@ -42,7 +42,7 @@ const LISTS: [&str; 10] = [
 ];
 
 /// The environment for a child that should behave like one the desktop started.
-fn clean(cmd: &mut Command) {
+pub(crate) fn clean(cmd: &mut Command) {
     let appdir = std::env::var_os("APPDIR").filter(|d| !d.is_empty());
     for key in OURS {
         cmd.env_remove(key);
@@ -59,7 +59,7 @@ fn clean(cmd: &mut Command) {
         let kept: Vec<String> = value
             .to_string_lossy()
             .split(':')
-            .filter(|part| !part.is_empty() && !part.starts_with(&appdir))
+            .filter(|part| !part.is_empty() && !part.starts_with(&appdir) && !crate::appimage_tls::is_ours(std::path::Path::new(part)))
             .map(str::to_owned)
             .collect();
         if kept.is_empty() {

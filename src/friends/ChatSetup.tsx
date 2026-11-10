@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Bell, BellOff, KeyRound, Lock, Power, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Bell, BellOff, KeyRound, Lock, Monitor, Power, RotateCcw, ShieldCheck, Smartphone, Trash2 } from '@/ui/pixel-icons'
 import { errorText, isWeb } from '@/lib/bridge'
 import {
+  chatAccountDeviceRemove,
+  chatAccountDevices,
   chatEnable,
   chatPushDisable,
   chatPushEnable,
@@ -14,6 +16,8 @@ import {
   Here,
   here,
   useChatStatus,
+  type AccountDevice,
+  type AccountDevices,
   type PushState,
 } from '@/lib/chat'
 import { Button, Caption, inputCls, Modal } from '@/ui'
@@ -29,6 +33,90 @@ type Asking = 'enable' | 'remove' | 'reset' | 'restore' | null
  *
  * Every step that signs in, deletes or replaces something asks first.
  */
+/** "Today", "Yesterday", "12 days ago": when a device last connected. */
+function lastUsed(d: AccountDevice): string {
+  if (d.online) return 'Connected now'
+  if (!d.lastSeenMs) return 'Never connected'
+  const days = Math.floor((Date.now() - d.lastSeenMs) / 86_400_000)
+  return days <= 0 ? 'Used today' : days === 1 ? 'Used yesterday' : `Used ${days} days ago`
+}
+
+/**
+ * The account's chat devices, listed and removed with no chat on this device:
+ * how a device turned away at the limit makes room. Removing one is what
+ * Remove in that device's own settings does.
+ */
+function YourChatDevices({ onRemoved }: { onRemoved: () => void }) {
+  const [list, setList] = useState<AccountDevices | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<AccountDevice | null>(null)
+  const load = () => {
+    setError(null)
+    chatAccountDevices().then(setList).catch((e: unknown) => setError(errorText(e)))
+  }
+  useEffect(load, [])
+  const name = (d: AccountDevice) => d.name || (d.kind === 'desktop' ? 'A PC' : 'A phone or browser')
+  return (
+    <div className="grid gap-2 border-t border-border pt-3">
+      <Caption>Your chat devices</Caption>
+      {error ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs text-destructive">{error}</p>
+          <Button size="sm" onClick={load}>
+            Retry
+          </Button>
+        </div>
+      ) : !list ? (
+        <p className="text-xs text-muted-foreground">Loading...</p>
+      ) : (
+        <ul className="grid gap-1.5">
+          {list.devices.map((d) => (
+              <li key={d.id} className="flex items-center gap-2.5">
+                {d.kind === 'desktop' ? <Monitor className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <Smartphone className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
+                <span className="grid min-w-0 grow">
+                  <span className="truncate text-xs text-foreground">{name(d)}</span>
+                  <span className="text-[11px] text-muted-foreground">{lastUsed(d)}</span>
+                </span>
+                <Button size="sm" variant="danger" onClick={() => setRemoving(d)}>
+                  <Trash2 className="size-3" aria-hidden />
+                  Remove
+                </Button>
+              </li>
+            ))}
+        </ul>
+      )}
+      {removing ? (
+        <Modal
+          title={`Remove ${name(removing)}?`}
+          onClose={() => setRemoving(null)}
+          footer={
+            <>
+              <Button onClick={() => setRemoving(null)}>Cancel</Button>
+              <Button
+                variant="danger"
+                onClick={() =>
+                  chatAccountDeviceRemove(removing.id).then(() => {
+                    setRemoving(null)
+                    load()
+                    onRemoved()
+                  })
+                }
+              >
+                Remove
+              </Button>
+            </>
+          }
+        >
+          <p className="text-sm text-foreground">
+            It leaves chat: the messages kept on it can no longer be read there, and it has to be set up again to chat.
+            Messages on your other devices stay.
+          </p>
+        </Modal>
+      ) : null}
+    </div>
+  )
+}
+
 export function ChatSetup({ available }: { available: boolean }) {
   const status = useChatStatus()
   const [asking, setAsking] = useState<Asking>(null)
@@ -119,6 +207,8 @@ export function ChatSetup({ available }: { available: boolean }) {
         </form>
       ) : null}
 
+      {status.state === 'unavailable' ? <YourChatDevices onRemoved={() => void run(chatEnable)} /> : null}
+
       {status.state === 'needsLink' ? (
         <div className="flex flex-wrap gap-2">
           <Button variant="primary" size="sm" disabled={busy} onClick={() => setAsking('restore')}>
@@ -145,7 +235,7 @@ export function ChatSetup({ available }: { available: boolean }) {
             Backup and devices
           </Button>
         ) : null}
-        {on ? (
+        {on && status.state !== 'connecting' ? (
           <Button variant="danger" size="sm" disabled={busy} onClick={() => setAsking('remove')}>
             <Trash2 className="size-3" aria-hidden />
             Remove from {here()}
@@ -153,7 +243,8 @@ export function ChatSetup({ available }: { available: boolean }) {
         ) : null}
       </div>
 
-      {online && isWeb() ? <BrowserNotifications /> : null}
+      {/* Browser pushes: a phone has its own, under Profile > Notifications. */}
+      {online && isWeb() && here() !== 'this phone' ? <BrowserNotifications /> : null}
 
       {security ? <ChatSecurity onClose={() => setSecurity(false)} /> : null}
 
@@ -164,7 +255,7 @@ export function ChatSetup({ available }: { available: boolean }) {
           footer={
             <>
               <Button onClick={() => setAsking(null)}>Cancel</Button>
-              <Button variant="primary" onClick={() => void run(chatEnable)}>
+              <Button variant="primary" onClick={() => run(chatEnable)}>
                 Turn on
               </Button>
             </>
@@ -229,7 +320,7 @@ export function ChatSetup({ available }: { available: boolean }) {
           footer={
             <>
               <Button onClick={() => setAsking(null)}>Cancel</Button>
-              <Button variant="danger" onClick={() => void run(chatResetIdentity)}>
+              <Button variant="danger" onClick={() => run(chatResetIdentity)}>
                 Start over
               </Button>
             </>
@@ -250,7 +341,7 @@ export function ChatSetup({ available }: { available: boolean }) {
           footer={
             <>
               <Button onClick={() => setAsking(null)}>Cancel</Button>
-              <Button variant="danger" onClick={() => void run(chatRemoveDevice)}>
+              <Button variant="danger" onClick={() => run(chatRemoveDevice)}>
                 Remove
               </Button>
             </>

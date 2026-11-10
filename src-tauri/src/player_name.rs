@@ -18,6 +18,11 @@
 //! Kryoto Online builds use the player's real Steam account, so there is no
 //! file to write and Steam's own name is what others see.
 //!
+//! The game's language lives in the same files (`language=` for gbe_fork,
+//! `Language=` for the others, `force_language.txt` for older Goldberg), so it
+//! is written in the same pass: a game asks the emulator which language to use
+//! and picks that one if it has it.
+//!
 //! Only files that already belong to an emulator are touched, and only when
 //! the name in them differs, so a game's folder is left alone when nothing
 //! needs changing.
@@ -66,6 +71,19 @@ pub fn resolve(
             clean(typed)
         }
     }
+}
+
+/// A language as Steam names it (`german`, `schinese`), which is what the
+/// emulators hand the game. None for anything else, the game's own included.
+pub fn clean_language(language: &str) -> Option<String> {
+    let s = language.trim().to_ascii_lowercase();
+    ((2..=16).contains(&s.len()) && s.chars().all(|c| c.is_ascii_lowercase())).then_some(s)
+}
+
+/// The language to write, from Settings and the game's own choice. `None`
+/// follows Settings; an empty choice, there or here, leaves the game's files.
+pub fn resolve_language(global: &str, game: Option<&str>) -> Option<String> {
+    clean_language(game.unwrap_or(global))
 }
 
 /* ── the last signed-in account, remembered for launches without the Store ── */
@@ -195,6 +213,10 @@ pub enum NameFile {
     SmartSteamEmu,
     /// ALI213.
     Ali213,
+    /// Goldberg: `steam_settings/force_language.txt`. Language only.
+    GoldbergLanguage,
+    /// Online-Fix's `OnlineFix.ini`. Language only.
+    OnlineFix,
 }
 
 fn walk(dir: &Path, depth: usize, seen: &mut usize, out: &mut Vec<(PathBuf, NameFile)>) {
@@ -215,6 +237,10 @@ fn walk(dir: &Path, depth: usize, seen: &mut usize, out: &mut Vec<(PathBuf, Name
                 if force.is_file() {
                     out.push((force, NameFile::GoldbergForce));
                 }
+                let force = path.join("force_language.txt");
+                if force.is_file() {
+                    out.push((force, NameFile::GoldbergLanguage));
+                }
             } else if depth > 0 {
                 walk(&path, depth - 1, seen, out);
             }
@@ -224,6 +250,7 @@ fn walk(dir: &Path, depth: usize, seen: &mut usize, out: &mut Vec<(PathBuf, Name
             "steam_emu.ini" | "steak_emu.ini" => Some(NameFile::SteamEmuIni),
             "smartsteamemu.ini" => Some(NameFile::SmartSteamEmu),
             "steamconfig.ini" => Some(NameFile::Ali213),
+            "onlinefix.ini" => Some(NameFile::OnlineFix),
             _ => None,
         };
         if let Some(kind) = kind {
@@ -241,16 +268,39 @@ pub fn renamed(kind: NameFile, text: Option<&str>, name: &str) -> Option<String>
         (NameFile::SteamEmuIni, Some(t)) => set_ini(t, Some("Settings"), "UserName", name, true),
         (NameFile::SmartSteamEmu, Some(t)) => set_ini(t, Some("SmartSteamEmu"), "PersonaName", name, false),
         (NameFile::Ali213, Some(t)) => set_ini(t, Some("Settings"), "PlayerName", name, false),
-        (_, None) => return None,
+        (NameFile::GoldbergLanguage | NameFile::OnlineFix, _) | (_, None) => return None,
+    };
+    (text != Some(next.as_str())).then_some(next)
+}
+
+/// The file's text with `language` in it, or None when nothing should be
+/// written. The formats that may not have the key are left without it.
+pub fn relanguaged(kind: NameFile, text: Option<&str>, language: &str) -> Option<String> {
+    let next = match (kind, text) {
+        (NameFile::GbeUser, None) => format!("[user::general]\nlanguage={language}\n"),
+        (NameFile::GbeUser, Some(t)) => set_ini(t, Some("user::general"), "language", language, true),
+        (NameFile::GoldbergLanguage, _) => language.to_string(),
+        (NameFile::SteamEmuIni, Some(t)) => set_ini(t, Some("Settings"), "Language", language, true),
+        (NameFile::SmartSteamEmu, Some(t)) => set_ini(t, Some("SmartSteamEmu"), "Language", language, false),
+        (NameFile::Ali213, Some(t)) => set_ini(t, Some("Settings"), "Language", language, false),
+        (NameFile::OnlineFix, Some(t)) => set_ini(t, Some("Main"), "Language", language, false),
+        (NameFile::GoldbergForce, _) | (_, None) => return None,
     };
     (text != Some(next.as_str())).then_some(next)
 }
 
 /// Write `name` into every emulator file under `root`. Returns how many files
-/// changed. A file that cannot be read as text or written is skipped.
+/// changed.
+#[cfg(test)]
 pub fn apply(root: &Path, name: &str) -> usize {
+    write_all(&name_files(root), |kind, text| renamed(kind, text, name))
+}
+
+/// Run `edit` over each file and save what it changes. Returns how many files
+/// changed. A file that cannot be read as text or written is skipped.
+fn write_all(files: &[(PathBuf, NameFile)], edit: impl Fn(NameFile, Option<&str>) -> Option<String>) -> usize {
     let mut changed = 0;
-    for (path, kind) in name_files(root) {
+    for (path, kind) in files.iter().cloned() {
         let text = match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(t) => Some(t),
@@ -260,7 +310,7 @@ pub fn apply(root: &Path, name: &str) -> usize {
             Err(_) if kind == NameFile::GbeUser => None,
             Err(_) => continue,
         };
-        let Some(next) = renamed(kind, text.as_deref(), name) else { continue };
+        let Some(next) = edit(kind, text.as_deref()) else { continue };
         match std::fs::write(&path, next) {
             Ok(()) => changed += 1,
             Err(e) => crate::logging::warn("player-name", &format!("could not write {}: {e}", path.display())),
@@ -269,28 +319,105 @@ pub fn apply(root: &Path, name: &str) -> usize {
     changed
 }
 
-/// Before a game starts: give it the name Settings and its Properties ask for.
+/// Before a game starts: give it the name and language Settings and its
+/// Properties ask for. One walk of the folder for both, none when neither is set.
 pub fn apply_for_launch<R: Runtime>(app: &AppHandle<R>, game: &crate::library::LibraryGame) {
     let settings = crate::settings::load(app);
     let account = remembered_account(app);
-    let Some(name) = resolve(
+    let name = resolve(
         settings.player_name_mode,
         &settings.player_name,
         game.player_name_mode,
         &game.player_name,
         account.as_deref(),
-    ) else {
+    );
+    let language = resolve_language(&settings.game_language, game.game_language.as_deref());
+    if name.is_none() && language.is_none() {
         return;
-    };
-    let changed = apply(Path::new(&game.install_dir), &name);
-    if changed > 0 {
-        crate::logging::info("player-name", &format!("{}: in-game name set in {changed} file(s)", game.title));
     }
+    let files = name_files(Path::new(&game.install_dir));
+    if let Some(name) = name {
+        let changed = write_all(&files, |kind, text| renamed(kind, text, &name));
+        if changed > 0 {
+            crate::logging::info("player-name", &format!("{}: in-game name set in {changed} file(s)", game.title));
+        }
+    }
+    if let Some(language) = language {
+        let changed = write_all(&files, |kind, text| relanguaged(kind, text, &language));
+        if changed > 0 {
+            crate::logging::info("player-name", &format!("{}: language set to {language} in {changed} file(s)", game.title));
+        }
+    }
+}
+
+/// The languages a build says it has (gbe_fork's `steam_settings/
+/// supported_languages.txt`, which also makes it ignore any other), or nothing
+/// when it does not say.
+pub fn supported_languages(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for (path, kind) in name_files(root) {
+        if kind != NameFile::GbeUser {
+            continue;
+        }
+        let Some(text) = path.parent().and_then(|dir| std::fs::read_to_string(dir.join("supported_languages.txt")).ok()) else { continue };
+        for language in text.lines().filter_map(clean_language) {
+            if !out.contains(&language) {
+                out.push(language);
+            }
+        }
+    }
+    out
+}
+
+/// What Properties offers for this game.
+#[tauri::command]
+pub async fn game_languages(install_dir: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || supported_languages(Path::new(&install_dir))).await.unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_language_is_a_steam_name_or_nothing() {
+        assert_eq!(clean_language(" German "), Some("german".into()));
+        assert_eq!(clean_language(""), None);
+        assert_eq!(clean_language("../x"), None);
+        assert_eq!(resolve_language("french", None), Some("french".into()));
+        assert_eq!(resolve_language("french", Some("german")), Some("german".into()));
+        // The game's own, picked for this game, beats Settings.
+        assert_eq!(resolve_language("french", Some("")), None);
+        assert_eq!(resolve_language("", None), None);
+    }
+
+    #[test]
+    fn writes_the_language_each_emulator_reads() {
+        let gbe = "[user::general]\r\naccount_name=kryoto\r\nlanguage=english\r\n";
+        assert_eq!(relanguaged(NameFile::GbeUser, Some(gbe), "french").unwrap(), "[user::general]\r\naccount_name=kryoto\r\nlanguage=french\r\n");
+        assert_eq!(relanguaged(NameFile::GbeUser, Some(gbe), "english"), None);
+        assert_eq!(relanguaged(NameFile::GbeUser, None, "french").unwrap(), "[user::general]\nlanguage=french\n");
+        assert_eq!(relanguaged(NameFile::SteamEmuIni, Some("[Settings]\nUserName=RUNE\n"), "polish").unwrap(), "[Settings]\nUserName=RUNE\nLanguage=polish\n");
+        assert_eq!(relanguaged(NameFile::GoldbergLanguage, Some("english"), "german").unwrap(), "german");
+        assert_eq!(relanguaged(NameFile::OnlineFix, Some("[Main]\nLanguage=english\n"), "german").unwrap(), "[Main]\nLanguage=german\n");
+        // Formats that may not have the key are never given one.
+        assert_eq!(relanguaged(NameFile::OnlineFix, Some("[Main]\nFakeAppId=480\n"), "german"), None);
+        assert_eq!(relanguaged(NameFile::Ali213, Some("[Settings]\nPlayerName=x\n"), "german"), None);
+        assert_eq!(relanguaged(NameFile::GoldbergForce, Some("Mira"), "german"), None);
+        assert_eq!(renamed(NameFile::GoldbergLanguage, Some("english"), "Mira"), None);
+        assert_eq!(renamed(NameFile::OnlineFix, Some("[Main]\n"), "Mira"), None);
+    }
+
+    #[test]
+    fn reads_what_a_build_says_it_has() {
+        let dir = std::env::temp_dir().join(format!("kryoto-langs-{}", std::process::id()));
+        let settings = dir.join("bin/steam_settings");
+        std::fs::create_dir_all(&settings).unwrap();
+        assert!(supported_languages(&dir).is_empty());
+        std::fs::write(settings.join("supported_languages.txt"), "english\r\nfrench\r\n\r\nenglish\r\n").unwrap();
+        assert_eq!(supported_languages(&dir), vec!["english".to_string(), "french".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn cleans_names() {

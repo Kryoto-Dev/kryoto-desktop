@@ -21,7 +21,7 @@ import {
   UserPlus,
   Users,
   X,
-} from 'lucide-react'
+} from '@/ui/pixel-icons'
 import { artSrc } from '@/lib/art'
 import { Button, Caption, ContextMenu, IconButton, inputCls, Label, Modal, type MenuEntry } from '@/ui'
 import type { Account } from '@/hooks/useAccount'
@@ -54,11 +54,12 @@ import {
   type Invite,
 } from '@/lib/chat'
 import { startCall } from '@/lib/calls'
-import { friendAction } from '@/lib/friends'
+import { followEmojiUsage, friendAction } from '@/lib/friends'
 import { GroupCreateDialog, GroupMembersDialog } from './GroupDialogs'
 import { RoomPane } from './RoomPane'
 import type { InviteGame } from './InvitePicker'
 import { call, errorText, on } from '@/lib/bridge'
+import { plainRich } from '@/rich/rich-text'
 import { cn } from '@/lib/utils'
 
 /** Below this width the list and the conversation take turns (the web chat in a side panel, a phone). */
@@ -81,6 +82,7 @@ export function FriendsPage({
   games = [],
   onJoinInvite,
   list = 'friends',
+  onConversation,
 }: {
   account: Account
   onProfile: () => void
@@ -97,6 +99,8 @@ export function FriendsPage({
    * where the site's own Friends tab lists the friends).
    */
   list?: 'friends' | 'chats'
+  /** A conversation filled a narrow page, or left it: `close` goes back to the list (Kryoto Mobile's Back and tab bar). */
+  onConversation?: (close: (() => void) | null) => void
 }) {
   const state = useFriends()
   const [search, setSearch] = useState('')
@@ -132,6 +136,7 @@ export function FriendsPage({
   const [selected, setSelected] = useState<string | null>(null)
   const [unread, setUnread] = useState<Record<string, number>>({})
   const [conversations, setConversations] = useState<Conversation[]>([])
+  const [chatsError, setChatsError] = useState<string | null>(null)
   // Group chats: the list, names of members who are not friends, dialogs.
   const groupsOn = !!account.groups
   const [groups, setGroups] = useState<GroupView[]>([])
@@ -225,6 +230,8 @@ export function FriendsPage({
     const e = extraPeople[id]
     return e ? e.displayName || e.username : 'Someone'
   }
+  // Your donation rank for rank emoji and stickers; an older kryo.to only says "a supporter".
+  const myRank = account.rank !== undefined ? account.rank : account.supporter ? 'supporter' : null
   const usernameOf = (id: string): string | null => (live ? state.friends.find(f => f.id === id)?.username : null) ?? extraPeople[id]?.username ?? null
 
   // The engine learns names, supporter status and mutes from the lists.
@@ -241,6 +248,11 @@ export function FriendsPage({
     }
     void chatSetContext(people, !!account.supporter).catch(() => {})
   }, [live, state, strangers, extraPeople, account.supporter])
+
+  // The picker's "Frequently used" row follows the account (lib/friends.ts).
+  useEffect(() => {
+    if (live && !account.guest) followEmojiUsage(account.username || null)
+  }, [live, account.username, account.guest])
 
   const refreshLists = () => void call('store_refresh_account').catch(() => {})
 
@@ -298,8 +310,9 @@ export function FriendsPage({
           // People by their id; groups by their conversation id.
           setUnread(Object.fromEntries(list.map((c) => [c.peerUserId ?? c.id, c.unread])))
           setConversations(list)
+          setChatsError(null)
         })
-        .catch(() => {})
+        .catch((e) => alive && setChatsError(errorText(e)))
     refresh()
     const stops = [on('chat-message', refresh), on('chat-updated', refresh), on('chat-read', refresh)]
     return () => {
@@ -374,6 +387,8 @@ export function FriendsPage({
   const showList = !narrow || !selected
   const showPane = !narrow || !!selected
   const back = narrow ? () => setSelected(null) : undefined
+  const paneOpen = narrow && !!selected
+  useEffect(() => onConversation?.(paneOpen ? () => setSelected(null) : null), [paneOpen, onConversation])
   const noFriendsYet = live && state.friends.length === 0 && state.incoming.length === 0 && strangers.requests.length === 0
   const chatReady = chat?.state === 'online'
 
@@ -451,6 +466,7 @@ export function FriendsPage({
           {live && list === 'chats' ? (
             <ChatsList
               conversations={conversations}
+              error={chatsError}
               needle={needle}
               faceOf={(id) => state.friends.find((f) => f.id === id) ?? [...strangers.requests, ...strangers.chats].find((p) => p.id === id) ?? extraPeople[id]}
               requests={strangers.requests}
@@ -652,13 +668,14 @@ export function FriendsPage({
         : null}
 
       {!showPane ? null : selected === 'room' && chatOn && account.room ? (
-        <RoomPane myUsername={account.username} onProfile={(u) => onWeb(`/user/${encodeURIComponent(u)}`)} onBack={back} />
+        <RoomPane myUsername={account.username} meSupporter={!!account.supporter} meRank={myRank} onProfile={(u) => onWeb(`/user/${encodeURIComponent(u)}`)} onBack={back} />
       ) : openGroup && chatOn && myIdRef.current ? (
         <ChatPane
           key={selected ?? ''}
           peer={{ id: groupTarget(openGroup.id), name: openGroup.name, supporter: false }}
           myId={myIdRef.current}
           meSupporter={!!account.supporter}
+          meRank={myRank}
           onProfile={() => {}}
           games={games}
           onJoinInvite={onJoinInvite}
@@ -671,10 +688,11 @@ export function FriendsPage({
       ) : peer && chatOn && myIdRef.current ? (
         <ChatPane
           key={peer.id}
-          peer={{ id: peer.id, name: friendName(peer), supporter: peer.supporter }}
+          peer={{ id: peer.id, name: friendName(peer), supporter: peer.supporter, rank: peer.rank }}
           face={peer}
           myId={myIdRef.current}
           meSupporter={!!account.supporter}
+          meRank={myRank}
           onProfile={() => profileOf(peer)}
           request={requestOf(peer.id)}
           onRespond={(accept) => respond(peer.id, accept)}
@@ -760,11 +778,11 @@ function SelfCard({ account, chat, onProfile }: { account: Account; chat: ChatSt
   const line: { text: string; tone: 'on' | 'wait' | 'off' } =
     chat?.state === 'online'
       ? { text: 'Online', tone: 'on' }
-      : chat?.state === 'connecting'
+      : !chat || chat.state === 'connecting'
         ? { text: 'Connecting', tone: 'wait' }
-        : chat?.state === 'offline'
+        : chat.state === 'offline'
           ? { text: 'Reconnecting', tone: 'wait' }
-          : chat?.state === 'locked'
+          : chat.state === 'locked'
             ? { text: 'Chat is locked', tone: 'off' }
             : { text: 'Chat is off', tone: 'off' }
   return (
@@ -968,7 +986,8 @@ function preview(m: ChatMessage | null, myId: string | null, nameOf: (id: string
     const c = parseCall(m.body)
     return c ? callLine(c, myId, nameOf(m.outgoing ? '' : m.senderUser)) : 'Call'
   }
-  return who + m.body.replace(/\s+/g, ' ')
+  // As it reads, not as it was typed: no marks or ids, and spoilers stay hidden.
+  return who + plainRich(m.body.replace(/<@(\d{1,20})>/g, (_, id: string) => `@${nameOf(id)}`)).replace(/\s+/g, ' ')
 }
 
 /** When, as short as a list row allows: a time today, else a date. */
@@ -985,6 +1004,7 @@ function when(ms: number): string {
  */
 function ChatsList({
   conversations,
+  error,
   needle,
   faceOf,
   requests,
@@ -1001,6 +1021,8 @@ function ChatsList({
   onMenu,
 }: {
   conversations: Conversation[]
+  /** Why the list could not be read: it is not an empty one. */
+  error: string | null
   needle: string
   faceOf: (id: string) => (FriendFace & Partial<Pick<Friend, 'online' | 'playing' | 'nickname'>>) | undefined
   requests: FriendFace[]
@@ -1051,7 +1073,9 @@ function ChatsList({
       ) : null}
       <div className="grid gap-0.5">
         <GroupTitle title="Messages" />
-        {rows.length === 0 && quiet.length === 0 ? (
+        {error ? (
+          <p role="alert" className="px-1 text-[11px] text-destructive">{error}</p>
+        ) : rows.length === 0 && quiet.length === 0 ? (
           <div className="kryo-radius grid justify-items-start gap-2 border border-dashed border-border px-3 py-2.5 text-[11px] text-muted-foreground">
             {needle ? 'Nothing matches.' : 'No conversations yet. Message a friend to start one.'}
             {needle ? null : (

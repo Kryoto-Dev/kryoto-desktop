@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
-import { on } from '@/lib/bridge'
+import { errorText, on } from '@/lib/bridge'
 import { padApi, type PadAxesEvent, type PadButtonEvent, type PadConfig, type PadInfo } from '@/lib/pad'
 import type { PadControl } from '@/lib/pad-art'
 
 /**
- * The pads plugged in and Settings > Controller, shared by everything that
+ * The pads plugged in and Settings > Devices, shared by everything that
  * shows or uses them (the shell's navigation, the settings pane). Filled once
  * the shell starts the feature (`useControllerFeature`).
  */
@@ -12,10 +12,12 @@ type Store = {
   pads: PadInfo[]
   config: PadConfig | null
   on: boolean
-  /** A pad to open Settings > Controller on (its notification was clicked). */
+  /** A pad to open Settings > Devices on (its notification was clicked). */
   requested: { guid: string } | null
+  /** Why controller support could not start. */
+  startError: string | null
 }
-let store: Store = { pads: [], config: null, on: false, requested: null }
+let store: Store = { pads: [], config: null, on: false, requested: null, startError: null }
 const subs = new Set<() => void>()
 const set = (patch: Partial<Store>) => {
   store = { ...store, ...patch }
@@ -30,7 +32,7 @@ export function usePadStore(): Store {
   return useSyncExternalStore(subscribe, () => store)
 }
 
-/** Open Settings > Controller on this pad. */
+/** Open Settings > Devices on this pad. */
 export function requestPad(guid: string) {
   set({ requested: { guid } })
 }
@@ -39,10 +41,16 @@ export function clearPadRequest() {
   set({ requested: null })
 }
 
-/** Save Settings > Controller; the native side returns what it kept. */
+/** Save Settings > Devices; the native side returns what it kept. A failed save puts the page back. */
 export async function savePadConfig(next: PadConfig) {
+  const before = store.config
   set({ config: next })
-  set({ config: await padApi.save(next) })
+  try {
+    set({ config: await padApi.save(next) })
+  } catch (e) {
+    set({ config: before })
+    throw e
+  }
 }
 
 /**
@@ -66,11 +74,13 @@ export function useControllerFeature(enabled: boolean) {
       await padApi.start()
       const config = await padApi.config()
       if (!cancelled) set({ config })
-    }).catch(() => {})
+    }).catch((e: unknown) => {
+      if (!cancelled) set({ startError: errorText(e) })
+    })
     return () => {
       cancelled = true
       stop?.()
-      set({ pads: [], on: false })
+      set({ pads: [], on: false, startError: null })
       void padApi.stop().catch(() => {})
     }
   }, [enabled])

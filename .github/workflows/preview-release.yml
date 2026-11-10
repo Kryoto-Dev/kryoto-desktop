@@ -1,0 +1,203 @@
+name: Preview release
+
+# Kryoto Desktop Preview: the `preview` branch, built for members of a Kryoto
+# Preview (kryo.to docs/preview.md). Not the same thing as preview.yml, which
+# builds a pull request's installers as artifacts for whoever reviews it.
+#
+# Every push to `preview` builds it again and replaces ONE rolling GitHub
+# pre-release tagged `preview`:
+#   - the app is "Kryoto Desktop Preview" (to.kryo.desktop.preview), built with
+#     KRYOTO_CHANNEL=preview and src-tauri/tauri.preview.conf.json, so it
+#     installs beside Kryoto Desktop with its own data and talks to
+#     preview.kryo.to (src-tauri/src/channel.rs);
+#   - its version is the branch's version plus `-preview.<run>`, so each build
+#     is newer than the last and an installed preview app updates itself from
+#     this release's latest.json (the overlay's updater endpoint);
+#   - a pre-release is never `releases/latest`, so Kryoto Desktop and the main
+#     site never see it. kryo.to/preview offers the files to members only
+#     (kryo.to lib/preview-builds.ts).
+#
+# Signed with the same updater key as the release (TAURI_SIGNING_PRIVATE_KEY).
+# Nothing here runs on pull requests: only someone who can push to `preview` can
+# start it.
+on:
+  push:
+    branches: [preview]
+  workflow_dispatch:
+
+concurrency:
+  group: preview-release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          base=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "version=${base}-preview.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-22.04
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch kryoto-messaging
+        shell: bash
+        run: git clone --depth 1 https://github.com/Kryoto-Dev/kryoto-messaging.git ../kryoto-messaging
+      - name: Fetch kryoto-padmap
+        shell: bash
+        run: git clone --depth 1 https://github.com/Kryoto-Dev/kryoto-padmap.git ../kryoto-padmap
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: preview
+
+      # The same toolchain as release.yml (see there for why).
+      - name: OpenSSL toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          [ -d "C:/Strawberry/perl/bin" ] || { echo "::error::Strawberry Perl is gone from the runner image."; exit 1; }
+          echo "C:/Strawberry/perl/bin" >> "$GITHUB_PATH"
+          choco install nasm -y --no-progress
+          VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          LINK=$("$VSWHERE" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC/Tools/MSVC/*/bin/Hostx64/x64/link.exe' | head -1)
+          [ -n "$LINK" ] || { echo "::error::No MSVC link.exe found."; exit 1; }
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$(echo "$LINK" | sed 's|\\|/|g')" >> "$GITHUB_ENV"
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libssl-dev libudev-dev
+
+      - name: Require the updater signing key
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          [ -n "$KEY" ] || { echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; a preview app could never update itself."; exit 1; }
+
+      - run: pnpm install --frozen-lockfile
+
+      # The preview overlay plus this build's version, as one config.
+      - name: Preview config
+        shell: bash
+        run: |
+          V="${{ needs.version.outputs.version }}" node -e '
+            const fs = require("fs");
+            const c = JSON.parse(fs.readFileSync("src-tauri/tauri.preview.conf.json", "utf8"));
+            c.version = process.env.V;
+            fs.writeFileSync("preview.build.json", JSON.stringify(c, null, 2));
+          '
+
+      - name: Build the installers
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # src-tauri/src/channel.rs and src/lib/endpoint.ts read these.
+          KRYOTO_CHANNEL: preview
+          VITE_KRYOTO_CHANNEL: preview
+          KRYOTO_BUILD: ${{ github.sha }}
+        run: |
+          set -o pipefail
+          pnpm app:build --config preview.build.json 2>&1 | tee build.log
+          if grep -q "does not match the public key" build.log; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY does not match plugins.updater.pubkey."
+            exit 1
+          fi
+
+      - name: Collect them
+        shell: bash
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          bundle=src-tauri/target/release/bundle
+          mkdir -p out
+          pick() { for f in $1; do [ -f "$f" ] && cp "$f" "out/$2"; done; }
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            pick "$bundle/nsis/*_${v}_x64-setup.exe" "Kryoto-Desktop-Preview_${v}_x64-setup.exe"
+            pick "$bundle/nsis/*_${v}_x64-setup.exe.sig" "Kryoto-Desktop-Preview_${v}_x64-setup.exe.sig"
+          else
+            pick "$bundle/appimage/*_${v}_amd64.AppImage" "Kryoto-Desktop-Preview_${v}_amd64.AppImage"
+            pick "$bundle/appimage/*_${v}_amd64.AppImage.sig" "Kryoto-Desktop-Preview_${v}_amd64.AppImage.sig"
+            pick "$bundle/deb/*_${v}_amd64.deb" "Kryoto-Desktop-Preview_${v}_amd64.deb"
+            pick "$bundle/deb/*_${v}_amd64.deb.sig" "Kryoto-Desktop-Preview_${v}_amd64.deb.sig"
+            # RPM spells a pre-release version its own way; the cache is per branch, so the one .rpm is this build's.
+            pick "$bundle/rpm/*.x86_64.rpm" "Kryoto-Desktop-Preview_${v}_x86_64.rpm"
+            pick "$bundle/rpm/*.x86_64.rpm.sig" "Kryoto-Desktop-Preview_${v}_x86_64.rpm.sig"
+          fi
+          ls -la out
+          [ -n "$(ls out)" ] || { echo "::error::No installers were built."; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ matrix.platform }}
+          path: out/*
+          retention-days: 3
+
+  # The rolling `preview` pre-release: the old one goes, this build replaces it.
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: latest.json and the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          cd out
+          V="$v" REPO="$REPO" node -e '
+            const fs = require("fs");
+            const v = process.env.V, base = `https://github.com/${process.env.REPO}/releases/download/preview/`;
+            const entry = (file) => fs.existsSync(`${file}.sig`) ? { signature: fs.readFileSync(`${file}.sig`, "utf8").trim(), url: base + file } : null;
+            const win = entry(`Kryoto-Desktop-Preview_${v}_x64-setup.exe`);
+            const appimage = entry(`Kryoto-Desktop-Preview_${v}_amd64.AppImage`);
+            const deb = entry(`Kryoto-Desktop-Preview_${v}_amd64.deb`);
+            const rpm = entry(`Kryoto-Desktop-Preview_${v}_x86_64.rpm`);
+            const platforms = {};
+            if (win) Object.assign(platforms, { "windows-x86_64-nsis": win, "windows-x86_64": win });
+            if (appimage) platforms["linux-x86_64-appimage"] = appimage;
+            if (deb) platforms["linux-x86_64-deb"] = deb;
+            if (rpm) platforms["linux-x86_64-rpm"] = rpm;
+            fs.writeFileSync("latest.json", JSON.stringify({ version: v, notes: "Kryoto Desktop Preview", pub_date: new Date().toISOString(), platforms }, null, 2));
+          '
+          gh release delete preview --repo "$REPO" --cleanup-tag --yes || true
+          gh release create preview --repo "$REPO" --prerelease --target "${{ github.sha }}" \
+            --title "Kryoto Desktop Preview $v" \
+            --notes "For members of a Kryoto Preview. Installs beside Kryoto Desktop and talks to preview.kryo.to. Get it from kryo.to/preview." \
+            ./*

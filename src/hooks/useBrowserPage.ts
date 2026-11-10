@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { isOnline } from '@/lib/online'
 import { listen } from '@tauri-apps/api/event'
 import { BROWSER_HOME } from '@/lib/browser'
 import type { WebNav } from '@/lib/history'
@@ -29,6 +30,8 @@ export interface BrowserPageState {
   back: string | null
   forward: string | null
   error: BrowserError | null
+  /** Try again was pressed and the page has not answered yet. */
+  retrying: boolean
   /** Transient shell notice (blocked link, slow load). */
   notice: string | null
 }
@@ -60,6 +63,7 @@ const INITIAL_STATE: BrowserPageState = {
   back: null,
   forward: null,
   error: null,
+  retrying: false,
   notice: null,
 }
 
@@ -95,6 +99,7 @@ export function useBrowserPage(homeUrl: string = BROWSER_HOME) {
         back: p.nav ? (p.back ?? null) : current.back,
         forward: p.nav ? (p.forward ?? null) : current.forward,
         error: p.loading ? null : current.error,
+        retrying: p.loading === false ? false : current.retrying,
       }
       const same =
         next.url === current.url &&
@@ -102,7 +107,8 @@ export function useBrowserPage(homeUrl: string = BROWSER_HOME) {
         next.loading === current.loading &&
         next.back === current.back &&
         next.forward === current.forward &&
-        next.error === current.error
+        next.error === current.error &&
+        next.retrying === current.retrying
       return same ? current : next
     })
     if (p.nav && p.url) navListeners.current.forEach((l) => l(p.url!, p.nav!))
@@ -126,7 +132,7 @@ export function useBrowserPage(homeUrl: string = BROWSER_HOME) {
         const url = event.payload.url ?? stateRef.current.url
         const reason = event.payload.reason ?? 'Navigation was blocked.'
         if (/^blocked|^unsupported/i.test(reason)) return flashNotice(`${reason} ${url}`.trim())
-        setState((current) => ({ ...current, loading: false, error: { kind: 'failed', message: fatalMessage(reason, url), url } }))
+        setState((current) => ({ ...current, loading: false, retrying: false, error: { kind: 'failed', message: fatalMessage(reason, url), url } }))
       }),
     )
     // Where the view already is (the window was reloaded).
@@ -145,19 +151,19 @@ export function useBrowserPage(homeUrl: string = BROWSER_HOME) {
     (url: string) => {
       setState((current) => ({ ...current, loading: true, error: null, notice: null }))
       if (!isTauri()) return
-      if (!navigator.onLine) {
-        setState((current) => ({ ...current, loading: false, error: { kind: 'offline', message: 'You appear to be offline.', url } }))
+      if (!isOnline()) {
+        setState((current) => ({ ...current, loading: false, retrying: false, error: { kind: 'offline', message: 'You appear to be offline.', url } }))
         return
       }
       void browserNavigate(url).catch((error: unknown) => {
         const message = typeof error === 'string' ? error : error instanceof Error ? error.message : 'Navigation failed.'
         if (/offline/i.test(message)) {
-          setState((current) => ({ ...current, loading: false, error: { kind: 'offline', message, url } }))
+          setState((current) => ({ ...current, loading: false, retrying: false, error: { kind: 'offline', message, url } }))
         } else if (/block|invalid|unsupported/i.test(message)) {
-          setState((current) => ({ ...current, loading: false }))
+          setState((current) => ({ ...current, loading: false, retrying: false }))
           flashNotice(message)
         } else {
-          setState((current) => ({ ...current, loading: false, error: { kind: 'failed', message: fatalMessage(message, url), url } }))
+          setState((current) => ({ ...current, loading: false, retrying: false, error: { kind: 'failed', message: fatalMessage(message, url), url } }))
         }
       })
     },
@@ -178,7 +184,10 @@ export function useBrowserPage(homeUrl: string = BROWSER_HOME) {
         setState((current) => ({ ...current, loading: false }))
         void controlBrowser('stop')
       },
-      retry: () => navigate(stateRef.current.error?.url || stateRef.current.url || homeUrl),
+      retry: () => {
+        setState((current) => ({ ...current, retrying: true }))
+        navigate(stateRef.current.error?.url || stateRef.current.url || homeUrl)
+      },
       /** Hear each change of address the page reports, with how it happened. */
       onNav: (fn: NavListener) => {
         navListeners.current.add(fn)

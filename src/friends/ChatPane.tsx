@@ -26,7 +26,7 @@ import {
   Trash2,
   Users,
   X,
-} from 'lucide-react'
+} from '@/ui/pixel-icons'
 import { errorText, on } from '@/lib/bridge'
 import {
   chatDelete,
@@ -69,6 +69,13 @@ import { startCall } from '@/lib/calls'
 import { Button, Caption, ContextMenu, IconButton, Modal, type MenuEntry } from '@/ui'
 import { cn } from '@/lib/utils'
 import { artSrc } from '@/lib/art'
+import { call } from '@/lib/bridge'
+import { RichText } from '@/rich/RichText'
+import { EmojiButton, RichTextarea, editableMentions, storedMentions, withShortcodes, type MentionCandidate } from '@/rich/RichEditor'
+import { plainRich } from '@/rich/rich-text'
+import { mediaRatio, singleMediaWidth } from '@/rich/attachment-layout'
+import { jumpToMessage, messageAnchor } from '@/rich/jump'
+import type { MentionIdentity } from '@/rich/mentions'
 
 const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000
 const TYPING_REPEAT_MS = 4000
@@ -129,8 +136,11 @@ function GifView({ gif, auto }: { gif: Gif; auto: boolean }) {
       </button>
     )
   }
-  return <img decoding="async" src={artSrc(gif.url) ?? undefined} alt={gif.title || 'GIF'} width={w} height={h} className="kryo-radius object-cover" loading="lazy" />
+  return <img decoding="async" src={artSrc(gif.url) ?? undefined} alt={gif.title || 'GIF'} width={w} height={h} style={{ width: `min(${w}px, 62vw)`, aspectRatio: `${w} / ${h}` }} className="kryo-radius h-auto object-contain" loading="lazy" />
 }
+
+/** A picture in a chat bubble is held to this, whole and at its own shape. */
+const BUBBLE_LIMITS = { width: 420, height: 320 }
 
 function size(n: number): string {
   if (n < 1000) return `${n} B`
@@ -144,6 +154,10 @@ function FileCard({ msgId, file }: { msgId: string; file: FileInfo }) {
   const [src, setSrc] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const [open, setOpen] = useState(false)
+  // Older messages carry no size: they take their shape once the picture is here.
+  const [learnt, setLearnt] = useState<{ width: number; height: number } | null>(null)
+  const shape = file.width ? file : (learnt ?? file)
   useEffect(() => {
     if (!image) return
     let alive = true
@@ -156,7 +170,31 @@ function FileCard({ msgId, file }: { msgId: string; file: FileInfo }) {
   }, [msgId, image])
   return (
     <span className="grid gap-2">
-      {src ? <img decoding="async" src={src} alt={file.name} className="kryo-radius max-h-72 max-w-full object-contain" /> : null}
+      {image && !error ? (
+        <button
+          type="button"
+          onClick={() => src && setOpen(true)}
+          className="kryo-media-cell"
+          // A bubble sizes itself to its content, so a percentage cannot hold this in on a phone.
+          style={{ width: `min(${singleMediaWidth(shape, BUBBLE_LIMITS)}px, 62vw)`, aspectRatio: String(mediaRatio(shape)) }}
+          aria-label={`Open ${file.name}`}
+        >
+          {src ? (
+            <img
+              decoding="async"
+              src={src}
+              alt={file.name}
+              onLoad={(e) => setLearnt({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
+              onError={() => setError('This picture did not load. Save it instead.')}
+            />
+          ) : null}
+        </button>
+      ) : null}
+      {src && open ? (
+        <Modal onClose={() => setOpen(false)} title={file.name} wide>
+          <img decoding="async" src={src} alt={file.name} className="mx-auto max-h-[75svh] w-auto max-w-full" />
+        </Modal>
+      ) : null}
       <span className="flex items-center gap-3">
         <span className="grid min-w-0">
           <b className="truncate text-xs">{file.name}</b>
@@ -229,6 +267,7 @@ export function ChatPane({
   peer,
   myId,
   meSupporter,
+  meRank = meSupporter ? 'supporter' : null,
   onProfile,
   request,
   onRespond,
@@ -242,13 +281,15 @@ export function ChatPane({
   face,
   onBack,
 }: {
-  peer: { id: string; name: string; supporter: boolean }
+  peer: { id: string; name: string; supporter: boolean; rank?: string | null }
   /** Their picture and what they are doing, for the header (people, not groups). */
   face?: Pick<Friend, 'username' | 'avatarUrl' | 'online' | 'playing'>
   /** Back to the list, where the list and the conversation take turns. */
   onBack?: () => void
   myId: string
   meSupporter: boolean
+  /** Your donation rank: which rank emoji and stickers you are offered and yours draw as. */
+  meRank?: string | null
   onProfile: () => void
   /**
    * Not a friend: `incoming` is their message request waiting for your
@@ -269,6 +310,30 @@ export function ChatPane({
   canCall?: boolean
 }) {
   const conversationId = useMemo(() => (group ? groupConversationId(group.id) : dmConversationId(myId, peer.id)), [group, myId, peer.id])
+  // Who can be @mentioned here: the person, or the group's members. Their names
+  // come from kryo.to's chat people (anonymous accounts are never among them).
+  const known = useMemo<MentionCandidate[]>(() => {
+    const ids = group ? group.members.map((x) => x.userId).filter((id) => id !== myId) : [peer.id]
+    return ids.flatMap((id) => {
+      const username = group ? usernameOf(id) : (face?.username ?? usernameOf(id))
+      if (!username) return []
+      return [{ id, username, displayName: group ? nameOf(id) : peer.name, avatarUrl: !group ? (face?.avatarUrl ?? null) : null }]
+    })
+  }, [group, myId, peer.id, peer.name, face?.username, face?.avatarUrl, usernameOf, nameOf])
+  const findPeople = useCallback(
+    (q: string) => {
+      const term = q.toLowerCase()
+      return known.filter((p) => !term || p.username.toLowerCase().includes(term) || (p.displayName ?? '').toLowerCase().includes(term))
+    },
+    [known],
+  )
+  const identityOf = useCallback(
+    (id: string): MentionIdentity | null => {
+      const p = known.find((x) => x.id === id)
+      return p ? { state: 'user', id, username: p.username, displayName: p.displayName } : null
+    },
+    [known],
+  )
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [text, setText] = useState('')
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null)
@@ -291,12 +356,12 @@ export function ChatPane({
   const messageMenu = (m: ChatMessage, canChange: boolean): MenuEntry[] => [
     { label: 'Reply', icon: <Reply />, onSelect: () => setReplyTo(m) },
     { label: 'React', icon: <SmilePlus />, onSelect: () => setReactingTo(m.msgId) },
-    ...(m.kind === 'text' ? [{ label: 'Copy text', icon: <Copy />, onSelect: () => void navigator.clipboard?.writeText(m.body).catch(() => {}) }] : []),
+    ...(m.kind === 'text' ? [{ label: 'Copy text', icon: <Copy />, onSelect: () => void navigator.clipboard?.writeText(editableMentions(m.body, known)).catch(() => {}) }] : []),
     ...(canChange && m.kind === 'text'
       ? [{ label: 'Edit', icon: <Pencil />, onSelect: () => {
           setEditing(m)
           setReplyTo(null)
-          setText(m.body)
+          setText(editableMentions(m.body, known))
         } }]
       : []),
     ...(canChange || !m.outgoing ? [{ separator: true } as const] : []),
@@ -406,23 +471,58 @@ export function ChatPane({
     typingStop.current = window.setTimeout(stopTyping, TYPING_REPEAT_MS)
   }
 
+  /** What a message said, as one line for a quote. */
+  const quoteLine = (q: ChatMessage): string =>
+    q.kind === 'gif'
+      ? 'GIF'
+      : q.kind === 'file'
+        ? `File: ${parseFile(q.body)?.name ?? ''}`
+        : q.kind === 'invite'
+          ? `Game invite: ${parseInvite(q.body)?.title ?? ''}`
+          : plainRich(editableMentions(q.body, known)).replace(/\s+/g, ' ').slice(0, 120)
+
+  /**
+   * The server never reads an encrypted message, so this app tells kryo.to
+   * who it mentions (the ids and the message id, nothing said) and kryo.to
+   * notifies them, once per message.
+   */
+  const tellMentioned = (ids: string[], msgId: string) => {
+    if (ids.length) void call('chat_mention_notify', { ids, message: msgId, group: Boolean(group) }).catch(() => {})
+  }
+
   const submit = async () => {
-    const value = text.trim()
+    const value = await withShortcodes(text.trim())
     if (!value || value.length > limit) return
     setError(null)
     window.clearTimeout(typingStop.current)
     stopTyping()
+    // `@username` of people in this chat travels as their id (rich/mentions.ts).
+    const stored = storedMentions(value, known)
     try {
       if (editing) {
-        const m = await chatEdit(editing.msgId, value)
+        const m = await chatEdit(editing.msgId, stored.text)
         setMessages((list) => list.map((x) => (x.msgId === m.msgId ? m : x)))
         setEditing(null)
+        tellMentioned(stored.ids, m.msgId)
       } else {
-        const m = await chatSend(peer.id, value, replyTo?.msgId)
+        const m = await chatSend(peer.id, stored.text, replyTo?.msgId)
         setMessages((list) => (list.some((x) => x.msgId === m.msgId) ? list.map((x) => (x.msgId === m.msgId ? m : x)) : [...list, m]))
         setReplyTo(null)
+        tellMentioned(stored.ids, m.msgId)
       }
       setText('')
+    } catch (e) {
+      setError(errorText(e))
+    }
+  }
+
+  /** A sticker is a message of its own, sent as soon as it is picked. */
+  const sendSticker = async (token: string) => {
+    setError(null)
+    try {
+      const m = await chatSend(peer.id, token, replyTo?.msgId)
+      setMessages((list) => (list.some((x) => x.msgId === m.msgId) ? list : [...list, m]))
+      setReplyTo(null)
     } catch (e) {
       setError(errorText(e))
     }
@@ -470,7 +570,7 @@ export function ChatPane({
                 <span className="truncate normal-case tracking-normal text-foreground/80">Playing {face.playing.title}</span>
               ) : (
                 <>
-                  <Lock className="size-2.5 shrink-0" aria-hidden />
+                  <Lock className="size-3 shrink-0" aria-hidden />
                   <span className="truncate">{group ? `${group.members.length} people · end-to-end encrypted` : 'End-to-end encrypted'}</span>
                 </>
               )}
@@ -538,6 +638,7 @@ export function ChatPane({
               </div>
             ) : (
             <div
+              id={messageAnchor(m.msgId)}
               className={cn('group flex', m.outgoing ? 'justify-end' : 'justify-start')}
               onContextMenu={(e) => {
                 // A link or a picture keeps the system's own menu (open, save).
@@ -549,8 +650,30 @@ export function ChatPane({
               <div className={cn('grid max-w-[75%] gap-1', m.outgoing ? 'justify-items-end' : 'justify-items-start')}>
                 {group && !m.outgoing ? <ProfileLink username={usernameOf(m.senderUser)} className="text-[10px] font-bold text-muted-foreground hover:underline focus-visible:outline-2 focus-visible:outline-primary"><TeamName username={usernameOf(m.senderUser)}>{nameOf(m.senderUser)}</TeamName></ProfileLink> : null}
                 {quoted ? (
-                  <span className="truncate border-l-2 border-border pl-2 text-[11px] text-muted-foreground">
-                    {quoted.deleted ? 'Message deleted' : quoted.kind === 'gif' ? 'GIF' : quoted.kind === 'file' ? `File: ${parseFile(quoted.body)?.name ?? ''}` : quoted.kind === 'invite' ? `Game invite: ${parseInvite(quoted.body)?.title ?? ''}` : quoted.body.slice(0, 80)}
+                  <span className="kryo-reply-quote max-w-full">
+                    <Reply className="size-3 shrink-0" aria-hidden />
+                    <span className="sr-only">Replying to</span>
+                    {quoted.deleted ? (
+                      <span className="italic">Message deleted</span>
+                    ) : (
+                      <>
+                        {quoted.outgoing ? (
+                          <b className="shrink-0 text-foreground">You</b>
+                        ) : (
+                          <ProfileLink username={group ? usernameOf(quoted.senderUser) : (face?.username ?? usernameOf(quoted.senderUser))} className="shrink-0 font-bold text-foreground hover:underline">
+                            {group ? nameOf(quoted.senderUser) : peer.name}
+                          </ProfileLink>
+                        )}
+                        <button type="button" onClick={() => jumpToMessage(quoted.msgId)} className="min-w-0 truncate text-left hover:text-foreground" aria-label="Go to the message this answers">
+                          <RichText text={quoteLine(quoted)} effects={false} people={identityOf} />
+                        </button>
+                      </>
+                    )}
+                  </span>
+                ) : m.replyTo ? (
+                  <span className="kryo-reply-quote">
+                    <Reply className="size-3 shrink-0" aria-hidden />
+                    <span className="italic">Replying to an earlier message</span>
                   </span>
                 ) : null}
                 <div
@@ -569,7 +692,14 @@ export function ChatPane({
                   ) : invite ? (
                     <InviteCard invite={invite} outgoing={m.outgoing} name={peer.name} cover={games.find((g) => g.slug === invite.slug)?.cover ?? null} onJoin={onJoinInvite} />
                   ) : (
-                    m.body
+                    // Effects only from supporters: nobody's server can strip them from
+                    // an encrypted message, so the sender's standing decides (as for GIFs).
+                    <RichText
+                      text={m.body}
+                      effects={m.outgoing ? meSupporter : !group && peer.supporter}
+                      rank={m.outgoing ? meRank : group ? null : peer.rank !== undefined ? peer.rank : peer.supporter ? 'supporter' : null}
+                      people={identityOf}
+                    />
                   )}
                 </div>
                 <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
@@ -610,7 +740,7 @@ export function ChatPane({
                         onClick={() => {
                           setEditing(m)
                           setReplyTo(null)
-                          setText(m.body)
+                          setText(editableMentions(m.body, known))
                         }}
                       >
                         <Pencil className="size-3" />
@@ -727,7 +857,7 @@ export function ChatPane({
         {replyTo || editing ? (
           <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
             <span className="truncate">
-              {editing ? 'Editing your message' : `Replying to: ${replyTo?.kind === 'gif' ? 'GIF' : replyTo?.kind === 'invite' ? 'a game invite' : replyTo?.body.slice(0, 80)}`}
+              {editing ? 'Editing your message' : `Replying to ${replyTo?.outgoing ? 'yourself' : group ? nameOf(replyTo?.senderUser ?? '') : peer.name}: ${replyTo ? quoteLine(replyTo) : ''}`}
             </span>
             <IconButton
               label="Cancel"
@@ -743,10 +873,14 @@ export function ChatPane({
           </div>
         ) : null}
         <div className="flex items-end gap-2">
-          <textarea
+          <RichTextarea
             ref={box}
             value={text}
-            onChange={(e) => onType(e.target.value)}
+            onValueChange={onType}
+            people={findPeople}
+            effects={meSupporter}
+            rank={meRank}
+            wrapperClassName="grow"
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
@@ -756,8 +890,9 @@ export function ChatPane({
             rows={Math.min(6, Math.max(1, text.split('\n').length))}
             placeholder={`Message ${peer.name}`}
             aria-label={`Message ${peer.name}`}
-            className="kryo-radius max-h-40 min-h-9 grow resize-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-foreground"
+            className="kryo-radius block max-h-40 min-h-9 w-full resize-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-foreground"
           />
+          <EmojiButton rank={meRank} target={box} value={text} onValueChange={onType} onPick={(token) => void sendSticker(token)} />
           <IconButton
             label="Send a file (up to 25 MB)"
             onClick={() =>
@@ -776,7 +911,7 @@ export function ChatPane({
               <ImagePlay className="size-4" />
             </IconButton>
           ) : null}
-          <Button variant="primary" size="sm" disabled={!text.trim() || counter < 0} onClick={() => void submit()} aria-label="Send">
+          <Button variant="primary" size="sm" disabled={!text.trim() || counter < 0} onClick={() => submit()} aria-label="Send">
             <Send className="size-3" />
           </Button>
         </div>

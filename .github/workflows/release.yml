@@ -190,6 +190,7 @@ jobs:
           pnpm build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cd src-tauri
+          if ($IsWindows) { ../scripts/test-manifests.ps1; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
           cargo test --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --locked --all-targets -- -D warnings
@@ -331,7 +332,10 @@ jobs:
               await new Promise(resolve => setTimeout(resolve, 20000));
             }
             throw new Error('CI did not pass in time; keeping the release as a draft.');
+      # Repository variable RELEASE_HOLD=1 keeps the finished release a draft, so it can go
+      # public in the same minute as kryo.to and the other apps (gh release edit --draft=false --latest).
       - name: Publish the release
+        if: vars.RELEASE_HOLD != '1'
         uses: actions/github-script@v7
         with:
           script: |

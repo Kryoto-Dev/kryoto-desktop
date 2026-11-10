@@ -151,6 +151,13 @@ pub(crate) fn redact_report(message: &str) -> String {
     text = bearer.replace_all(&text, "Bearer [redacted]").into_owned();
     text = fields.replace_all(&text, "$1=[redacted]").into_owned();
     text = cookies.replace_all(&text, "Cookie: [redacted]").into_owned();
+    // The player's own games (not on kryo.to) by name and folder: longest
+    // first, so a folder goes before the title inside it.
+    if let Ok(private) = PRIVATE.lock() {
+        for value in private.iter() {
+            text = text.replace(value.as_str(), "[own game]").replace(&value.replace('\\', "/"), "[own game]");
+        }
+    }
     for name in ["USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA"] {
         if let Ok(value) = std::env::var(name) {
             if !value.is_empty() {
@@ -159,6 +166,20 @@ pub(crate) fn redact_report(message: &str) -> String {
         }
     }
     text
+}
+
+static PRIVATE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Names and folders of games kryo.to does not list, kept out of error
+/// reports: a game Kryoto does not know stays on the PC (library.rs keeps
+/// this current).
+pub(crate) fn keep_private(mut values: Vec<String>) {
+    values.retain(|v| v.chars().count() >= 3);
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    values.dedup();
+    if let Ok(mut private) = PRIVATE.lock() {
+        *private = values;
+    }
 }
 
 pub fn info(scope: &str, message: &str) {
@@ -295,6 +316,15 @@ pub async fn logs_send(app: AppHandle) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reports_never_name_the_players_own_games() {
+        super::keep_private(vec![r"D:\Games\Lantern Rite".into(), "Lantern Rite".into(), "ab".into()]);
+        let out = super::redact_report(r"Could not start D:\Games\Lantern Rite\LanternRite.exe: Lantern Rite failed (D:/Games/Lantern Rite) ab");
+        assert!(!out.contains("Lantern Rite"), "{out}");
+        assert!(out.contains("[own game]") && out.ends_with(" ab"), "{out}");
+        super::keep_private(Vec::new());
+    }
+
     #[test]
     fn outbound_reports_redact_credentials_and_signed_links() {
         let input = "GET https://user:pw@dl.kryo.to/d/signed-secret?token=query-secret#fragment Authorization: Bearer abc123 password=hunter2 api_key=secret456";

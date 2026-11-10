@@ -13,6 +13,8 @@ import { PREVIEW_FRIENDS, type FriendsState } from '@/hooks/useFriends'
 type Handler = (p: unknown) => void
 const listeners = new Map<string, Set<Handler>>()
 
+const remoteConsent = { signedIn: true, enabled: false, decided: false }
+
 export const previewBus = {
   on(event: string, fn: Handler) {
     if (!listeners.has(event)) listeners.set(event, new Set())
@@ -24,6 +26,7 @@ export const previewBus = {
   },
 }
 
+const phone: { lan: boolean; code: string | null; pairUri: string | null } = { lan: false, code: null, pairUri: null }
 const now = () => Math.floor(Date.now() / 1000)
 const steam = (appid: number, file: string) => `https://cdn.cloudflare.steamstatic.com/steam/apps/${appid}/${file}`
 
@@ -79,12 +82,13 @@ const games = [
   }),
   game(367520, 'Hollow Knight', { playtimeSeconds: 162000, lastPlayed: now() - 3600 * 3, source: 'Steam (DRM-free)' }),
   game(504230, 'Celeste', { playtimeSeconds: 30000, lastPlayed: now() - 86400 * 9 }),
-  game(1145360, 'Hades', { playtimeSeconds: 72000, lastPlayed: now() - 86400 * 30, source: 'Steam + Kryoto Online' }),
+  game(1145360, 'Hades', { playtimeSeconds: 72000, lastPlayed: now() - 86400 * 30, source: 'Steam + Kryoto Online', launcher: 'steam' }),
   game(413150, 'Stardew Valley', { playtimeSeconds: 0 }),
   // One Steam game, two listings: the public build and the gb27 beta.
   game(2027330, 'GoreBox', { steamBranch: 'public', playtimeSeconds: 7200, lastPlayed: now() - 86400 * 2 }),
   game(2027330, 'GoreBox27 (early access)', { steamBranch: 'gb27', playtimeSeconds: 3600, lastPlayed: now() - 86400 }),
   game(105600, 'Terraria', {
+    launcher: 'steam',
     playtimeSeconds: 900,
     lastPlayed: now() - 86400 * 60,
     source: 'Steam + online-fix',
@@ -92,9 +96,19 @@ const games = [
 ] as Record<string, unknown>[]
 
 const running = new Set<string>()
+/** Settings > Patchbay's own server for `key`, by host, as the native side reports it. */
+function ownHost(key: 'savesEndpoint' | 'achievementsEndpoint'): string | null {
+  try {
+    return settings[key] ? new URL(String(settings[key])).host : null
+  } catch {
+    return null
+  }
+}
+
 const settings: Record<string, unknown> = {
   libraryDir: 'C:\\Users\\you\\Kryoto Games',
   deleteArchives: true,
+  downloadDir: '',
   startPage: 'library',
   defaultCompatTool: null,
   minimizeOnPlay: false,
@@ -106,6 +120,7 @@ const settings: Record<string, unknown> = {
   showAdult: false,
   followAccount: true,
   libraryFolders: ['D:\\Games\\Kryoto'],
+  askInstallFolder: true,
   sendReports: true,
   closeToTray: true,
   startWithSystem: false,
@@ -114,9 +129,25 @@ const settings: Record<string, unknown> = {
   connections: 16,
   speedLimitMb: 0,
   catalogEndpoint: '',
+  savesEndpoint: '',
+  achievementsEndpoint: '',
+  debrid: '',
+  extractInPlace: false,
+  // An everyday player: this version's What's new (setup/FirstStart.tsx) and
+  // found-games check are behind them. `?whatsnew` in the preview shows them.
+  seenNotices:
+    typeof location !== 'undefined' && location.search.includes('whatsnew')
+      ? []
+      : ['setup', 'intro', 'found-games'].map((n) => `${n}-${__APP_VERSION__.replace(/\./g, '-')}`),
+  // `?firststart` in the preview shows the first-start setup (setup/FirstStart.tsx).
+  welcomed: typeof location === 'undefined' || !location.search.includes('firststart'),
+  vrRuntime: '',
+  vrStartSteamvr: true,
+  blockAds: true,
   linuxMangohud: false,
   linuxGamemode: false,
   linuxFsr: false,
+  gameLanguage: '',
   cloudSaves: true,
   cloudSavesOnExit: true,
   cloudSavesRestore: 'auto',
@@ -126,6 +157,18 @@ const settings: Record<string, unknown> = {
   cloudSavesKeepLocal: 5,
   pet: true,
   petMascot: 'telly',
+  discord: {
+    on: true,
+    browsing: false,
+    line1: '{game}',
+    line2: '{playtime} played',
+    picture: 'cover',
+    elapsed: true,
+    playtime: true,
+    adultNames: false,
+    button1: { kind: 'desktop', label: '', url: '' },
+    button2: { kind: 'rotate', label: '', url: '' },
+  },
 }
 
 const GB = 1_073_741_824
@@ -170,6 +213,22 @@ const dl = (over: Record<string, unknown>) => ({
   },
   ...over,
 })
+
+/** Two lists of the account's and a followed one that gained a game (collections.rs). */
+const collectionGame = (slug: string, title: string, gb: number | null, nsfw = false) => ({ slug, title, cover: null, nsfw, sizeBytes: gb === null ? null : gb * GB })
+const collectionsPreview: { collections: { id: string; name: string; href: string; role: string; games: ReturnType<typeof collectionGame>[] }[]; installed: string[]; updates: { id: string; name: string; href: string; added: ReturnType<typeof collectionGame>[] }[] } = {
+  collections: [
+    { id: '101', name: 'Cozy nights', href: '/user/mira/c/cozy-nights', role: 'owner', games: [collectionGame('stardew-valley', 'Stardew Valley', 0.6), collectionGame('celeste', 'Celeste', 1.2), collectionGame('a-short-hike', 'A Short Hike', 0.4), collectionGame('unpacking', 'Unpacking', 1.1)] },
+    { id: '102', name: 'Finished in a weekend', href: '/user/mira/c/weekend', role: 'owner', games: [collectionGame('celeste', 'Celeste', 1.2)] },
+    { id: '201', name: 'Best of the decade', href: '/user/ren/c/decade', role: 'following', games: [collectionGame('hades-ii', 'Hades II', 9.8), collectionGame('tunic', 'TUNIC', 1.9), collectionGame('outer-wilds', 'Outer Wilds', null), collectionGame('after-dark', 'After Dark', 2.2, true)] },
+  ],
+  installed: ['201'],
+  // The followed list's new game asks on start (library/CollectionInstall.tsx); `?collectionupdate` shows it.
+  updates:
+    typeof location !== 'undefined' && location.search.includes('collectionupdate')
+      ? [{ id: '201', name: 'Best of the decade', href: '/user/ren/c/decade', added: [collectionGame('outer-wilds', 'Outer Wilds', 6.3)] }]
+      : [],
+}
 
 const downloadList: Record<string, unknown>[] = [
   dl({}),
@@ -252,10 +311,13 @@ let previewChat: { state: string } = { state: 'off' }
 // side "reads" and answers after a moment. Ids match lib/chat's conversation id.
 type PreviewMsg = {
   msgId: string; conversationId: string; senderUser: string; outgoing: boolean; sentAt: number; receivedAt: number
-  kind: 'text' | 'gif' | 'invite'; body: string; replyTo: string | null; editedAt: number | null; deleted: boolean
+  kind: 'text' | 'gif' | 'invite' | 'file'; body: string; replyTo: string | null; editedAt: number | null; deleted: boolean
   status: string; reactions: { emoji: string; userIds: string[] }[]
 }
 const previewMsgs: PreviewMsg[] = []
+const previewRoom: { id: string; body: string; replyTo?: { id: string; gone: boolean; name: string | null; username: string | null; excerpt: string } | null; createdAt: string; user: { id: string; username: string; displayName: string | null; avatarUrl: string | null; supporter: boolean } }[] = [
+  { id: '1', body: 'anyone up for Lethal Company tonight?', createdAt: new Date().toISOString(), user: { id: '2', username: 'bo', displayName: 'Bo', avatarUrl: null, supporter: true } },
+]
 const previewVerified = new Set<string>()
 let previewGroups: { id: string; name: string; members: { userId: string; role: string }[]; myRole: string }[] = [
   { id: '900', name: 'Lethal crew', members: [{ userId: '1', role: 'owner' }, { userId: '2', role: 'member' }, { userId: '8', role: 'member' }], myRole: 'owner' },
@@ -370,10 +432,19 @@ function previewFriendFetch(a: Record<string, unknown>): Record<string, unknown>
 const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   friends_fetch: (a) => previewFriendFetch(a),
   store_refresh_account: () => null,
+  // Community updates (src-tauri community_offer.rs): the first game has a newer build, half played.
+  community_offer_state: (a) => (a.id === games[0]?.id
+    ? { shown: true, toVersion: '1.4.2', kryotoVersion: '1.4.0', playedSeconds: 420, needSeconds: 600, exitCode: 0, shots: [], autoShots: true, offerId: null, offerState: null, reasons: [] }
+    : { shown: false }),
+  // The second game: Steam has a newer build to try.
+  community_update_check: (a) => (a.id === games[1]?.id ? { available: true, steamBuildId: '24935044', kryotoBuildId: '19870421', reason: null } : { available: false }),
+  community_update_try: () => ({ shown: true, toVersion: 'Steam build 24935044', kryotoVersion: '1.0', playedSeconds: 0, needSeconds: 600, exitCode: null, shots: [], autoShots: true, offerId: null, offerState: null, reasons: [] }),
+  community_offer_add_shot: () => ({ shown: true, toVersion: '1.4.2', kryotoVersion: '1.4.0', playedSeconds: 720, needSeconds: 600, exitCode: 0, shots: ['shot.png'], autoShots: true, offerId: null, offerState: null, reasons: [] }),
+  community_offer_send: () => ({ shown: true, toVersion: '1.4.2', kryotoVersion: '1.4.0', playedSeconds: 720, needSeconds: 600, exitCode: 0, shots: ['shot.png'], autoShots: true, offerId: '1', offerState: 'review', reasons: [] }),
   // Cloud saves (src-tauri saves/): one game with every kind of location, a conflict on another.
-  cloud_saves_status: () => ({ feature: true, on: true, perk: true, allowance: { totalBytes: GB, versionsPerGame: 5, maxBackupBytes: 100 * 1_048_576 }, usage: { bytes: 214_000_000, games: 7, versions: 23 }, lastSync: now() - 300, conflicts: [] }),
+  cloud_saves_status: () => ({ feature: true, on: true, perk: true, allowance: { totalBytes: GB, versionsPerGame: 5, maxBackupBytes: 100 * 1_048_576 }, usage: { bytes: 214_000_000, games: 7, versions: 23 }, lastSync: now() - 300, conflicts: [], endpoint: ownHost('savesEndpoint'), mode: settings.savesMode === 'local' ? 'local' : ownHost('savesEndpoint') ? 'patchbay' : 'account', localDir: (settings.savesLocalDir as string) || null }),
   cloud_saves_refresh: () => HANDLERS.cloud_saves_status!({}),
-  cloud_saves_library: () => games.slice(0, 4).map((g, i) => ({ id: g.id, title: g.title, lastBackupAt: i === 1 ? null : now() - i * 3600, conflict: i === 1, error: null, tooBig: false })),
+  cloud_saves_library: () => games.slice(0, 4).map((g, i) => ({ id: g.id, title: g.title, lastBackupAt: i === 1 ? null : now() - i * 3600, conflict: i === 1, error: null, tooBig: i === 2 })),
   cloud_saves_game: (a) => {
     const index = games.findIndex((g) => g.id === a.id)
     const conflict = index === 1
@@ -427,7 +498,16 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   cloud_saves_restore: () => 'Saves restored. What was here before is kept under Versions, On this PC.',
   cloud_saves_restore_local: () => 'Saves put back from this PC\'s backup.',
   cloud_saves_answer: () => null,
-  cloud_achievements_status: () => ({ perk: true, games: 3, lastSync: Math.floor(Date.now() / 1000) - 120 }),
+  cloud_achievements_status: () => ({ perk: true, games: 3, lastSync: Math.floor(Date.now() / 1000) - 120, endpoint: ownHost('achievementsEndpoint'), mode: settings.achievementsMode === 'local' ? 'local' : ownHost('achievementsEndpoint') ? 'patchbay' : 'account', localDir: (settings.savesLocalDir as string) || null }),
+  patchbay_status: () => ({ saves: { endpoint: (settings.savesEndpoint as string) || null, token: false }, achievements: { endpoint: (settings.achievementsEndpoint as string) || null, token: false }, debrid: (settings.debrid as string) || null, debridToken: false, torboxToken: false }),
+  patchbay_set_token: (a) => ({
+    saves: { endpoint: null, token: a.slot === 'saves' && !!a.token },
+    achievements: { endpoint: null, token: a.slot === 'achievements' && !!a.token },
+    debrid: (settings.debrid as string) || null,
+    debridToken: a.slot === 'real-debrid' && !!a.token,
+    torboxToken: a.slot === 'torbox' && !!a.token,
+  }),
+  patchbay_test: (a) => (a.slot === 'real-debrid' ? 'Signed in as preview: premium, 120 days left.' : a.slot === 'torbox' ? 'Signed in as preview@example.com: paid plan until 2027-01-31.' : 'Connected. 3 games stored there.'),
   runtimes_list: () => RUNTIMES.map((r) => ({ ...r })),
   runtimes_install: (a) => previewRuntimesInstall(a.ids as string[]),
   runtimes_progress: () => runtimesJob,
@@ -506,18 +586,32 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   online_lobby: () => ({ lobby: '109775241075364289', hostSteamId: '76561198000000000' }),
   steam_join_lobby: () => null,
   chat_report: () => null,
-  chat_send_file: () => null,
-  room_list: () => ({
-    canModerate: false,
-    messages: [{ id: '1', body: 'anyone up for Lethal Company tonight?', createdAt: new Date().toISOString(), user: { id: '2', username: 'bo', displayName: 'Bo', avatarUrl: null, supporter: true } }],
-  }),
-  room_post: () => ({}),
+  chat_send_file: (a) => {
+    const m: PreviewMsg = { msgId: newId(), conversationId: convOf(String(a.peer)), senderUser: '1', outgoing: true, sentAt: Date.now(), receivedAt: Date.now(), kind: 'file', body: JSON.stringify({ name: 'tall-screenshot.svg', mime: 'image/svg+xml', size: 2048, width: 400, height: 800 }), replyTo: null, editedAt: null, deleted: false, status: 'sent', reactions: [] }
+    previewMsgs.push(m)
+    return m
+  },
+  room_list: (a) => ({ canModerate: false, messages: a.after ? previewRoom.filter((m) => Number(m.id) > Number(a.after)) : previewRoom }),
+  room_post: (a) => {
+    const to = previewRoom.find((m) => m.id === a.replyTo)
+    previewRoom.push({
+      id: String(previewRoom.length + 1),
+      body: String(a.text),
+      replyTo: to ? { id: to.id, gone: false, name: to.user.displayName, username: to.user.username, excerpt: to.body } : null,
+      createdAt: new Date().toISOString(),
+      user: { id: '1', username: 'mira', displayName: 'Mira', avatarUrl: null, supporter: false },
+    })
+    return {}
+  },
   room_delete: () => null,
   chat_call_signal: () => null,
   chat_ice_servers: () => ({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] }),
   chat_file_save: () => null,
-  chat_file_preview: () => {
-    throw new Error('No preview in the browser preview.')
+  // Every second file fails, for the message that says so.
+  chat_file_preview: (a) => {
+    const nth = previewMsgs.filter((m) => m.kind === 'file').findIndex((m) => m.msgId === a.msg)
+    if (nth % 2 === 1) throw new Error('This picture could not be fetched.')
+    return `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800"><rect width="400" height="800" fill="#7fd3ff"/><circle cx="200" cy="400" r="150" fill="#b26bff"/></svg>')}`
   },
   chat_groups: () => previewGroups,
   chat_group_create: (a) => {
@@ -532,6 +626,16 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     return null
   },
   chat_people: () => ({ people: [{ id: '8', username: 'rook', displayName: 'Rook', avatarUrl: null, supporter: false }] }),
+  // Mentions (src/rich): the room's `@` list, names for ids the chat does not
+  // know (anyone else reads as anonymous here), and the notify call.
+  chat_mention_search: (a) => ({
+    people: [
+      { id: '2', username: 'bo', displayName: 'Bo', avatarUrl: null },
+      { id: '8', username: 'rook', displayName: 'Rook', avatarUrl: null },
+    ].filter((p) => p.username.includes(String(a.query ?? '').toLowerCase())),
+  }),
+  chat_mention_lookup: (a) => ({ people: Object.fromEntries((a.ids as string[]).map((id) => [id, { state: 'anonymous' }])) }),
+  chat_mention_notify: () => null,
   chat_export_history: () => 'C:\Users\you\Documents\kryoto-chat-history.json',
   chat_send: (a) => {
     const peer = String(a.peer)
@@ -594,6 +698,10 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     gamemode: false,
   }),
   library_list: () => clone(games),
+  library_set_hidden: (a) => {
+    for (const g of games) if ((a.ids as string[]).includes(String(g.id))) g.hidden = a.hidden
+    previewBus.emit('library-changed', null)
+  },
   library_artwork: (a) => {
     const game = games.find((g) => g.id === a.id)
     if (!game) throw new Error('Game not found.')
@@ -651,6 +759,8 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   },
   game_disk_size: () => 14_300_000_000,
   open_folder: () => null,
+  game_languages: () => ['english', 'french', 'german', 'spanish'],
+  game_shortcut: () => 'desktop',
   settings_get: () => ({ ...settings }),
   // Every sample game can use Kryoto Online, so the add-ons card shows it.
   online_check: () => null,
@@ -665,12 +775,11 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
         exists: true,
         total: 953 * GB,
         free: 212 * GB,
-        gamesBytes: 41.3 * GB,
         games: [stored('captain-hardcore', 22.1 * GB), stored('stardew-valley', 0.6 * GB), stored('celeste', 1.2 * GB)],
       },
-      { path: 'D:\\Games\\Kryoto', drive: 'D:', isDefault: false, exists: true, total: 1863 * GB, free: 1204 * GB, gamesBytes: 0, games: [] },
+      { path: 'D:\\Games\\Kryoto', drive: 'D:', isDefault: false, exists: true, total: 1863 * GB, free: 1204 * GB, games: [] },
     ],
-    elsewhere: [stored('terraria', 0.4 * GB)],
+    elsewhere: [stored('terraria', 0.4 * GB), ...Array.from({ length: 24 }, (_, i) => ({ ...stored('hades', 0), id: `steam-${i}`, title: `Steam game ${i + 1}`, blocked: 'Steam manages this game.', launcher: 'steam' }))],
   }),
   storage_add_folder: (a) => {
     ;(settings.libraryFolders as string[]).push(String(a.path))
@@ -678,14 +787,65 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   },
   storage_remove_folder: () => null,
   storage_set_default: () => null,
+  storage_folders: () => [
+    { path: String(settings.libraryDir), drive: 'C:', isDefault: true, exists: true, total: 953 * GB, free: 212 * GB, games: [] },
+    ...(settings.libraryFolders as string[]).map((path, i) => ({ path, drive: i ? 'E:' : 'D:', isDefault: false, exists: true, total: 1863 * GB, free: 1204 * GB, games: [] })),
+  ],
+  // Two folders' worth of lost installs (library.rs `library_find_kryoto_games`).
+  library_find_kryoto_games: () => [
+    { title: 'Hollow Knight', installDir: 'D:\\Games\\Kryoto\\Hollow Knight', cover: null, nsfw: false, playtimeSeconds: 41 * 3600 },
+    { title: 'Hades II', installDir: 'D:\\Games\\Kryoto\\Hades II', cover: null, nsfw: false, playtimeSeconds: 0 },
+  ],
+  library_restore_found: (a) => (a.dirs as string[]).length,
+  collections_state: () => clone(collectionsPreview),
+  collection_install: (a) => {
+    const c = collectionsPreview.collections.find((x) => x.id === a.id)
+    if (!collectionsPreview.installed.includes(String(a.id))) collectionsPreview.installed.push(String(a.id))
+    collectionsPreview.updates = collectionsPreview.updates.filter((u) => u.id !== a.id)
+    for (const slug of a.slugs as string[]) {
+      const g = c?.games.find((x) => x.slug === slug)
+      if (g) downloadList.unshift(dl({ id: `dl-${slug}`, slug, status: 'queued', received: 0, total: g.sizeBytes, speed: 0, meta: { ...dl({}).meta, title: g.title, cover: g.cover }, libraryDir: a.folder ?? null }))
+    }
+    previewBus.emit('downloads', clone(downloadList))
+    previewBus.emit('collections-state', clone(collectionsPreview))
+    return (a.slugs as string[]).length
+  },
+  collection_later: (a) => {
+    collectionsPreview.updates = collectionsPreview.updates.filter((u) => u.id !== a.id)
+    previewBus.emit('collections-state', clone(collectionsPreview))
+    return null
+  },
+  collection_forget: (a) => {
+    collectionsPreview.installed = collectionsPreview.installed.filter((i) => i !== a.id)
+    collectionsPreview.updates = collectionsPreview.updates.filter((u) => u.id !== a.id)
+    previewBus.emit('collections-state', clone(collectionsPreview))
+    return null
+  },
   storage_move: () => null,
   logs_tail: () => LOG.join('\n'),
   logs_folder: () => 'C:\\Users\\you\\AppData\\Roaming\\to.kryo.desktop\\logs',
   logs_send: () => 1,
-  phone_status: () => ({ lan: false, addresses: [], code: null, codeExpiresIn: null, pairUri: null, devices: [] }),
-  phone_set_lan: () => null,
-  phone_new_code: () => '123456',
+  phone_status: () => ({ ...phone, addresses: phone.lan ? ['192.168.1.20'] : [], codeExpiresIn: phone.code ? 300 : null, devices: [] }),
+  phone_set_lan: (a) => {
+    phone.lan = !!a.on
+    return null
+  },
+  phone_new_code: () => {
+    phone.code = '123456'
+    phone.pairUri = 'kryoto://pair?code=123456'
+    return phone.code
+  },
   phone_revoke: () => null,
+  // Remote (remote.rs): off until turned on, as for a fresh account.
+  remote_status: () => ({ ...remoteConsent }),
+  remote_set_consent: (a) => {
+    Object.assign(remoteConsent, { enabled: a.enabled === true, decided: true })
+    setTimeout(() => {
+      previewBus.emit('remote-consent', { ...remoteConsent })
+      previewBus.emit('remote-consent-done', { ok: true, error: null })
+    }, 300)
+    return null
+  },
   log_write: () => null,
   shell_ready: () => null,
   download_pause: (a) => {
@@ -706,9 +866,16 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     previewBus.emit('downloads', clone(downloadList))
     return null
   },
+  download_pick_folder: (a) => {
+    const d = downloadList.find((x) => x.id === a.id)
+    if (a.alwaysDefault) settings.askInstallFolder = false
+    if (d) Object.assign(d, { askFolder: false, libraryDir: a.folder === settings.libraryDir ? null : a.folder, status: 'downloading', speed: 36_000_000 })
+    previewBus.emit('downloads', clone(downloadList))
+    return null
+  },
   download_cancel: (a) => {
     const d = downloadList.find((x) => x.id === a.id)
-    if (d) Object.assign(d, { status: 'canceled', speed: 0, received: 0 })
+    if (d) Object.assign(d, { status: 'canceled', speed: 0, received: 0, askFolder: false })
     previewBus.emit('downloads', clone(downloadList))
     return null
   },
@@ -804,6 +971,100 @@ Object.assign(HANDLERS, {
     return previewPadConfig
   },
   pad_virtual_driver: () => false,
+  // pad_games.rs: a game following the shared default, one layout to pick.
+  pad_game_get: () => {
+    const profile = { mode: 'keyboard', template: 'shooter', remap: {}, binds: { righttrigger: 'mouse1', a: 'space' }, leftStick: 'wasd', rightStick: 'mouse', sensitivity: 1600, deadzone: 0.15, invertY: false, pads: {} }
+    return {
+      profile,
+      own: false,
+      default: profile,
+      antiCheat: null,
+      outputProblem: null,
+      runAsAdmin: false,
+      templates: [{ id: 'shooter', label: 'First-person shooter', hint: 'Left stick walks, right stick aims, triggers aim and fire.' }],
+      keys: [{ name: 'mouse1', label: 'Left click' }, { name: 'space', label: 'Space' }],
+      layouts: { shooter: profile },
+    }
+  },
+  pad_game_set: () => undefined,
+  pad_game_default_set: () => undefined,
+  // Two controllers on one game: an Xbox pad and a DualSense.
+  pad_game_seen: () => ({
+    summary: 'The game sees one keyboard and one mouse, not separate players: every controller presses the same keys and moves the same mouse. For a game where two people share a keyboard, give one controller its own keys.',
+    pads: [
+      { key: 'xbox', name: 'Xbox Series X|S Controller', sees: 'Presses the keys below.', player: null, removed: false, canRemove: true, own: false, canOwn: true },
+      { key: 'sense', name: 'DualSense', sees: 'Presses the keys below.', player: null, removed: false, canRemove: true, own: false, canOwn: true },
+    ],
+  }),
+  pad_game_configured: () => ['celeste'],
+  // vr.rs: a PC with SteamVR and Quest Link, SteamVR not running yet.
+  vr_status: () => ({
+    runtimes: [
+      { id: 'steamvr', name: 'SteamVR', manifest: 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\steamxr_win64.json', starter: 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\bin\\win64\\vrstartup.exe', active: true },
+      { id: 'meta', name: 'Meta Quest Link', manifest: 'C:\\Program Files\\Meta Horizon\\Support\\oculus-runtime\\oculus_openxr_64.json', starter: null, active: false },
+    ],
+    steamvrInstalled: true,
+    steamvrRunning: false,
+    experimental: false,
+  }),
+  game_launch_vr: () => undefined,
+  // defender.rs: Defender on, exclusions hidden without administrator; adding asks UAC, here declined.
+  defender_status: () => ({ supported: true, realtime: true, passive: false, others: [], excluded: null, folders: ['C:\\Kryoto Games', 'D:\\Games'], drives: ['D:\\'] }),
+  defender_script: (a: { kind?: string }) => `$ErrorActionPreference = 'Stop'\n$out = '%TEMP%\\kryoto-defender.json'\ntry {\n    Add-MpPreference -ExclusionPath @(${(a.kind === 'drives' ? ['D:\\'] : ['C:\\Kryoto Games', 'D:\\Games']).map((p) => `'${p}'`).join(', ')})\n    ...\n}`,
+  defender_exclude: () => ({ ok: false, reason: 'declined', message: 'The administrator prompt was declined.', excluded: null }),
+  // library.rs: the first game is offered the hours its folder remembers, once.
+  // Bridge (src-tauri bridge/): a small library with one of each kind of row.
+  discord_games_status: () => ({
+    on: true,
+    open: true,
+    games: games.map((g, i) => ({ id: g.id, title: g.title, why: g.nsfw ? 'adult' : i === 2 ? 'game' : null, playing: false, now: false, set: i === 2 })),
+  }),
+  discord_game_set: () => null,
+  discord_presence_status: () => ({
+    connected: true,
+    preview: {
+      details: 'Hollow Knight',
+      state: '45 hours played',
+      assets: { large_image: games.find((g) => g.title === 'Hollow Knight')?.cover ?? null },
+      timestamps: { start: Math.floor(Date.now() / 1000) },
+      buttons: [{ label: 'Get Kryoto Desktop', url: 'https://kryo.to/desktop' }, { label: 'Open in Kryoto', url: 'https://kryo.to/game/hollow-knight' }],
+    },
+  }),
+  bridge_launchers: () => [
+    { id: 'hydra', name: 'Hydra', dir: 'C:\\Users\\you\\AppData\\Roaming\\hydralauncher\\hydra-db', running: false, keeps: false, exports: false },
+    { id: 'steam', name: 'Steam', dir: 'C:\\Program Files (x86)\\Steam', running: false, keeps: true, exports: true },
+  ],
+  bridge_detect: (a: Record<string, unknown>) => ({ id: a.launcherId, name: String(a.launcherId), dir: a.dir, running: false, keeps: a.launcherId === 'steam', exports: a.launcherId === 'steam' }),
+  bridge_export_list: () => ({
+    users: [{ id: '1', name: 'you' }],
+    games: games.slice(0, 3).map((g) => ({ id: g.id, title: g.title, cover: g.cover ?? null, nsfw: !!g.nsfw, sent: false })),
+    note: null,
+    undoable: 0,
+  }),
+  bridge_export: (a: Record<string, unknown>) => ({ added: (a.ids as string[]).length, updated: 0, pictures: (a.ids as string[]).length * 3, backup: 'C:\\Users\\you\\AppData\\Roaming\\to.kryo.desktop\\bridge-backups\\shortcuts-1.vdf' }),
+  bridge_export_undo: () => 2,
+  bridge_scan: () => ({
+    dir: 'C:\\Users\\you\\AppData\\Roaming\\hydralauncher\\hydra-db',
+    running: false,
+    catalog: true,
+    rows: [
+      { key: 'steam:1145360', title: 'Hades', playtimeSeconds: 45_000, lastPlayed: Math.floor(Date.now() / 1000) - 86_400, executable: 'D:\\Games\\Hades\\x64\\Hades.exe', cover: null, kind: 'matched', options: [{ slug: 'hades', title: 'Hades', developer: 'Supergiant Games', year: 2020, nsfw: false }], how: 'steamAppid', joins: null, remembered: false },
+      { key: 'custom:1', title: 'Hollow Knight: Godmaster', playtimeSeconds: 1_800, lastPlayed: null, executable: 'D:\\HK\\hollow_knight.exe', cover: null, kind: 'ask', options: [{ slug: 'hollow-knight', title: 'Hollow Knight', developer: 'Team Cherry', year: 2017, nsfw: false }], how: null, joins: null, remembered: false },
+      { key: 'custom:2', title: 'Lantern Rite Test', playtimeSeconds: 5_400, lastPlayed: Math.floor(Date.now() / 1000) - 3_600, executable: 'D:\\Games\\Lantern Rite\\LanternRite.exe', cover: null, kind: 'own', options: [], how: null, joins: null, remembered: false },
+      { key: 'steam:504230', title: 'Celeste', playtimeSeconds: 900, lastPlayed: null, executable: null, cover: null, kind: 'missing', options: [], how: null, joins: null, remembered: false },
+    ],
+  }),
+  bridge_import: (a: Record<string, unknown>) => ({ linked: 1, own: (a.decisions as { slug: string | null }[]).filter((d) => !d.slug).length, joined: 0, seconds: 52_200 }),
+  library_merge_offers: () => [],
+  store_report_carry: () => null,
+  playtime_offer: (a: Record<string, unknown>) => (a.id === games[0]?.id && !games[0]?.playtimePrompt ? { seconds: 45_900, source: 'folder' } : null),
+  playtime_answer: (a: Record<string, unknown>) => {
+    const g = games.find((x) => x.id === a.id)
+    if (!g) throw new Error('That game is no longer in the library.')
+    if (a.answer === 'yes') { g.playtimeSeconds = Math.max(Number(g.playtimeSeconds) || 0, Number(a.seconds)); g.playtimePrompt = 'restored' }
+    if (a.answer === 'no') g.playtimePrompt = 'never'
+    return clone(g)
+  },
   // The resolvers' table (src-tauri/src/resolvers/mod.rs), for a game's Builds.
   mirror_hosts: (a: Record<string, unknown>) =>
     (a.urls as string[]).map((u) => {
@@ -813,6 +1074,8 @@ Object.assign(HANDLERS, {
       if (page[host]) return { host: page[host], kind: 'page' }
       if (api[host]) return { host: api[host], kind: 'api' }
       if (host === '0807.st') return { host: '0807.st', kind: 'direct' }
+      // filez.stream: a file link with its key is fetched and decrypted by the app.
+      if (host === 'filez.stream' && /#[A-Za-z0-9_-]{43}$/.test(u)) return { host: 'filez.stream', kind: 'api' }
       return null
     }),
   // A mirror download: its page is solved in the background, then it comes down like ours.
@@ -834,6 +1097,13 @@ Object.assign(HANDLERS, {
         return { ...dl({}).meta, title: String(a.title ?? a.slug), cover: g?.cover ?? null, hero: g?.hero ?? null }
       })(),
     })
+    // Two library folders and a game not installed yet: it asks where first (download_pick_folder).
+    if (settings.askInstallFolder && (settings.libraryFolders as string[]).length && !games.some((g) => g.slug === a.slug)) {
+      Object.assign(item, { status: 'queued', askFolder: true })
+      downloadList.unshift(item)
+      previewBus.emit('downloads', downloadList.map((x) => ({ ...x })))
+      return null
+    }
     downloadList.unshift(item)
     previewBus.emit('downloads', downloadList.map((x) => ({ ...x })))
     setTimeout(() => {

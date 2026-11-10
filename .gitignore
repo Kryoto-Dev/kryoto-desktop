@@ -36,3 +36,7 @@ dist-web/
 
 # Scratch files for builds (scripts/tauri-env.mjs)
 .tmp/
+# In-repo TEMP folders sessions point tsc/vite at (Node's compile cache lands
+# there, full of this PC's paths)
+.tmp-*/
+tmp/

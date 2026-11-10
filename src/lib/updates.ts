@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react'
+import { isOnline, whenOnline } from '@/lib/online'
 import { getVersion } from '@tauri-apps/api/app'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check as tauriCheck, type Update } from '@tauri-apps/plugin-updater'
@@ -73,8 +74,8 @@ export const updates = {
   /** Once per run, as soon as there is a connection (offline, it waits for one). */
   async checkOnLaunch() {
     if (launchChecked || !isTauri()) return
-    if (!navigator.onLine) {
-      window.addEventListener('online', () => void updates.checkOnLaunch(), { once: true })
+    if (!isOnline()) {
+      void whenOnline().then(() => updates.checkOnLaunch())
       return
     }
     launchChecked = true

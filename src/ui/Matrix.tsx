@@ -136,6 +136,34 @@ function cellAnimation(motion: Motion, cell: Cell, spec: Spec): string | null {
 }
 
 /**
+ * Whole-pixel dots. With 1fr tracks and a percentage gap, a small matrix
+ * (12-16 px) puts its dots on fractions of a pixel and the browser draws some
+ * wider than others: stretched cubes. For a Tailwind size it knows, the
+ * matrix lays itself out in whole pixels instead - every dot the same size,
+ * whole-pixel gaps, the leftover pixel at the edges. Dots under 6 px lose
+ * their rounding, which at that size only blurs their corners. At a screen
+ * scale like 125% the page re-fits it in device pixels (pixel-icons-motion).
+ */
+const SIZE_STEP = /(?:^|\s)size-(\d+(?:\.5)?)(?=\s|$)/
+function wholePixels(classes: string): CSSProperties | undefined {
+  const step = classes.match(SIZE_STEP)?.[1]
+  if (!step) return undefined
+  const box = parseFloat(step) * 4
+  const dot = Math.max(2, Math.floor(box * 0.29))
+  const gap = Math.max(1, Math.floor((box - 3 * dot) / 2.6))
+  const edge = Math.max(0, Math.floor((box - 3 * dot - 2 * gap) / 2))
+  return {
+    gridTemplateColumns: `repeat(3, ${dot}px)`,
+    gridTemplateRows: `repeat(3, ${dot}px)`,
+    gap: `${gap}px`,
+    placeContent: 'start',
+    padding: `${edge}px 0 0 ${edge}px`,
+    boxSizing: 'border-box',
+    ...(dot < 6 ? { '--kryo-m-r': '0' } : null),
+  } as CSSProperties
+}
+
+/**
  * One glyph of the alphabet.
  *
  * `state` picks the glyph. `progress` (0-1) instead draws a determinate fill:
@@ -171,6 +199,7 @@ export function Matrix({
   return (
     <span
       className={cn('kryo-matrix size-3.5 shrink-0', className)}
+      style={wholePixels(cn('kryo-matrix size-3.5 shrink-0', className))}
       data-state={determinate ? 'progress' : state}
       {...a11y}
     >

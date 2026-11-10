@@ -40,10 +40,26 @@ pub struct LaunchEntry {
 }
 
 impl LaunchEntry {
+    /// An entry this app can start: for Windows, and a file rather than a
+    /// launcher link. Steam lists `link2ea://launchgame/...` entries for EA
+    /// games; stored as the exe, they made Play "close again straight away"
+    /// (1,252 reports in two weeks), since nothing at that path can run.
     pub fn is_windows(&self) -> bool {
         let os = self.oslist.to_ascii_lowercase();
-        os.is_empty() || os.contains("windows")
+        (os.is_empty() || os.contains("windows")) && !is_url_scheme(&self.executable)
     }
+}
+
+/// A launcher link (`link2ea://`, `steam://`, `com.epicgames.launcher://`)
+/// rather than a file in the game's folder.
+pub fn is_url_scheme(executable: &str) -> bool {
+    let e = executable.trim();
+    e.split_once("://").is_some_and(|(scheme, _)| !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+}
+
+/// A shell script: started by this system's shell, never through Wine.
+pub fn is_shell_script(executable: &str) -> bool {
+    Path::new(executable.trim()).extension().is_some_and(|e| e.eq_ignore_ascii_case("sh"))
 }
 
 /// What a Play press runs.
@@ -188,6 +204,19 @@ pub fn wine_overrides_for(source: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// The online layer's overrides from the game's own files, for a release
+/// whose source label does not name it (kryoto-bugs KB-0010: an online-fix
+/// build labelled only "Steam" launched without them and never started).
+/// Looks beside the exe and at the top of the folder.
+pub fn wine_overrides_from_files(install_dir: &Path, exe: &Path) -> Option<&'static str> {
+    let dirs = [exe.parent(), Some(install_dir)];
+    let has = |name: &str| dirs.iter().flatten().any(|d| d.join(name).is_file());
+    if has("OnlineFix64.dll") || has("OnlineFix.dll") || has("OnlineFix.ini") {
+        return wine_overrides_for(Some("online-fix"));
+    }
+    None
+}
+
 /// Join a relative path from Steam or the user onto the install folder,
 /// refusing anything that climbs out of it.
 pub fn inside(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -237,6 +266,9 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
     if exe_rel.trim().is_empty() {
         return Err("No executable is set for this game. Pick one in Properties.".into());
     }
+    if is_url_scheme(exe_rel) {
+        return Err("This game is set to start through a launcher link, which Kryoto cannot run. Pick the game's own .exe in Properties.".into());
+    }
     let exe = inside(input.install_dir, exe_rel)?;
     let cwd = if workdir.trim().is_empty() {
         exe.parent().map(Path::to_path_buf).unwrap_or_else(|| input.install_dir.to_path_buf())
@@ -264,34 +296,39 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
         for (k, v) in &input.env {
             set_default(&mut env, k, v);
         }
-        let tool = input
-            .compat_tool
-            .ok_or("This is a Windows game. Get Proton in Settings, Compatibility, or pick Wine or Proton under Properties, Compatibility.")?;
-        let kind = crate::compat::kind_of(tool);
-        let through_umu = kind == "proton" && input.umu.is_some();
-        if through_umu {
-            chain.push(input.umu.unwrap_or(tool).to_string_lossy().into_owned());
+        if is_shell_script(exe_rel) {
+            // A game's own start script: Wine could only fail on it.
+            chain.push("sh".to_string());
         } else {
-            chain.push(tool.to_string_lossy().into_owned());
-        }
-        if through_umu {
-            // Steam's way: the Proton picked, run by umu inside the runtime.
-            let proton_dir = tool.parent().unwrap_or(tool);
-            set_default(&mut env, "PROTONPATH", &proton_dir.to_string_lossy());
-            set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
-            set_default(&mut env, "GAMEID", "umu-default");
-        } else if kind == "umu" {
-            // umu-run is Proton outside Steam: a prefix and a game id is all it needs.
-            set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
-            set_default(&mut env, "GAMEID", "umu-default");
-        } else if kind == "proton" {
-            return Err("Proton needs its game runtime. Get Proton in Settings > Compatibility to set it up, or pick Wine.".into());
-        } else {
-            set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
-        }
-        if input.apply_overrides {
-            if let Some(o) = wine_overrides_for(input.source) {
-                set_default(&mut env, "WINEDLLOVERRIDES", o);
+            let tool = input
+                .compat_tool
+                .ok_or("This is a Windows game. Get Proton in Settings, Compatibility, or pick Wine or Proton under Properties, Compatibility.")?;
+            let kind = crate::compat::kind_of(tool);
+            let through_umu = kind == "proton" && input.umu.is_some();
+            if through_umu {
+                chain.push(input.umu.unwrap_or(tool).to_string_lossy().into_owned());
+            } else {
+                chain.push(tool.to_string_lossy().into_owned());
+            }
+            if through_umu {
+                // Steam's way: the Proton picked, run by umu inside the runtime.
+                let proton_dir = tool.parent().unwrap_or(tool);
+                set_default(&mut env, "PROTONPATH", &proton_dir.to_string_lossy());
+                set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
+                set_default(&mut env, "GAMEID", "umu-default");
+            } else if kind == "umu" {
+                // umu-run is Proton outside Steam: a prefix and a game id is all it needs.
+                set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
+                set_default(&mut env, "GAMEID", "umu-default");
+            } else if kind == "proton" {
+                return Err("Proton needs its game runtime. Get Proton in Settings > Compatibility to set it up, or pick Wine.".into());
+            } else {
+                set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
+            }
+            if input.apply_overrides {
+                if let Some(o) = wine_overrides_for(input.source).or_else(|| wine_overrides_from_files(input.install_dir, &exe)) {
+                    set_default(&mut env, "WINEDLLOVERRIDES", o);
+                }
             }
         }
         chain.push(exe.to_string_lossy().into_owned());
@@ -336,6 +373,9 @@ pub fn command(plan: &LaunchPlan) -> std::process::Command {
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+        // Nothing types into a game. A Run Me.bat under Wine reads what it was
+        // handed instead of its script, and on an open pipe it waits for good.
+        cmd.stdin(std::process::Stdio::null());
     }
     cmd
 }
@@ -384,7 +424,7 @@ fn apply_appimage_env(cmd: &mut std::process::Command, root: &Path, vars: impl I
             continue;
         }
         let paths: Vec<_> = std::env::split_paths(&value).collect();
-        let kept: Vec<_> = paths.iter().filter(|p| !p.starts_with(root)).collect();
+        let kept: Vec<_> = paths.iter().filter(|p| !p.starts_with(root) && !crate::appimage_tls::is_ours(p)).collect();
         if kept.len() == paths.len() {
             continue;
         }
@@ -574,6 +614,22 @@ mod tests {
     }
 
     #[test]
+    fn a_start_script_runs_in_the_shell_and_needs_no_wine() {
+        let mut i = input(None, "", false);
+        i.executable = "start.sh";
+        i.compat_tool = None;
+        let p = plan(&i).unwrap();
+        assert_eq!(p.program, PathBuf::from("sh"));
+        assert!(p.lead_args[0].ends_with("start.sh"));
+        assert!(!p.env.iter().any(|(k, _)| k == "WINEPREFIX"));
+        // A .bat is Windows' and goes through Wine like any .exe.
+        let mut i = input(None, "", false);
+        i.executable = "Run Me.bat";
+        let p = plan(&i).unwrap();
+        assert_eq!(p.program, PathBuf::from("/usr/bin/wine"));
+    }
+
+    #[test]
     fn linux_without_a_tool_says_what_to_do() {
         let mut i = input(None, "", false);
         i.compat_tool = None;
@@ -610,7 +666,7 @@ mod tests {
             ("PYTHONHOME".into(), root.join("usr").into_os_string()),
             ("PYTHONPATH".into(), std::env::join_paths([root.join("usr/share/pyshared"), host.clone()]).unwrap()),
             ("PATH".into(), std::env::join_paths([root.join("usr/bin"), host.clone()]).unwrap()),
-            ("LD_LIBRARY_PATH".into(), root.join("usr/lib").into_os_string()),
+            ("LD_LIBRARY_PATH".into(), std::env::join_paths([std::path::Path::new("/tmp/kryoto-ca-1000"), &root.join("usr/lib")]).unwrap()),
             ("DISPLAY".into(), ":0".into()),
         ];
         let mut cmd = std::process::Command::new("unused");
@@ -623,6 +679,20 @@ mod tests {
         assert!(!env.contains_key(std::ffi::OsStr::new("DISPLAY")));
         cmd.env("PYTHONHOME", "explicit-player-setting");
         assert_eq!(cmd.get_envs().find(|(k, _)| *k == "PYTHONHOME").unwrap().1, Some(std::ffi::OsStr::new("explicit-player-setting")));
+    }
+
+    #[test]
+    fn launcher_links_are_never_an_exe() {
+        assert!(is_url_scheme("link2ea://launchgame/1234?theme=fifa"));
+        assert!(is_url_scheme(" steam://rungameid/620"));
+        assert!(!is_url_scheme("bin/win64/Game.exe"));
+        assert!(!is_url_scheme("C:\\Games\\Game.exe"));
+        assert!(!is_url_scheme("http.exe"));
+        let ea = LaunchEntry { executable: "link2ea://launchgame/1234".into(), oslist: "windows".into(), ..Default::default() };
+        assert!(!ea.is_windows(), "an EA launcher link is not something this app starts");
+        let mut i = input(None, "", true);
+        i.executable = "link2ea://launchgame/1234";
+        assert!(plan(&i).unwrap_err().contains("launcher link"));
     }
 
     #[test]
@@ -701,6 +771,18 @@ mod tests {
         assert!(wine_overrides_for(Some("Steam + Kryoto Online + Steamless")).unwrap().contains("kryotoO"));
         assert!(wine_overrides_for(Some("Steam + online-fix")).unwrap().contains("OnlineFix64"));
         assert!(wine_overrides_for(Some("OFME")).unwrap().contains("OnlineFix64"));
+    }
+
+    #[test]
+    fn online_fix_is_found_by_its_files_when_the_label_does_not_say() {
+        let dir = std::env::temp_dir().join(format!("kryo-of-{}", std::process::id()));
+        let bin = dir.join("Game").join("Binaries");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("Game.exe");
+        assert!(wine_overrides_from_files(&dir, &exe).is_none());
+        std::fs::write(bin.join("OnlineFix64.dll"), b"").unwrap();
+        assert!(wine_overrides_from_files(&dir, &exe).unwrap().contains("OnlineFix64=n"));
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(wine_overrides_for(Some("Steam + gbe_fork")), None);
         assert_eq!(wine_overrides_for(None), None);
         assert!(wine_overrides_for(Some("Steam + RUNE steakclient")).unwrap().contains("winmm=n,b"));

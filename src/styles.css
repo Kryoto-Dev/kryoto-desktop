@@ -11,7 +11,7 @@
 
 /* `dark:` follows the class on <html>, as on kryo.to (site components
    colour themselves with it). The shell follows the selected colour scheme. */
-@custom-variant dark (&:where(.dark, .dark *));
+@custom-variant dark (&:where(.dark, .dark *, .kryo-night, .kryo-night *));
 
 /* ---------------------------------------------------------------------------
    Kryoto design tokens - the same ones kryo.to and Forge use.
@@ -103,8 +103,11 @@
 }
 
 /* Dark, the site's `.dark` - the base every palette overrides. The status
-   colours are the site's and Forge's, so a warning looks the same in all three. */
-:root.dark {
+   colours are the site's and Forge's, so a warning looks the same in all three.
+   `.kryo-night` is a scene drawn on black whatever the theme (the splash and
+   sign-in, Boot.tsx): under a light theme it keeps these colours too. */
+:root.dark,
+:root:not(.dark) .kryo-night {
   color-scheme: dark;
   --background: oklch(0.15 0 0);
   --foreground: oklch(0.96 0 0);
@@ -135,6 +138,8 @@
   html, body, #root { height: 100%; overflow: hidden; }
   body {
     margin: 0;
+    /* A long word or address breaks at the edge of its box, in every list and notice. */
+    overflow-wrap: break-word;
     background: var(--background);
     color: var(--foreground);
     font-family: var(--kryo-text);
@@ -169,6 +174,9 @@
   :disabled { cursor: not-allowed; }
   img { -webkit-user-drag: none; }
 
+  /* The reader's accent on the browser's own sliders, never its blue. */
+  input[type='range'] { accent-color: var(--primary); }
+
   html { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -188,6 +196,32 @@
 @utility kryo-radius { border-radius: var(--kryo-radius); }
 @utility kryo-pill { border-radius: var(--kryo-radius-pill); }
 @utility kryo-square { border-radius: 0; }
+
+/* kryo.to's home page wall (ui/CoverWall.tsx): anchored a quarter of the way
+   down its own height, so one pass of a column always spans the window. */
+@keyframes kryo-wall-in {
+  from { opacity: 0; transform: translate(-50%, -25%) rotate(-8deg) scale(1.1); }
+  to { opacity: 0.45; transform: translate(-50%, -25%) rotate(-8deg) scale(1); }
+}
+.kryo-wall {
+  transform: translate(-50%, -25%) rotate(-8deg);
+  transform-origin: 50% 25%;
+  opacity: 0.45;
+  animation: kryo-wall-in 1600ms var(--kryo-ease-out) both;
+}
+@keyframes kryo-wall-drift {
+  from { transform: translateY(0); }
+  to { transform: translateY(-50%); }
+}
+.kryo-wall-track {
+  will-change: transform;
+  animation: kryo-wall-drift 120s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kryo-wall, .kryo-wall-track { animation: none !important; }
+}
+html[data-motion='reduced'] .kryo-wall,
+html[data-motion='reduced'] .kryo-wall-track { animation: none !important; }
 
 /* Motion, from the site's vocabulary. */
 @keyframes kryo-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
@@ -220,6 +254,23 @@ html[data-os='linux'] .kryo-shimmer {
 }
 .kryo-toast { animation: kryo-toast 260ms var(--kryo-ease-out) both; }
 
+/* A setting a link was sent to (lib/settings-links.ts): a ring in the accent
+   for a moment, then nothing, as on kryo.to. */
+.kryo-deep-link-target {
+  animation: kryo-deep-link-flash 2000ms ease-out;
+  border-radius: var(--kryo-radius);
+}
+@keyframes kryo-deep-link-flash {
+  0%, 70% {
+    box-shadow: 0 0 0 4px color-mix(in oklch, var(--primary) 70%, transparent), 0 0 0 10px color-mix(in oklch, var(--primary) 20%, transparent);
+    background-color: color-mix(in oklch, var(--primary) 8%, transparent);
+  }
+  100% { box-shadow: 0 0 0 4px transparent, 0 0 0 10px transparent; background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kryo-deep-link-target { animation: none; box-shadow: 0 0 0 4px var(--primary); }
+}
+
 /* ---------------------------------------------------------------------------
    The 3x3 matrix (ui/Matrix.tsx, kryo.to's verbatim).
 
@@ -241,10 +292,11 @@ html[data-os='linux'] .kryo-shimmer {
   vertical-align: middle;
 }
 .kryo-matrix > i {
-  border-radius: 20%;
+  border-radius: var(--kryo-m-r, 20%);
   background: currentColor;
   opacity: var(--o, 0.14);
 }
+
 
 /* orbit: a head and a two-step tail, one ring cell per 110ms. */
 @keyframes kryo-m-orbit {
@@ -593,7 +645,7 @@ html.kryo-pad .kryo-bp-tile:focus {
   --destructive: oklch(0.55 0.2 25);
   --destructive-foreground: oklch(0.99 0 0);
   /* Shared status colours, adjusted for a light background. */
-  --warning: oklch(0.62 0.15 75);
+  --warning: oklch(0.52 0.13 75);
   --success: oklch(0.56 0.14 150);
   --border: oklch(0.84 0 0);
   --input: oklch(0.86 0 0);

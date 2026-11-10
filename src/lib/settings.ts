@@ -6,11 +6,32 @@ export type Palette = 'monochrome' | 'oled' | 'amber' | 'emerald' | 'nord' | 'se
 export type Radius = 'sharp' | 'soft' | 'rounded' | 'round' | 'pill'
 export type Theme = 'account' | 'system' | 'light' | 'dark'
 
+/** One of the two buttons Discord allows. */
+export type PresenceButton = { kind: 'desktop' | 'game' | 'donate' | 'profile' | 'custom' | 'none' | 'rotate'; label: string; url: string }
+
+/** What Discord shows while a game runs (src-tauri discord_rpc/). */
+export type DiscordPresence = {
+  on: boolean
+  /** Show Kryoto itself while no game runs. */
+  browsing: boolean
+  line1: string
+  line2: string
+  picture: 'cover' | 'kryoto' | 'none'
+  elapsed: boolean
+  playtime: boolean
+  /** Adult games show their name and art like any other. */
+  adultNames: boolean
+  button1: PresenceButton
+  button2: PresenceButton
+}
+
 /** Mirrors `src-tauri/src/settings.rs`. */
 export type Settings = {
   recoveryError?: string | null
   libraryDir: string
   deleteArchives: boolean
+  /** Where archives download to. Empty: inside the library folder. */
+  downloadDir: string
   startPage: 'store' | 'library'
   defaultCompatTool: string | null
   minimizeOnPlay: boolean
@@ -25,6 +46,8 @@ export type Settings = {
   followAccount: boolean
   /** Library folders besides `libraryDir` (where new games go). */
   libraryFolders: string[]
+  /** With two or more library folders, a download asks which one. */
+  askInstallFolder: boolean
   sendReports: boolean
   closeToTray: boolean
   startWithSystem: boolean
@@ -47,6 +70,8 @@ export type Settings = {
   /** The name in games: your K// username, `playerName`, or each build's own. */
   playerNameMode: PlayerNameMode
   playerName: string
+  /** The language games start in, as Steam names it; empty leaves each build's own. */
+  gameLanguage: string
   /** Cloud saves (saves/ in src-tauri), where kryo.to has them on. */
   cloudSaves: boolean
   /** Back a game's saves up when it closes. */
@@ -67,6 +92,43 @@ export type Settings = {
   petMascot: PetMascot
   /** Where it stands, in physical pixels; pet.rs keeps it. */
   petPos?: [number, number] | null
+  discord: DiscordPresence
+  /** Patchbay: a cloud saves server of your own instead of kryo.to. Blank is kryo.to. */
+  savesEndpoint: string
+  /**
+   * Where save versions are kept (src-tauri saves/): the kryo.to account (a
+   * supporter perk), a folder on this PC (`savesLocalDir`), or the Patchbay
+   * server. Blank, as before there was a choice: the own server when one is set.
+   */
+  savesMode?: '' | KeptIn
+  /** On this PC: the folder for save versions and achievements, apart from caches. */
+  savesLocalDir?: string
+  /** On this PC: versions kept per game. */
+  savesLocalKeep?: number
+  /** The card about kryo.to's cloud saves was closed for good. */
+  savesPromoClosed?: boolean
+  /** Where achievements are kept, the same three places. */
+  achievementsMode?: '' | KeptIn
+  /** Patchbay: an achievements server of your own instead of kryo.to. */
+  achievementsEndpoint: string
+  /** Patchbay: the debrid service downloads try first. Its token is in the OS secure store. */
+  debrid: '' | 'real-debrid' | 'torbox'
+  /** Unpack archives in place with HatchZip: room for the game, not the game and its archive. Used anyway when a drive is short. */
+  extractInPlace: boolean
+  /** New-feature notices (ui/FeatureNotice.tsx) already dismissed. */
+  seenNotices: string[]
+  /** The first-start setup (setup/FirstStart.tsx) is done or skipped; false only on a fresh install. */
+  welcomed: boolean
+  /** VR: the OpenXR runtime VR games get, by id; blank leaves the system's own. */
+  vrRuntime: string
+  /** VR: start SteamVR before a VR game when it is installed and not running. */
+  vrStartSteamvr: boolean
+  /** The Store's address bar refuses ad servers on other sites (adblock.rs). kryo.to is never filtered. */
+  blockAds: boolean
+  /** Get newer Kryoto builds of installed games without asking (game_update.rs). Off by default. */
+  autoUpdateGames: boolean
+  /** Where an update copies the files it replaces first, so it can be undone. Empty: no copies. */
+  updateBackupDir: string
 }
 
 export type PetMascot = 'telly' | 'kubi' | 'yuki' | 'blip'
@@ -75,6 +137,40 @@ export const PET_MASCOTS: { id: PetMascot; label: string }[] = [
   { id: 'kubi', label: 'Kubi' },
   { id: 'yuki', label: 'Yuki' },
   { id: 'blip', label: 'Blip' },
+]
+
+/** Every language Steam has, by the name the emulators hand a game (src-tauri player_name.rs). */
+export const GAME_LANGUAGES: { value: string; label: string }[] = [
+  { value: 'arabic', label: 'Arabic' },
+  { value: 'bulgarian', label: 'Bulgarian' },
+  { value: 'schinese', label: 'Chinese (Simplified)' },
+  { value: 'tchinese', label: 'Chinese (Traditional)' },
+  { value: 'czech', label: 'Czech' },
+  { value: 'danish', label: 'Danish' },
+  { value: 'dutch', label: 'Dutch' },
+  { value: 'english', label: 'English' },
+  { value: 'finnish', label: 'Finnish' },
+  { value: 'french', label: 'French' },
+  { value: 'german', label: 'German' },
+  { value: 'greek', label: 'Greek' },
+  { value: 'hungarian', label: 'Hungarian' },
+  { value: 'indonesian', label: 'Indonesian' },
+  { value: 'italian', label: 'Italian' },
+  { value: 'japanese', label: 'Japanese' },
+  { value: 'koreana', label: 'Korean' },
+  { value: 'norwegian', label: 'Norwegian' },
+  { value: 'polish', label: 'Polish' },
+  { value: 'portuguese', label: 'Portuguese' },
+  { value: 'brazilian', label: 'Portuguese (Brazil)' },
+  { value: 'romanian', label: 'Romanian' },
+  { value: 'russian', label: 'Russian' },
+  { value: 'spanish', label: 'Spanish' },
+  { value: 'latam', label: 'Spanish (Latin America)' },
+  { value: 'swedish', label: 'Swedish' },
+  { value: 'thai', label: 'Thai' },
+  { value: 'turkish', label: 'Turkish' },
+  { value: 'ukrainian', label: 'Ukrainian' },
+  { value: 'vietnamese', label: 'Vietnamese' },
 ]
 
 /** How a game's in-game name is picked (src-tauri player_name.rs). */
@@ -106,6 +202,8 @@ export type Look = Pick<Settings, 'palette' | 'radius' | 'font' | 'showAdult'> &
   theme: 'system' | 'light' | 'dark'
   season?: string | null
   reducedMotion?: boolean
+  /** Classic line icons instead of the pixel ones, as chosen on kryo.to. */
+  classicIcons?: boolean
   /** kryo.to's "Hide" for adult games: left out of every list the client draws from kryo.to. */
   hideAdult?: boolean
 }
@@ -134,6 +232,8 @@ export type CatalogAppearance = {
   font?: string | null
   motion?: string | null
   season?: string | null
+  /** kryo.to's Icons choice (Settings > Appearance): Kryoto's pixel icons or the classic line ones. */
+  icons?: string | null
 }
 const SEASON_IDS = new Set(['halloween', 'christmas', 'new-year', 'valentine', 'easter', 'winter'])
 
@@ -147,7 +247,7 @@ export function effectiveLook(s: Settings, account: { appearance?: AccountAppear
   const accountTheme = a?.theme === 'light' || a?.theme === 'system' ? a.theme : 'dark'
   const theme = choice === 'account' ? catalog?.theme ?? accountTheme : choice
   const season = s.followAccount && catalog?.season && SEASON_IDS.has(catalog.season) ? catalog.season : null
-  if (!s.followAccount) return { theme, palette: s.palette, radius: s.radius, font: s.font, showAdult: s.showAdult }
+  if (!s.followAccount) return { theme, palette: s.palette, radius: s.radius, font: s.font, showAdult: s.showAdult, classicIcons: catalog?.icons === 'classic' }
   const palette = catalog?.palette ?? a?.palette ?? s.palette
   const radius = catalog?.radius ?? a?.radius ?? s.radius
   const font = catalog?.font ?? a?.typeface ?? s.font
@@ -160,11 +260,12 @@ export function effectiveLook(s: Settings, account: { appearance?: AccountAppear
     showAdult: a ? !a.nsfwBlur && !a.nsfwHide : s.showAdult,
     hideAdult: a?.nsfwHide === true,
     reducedMotion: (catalog?.motion ?? a?.motion) === 'reduced',
+    classicIcons: catalog?.icons === 'classic',
   }
 }
 
 /** Stamp the look on <html>, the way kryo.to does before first paint. */
-export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { theme?: 'system' | 'light' | 'dark'; season?: string | null; reducedMotion?: boolean; systemDark?: boolean | null }) {
+export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { theme?: 'system' | 'light' | 'dark'; season?: string | null; reducedMotion?: boolean; classicIcons?: boolean; systemDark?: boolean | null }) {
   const html = document.documentElement
   const dark = s.theme === 'system' ? s.systemDark ?? matchMedia('(prefers-color-scheme: dark)').matches : s.theme !== 'light'
   html.classList.toggle('dark', dark)
@@ -173,6 +274,8 @@ export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { t
   html.style.colorScheme = dark && html.dataset.os !== 'linux' ? 'dark' : 'light'
   if (s.reducedMotion) html.dataset.motion = 'reduced'
   else delete html.dataset.motion
+  if (s.classicIcons) html.dataset.icons = 'classic'
+  else delete html.dataset.icons
   html.dataset.palette = s.palette || 'monochrome'
   html.dataset.radius = s.radius || 'pill'
   if (s.season && SEASON_IDS.has(s.season)) html.dataset.season = s.season
@@ -201,6 +304,11 @@ export const displayApi = {
   setMode: (mode: DisplayMode) => call<void>('display_set_mode', { mode }),
 }
 
+/** Where saves or achievements are kept: kryo.to, this PC, or your own server. */
+export type KeptIn = 'account' | 'local' | 'patchbay'
+
+let changing: Promise<unknown> = Promise.resolve()
+
 export const settingsApi = {
   recover: async () => {
     const settings = await call<Settings>('settings_recover')
@@ -220,6 +328,16 @@ export const settingsApi = {
     clearCatalogEndpointCache()
     publish(s)
     return s
+  },
+  /**
+   * Change something on top of what is saved now. One at a time: two running
+   * together both started from the same copy, and the later one undid the
+   * earlier, so a notice marked seen came back at the next start.
+   */
+  change: (patch: (now: Settings) => Settings) => {
+    const done = changing.then(async () => settingsApi.save(patch(await settingsApi.get())))
+    changing = done.catch(() => undefined)
+    return done
   },
   /** Re-read after the native side changed them (Storage writes folders). */
   reload: () => settingsApi.get(),

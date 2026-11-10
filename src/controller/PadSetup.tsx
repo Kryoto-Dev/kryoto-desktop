@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Matrix, Modal } from '@/ui'
-import { on } from '@/lib/bridge'
+import { errorText, on } from '@/lib/bridge'
 import { padApi, padLabel, type PadAxesEvent, type PadInfo, type PadRawEvent, type PadRawState } from '@/lib/pad'
 import type { PadControl, PadFamily } from '@/lib/pad-art'
 import { PadArtView, type Pointer } from '@/controller/PadArtView'
 import { savePadConfig } from '@/hooks/usePads'
 import { cn } from '@/lib/utils'
+import { PixelSplash } from '@/ui/pixel-icons-motion'
 
 /**
  * Setting up a controller, one control at a time.
@@ -218,7 +219,7 @@ export function PadSetup({ pad, family, onClose }: { pad: PadInfo; family: PadFa
     // The resting-state reply must not beat the event subscriptions.
     void Promise.all(subscriptions).then(() => {
       if (!cancelled) return padApi.capture(pad.id)
-    }).catch(e => setError(String(e)))
+    }).catch((e: unknown) => setError(errorText(e)))
     return () => {
       cancelled = true
       stops.forEach((f) => f())
@@ -318,7 +319,7 @@ export function PadSetup({ pad, family, onClose }: { pad: PadInfo; family: PadFa
           <div className="flex w-full items-center justify-between gap-3">
             <span className="text-[11px] text-muted-foreground">About a minute. Nothing changes until you save.</span>
             <Button variant="primary" onClick={begin} disabled={!ready}>
-              {ready ? 'Start setup' : 'Connecting…'}
+              {ready || error ? 'Start setup' : 'Connecting…'}
             </Button>
           </div>
         ) : phase === 'step' ? (
@@ -347,12 +348,12 @@ export function PadSetup({ pad, family, onClose }: { pad: PadInfo; family: PadFa
 
         <div className="relative w-full max-w-[460px]">
           {phase === 'done' || phase === 'saving' ? (
-            <div className="grid place-items-center py-8">
-              <Matrix
-                state={phase === 'saving' ? 'busy' : error ? 'error' : 'success'}
-                className={cn('size-20', error ? 'text-destructive' : phase === 'saving' ? 'text-muted-foreground' : 'text-success')}
-                announce
-              />
+            <div className="grid place-items-center py-6">
+              {phase === 'saving' ? (
+                <Matrix state="busy" className="size-20 text-muted-foreground" announce />
+              ) : (
+                <PixelSplash icon={error ? 'X' : 'Check'} className={cn('size-32', error ? 'text-destructive' : 'text-success')} label={error ? 'Failed' : 'Done'} />
+              )}
             </div>
           ) : (
             <PadArtView family={family} pressed={art.pressed} axes={art.axes} focus={art.focus} pointer={art.pointer} />
@@ -362,10 +363,14 @@ export function PadSetup({ pad, family, onClose }: { pad: PadInfo; family: PadFa
         <div className="grid min-h-20 justify-items-center gap-1.5 text-center" aria-live="polite">
           {phase === 'intro' ? (
             <>
-              <p className="text-lg font-bold text-foreground">Follow the highlighted button</p>
-              <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
-                Put the controller down so the sticks and triggers rest. Press Start setup, then press each highlighted button once and let go. Skip controls your controller does not have. Save and test when finished.
-              </p>
+              <p className="text-lg font-bold text-foreground">{error ? 'Kryoto cannot listen to this controller' : 'Follow the highlighted button'}</p>
+              {error ? (
+                <p role="alert" className="max-w-md text-xs leading-relaxed text-destructive">{error}</p>
+              ) : (
+                <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
+                  Put the controller down so the sticks and triggers rest. Press Start setup, then press each highlighted button once and let go. Skip controls your controller does not have. Save and test when finished.
+                </p>
+              )}
             </>
           ) : phase === 'step' ? (
             <>

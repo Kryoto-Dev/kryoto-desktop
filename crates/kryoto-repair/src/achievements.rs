@@ -334,7 +334,11 @@ pub async fn ensure_gbe_schema(client: &reqwest::Client, game_dir: &Path, appid:
         .filter(|e| e.file_type().is_dir() && e.file_name() == "steam_settings")
         .map(|e| e.into_path())
         // gbe_fork's folder, not a RUNE or Online one: it has gbe's own config files.
-        .filter(|d| d.join("steam_appid.txt").exists() || d.join("configs.app.ini").exists() || d.join("steam_interfaces.txt").exists())
+        .filter(|d| {
+            ["steam_appid.txt", "configs.app.ini", "configs.main.ini", "configs.user.ini", "steam_interfaces.txt"]
+                .iter()
+                .any(|f| d.join(f).exists())
+        })
         .collect();
     dirs.sort_by_key(|d| d.components().any(|c| c.as_os_str().to_string_lossy().ends_with(".app")));
     let mut fix = GbeFix::default();
@@ -379,6 +383,9 @@ enum Format {
 /// Wine prefix can use their own.
 fn locations(roots: &Roots, appid: &str) -> Vec<(PathBuf, Format)> {
     let mut out = Vec::new();
+    for base in &roots.game_saves {
+        out.push((base.join(appid).join("achievements.json"), Format::GoldbergJson));
+    }
     if let Some(a) = &roots.app_data {
         out.push((a.join("GSE Saves").join(appid).join("achievements.json"), Format::GoldbergJson));
         out.push((a.join("Goldberg SteamEmu Saves").join(appid).join("achievements.json"), Format::GoldbergJson));
@@ -399,14 +406,101 @@ fn locations(roots: &Roots, appid: &str) -> Vec<(PathBuf, Format)> {
 pub struct Roots {
     pub app_data: Option<PathBuf>,
     pub public_documents: Option<PathBuf>,
+    /// Where this game's own gbe_fork / Goldberg settings send its saves
+    /// ([`Roots::with_game`]): each folder holds `<appid>/achievements.json`.
+    pub game_saves: Vec<PathBuf>,
 }
 
 impl Roots {
     /// This PC's, from the environment Windows sets.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var_os(k).map(PathBuf::from).filter(|p| p.is_dir());
-        Roots { app_data: var("APPDATA"), public_documents: var("PUBLIC").map(|p| p.join("Documents")) }
+        Roots { app_data: var("APPDATA"), public_documents: var("PUBLIC").map(|p| p.join("Documents")), game_saves: Vec::new() }
     }
+
+    /// Also where the game's own emulator settings say it saves. A gbe_fork
+    /// build can keep its saves somewhere of its own choosing, in
+    /// `steam_settings/configs.user.ini` (`[user::saves]`): `local_save_path`
+    /// (a folder beside the game, or anywhere, for a portable build) or
+    /// `saves_folder_name` (another name than `GSE Saves` under AppData).
+    /// Older Goldberg builds said the same with `steam_settings/local_save.txt`.
+    /// Without this, unlocks from such builds never showed.
+    pub fn with_game(mut self, game_dir: &Path) -> Self {
+        for settings in emulator_settings_dirs(game_dir) {
+            // Relative paths are from the folder the emulator's dll is in,
+            // which is where its `steam_settings` is.
+            let base = settings.parent().map(Path::to_path_buf).unwrap_or_else(|| game_dir.to_path_buf());
+            let resolve = |p: &str| {
+                let p = PathBuf::from(p.trim());
+                if p.is_absolute() { p } else { base.join(p) }
+            };
+            let mut found: Vec<PathBuf> = Vec::new();
+            if let Ok(raw) = std::fs::read(settings.join("configs.user.ini")) {
+                let (local, folder_name) = user_saves(&String::from_utf8_lossy(&raw));
+                if let Some(local) = local {
+                    found.push(resolve(&local));
+                } else if let (Some(name), Some(app)) = (folder_name, &self.app_data) {
+                    if name != "GSE Saves" && !name.contains(['/', '\\']) {
+                        found.push(app.join(name));
+                    }
+                }
+            }
+            if let Ok(raw) = std::fs::read(settings.join("local_save.txt")) {
+                let text = String::from_utf8_lossy(&raw);
+                let line = text.trim_start_matches('\u{feff}').lines().next().unwrap_or("").trim().to_string();
+                if !line.is_empty() {
+                    found.push(resolve(&line));
+                }
+            }
+            for f in found {
+                if !self.game_saves.contains(&f) {
+                    self.game_saves.push(f);
+                }
+            }
+        }
+        self
+    }
+}
+
+/// The `steam_settings` folders of gbe_fork or Goldberg in a game that say
+/// where they save.
+fn emulator_settings_dirs(game_dir: &Path) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(game_dir)
+        .max_depth(8)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_dir() && e.file_name() == "steam_settings")
+        .map(|e| e.into_path())
+        .filter(|d| d.join("configs.user.ini").is_file() || d.join("local_save.txt").is_file())
+        .collect()
+}
+
+/// `[user::saves]` in gbe_fork's `configs.user.ini`: `local_save_path` and
+/// `saves_folder_name`, trimmed, an empty one as none. Pure, for tests.
+pub fn user_saves(text: &str) -> (Option<String>, Option<String>) {
+    let mut in_saves = false;
+    let (mut local, mut name) = (None, None);
+    for line in text.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_saves = line.eq_ignore_ascii_case("[user::saves]");
+            continue;
+        }
+        if !in_saves || line.starts_with(['#', ';']) {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let v = v.trim().to_string();
+        if v.is_empty() {
+            continue;
+        }
+        match k.trim().to_ascii_lowercase().as_str() {
+            "local_save_path" => local = Some(v),
+            "saves_folder_name" => name = Some(v),
+            _ => {}
+        }
+    }
+    (local, name)
 }
 
 /// The save files that exist for `appid`, newest first. A watcher polls these.
@@ -545,6 +639,38 @@ mod tests {
     }
 
     #[test]
+    fn a_builds_own_save_place_is_read() {
+        let (local, name) = user_saves("\u{feff}[user::general]\naccount_name=x\n[user::saves]\n# a comment\nlocal_save_path = ./saves \nsaves_folder_name=\n");
+        assert_eq!(local.as_deref(), Some("./saves"));
+        assert_eq!(name, None);
+        assert_eq!(user_saves("[user::saves]\nsaves_folder_name=My Saves\n").1.as_deref(), Some("My Saves"));
+        assert_eq!(user_saves("[user::general]\nlocal_save_path=x\n"), (None, None));
+
+        let root = std::env::temp_dir().join(format!("kryoto-ach-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let game = root.join("Game");
+        std::fs::create_dir_all(game.join("bin/steam_settings")).unwrap();
+        std::fs::write(game.join("bin/steam_settings/configs.user.ini"), "[user::saves]\nlocal_save_path=../saves\n").unwrap();
+        std::fs::create_dir_all(game.join("saves/620")).unwrap();
+        std::fs::write(game.join("saves/620/achievements.json"), r#"{"ACH.OWN":{"earned":true,"earned_time":1700000001}}"#).unwrap();
+        let app = root.join("AppData");
+        std::fs::create_dir_all(&app).unwrap();
+        let plain = Roots { app_data: Some(app.clone()), ..Default::default() };
+        assert!(read_unlocked(&plain, "620").is_empty(), "nothing in the usual place");
+        let roots = plain.with_game(&game);
+        assert_eq!(read_unlocked(&roots, "620"), vec![Unlock { name: "ACH.OWN".into(), time: Some(1700000001) }]);
+        assert_eq!(save_files(&roots, "620").len(), 1);
+
+        // Another folder name under AppData.
+        std::fs::write(game.join("bin/steam_settings/configs.user.ini"), "[user::saves]\nsaves_folder_name=Kryo Saves\n").unwrap();
+        std::fs::create_dir_all(app.join("Kryo Saves/620")).unwrap();
+        std::fs::write(app.join("Kryo Saves/620/achievements.json"), r#"{"ACH.NAMED":{"earned":true,"earned_time":5}}"#).unwrap();
+        let roots = Roots { app_data: Some(app), ..Default::default() }.with_game(&game);
+        assert_eq!(read_unlocked(&roots, "620")[0].name, "ACH.NAMED");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn unlocks_are_read_from_every_emulators_save() {
         let root = std::env::temp_dir().join(format!("kry-ach-{}", std::process::id()));
         let app = root.join("AppData");
@@ -561,7 +687,7 @@ mod tests {
             "\u{feff}[SteamAchievements]\nCount=2\n[ACH.WAKE_UP]\nAchieved=1\nUnlockTime=1600000000\n[ACH.LASER]\nAchieved=1\nUnlockTime=1650000000\n[NOPE]\nAchieved=0\n",
         )
         .unwrap();
-        let roots = Roots { app_data: Some(app), public_documents: Some(public) };
+        let roots = Roots { app_data: Some(app), public_documents: Some(public), ..Default::default() };
         let mut got = read_unlocked(&roots, "620");
         got.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(

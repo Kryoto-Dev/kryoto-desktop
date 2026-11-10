@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { ArrowUpRight, RotateCw } from 'lucide-react'
+import { ArrowUpRight, RotateCw } from '@/ui/pixel-icons'
 import { AsciiBar, Busy, Button, Caption, Modal } from '@/ui'
 import { explainUpdateError, updateFraction, updates, useUpdates } from '@/lib/updates'
 import { openExternal } from '@/lib/window'
 import { errorText } from '@/lib/bridge'
+import { usePromptTurn } from '@/lib/prompts'
 
 /**
  * Offer a new version; never take the decision. Installing means restarting,
@@ -31,8 +32,9 @@ export function UpdatePrompt({ busy }: { busy: { games: number; downloads: numbe
   }, [])
 
   const { update } = state
-  if (!update || dismissed) return null
   const working = state.status === 'downloading' || state.status === 'ready'
+  const turn = usePromptTurn('update', !!update && (!dismissed || working))
+  if (!update || !turn) return null
   const problem = state.status === 'failed' ? explainUpdateError(state.error) : null
 
   return (
@@ -44,7 +46,7 @@ export function UpdatePrompt({ busy }: { busy: { games: number; downloads: numbe
           <Button onClick={() => setDismissed(true)} disabled={working}>
             Later
           </Button>
-          <Button variant="primary" onClick={() => void updates.install()} disabled={working}>
+          <Button variant="primary" onClick={() => updates.install()} disabled={working}>
             {state.status === 'failed' ? 'Try again' : 'Update now'}
           </Button>
         </>
@@ -59,13 +61,13 @@ export function UpdatePrompt({ busy }: { busy: { games: number; downloads: numbe
           <Row k="New version" v={update.version} strong />
           {update.date && Number.isFinite(Date.parse(update.date)) ? <Row k="Released" v={new Date(update.date).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })} /> : null}
         </dl>
-        <Button size="sm" className="justify-self-start" onClick={() => void openChangelog()}>
+        <Button size="sm" className="justify-self-start" onClick={() => openChangelog()}>
           View changelog <ArrowUpRight className="size-3" aria-hidden />
         </Button>
         {changelogError ? <p role="alert" className="text-[11px] text-destructive">{changelogError}</p> : null}
         {busy.games > 0 || busy.downloads > 0 ? (
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            {busy.games > 0 ? `${busy.games === 1 ? 'A game is' : `${busy.games} games are`} running: close it first, or this session's play time is not counted. ` : ''}
+            {busy.games > 0 ? `${busy.games === 1 ? 'A game is' : `${busy.games} games are`} running: close it first, or the last minute of play time is not counted. ` : ''}
             {busy.downloads > 0 ? 'Downloads pause for the restart; press Resume in Downloads afterwards and they carry on from where they were.' : ''}
           </p>
         ) : null}
@@ -83,8 +85,8 @@ export function UpdatePrompt({ busy }: { busy: { games: number; downloads: numbe
   )
 }
 
-/** "Check for updates" with its answer, for About. */
-export function UpdateCheck() {
+/** "Check for updates" with its answer, for About. `onInstall` closes About: the prompt shows the progress. */
+export function UpdateCheck({ onInstall }: { onInstall: () => void }) {
   const state = useUpdates()
   useEffect(() => void updates.loadVersion(), [])
   const problem = state.status === 'failed' ? explainUpdateError(state.error) : null
@@ -103,12 +105,19 @@ export function UpdateCheck() {
   return (
     <div className="grid justify-items-center gap-2">
       <div className="flex gap-2">
-        <Button size="sm" onClick={() => void updates.check()} disabled={state.status === 'checking' || state.status === 'downloading'}>
+        <Button size="sm" onClick={() => updates.check()} disabled={state.status === 'checking' || state.status === 'downloading'}>
           {state.status === 'checking' ? <Busy className="size-3" /> : <RotateCw className="size-3" />}
           Check for updates
         </Button>
         {state.status === 'available' ? (
-          <Button size="sm" variant="primary" onClick={() => void updates.install()}>
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={() => {
+              void updates.install()
+              onInstall()
+            }}
+          >
             Update now
           </Button>
         ) : null}

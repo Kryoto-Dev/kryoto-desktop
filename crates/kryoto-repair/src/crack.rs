@@ -1468,6 +1468,17 @@ fn dlc_ini(dlc: &[Dlc]) -> String {
     out
 }
 
+/// gbe_fork's `steam_interfaces.txt` for a Steam dll that is not in place
+/// yet, written into `out_dir`: for an update that brought a new original
+/// (Kryoto Desktop's community updater), where the emulator stays and only
+/// the list it reads has to follow the game. `Ok(false)` when the tool is
+/// missing or wrote nothing.
+pub async fn interfaces_for_original(paths: &ToolPaths, original: &Path, is64: bool, out_dir: &Path) -> Result<bool> {
+    std::fs::create_dir_all(out_dir).map_err(|e| Error::Io(format!("creating {}: {e}", out_dir.display())))?;
+    let _ = std::fs::remove_file(out_dir.join("steam_interfaces.txt"));
+    generate_interfaces(paths, original, is64, out_dir).await
+}
+
 /// Run generate_interfaces on the original dll and move the result into
 /// steam_settings. Returns false when the tool is not configured - that is a
 /// degraded but working crack, not an error.

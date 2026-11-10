@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ProfileLink, TeamName } from '@/ui/TeamName'
-import { Headphones, HeadphoneOff, Mic, MicOff, Phone, PhoneOff, Settings2, WifiOff } from 'lucide-react'
+import { Headphones, HeadphoneOff, Mic, MicOff, Phone, PhoneOff, Settings2, WifiOff } from '@/ui/pixel-icons'
 import {
   accept,
   audioDevices,
@@ -98,7 +98,7 @@ export function CallOverlay({ nameOf, avatarOf, usernameOf }: { nameOf: (id: str
 
       {s.phase === 'incoming' ? (
         <div className="flex gap-2">
-          <Button variant="primary" size="sm" className="grow" onClick={() => void accept()}>
+          <Button variant="primary" size="sm" className="grow" onClick={() => accept()}>
             <Phone className="size-3" aria-hidden /> Answer
           </Button>
           <Button variant="danger" size="sm" className="grow" onClick={decline}>

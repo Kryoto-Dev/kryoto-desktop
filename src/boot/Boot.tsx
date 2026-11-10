@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ProfileLink, TeamName } from '@/ui/TeamName'
 import { artSrc } from '@/lib/art'
-import { ArrowLeft, Minus, RotateCw, X } from 'lucide-react'
+import { ArrowLeft, Minus, RotateCw, X } from '@/ui/pixel-icons'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { AsciiBar, Button } from '@/ui'
+import { AsciiBar, Button, Matrix } from '@/ui'
 import { AsciiArt } from '@/ui/ascii/AsciiArt'
+import { CoverWall } from '@/ui/CoverWall'
 import { WORDMARK } from '@/ui/ascii/cells'
 import { SplashScene } from '@/boot/SplashScene'
 import { RuntimesPrompt, useStartupRuntimes } from '@/boot/RuntimesPrompt'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
-import { isTauri, exitApp, mountStore, navigateCatalog, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
+import { isTauri, exitApp, mountStore, navigateCatalog, openExternal, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
+import { isOutage, pokeHealth, useServiceHealth } from '@/lib/health'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
@@ -41,10 +43,10 @@ function BoxControls() {
   )
 }
 
-/** The box is the whole window; Windows rounds it and draws its shadow. */
+/** The box is the whole window; Windows rounds it and draws its shadow. A night scene in every theme. */
 function Box({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <main className={cn('drag kryo-square relative h-full overflow-hidden bg-background text-foreground', className)}>
+    <main className={cn('kryo-night drag kryo-square relative h-full overflow-hidden bg-background text-foreground', className)}>
       <BoxControls />
       <DevEndpointNotice className="absolute left-1/2 top-3 z-20 -translate-x-1/2" />
       {children}
@@ -99,6 +101,9 @@ export function Splash({ onRevealed }: { onRevealed: () => void }) {
 
 /* ── Welcome and sign-in ────────────────────────────────── */
 
+/** How long Try again waits for kryo.to before saying it heard nothing. */
+const RETRY_WAIT_MS = 12_000
+
 export function Welcome({
   account,
   page,
@@ -124,6 +129,38 @@ export function Welcome({
     return () => window.clearTimeout(t)
   }, [checking])
 
+  // Try again shows it is trying, until kryo.to answers or the wait runs out.
+  const health = useServiceHealth()
+  const outage = isOutage(health)
+  const [retrying, setRetrying] = useState(false)
+  const [noAnswer, setNoAnswer] = useState(false)
+  const retry = useRef(onRetry)
+  retry.current = onRetry
+  const tryAgain = () => {
+    setRetrying(true)
+    setNoAnswer(false)
+    pokeHealth()
+    onRetry()
+  }
+  useEffect(() => {
+    if (!retrying) return
+    const t = window.setTimeout(() => {
+      setRetrying(false)
+      setNoAnswer(true)
+    }, RETRY_WAIT_MS)
+    return () => window.clearTimeout(t)
+  }, [retrying])
+  useEffect(() => {
+    if (retrying && !checking) setRetrying(false)
+  }, [retrying, checking])
+  // kryo.to answers again: go on by itself, without being asked.
+  const stuck = checking && (!!page.error || slow)
+  useEffect(() => {
+    if (!stuck || !health.answering || page.loading) return
+    setNoAnswer(false)
+    retry.current()
+  }, [stuck, health.answering, page.loading])
+
   // Signing in on the page finishes the job: the account arriving is the cue.
   useEffect(() => {
     if (signingIn && account) onContinue()
@@ -140,14 +177,8 @@ export function Welcome({
 
   return (
     <Box className="bg-black">
-      <img
-        decoding="async"
-        src="/brand/og-backdrop.jpg"
-        alt=""
-        draggable={false}
-        className="pointer-events-none absolute inset-0 size-full scale-105 object-cover opacity-45"
-      />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(0,0,0,0.55)_70%)]" />
+      <CoverWall />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_60%_55%_at_center,rgba(0,0,0,0.85)_30%,rgba(0,0,0,0.55)_70%,rgba(0,0,0,0.2)_100%)]" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-background to-transparent" />
 
       <div
@@ -177,17 +208,38 @@ export function Welcome({
           <div className="no-drag kryo-in grid w-80 justify-items-center gap-3" style={{ animationDelay: '900ms' }}>
             {checking ? (
               <>
-                <AsciiBar fraction={null} cells={18} showPct={false} className="text-foreground/70" />
-                <p className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
-                  {page.error ? 'kryo.to is not answering' : slow ? 'kryo.to is slow to answer' : 'Checking your account'}
+                {retrying ? (
+                  <Matrix state="busy" className="size-5 text-foreground/70" />
+                ) : (
+                  <AsciiBar fraction={null} cells={18} showPct={false} className="text-foreground/70" />
+                )}
+                <p role="status" className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
+                  {retrying
+                    ? 'Trying again'
+                    : health.state === 'down'
+                      ? 'Kryoto is down right now'
+                      : noAnswer
+                        ? 'Still no answer from kryo.to'
+                        : page.error || outage
+                          ? 'kryo.to is not answering'
+                          : slow
+                            ? 'kryo.to is slow to answer'
+                            : 'Checking your account'}
                 </p>
-                {page.error || slow ? (
+                {page.error || slow || outage ? (
                   <>
-                    <Button size="sm" onClick={onRetry}>
+                    <Button size="sm" busy={retrying} busyLabel="Trying again" onClick={tryAgain}>
                       <RotateCw className="size-3" />
                       Try again
                     </Button>
                     <GuestButton onGuest={onGuest} />
+                    <button
+                      type="button"
+                      onClick={() => void openExternal(health.statusUrl)}
+                      className="kryo-pill px-2 text-[10px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                    >
+                      See what is happening on the status page
+                    </button>
                   </>
                 ) : null}
               </>

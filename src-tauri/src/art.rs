@@ -113,13 +113,15 @@ async fn current_steam_address(appid: &str, file: &str) -> Option<String> {
         "capsule_616x353.jpg" => "capsule_imagev5",
         _ => return None,
     };
+    // Steam's own store API, not kryo.to's proxy: the picture may be of a
+    // game kryo.to does not list, and its AppID stays between this PC and Steam.
     let res = client()
-        .get(format!("https://kryo.to/api/steam/art?appid={appid}"))
+        .get(format!("https://store.steampowered.com/api/appdetails?appids={appid}&filters=basic"))
         .send()
         .await
         .ok()?;
     let json: serde_json::Value = res.json().await.ok()?;
-    let url = json.get(field)?.as_str()?.to_string();
+    let url = json.get(appid)?.get("data")?.get(field)?.as_str()?.to_string();
     (url.starts_with("https://") && legacy_steam(&url).is_none()).then_some(url)
 }
 
@@ -150,6 +152,9 @@ pub async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> 
     if matches!(&fetched, Err(why) if why.contains("404")) {
         if let Some((appid, file)) = legacy_steam(url.as_str()) {
             if let Some(now) = current_steam_address(&appid, &file).await {
+                if is_direct(url.as_str()) {
+                    load_directly([now.clone()]);
+                }
                 // Kept under the OLD address's key, so the next ask is a disk hit.
                 fetched = fetch(&now).await;
             }
@@ -172,8 +177,65 @@ pub async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> 
     }
 }
 
+/// Pictures of games kryo.to does not list. They are asked of their own host
+/// and never of kryo.to's image proxy, whose address would name the game.
+/// Kept by address and, for Steam's, by AppID: the window works out more
+/// addresses from one it has (a bigger hero, the logo, the header).
+static DIRECT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// The AppID in a Steam picture's address (`.../apps/<appid>/...`).
+fn steam_app(url: &str) -> Option<&str> {
+    let (_, rest) = url.split_once("/apps/")?;
+    let id = rest.split('/').next()?;
+    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+}
+
+fn app_key(id: &str) -> String {
+    format!("app/{id}")
+}
+
+pub(crate) fn load_directly(urls: impl IntoIterator<Item = String>) {
+    let Ok(mut set) = DIRECT.lock() else { return };
+    let set = set.get_or_insert_with(HashSet::new);
+    for url in urls.into_iter().filter(|u| u.starts_with("http")) {
+        set.extend(steam_app(&url).map(app_key));
+        set.insert(url);
+    }
+}
+
+/// Every picture of this Steam app, whatever its address.
+pub(crate) fn load_app_directly(appid: &str) {
+    let Ok(mut set) = DIRECT.lock() else { return };
+    set.get_or_insert_with(HashSet::new).insert(app_key(appid));
+}
+
+fn is_direct(url: &str) -> bool {
+    let Ok(set) = DIRECT.lock() else { return false };
+    set.as_ref().is_some_and(|s| s.contains(url) || steam_app(url).is_some_and(|id| s.contains(&app_key(id))))
+}
+
+/// A game's picture as bytes, from wherever it is: picked by the player, in
+/// the cache, or on the network (and then kept).
+pub(crate) async fn bytes_of<R: Runtime>(app: &AppHandle<R>, url: &str) -> Option<Vec<u8>> {
+    if let Some(key) = managed_key(url) {
+        return crate::managed_art::read_image(&custom_dir(app).ok()?.join(key)).ok();
+    }
+    let absolute = if url.starts_with("//") { format!("https:{url}") } else if url.starts_with('/') { format!("https://kryo.to{url}") } else { url.to_string() };
+    if !absolute.starts_with("http") {
+        return None;
+    }
+    let file = dir(app)?.join(key(&absolute));
+    if let Some(bytes) = std::fs::read(&file).ok().filter(|b| !b.is_empty()) {
+        return Some(bytes);
+    }
+    let bytes = fetch(&absolute).await.ok()?;
+    let _ = std::fs::write(&file, &bytes);
+    Some(bytes)
+}
+
 async fn fetch(url: &str) -> Result<Vec<u8>, String> {
-    let res = client().get(network_image_url(url)).send().await.map_err(|e| {
+    let address = if is_direct(url) { url.to_string() } else { network_image_url(url) };
+    let res = client().get(address).send().await.map_err(|e| {
         if e.is_connect() || e.is_timeout() {
             "no connection".to_string()
         } else {
@@ -284,6 +346,23 @@ mod tests {
         assert_eq!(mime(&[0xFF, 0xD8, 0xFF]), "image/jpeg");
         assert_eq!(mime(b"\x89PNG\r\n"), "image/png");
         assert_eq!(mime(b"<html>"), "application/octet-stream");
+    }
+
+    #[test]
+    fn a_picture_of_an_unlisted_game_never_names_it_to_kryoto() {
+        let raw = "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/3999991/library_600x900.jpg";
+        assert!(!is_direct(raw));
+        load_directly([raw.to_string(), "kryoto-art://x".to_string()]);
+        assert!(is_direct(raw) && !is_direct("kryoto-art://x"));
+        // The addresses the window works out from it.
+        assert!(is_direct("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/3999991/library_hero_2x.jpg"));
+        assert!(is_direct("https://cdn.cloudflare.steamstatic.com/steam/apps/3999991/logo.png"));
+        // Known by AppID alone.
+        load_app_directly("3999992");
+        assert!(is_direct("https://cdn.cloudflare.steamstatic.com/steam/apps/3999992/header.jpg"));
+        // Every other address stays on the proxy.
+        assert!(!is_direct("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/library_600x900.jpg"));
+        assert!(!is_direct("https://cdn.example/apps/not-a-number/x.jpg"));
     }
 
     #[test]

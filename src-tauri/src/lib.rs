@@ -1,17 +1,32 @@
 mod achievements;
+mod adblock;
 mod achievements_cloud;
+mod appimage_tls;
 mod addons;
 mod art;
 mod managed_art;
 mod chat;
+mod collections;
+mod community_offer;
+mod community_update;
 mod compat;
+mod antivirus;
+mod defender;
+mod custom_sounds;
 mod display_env;
 mod game_logs;
+mod game_update;
 mod remote;
 mod pet;
 mod phone;
 mod downloads;
 mod handoff;
+mod health;
+mod hatchzip;
+mod bridge;
+mod channel;
+mod discord_rpc;
+mod steam_art;
 mod launch;
 mod proton_script;
 mod library;
@@ -28,15 +43,20 @@ mod menus;
 mod online;
 mod repair;
 mod pad;
+mod pad_games;
+mod patchbay;
 mod placement;
 mod player_name;
 mod presence;
+mod preview_report;
 mod resolvers;
 mod runtimes;
 mod saves;
 mod settings;
+mod shortcuts;
 mod storage;
 mod system;
+mod vr;
 
 use serde::{Deserialize, Serialize};
 use tauri::plugin::Builder as PluginBuilder;
@@ -47,7 +67,7 @@ use tauri::{Emitter, Manager, Runtime, WebviewUrl};
 
 /// The Store / Community / profile pages: one real web view, kryo.to in it.
 /// The label is what `capabilities/catalog.json` grants the reporting bridge to.
-const STORE: &str = "catalog";
+pub(crate) const STORE: &str = "catalog";
 const HOME: &str = "https://kryo.to";
 
 /// Navigation state for the web view, emitted to the shell.
@@ -67,6 +87,10 @@ struct BrowserState {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Account {
+    /// The account's number on kryo.to; chat goes by it. Empty from a page that
+    /// did not say.
+    #[serde(default)]
+    id: String,
     username: String,
     display_name: Option<String>,
     avatar_url: Option<String>,
@@ -77,6 +101,10 @@ struct Account {
     /// A supporter (or bought "no ads"): the client does not ask them to donate.
     #[serde(default)]
     supporter: bool,
+    /// Their current donation rank ('supporter', 'backer', 'patron', 'sponsor'):
+    /// which rank emoji and stickers the editor offers. Missing from an older kryo.to.
+    #[serde(default)]
+    rank: Option<String>,
     /// Chat is rolled out to this account (kryo.to feature flag `chat`).
     #[serde(default)]
     chat: bool,
@@ -98,9 +126,19 @@ struct Account {
     /// Cloud saves are rolled out to this account (flag `cloud_saves`).
     #[serde(default)]
     cloud_saves: bool,
+    /// Remote is on for this account (kryo.to lib/remote-consent.ts, remote.rs).
+    /// Missing (an older kryo.to) is off.
+    #[serde(default)]
+    remote: bool,
+    /// The account has answered whether Remote is on.
+    #[serde(default)]
+    remote_decided: bool,
     /// Their Kryos balance (kryo.to's coin for perks and badges).
     #[serde(default)]
     kryos: Option<i64>,
+    /// Anonymous mode: nothing Kryoto shows outside links to their profile.
+    #[serde(default)]
+    anonymous: bool,
 }
 
 /// State reported by the page-side script.
@@ -143,6 +181,9 @@ struct BrowserReport {
     /// account marked Playing, Plan to Play, Favorite and so on.
     #[serde(default)]
     saved: Option<serde_json::Value>,
+    /// `{ collections }` from kryo.to's `/api/account/collections/sync`.
+    #[serde(default)]
+    collections: Option<serde_json::Value>,
     /// `{ friends, incoming, outgoing }` from kryo.to's `/api/friends`, when
     /// the account has the friends feature.
     #[serde(default)]
@@ -485,9 +526,13 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   try { new MutationObserver(reportTitle).observe(document.querySelector('title') || document.head, { childList: true, subtree: true, characterData: true }); } catch (_) {}
 
   let me;
+  // Remote is on for the signed-in account (kryo.to lib/remote-consent.ts).
+  // Off until /api/auth/me says on; nothing below talks to Remote before.
+  let remoteOn = false;
   let kryos = null;
   let account = null;
   let savedAt = 0;
+  let listsAt = 0;
   // The wallet on kryo.to's perks page moves the balance after a claim, an
   // exchange or a purchase (it sends this event); pass it on so the coin
   // beside the account keeps up.
@@ -498,7 +543,12 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     account = Object.assign({}, account, { kryos: n });
     send({ account });
   });
-  const json = (path) => fetch(path, { credentials: 'include' }).then((r) => r.json());
+  // An error is no answer: a site having trouble must not read as "nobody is
+  // signed in" or "no friends". 401 is an answer: signed out.
+  const json = (path) => fetch(path, { credentials: 'include' }).then((r) => {
+    if (!r.ok && r.status !== 401) throw new Error(String(r.status));
+    return r.json();
+  });
   // A page shows the site's default palette for a moment before it applies
   // the reader's own. The shell would flash that default, so while the page is
   // young a palette that is not the signed-in reader's saved one is not passed on.
@@ -514,6 +564,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
       radius: root.dataset.radius || 'pill',
       font: root.dataset.font || 'teletext',
       motion: root.dataset.motion || 'full',
+      icons: root.dataset.icons === 'classic' ? 'classic' : 'pixel',
       season: root.dataset.season || null
     } });
   };
@@ -529,14 +580,18 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         const coins = u && u.kryos && typeof u.kryos.balance === 'number' ? u.kryos.balance : null;
         const changed = id !== me || coins !== kryos;
         me = id;
+        remoteOn = !!(u && u.remote && u.remote.enabled === true);
         kryos = coins;
         wantPalette = u && u.appearancePalette ? u.appearancePalette : null;
         reportAppearance();
         const nextAccount = u ? {
+          id: String(u.id || ''),
           username: u.username,
           displayName: u.displayName || null,
           avatarUrl: u.avatarUrl || null,
+          anonymous: !!u.isAnonymous,
           supporter: !!(u.isSupporter || (Array.isArray(u.perks) && u.perks.indexOf('ad_free') >= 0)),
+          rank: typeof u.donationTier === 'string' ? u.donationTier : null,
           chat: !!(u.features && u.features.chat),
           friends: !!(u.features && u.features.friends),
           groups: !!(u.features && u.features.chat_groups),
@@ -544,6 +599,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           voice: !!(u.features && u.features.voice),
           controller: !!(u.features && u.features.controller),
           cloudSaves: !!(u.features && u.features.cloud_saves),
+          remote: !!(u.remote && u.remote.enabled === true),
+          remoteDecided: !!(u.remote && u.remote.decided === true),
           kryos: coins,
           appearance: {
             theme: u.appearanceTheme || null,
@@ -561,7 +618,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         }
         if (!u) return;
         if (u.features && u.features.friends) {
-          const face = (p) => ({ id: p.id, username: p.username, displayName: p.displayName || null, avatarUrl: p.avatarUrl || null, supporter: !!p.supporter });
+          const face = (p) => ({ id: p.id, username: p.username, displayName: p.displayName || null, avatarUrl: p.avatarUrl || null, supporter: !!p.supporter, rank: typeof p.rank === 'string' ? p.rank : null });
           Promise.all([json('/api/friends'), json('/api/blocks/hidden').catch(() => ({ usernames: [] }))])
             .then(([f, h]) => send({ friends: {
               hidden: (h.usernames || []).slice(0, 5000).map(String),
@@ -583,7 +640,15 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         if (changed || full || Date.now() - savedAt > 600000) {
           savedAt = Date.now();
           json('/api/account/library')
-            .then((l) => send({ saved: { entries: (l.entries || []).slice(0, 2000) } }))
+            .then((l) => send({ saved: { entries: (l.entries || []).slice(0, 2000), hidden: l.hidden } }))
+            .catch(() => {});
+        }
+        // The account's collections, for the sidebar and what is watched
+        // (collections.rs): after a change, and every ten minutes.
+        if (changed || full || Date.now() - listsAt > 600000) {
+          listsAt = Date.now();
+          json('/api/account/collections/sync')
+            .then((l) => send({ collections: { collections: (l.collections || []).slice(0, 60) } }))
             .catch(() => {});
         }
       })
@@ -594,7 +659,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   const soon = () => { clearTimeout(whoTimer); whoTimer = setTimeout(() => who(false), 800); };
   window.__kryoDesktopRefresh = () => who(true);
   if (KRYO) new MutationObserver(reportAppearance).observe(document.documentElement, {
-    attributes: true, attributeFilter: ['class', 'data-palette', 'data-radius', 'data-font', 'data-motion', 'data-season']
+    attributes: true, attributeFilter: ['class', 'data-palette', 'data-radius', 'data-font', 'data-motion', 'data-season', 'data-icons']
   });
   // Kryoto Desktop from the website (kryo.to lib/desktop-remote.ts, remote.rs):
   // take what was queued there, hand it to the downloader, and report the
@@ -608,22 +673,36 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   // the site (kryoto-bugs KB-0002). An older kryo.to sends no `next`: every beat.
   let nextTakeAt = 0;
   let watched = true;
+  // A refusal because Remote is off comes back as { remote: false }; any other as null.
   const post = (path, body) => fetch(path, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-    .then((r) => (r.ok ? r.json() : null));
+    .then((r) => (r.ok ? r.json() : r.json().then((j) => (j && j.remote === false ? { remote: false } : null), () => null)));
+  // Turned off on another device: stop at once, natively too (remote.rs).
+  const remoteOff = () => {
+    remoteOn = false;
+    lastReport = '';
+    nextTakeAt = 0;
+    invoke('remote_consent_off').catch(() => {});
+    soon();
+  };
   const remote = async () => {
-    if (!KRYO || !me || remoteBusy || document.visibilityState === 'prerender') return;
+    if (!KRYO || !me || !remoteOn || remoteBusy || document.visibilityState === 'prerender') return;
     if (Date.now() < nextTakeAt) return;
     remoteBusy = true;
     try {
       const snap = await invoke('remote_snapshot');
       if (!snap || !snap.installId) return;
       // `mirrors`: a game only on mirrors may be sent too (remote.rs).
-      const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: snap.protocol, mirrors: true }).catch(() => null);
+      const taken = await post('/api/desktop/remote/take', { installId: snap.installId, protocol: snap.protocol, mirrors: true, collections: true }).catch(() => null);
+      if (taken && taken.remote === false) return remoteOff();
       const next = taken && typeof taken.next === 'number' && taken.next > 0 ? Math.min(taken.next, 60000) : 0;
       watched = !next || next <= 5000;
       nextTakeAt = next ? Date.now() + next - 500 : 0;
       let now = snap;
       if (taken && Array.isArray(taken.commands) && taken.commands.length) {
+        // Still on? Asked right before anything is carried out, so a command
+        // in flight when Remote was turned off is never run.
+        const still = await fetch('/api/account/remote', { credentials: 'include', cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+        if (!still || !still.remote || still.remote.enabled !== true || !remoteOn) return remoteOff();
         const results = await invoke('remote_apply', { commands: taken.commands });
         for (const result of results || []) {
           const command = taken.commands.find((c) => c.id === result.id);
@@ -639,6 +718,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         lastReport = body;
         lastReportAt = Date.now();
         const answer = await post('/api/desktop/remote/report', now).catch(() => null);
+        if (answer && answer.remote === false) return remoteOff();
         // A phone connected through kryo.to, for Settings > Phone (phone.rs).
         if (answer && 'phoneSeenAt' in answer) invoke('remote_phone_seen', { seenAt: answer.phoneSeenAt ? Date.parse(answer.phoneSeenAt) : null }).catch(() => {});
       }
@@ -702,7 +782,9 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           url: String(url || ''),
           slug: String(slug || ''),
           title: title ? String(title) : null
-        })
+        }),
+        // A collection's page: install what it holds here (collections.rs).
+        installCollection: (collection) => invoke('store_install_collection', { collection })
       })
     });
   } catch (_) {}
@@ -738,11 +820,11 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     const rules = [
       ['', 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647'],
       [' *:not(svg):not(svg *):not(style)', 'all:unset;box-sizing:border-box'],
-      [' .panel', `position:fixed;display:block;min-width:max(208px,${p.minWidth || 0}px);padding:4px 0;overflow:hidden;
+      [' .panel', `position:fixed;display:block;min-width:max(208px,${p.minWidth || 0}px);max-width:min(420px,calc(100vw - 12px));padding:4px 0;overflow:hidden;
         background:${c.popover};color:${c.foreground};border:1px solid ${c.border};border-radius:${r};
         box-shadow:0 25px 50px -12px rgba(0,0,0,.6);font:12px/16px ${c.font || 'system-ui,sans-serif'};
         animation:__kryo-pop .18s cubic-bezier(.2,.8,.2,1) both;user-select:none`],
-      [' .item', `display:flex;align-items:center;gap:10px;width:100%;padding:8px 12px;cursor:pointer;
+      [' .item', `display:flex;align-items:center;gap:8px;width:100%;padding:6px 12px;cursor:pointer;
         border-radius:${r};transition:color .12s,background-color .12s`],
       [' .item:hover, #__kryo-menu .item:focus', `background:${c.primary};color:${c.primaryForeground}`],
       [' .item.danger', `color:${c.destructive}`],
@@ -835,18 +917,23 @@ fn open_external_url(url: &str) -> Result<(), String> {
     if !allowed_browser_url(&parsed) {
         return Err(block_reason(&parsed));
     }
+    open_with_system(parsed.as_str())
+}
+
+/// Hand an address to whatever this system opens it with.
+pub(crate) fn open_with_system(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     let result = {
         use std::os::windows::process::CommandExt;
         std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", parsed.as_str()])
+            .args(["url.dll,FileProtocolHandler", url])
             .creation_flags(0x0800_0000)
             .spawn()
     };
     #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open").arg(parsed.as_str()).spawn();
+    let result = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    return linux_open::open(parsed.as_str());
+    return linux_open::open(url);
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     result.map(|_| ()).map_err(|e| e.to_string())
 }
@@ -998,6 +1085,7 @@ async fn store_mount(
     let (position, size) = placement::rect(x, y, width, height, scale);
     let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;
     display_env::watch_crashes(&view);
+    adblock::install(&view, &settings::load(&app));
     #[cfg(target_os = "linux")]
     linux_store_downloads::install(&view)?;
     if visible == Some(false) {
@@ -1045,6 +1133,7 @@ fn allow_repeat_downloads(view: &tauri::Webview, settings: settings::Settings) {
 
 #[tauri::command]
 fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    menus::set_store_shown(visible);
     let Some(view) = app.get_webview(STORE) else { return Ok(()) };
     if visible { view.show() } else { view.hide() }.map_err(|e| e.to_string())?;
     if visible {
@@ -1092,7 +1181,7 @@ fn store_expect_download(
 
 /// The call came from kryo.to, showing in the Store: the only page that may
 /// use the Store's own commands.
-fn from_kryoto_store(app: &tauri::AppHandle, webview: &tauri::Webview) -> Result<(), String> {
+pub(crate) fn from_kryoto_store(app: &tauri::AppHandle, webview: &tauri::Webview) -> Result<(), String> {
     if webview.label() != STORE || !webview.url().map(|u| is_kryoto(&u, app)).unwrap_or(false) {
         return Err("Only kryo.to in the Store may ask.".into());
     }
@@ -1172,8 +1261,9 @@ fn store_download_link(
     let title = title
         .map(|t| t.trim().chars().filter(|c| !c.is_control()).take(300).collect::<String>())
         .filter(|t| !t.is_empty());
-    // MEGA and filez.stream only give their files to their own page: those
-    // open in the browser, as the link would anywhere else.
+    // MEGA (and a filez.stream address without its key) only give their files
+    // to their own page: those open in the browser, as the link would
+    // anywhere else. A filez.stream file link is downloaded here (filez.rs).
     if resolvers::classify_any(&url).is_none() {
         let parsed: url::Url = url.parse().map_err(|_| "Not a valid link.".to_string())?;
         if !allowed_browser_url(&parsed) {
@@ -1231,6 +1321,7 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
         }
         if let Some(account) = state.account {
             logging::set_account(account.as_ref().map(|a| a.username.clone()));
+            discord_rpc::set_account(&app, account.as_ref().map(|a| a.username.as_str()), account.as_ref().is_some_and(|a| a.anonymous));
             phone::set_account(account.as_ref().map(|a| phone::PhoneProfile {
                 username: a.username.clone(),
                 display_name: a.display_name.clone(),
@@ -1241,6 +1332,12 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
             }));
             player_name::remember_account(&app, account.as_ref().map(|a| a.username.as_str()));
             saves::set_account(&app, account.as_ref().map(|a| a.username.as_str()), account.as_ref().is_some_and(|a| a.cloud_saves));
+            // Remote follows the signed-in account's own answer; signed out is off.
+            remote::set_consent(&app, account.as_ref().map(|a| (a.remote, a.remote_decided)));
+            chat::follow_account(&app, account.as_ref().map(|a| a.id.as_str()));
+            if account.is_none() {
+                collections::signed_out(&app);
+            }
             let _ = app.emit_to("main", "account-state", account);
         }
         if let Some(friends) = state.friends {
@@ -1254,7 +1351,17 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
         }
         if let Some(saved) = state.saved {
             phone::set_saved(&saved);
+            // A kryo.to from before hidden games sends no list: nothing to follow.
+            if let Some(list) = saved["hidden"].as_array() {
+                let slugs: Vec<String> = list.iter().filter_map(|s| s.as_str().map(String::from)).collect();
+                if let Err(e) = library::account_hidden(&app, &slugs) {
+                    logging::error("library", &format!("hidden games: {e}"));
+                }
+            }
             let _ = app.emit_to("main", "saved-state", saved);
+        }
+        if let Some(lists) = state.collections {
+            collections::report(&app, lists);
         }
     }
     let same_origin = |u: &str| u.parse::<url::Url>().ok().filter(|u| u.origin() == actual.origin());
@@ -1280,13 +1387,25 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
 fn store_sign_out(app: tauri::AppHandle) -> Result<(), String> {
     let view = store(&app)?;
     if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        // The Store is on another site: kryo.to first, and the sign-out when it
+        // has loaded, so the one press does it.
         let endpoint = settings::catalog_endpoint(&settings::load(&app));
-        view.navigate(format!("{endpoint}/").parse().map_err(|e: url::ParseError| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        return Err("Open kryo.to first, then sign out.".into());
+        *SIGN_OUT_NEXT.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        return view
+            .navigate(format!("{endpoint}/").parse().map_err(|e: url::ParseError| e.to_string())?)
+            .map_err(|e| e.to_string());
     }
-    view.eval("fetch('/api/auth/logout',{method:'POST',credentials:'include'}).finally(()=>{location.href='/'})")
-        .map_err(|e| e.to_string())
+    view.eval(SIGN_OUT).map_err(|e| e.to_string())
+}
+
+const SIGN_OUT: &str = "fetch('/api/auth/logout',{method:'POST',credentials:'include'}).finally(()=>{location.href='/'})";
+
+/// Sign out as soon as kryo.to has loaded in the Store, unless that takes so
+/// long (no connection) that it would come as a surprise.
+static SIGN_OUT_NEXT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn sign_out_is_due() -> bool {
+    SIGN_OUT_NEXT.lock().unwrap_or_else(|e| e.into_inner()).take().is_some_and(|asked| asked.elapsed().as_secs() < 30)
 }
 
 /// Mark every kryo.to notification read, then have the page report again.
@@ -1324,7 +1443,7 @@ fn store_notifications_shown(app: tauri::AppHandle, ids: Vec<String>) -> Result<
 }
 
 /// Set a game's status in the account's kryo.to library (`playing`, `plan`,
-/// `completed`, `onhold`, `dropped`, `favorite`), or take it out with `None`.
+/// `completed`, `onhold`, `dropped`, `favorite`, `notinterested`), or take it out with `None`.
 /// Runs in the Store's page, with the session the player signed in with.
 #[tauri::command]
 fn store_set_status(
@@ -1334,7 +1453,7 @@ fn store_set_status(
     title: Option<String>,
     cover: Option<String>,
 ) -> Result<(), String> {
-    const STATUSES: [&str; 6] = ["playing", "plan", "completed", "onhold", "dropped", "favorite"];
+    const STATUSES: [&str; 7] = ["playing", "plan", "completed", "onhold", "dropped", "favorite", "notinterested"];
     if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err("Not a kryo.to game.".into());
     }
@@ -1365,6 +1484,22 @@ fn store_set_status(
         .map_err(|e| e.to_string())
 }
 
+/// Hide games on the account, or show them again, through the Store's page.
+/// `refresh` reads the account back at once; never from an answer to reading it.
+pub(crate) fn store_send_hidden<R: Runtime>(app: &tauri::AppHandle<R>, slugs: &[String], hidden: bool, adult: bool, refresh: bool) -> Result<(), String> {
+    let view = store(app)?;
+    if !view.url().map(|u| is_kryoto(&u, app)).unwrap_or(false) {
+        return Err("Open kryo.to first.".into());
+    }
+    let body = serde_json::json!({ "slugs": slugs, "hidden": hidden, "adult": adult }).to_string();
+    let body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let then = if refresh { ".finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())" } else { ".catch(()=>{})" };
+    view.eval(format!(
+        "fetch('/api/account/hidden-games',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:{body}}}){then}"
+    ))
+    .map_err(|e| e.to_string())
+}
+
 /// A game closed: add the session to the account's play time on kryo.to
 /// (community statistics, the play-time board). Sent from the Store's page
 /// with the player's own session. `key` makes a retried report count once.
@@ -1387,6 +1522,9 @@ fn store_report_playing(app: tauri::AppHandle, slug: String, playing: bool) -> R
     .map_err(|e| e.to_string())
 }
 
+/// One play session on its way. It is only done with once kryo.to has answered
+/// (`store_play_done`): a site that is down takes the request and says nothing,
+/// and the session stays with the shell for the next try.
 #[tauri::command]
 fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, seconds: u64, key: String) -> Result<(), String> {
     if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -1400,9 +1538,53 @@ fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, secon
         return Err("Open kryo.to first.".into());
     }
     view.eval(format!(
-        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',startedAt:{started_at},seconds:{seconds},sessionKey:'{key}'}})}}).catch(()=>{{}})"
+        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',startedAt:{started_at},seconds:{seconds},sessionKey:'{key}'}})}}).then(r=>{{if(r.ok||(r.status>=400&&r.status<500&&r.status!==429))window.__TAURI_INTERNALS__.invoke('store_play_done',{{key:'{key}'}})}}).catch(()=>{{}})"
     ))
     .map_err(|e| e.to_string())
+}
+
+/// kryo.to's answer to `store_report_play`: taken, or refused for good. A guest
+/// has no account to count it on (401); too many (429) or a server error is tried again.
+#[tauri::command]
+fn store_play_done(app: tauri::AppHandle, webview: tauri::Webview, key: String) -> Result<(), String> {
+    from_kryoto_store(&app, &webview)?;
+    app.emit_to("main", "play-reported", key).map_err(|e| e.to_string())
+}
+
+/// A game just linked to its kryo.to page: the play time it had before
+/// (Hydra's hours, sessions while it was the player's own), once, under `key`
+/// so a repeated send counts once (library.rs `carry_sends`). It stays queued
+/// until kryo.to answers (`store_carry_done`): a signed-out page or a busy
+/// server leaves it for the next try instead of losing it.
+#[tauri::command]
+fn store_report_carry(app: tauri::AppHandle, id: String, slug: String, seconds: u64, key: String) -> Result<(), String> {
+    let safe = |s: &str| !s.is_empty() && s.len() <= 120 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !safe(&slug) || !safe(&id) {
+        return Err("Not a kryo.to game.".into());
+    }
+    if !key.starts_with("carry-") || key.len() > 80 || !safe(&key) || seconds == 0 {
+        return Err("Not a play time.".into());
+    }
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to first.".into());
+    }
+    // Stored, or refused for good (not a kryo.to game, not valid): done.
+    // Signed out (401), too many (429) or a server error: tried again later.
+    view.eval(format!(
+        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',seconds:{seconds},sessionKey:'{key}',carried:true}})}}).then(r=>{{if(r.ok||(r.status>=400&&r.status<500&&r.status!==401&&r.status!==429))window.__TAURI_INTERNALS__.invoke('store_carry_done',{{id:'{id}',key:'{key}'}})}}).catch(()=>{{}})"
+    ))
+    .map_err(|e| e.to_string())
+}
+
+/// kryo.to's answer to `store_report_carry`: those hours are not sent again.
+#[tauri::command]
+fn store_carry_done(app: tauri::AppHandle, webview: tauri::Webview, id: String, key: String) -> Result<(), String> {
+    from_kryoto_store(&app, &webview)?;
+    if !key.starts_with("carry-") || key.len() > 80 {
+        return Err("Not a play time.".into());
+    }
+    library::carry_sent(&app, &id, &key)
 }
 
 /// Whether the friends list may send this request: only the routes behind its
@@ -1415,8 +1597,36 @@ fn friend_route_allowed(method: &str, path: &str) -> bool {
         ("POST", ["", "api", "friends", "requests", n]) => id(n),
         ("DELETE" | "PATCH", ["", "api", "friends", n]) => id(n),
         ("POST" | "DELETE", ["", "api", "blocks", n]) | ("POST" | "DELETE", ["", "api", "mutes", n]) => id(n),
+        // The emoji you pick most, so the picker's "Frequently used" row follows the account.
+        ("GET" | "PUT", ["", "api", "account", "emoji-usage"]) => true,
+        // Reacting to a game's write-ups from its Library page (library/Writeups.tsx): only comments.
+        ("POST", ["", "api", "reactions"]) => true,
+        ("GET", ["", "api", rest]) if rest.starts_with("reactions?t=") => reaction_targets_allowed(&rest["reactions?t=".len()..]),
+        ("GET", ["", "api", "account", rest]) => playtime_query_allowed(rest),
+        // Whether the account wrote a game up yet, for the "write one?" card.
+        ("GET", ["", "api", "games", slug, "writeups?mine=1"]) => {
+            !slug.is_empty() && slug.len() <= 120 && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        }
         _ => false,
     }
+}
+
+/// `comment:1,comment:2`: a few comments' reactions, nothing else.
+fn reaction_targets_allowed(list: &str) -> bool {
+    let ids: Vec<&str> = list.split(',').collect();
+    !ids.is_empty()
+        && ids.len() <= 10
+        && ids.iter().all(|t| {
+            t.strip_prefix("comment:")
+                .is_some_and(|n| !n.is_empty() && n.len() <= 20 && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
+/// The one read the shell makes through the same door: the account's play
+/// time for a few games (`playtime?slugs=a,b`), for "restore your playtime?".
+fn playtime_query_allowed(rest: &str) -> bool {
+    let Some(slugs) = rest.strip_prefix("playtime?slugs=") else { return false };
+    !slugs.is_empty() && slugs.len() <= 2000 && slugs.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b',')
 }
 
 /// A friends-list action (add, answer, remove, block, pin, mute, invite link),
@@ -1514,6 +1724,7 @@ pub fn run() {
     // that process exits without drawing, falsely triggering CPU fallback
     // the next time the real app starts.
     display_env::apply();
+    appimage_tls::apply();
     let to_tray = std::env::args().any(|a| a == "--tray");
     // Started by a `kryoto://` link: the shell takes it once it is ready.
     if let Some(link) = links::from_args() {
@@ -1558,12 +1769,20 @@ pub fn run() {
             if let Some(how) = display_env::describe() {
                 logging::info("display", &how);
             }
+            if let Some(how) = appimage_tls::describe() {
+                logging::info("display", &how);
+            }
             logging::start_reporter(app.handle().clone());
             presence::start(app.handle().clone());
+            discord_rpc::start(app.handle().clone());
             remote::start(app.handle().clone());
+            health::start(app.handle().clone());
+            patchbay::achievements::start(app.handle().clone());
             // Off the main thread: registry and xdg-mime are not worth a frame.
             std::thread::spawn(links::register);
             downloads::init(app.handle());
+            game_update::recover_on_start(app.handle());
+            library::recover_sessions(app.handle());
             library::fill_branches(app.handle());
             art::prune(app.handle(), 512 * 1024 * 1024);
             if let Some(l) = listener.take() {
@@ -1582,6 +1801,11 @@ pub fn run() {
                     display_env::watch_crashes(&view);
                 }
                 system::round_corners(&main, false);
+                // The window's name is in tauri.conf.json per platform; the preview
+                // app says it is the preview in the taskbar too (src/channel.rs).
+                if channel::PREVIEW {
+                    let _ = main.set_title(channel::APP_NAME);
+                }
                 if !to_tray {
                     let _ = main.show();
                 }
@@ -1717,11 +1941,23 @@ pub fn run() {
                 let _ = webview.eval(BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" }));
                 if kryo {
                     presence::beat(webview.app_handle());
+                    if sign_out_is_due() {
+                        let _ = webview.eval(SIGN_OUT);
+                    }
                 }
             }
         })
         .manage(repair::Sessions::default())
         .invoke_handler(tauri::generate_handler![
+            community_offer::community_offer_state,
+            preview_report::preview_report_screenshot,
+            preview_report::preview_report_send,
+            preview_report::preview_reports_mine,
+            community_offer::community_offer_add_shot,
+            community_offer::community_offer_send,
+            community_offer::community_offer_cancel,
+            community_update::community_update_check,
+            community_update::community_update_try,
             repair::repair_sources,
             repair::repair_state,
             repair::repair_apply,
@@ -1734,6 +1970,10 @@ pub fn run() {
             remote::remote_snapshot,
             remote::remote_phone_seen,
             remote::remote_apply,
+            remote::remote_status,
+            remote::remote_set_consent,
+            remote::remote_consent_off,
+            remote::remote_consent_done,
             phone::phone_status,
             phone::phone_set_lan,
             phone::phone_new_code,
@@ -1742,6 +1982,9 @@ pub fn run() {
             achievements_cloud::cloud_achievements_pending,
             achievements_cloud::cloud_achievements_report,
             achievements_cloud::cloud_achievements_status,
+            patchbay::patchbay_status,
+            patchbay::patchbay_set_token,
+            patchbay::patchbay_test,
             saves::cloud_saves_status,
             saves::cloud_saves_refresh,
             saves::cloud_saves_game,
@@ -1763,6 +2006,11 @@ pub fn run() {
             game_logs::game_log_read,
             game_logs::game_logs_folder,
             library::library_prefix_folder,
+            library::library_relocate,
+            library::library_plain_folder,
+            library::folder_exists,
+            library::storage_leftover_prefixes,
+            library::storage_delete_prefix,
             pad::pad_start,
             shell_theme,
             system_dark,
@@ -1776,6 +2024,11 @@ pub fn run() {
             pad::pad_forward,
             pad::pad_mapping_set,
             pad::pad_virtual_driver,
+            pad_games::pad_game_get,
+            pad_games::pad_game_set,
+            pad_games::pad_game_default_set,
+            pad_games::pad_game_seen,
+            pad_games::pad_game_configured,
             display_env::display_state,
             display_env::display_set_mode,
             chat::chat_status,
@@ -1791,7 +2044,6 @@ pub fn run() {
             chat::chat_react,
             chat::chat_typing,
             chat::chat_mark_read,
-            chat::chat_search,
             chat::chat_settings_get,
             chat::chat_settings_set,
             chat::chat_gif_search,
@@ -1805,6 +2057,8 @@ pub fn run() {
             chat::chat_backup_delete,
             chat::chat_devices,
             chat::chat_device_revoke,
+            chat::chat_account_devices,
+            chat::chat_account_device_remove,
             chat::chat_restore,
             chat::chat_reset_identity,
             chat::chat_unlock,
@@ -1823,6 +2077,9 @@ pub fn run() {
             chat::chat_file_preview,
             chat::chat_groups,
             chat::chat_people,
+            chat::chat_mention_search,
+            chat::chat_mention_lookup,
+            chat::chat_mention_notify,
             chat::chat_group_create,
             chat::chat_group_rename,
             chat::chat_group_add,
@@ -1835,10 +2092,14 @@ pub fn run() {
             store_mark_read,
             store_notifications_shown,
             store_refresh_account,
+            store_play_done,
+            health::health_get,
+            health::health_poke,
             store_friend_fetch,
             store_friend_done,
             store_set_status,
             store_report_play,
+            store_report_carry,
             store_report_playing,
             navigate_catalog,
             browser_navigate,
@@ -1852,16 +2113,48 @@ pub fn run() {
             settings::settings_recover,
             settings::settings_save,
             art::art_import,
+            custom_sounds::sound_custom_list,
+            custom_sounds::sound_custom_set,
+            custom_sounds::sound_custom_clear,
+            custom_sounds::sound_custom_read,
+            custom_sounds::sound_custom_folder,
             library::library_list,
+            library::library_find_kryoto_games,
+            library::library_restore_found,
             library::library_add,
             library::library_artwork,
             library::library_save,
+            library::library_set_hidden,
             library::library_remove,
             library::game_launch,
             achievements::game_achievements,
             library::game_launch_preview,
             library::game_running,
             library::game_stop,
+            library::playtime_offer,
+            library::playtime_answer,
+            store_carry_done,
+            discord_rpc::discord_presence_status,
+            discord_rpc::discord_games_status,
+            discord_rpc::discord_game_set,
+            bridge::bridge_launchers,
+            bridge::bridge_detect,
+            bridge::bridge_scan,
+            bridge::bridge_import,
+            bridge::bridge_export_list,
+            bridge::bridge_export,
+            bridge::bridge_export_undo,
+            bridge::library_merge_offers,
+            bridge::library_merge_answer,
+            steam_art::steam_art_search,
+            steam_art::steam_art,
+            library::game_launch_vr,
+            vr::vr_status,
+            defender::defender_status,
+            antivirus::game_antivirus,
+            antivirus::game_restore_files,
+            defender::defender_script,
+            defender::defender_exclude,
             library::game_disk_size,
             library::open_folder,
             downloads::downloads_list,
@@ -1870,7 +2163,12 @@ pub fn run() {
             downloads::download_install_anyway,
             downloads::download_move,
             player_name::player_account_name,
+            player_name::game_languages,
+            shortcuts::game_shortcut,
             downloads::download_cancel,
+            downloads::download_pick_folder,
+            game_update::game_update_backup,
+            game_update::game_update_undo,
             downloads::download_remove,
             download_mirror,
             mirror_hosts,
@@ -1886,6 +2184,7 @@ pub fn run() {
             storage::storage_add_folder,
             storage::storage_remove_folder,
             storage::storage_set_default,
+            storage::storage_folders,
             storage::storage_move,
             logging::log_write,
             logging::logs_tail,
@@ -1898,9 +2197,10 @@ pub fn run() {
             system::window_corners,
             system::window_state_get,
             pet::pet_menu,
-            pet::pet_open_app,
+            pet::pet_drag,
             pet::pet_mascot,
             menus::menu_open,
+            menus::menu_warm,
             menus::menu_payload,
             menus::menu_ready,
             menus::menu_pick,
@@ -1910,6 +2210,11 @@ pub fn run() {
             store_installed,
             store_play,
             store_download_link,
+            collections::store_install_collection,
+            collections::collections_state,
+            collections::collection_install,
+            collections::collection_later,
+            collections::collection_forget,
             store_library_changed,
             menus::menu_hover
         ])
@@ -1969,9 +2274,32 @@ mod tests {
             ("POST", "/api/blocks/42/x"),
             ("POST", "https://evil.example/api/friends/requests"),
             ("POST", "/api/friends/requests?next=1"),
+            // Only the play-time read, only by GET, only plain slugs.
+            ("POST", "/api/account/playtime?slugs=celeste"),
+            ("GET", "/api/account/library"),
+            ("GET", "/api/account/playtime"),
+            ("GET", "/api/account/playtime?slugs=celeste&x=1"),
+            ("GET", "/api/account/playtime?slugs=../auth"),
+            // Only "did I write this up", only by GET, only a plain slug.
+            ("POST", "/api/games/hades/writeups?mine=1"),
+            ("GET", "/api/games/hades/writeups"),
+            ("GET", "/api/games/Hades/writeups?mine=1"),
+            ("GET", "/api/games/../writeups?mine=1"),
+            ("GET", "/api/games/hades/writeups?mine=1&x=1"),
         ] {
             assert!(!friend_route_allowed(m, p), "{m} {p}");
         }
+        assert!(friend_route_allowed("GET", "/api/account/playtime?slugs=celeste,hades-ii"));
+        assert!(friend_route_allowed("GET", "/api/games/hades-ii/writeups?mine=1"));
+        assert!(friend_route_allowed("GET", "/api/account/emoji-usage"));
+        assert!(friend_route_allowed("PUT", "/api/account/emoji-usage"));
+        assert!(!friend_route_allowed("DELETE", "/api/account/emoji-usage"));
+        assert!(!friend_route_allowed("PUT", "/api/account/profile"));
+        assert!(friend_route_allowed("POST", "/api/reactions"));
+        assert!(friend_route_allowed("GET", "/api/reactions?t=comment:12,comment:7"));
+        assert!(!friend_route_allowed("GET", "/api/reactions?t=profile:mira"));
+        assert!(!friend_route_allowed("GET", "/api/reactions?t=comment:1&x=2"));
+        assert!(!friend_route_allowed("DELETE", "/api/reactions"));
     }
 
     /// Chat acts on the account's encrypted messages and keys: only the
@@ -1994,6 +2322,19 @@ mod tests {
         assert_eq!(cap["webviews"], serde_json::json!(["main"]));
         assert_eq!(cap["windows"], serde_json::json!(["main"]));
         assert!(cap.get("remote").is_none(), "chat must never be granted to remote URLs");
+    }
+
+    /// Remote is opt-in (remote.rs): a Store page can only say it was turned
+    /// off, never turn it on, and its script does nothing for Remote until the
+    /// signed-in account's answer says on.
+    #[test]
+    fn a_store_page_cannot_turn_remote_on() {
+        let catalog_perms = include_str!("../permissions/catalog.toml");
+        assert!(!catalog_perms.contains("\"remote_set_consent\""));
+        assert!(!catalog_perms.contains("\"remote_status\""));
+        assert!(BROWSER_STATE_SCRIPT.contains("let remoteOn = false;"));
+        assert!(BROWSER_STATE_SCRIPT.contains("if (!KRYO || !me || !remoteOn ||"));
+        assert!(BROWSER_STATE_SCRIPT.contains("u.remote.enabled === true"));
     }
 
     /// A plugin's page script runs in every frame of every web view, the Store's

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { pickPath } from '@/lib/pick'
-import { ArrowLeft, Bookmark, Download, FolderOpen, Search } from 'lucide-react'
+import { ArrowLeft, Bookmark, Download, FolderOpen, Search } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Modal, Section, inputCls } from '@/ui'
 import { errorText, isTauri } from '@/lib/bridge'
 import { fetchCatalogGame, library, slugFrom, type CatalogGame, type LibraryGame } from '@/lib/library'
@@ -30,6 +30,7 @@ export function AddGameDialog({
   onAdded,
   onDownload,
   onSave,
+  onImport,
   onClose,
 }: {
   initialSlug: string | null
@@ -37,6 +38,8 @@ export function AddGameDialog({
   onDownload: (slug: string) => void
   /** Keep it in the library without downloading; null for a guest (it needs an account). */
   onSave: ((game: CatalogGame) => void) | null
+  /** Bring a whole library in from another launcher instead (Bridge.tsx). */
+  onImport?: () => void
   onClose: () => void
 }) {
   const showAdult = useShowAdult()
@@ -103,10 +106,15 @@ export function AddGameDialog({
     setError(null)
     let picked: string | null
     if (isTauri()) {
-      picked = await pickPath({
-        title: found?.executable ? `Find ${found.executable}` : "Choose the game's .exe",
-        extensions: ['exe', 'bat'],
-      })
+      try {
+        picked = await pickPath({
+          title: found?.executable ? `Find ${found.executable}` : "Choose the game's .exe",
+          extensions: ['exe', 'bat'],
+        })
+      } catch (e) {
+        setError(`The file picker did not open: ${errorText(e)}`)
+        return
+      }
     } else {
       picked = `C:\\Games\\${title || found?.title || 'Game'}\\${found?.executable || 'Game.exe'}`
     }
@@ -191,7 +199,7 @@ export function AddGameDialog({
           <p className="text-xs text-muted-foreground">Steam artwork is matched automatically when you add the game. You can also pick it now.</p>
           <ArtworkEditor title={title} value={artwork} onChange={(art) => setArtwork((current) => ({ ...current, ...art }))} onBusy={setArtBusy} />
           <div className="flex gap-2">
-            <Button variant="primary" disabled={busy || artBusy} onClick={() => void chooseExe()}>
+            <Button variant="primary" disabled={busy || artBusy} onClick={() => chooseExe()}>
               <FolderOpen className="size-3.5" />
               {busy ? 'Adding' : 'Find the .exe'}
             </Button>
@@ -237,7 +245,7 @@ export function AddGameDialog({
                         style={{ borderRadius: 'min(var(--kryo-radius), 4px)' }}
                       />
                     ) : (
-                      <span className="h-12 w-8 shrink-0 bg-secondary" />
+                      <span className="h-12 w-8 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 4px)' }} />
                     )}
                     <span className="grid min-w-0">
                       <span className="truncate text-sm text-foreground">{h.title}</span>
@@ -260,6 +268,15 @@ export function AddGameDialog({
           >
             Not on kryo.to? Add any .exe
           </button>
+          {onImport ? (
+            <button
+              type="button"
+              onClick={onImport}
+              className="kryo-square w-fit text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+            >
+              Games in Steam or Hydra? Bring them all in
+            </button>
+          ) : null}
         </>
       )}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}

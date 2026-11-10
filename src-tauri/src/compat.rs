@@ -118,6 +118,55 @@ fn proton_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Steam's own Windows client files, which Proton puts in a prefix so a game
+/// can reach the real Steam (`legacycompat/` in the Steam folder).
+const STEAM_CLIENT_FILES: [&str; 6] =
+    ["steamclient.dll", "steamclient64.dll", "GameOverlayRenderer.dll", "GameOverlayRenderer64.dll", "SteamService.exe", "Steam.dll"];
+
+/// The Steam folder that has the client files Proton copies, if Steam is installed.
+pub fn steam_client_root(home: &Path) -> Option<PathBuf> {
+    steam_roots(home).into_iter().find(|r| r.join("legacycompat").join("steamclient64.dll").is_file())
+}
+
+/// Linux: a game whose online layer talks to the real Steam (Online-Fix,
+/// Kryoto Online) under Proton. Proton sets the prefix up with Steam's client
+/// files from `STEAM_COMPAT_CLIENT_INSTALL_PATH`, which Steam sets for its own
+/// games and a start from Kryoto did not; umu even sets it empty. Without
+/// them Online-Fix stops with its error 998 and Kryoto Online cannot reach
+/// Steam. This says where Steam is, for a Proton started directly, and puts
+/// the files in the prefix where Proton would, for one through umu. A
+/// launch options line that sets the variable wins. Returns what it did, for
+/// the game's log; None when there is nothing to do or no Steam.
+pub fn steam_client_for(env: &mut Vec<(String, String)>, home: &Path) -> Option<String> {
+    let overrides = env.iter().find(|(k, _)| k == "WINEDLLOVERRIDES").map(|(_, v)| v.to_ascii_lowercase()).unwrap_or_default();
+    if !(overrides.contains("onlinefix64") || overrides.contains("kryotoo")) {
+        return None;
+    }
+    let Some(steam) = steam_client_root(home) else {
+        return Some("Steam is not installed, so Proton has no Steam client to set up for this game's online layer.".into());
+    };
+    if !env.iter().any(|(k, _)| k == "STEAM_COMPAT_CLIENT_INSTALL_PATH") {
+        env.push(("STEAM_COMPAT_CLIENT_INSTALL_PATH".into(), steam.to_string_lossy().into_owned()));
+    }
+    let prefix = env.iter().find(|(k, _)| k == "WINEPREFIX").map(|(_, v)| PathBuf::from(v));
+    let mut copied = 0;
+    for drive in prefix.iter().flat_map(|p| [p.join("drive_c"), p.join("pfx").join("drive_c")]).filter(|d| d.is_dir()) {
+        let dst = drive.join("Program Files (x86)").join("Steam");
+        if std::fs::create_dir_all(&dst).is_err() {
+            continue;
+        }
+        for f in STEAM_CLIENT_FILES {
+            let from = steam.join("legacycompat").join(f);
+            let to = dst.join(f);
+            let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
+            if from.is_file() && len(&from) != len(&to) && std::fs::copy(&from, &to).is_ok() {
+                copied += 1;
+            }
+        }
+    }
+    Some(format!("Steam's client files for Proton come from {}{}.", steam.display(), if copied > 0 { format!(" ({copied} copied into the prefix)") } else { String::new() }))
+}
+
 pub fn steam_roots(home: &Path) -> Vec<PathBuf> {
     vec![
         home.join(".steam/steam"),
@@ -125,6 +174,7 @@ pub fn steam_roots(home: &Path) -> Vec<PathBuf> {
         home.join(".local/share/Steam"),
         home.join(".var/app/com.valvesoftware.Steam/data/Steam"),
         home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+        home.join("snap/steam/common/.local/share/Steam"),
     ]
 }
 
@@ -550,5 +600,37 @@ mod tests {
         assert_eq!(kind_of(Path::new("/opt/GE-Proton10-3/proton")), "proton");
         assert_eq!(kind_of(Path::new("/usr/bin/umu-run")), "umu");
         assert_eq!(kind_of(Path::new("/usr/bin/wine")), "wine");
+    }
+
+    #[test]
+    fn online_layers_get_steams_client_files_under_proton() {
+        let home = std::env::temp_dir().join(format!("kryo-steamclient-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let prefix = home.join("prefix");
+        std::fs::create_dir_all(prefix.join("pfx/drive_c")).unwrap();
+        let env = |overrides: &str| vec![("WINEDLLOVERRIDES".to_string(), overrides.to_string()), ("WINEPREFIX".to_string(), prefix.to_string_lossy().into_owned())];
+        // A plain game is left alone.
+        let mut plain = env("steam_api64=n,b");
+        assert!(steam_client_for(&mut plain, &home).is_none());
+        assert_eq!(plain.len(), 2);
+        // No Steam: said, nothing set.
+        let mut of = env("OnlineFix64=n;SteamOverlay64=n;winmm=n,b;dnet=n;steam_api64=n");
+        assert!(steam_client_for(&mut of, &home).unwrap().contains("not installed"));
+        assert!(!of.iter().any(|(k, _)| k == "STEAM_COMPAT_CLIENT_INSTALL_PATH"));
+        // Steam installed: where it is, and its files in the prefix.
+        let steam = home.join(".local/share/Steam");
+        std::fs::create_dir_all(steam.join("legacycompat")).unwrap();
+        std::fs::write(steam.join("legacycompat/steamclient64.dll"), b"64").unwrap();
+        std::fs::write(steam.join("legacycompat/steamclient.dll"), b"32").unwrap();
+        let note = steam_client_for(&mut of, &home).unwrap();
+        assert!(note.contains("2 copied"), "{note}");
+        assert_eq!(of.iter().find(|(k, _)| k == "STEAM_COMPAT_CLIENT_INSTALL_PATH").map(|(_, v)| PathBuf::from(v)), Some(steam.clone()));
+        assert_eq!(std::fs::read(prefix.join("pfx/drive_c/Program Files (x86)/Steam/steamclient64.dll")).unwrap(), b"64");
+        // The launch options line's own value wins; files already there are not copied again.
+        let mut own = env("kryotoO=n,b");
+        own.push(("STEAM_COMPAT_CLIENT_INSTALL_PATH".into(), "/mine".into()));
+        assert!(!steam_client_for(&mut own, &home).unwrap().contains("copied"));
+        assert_eq!(own.iter().filter(|(k, _)| k == "STEAM_COMPAT_CLIENT_INSTALL_PATH").count(), 1);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

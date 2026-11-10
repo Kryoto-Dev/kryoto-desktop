@@ -18,6 +18,14 @@ import { API_BASE } from './api'
  * Message text and keys never leave the frame.
  */
 
+/** How this device reads in the account's chat devices. */
+export const DEVICE_NAME = 'Web browser'
+
+/** Only Kryoto Mobile has one: a browser uses Web Push. */
+export async function nativePushEndpoint(): Promise<string | null | undefined> {
+  return undefined
+}
+
 /** Framed by kryo.to with `?embed=1`; anywhere else it is the plain web chat. */
 export const EMBEDDED = typeof window !== 'undefined' && window.parent !== window && new URLSearchParams(location.search).has('embed')
 

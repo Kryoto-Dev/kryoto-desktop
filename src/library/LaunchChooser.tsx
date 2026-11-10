@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Glasses, Play } from 'lucide-react'
-import { Button, Check, Modal } from '@/ui'
+import { Glasses, Play } from '@/ui/pixel-icons'
+import { Button, Check, Modal, Tag } from '@/ui'
 import { startEntry, waysToPlay, type LibraryGame } from '@/lib/library'
 import { cn } from '@/lib/utils'
 
@@ -68,11 +68,7 @@ export function LaunchChooser({
             <span className="grid min-w-0 gap-0.5">
               <span className="text-sm font-bold text-foreground">
                 {w.label}
-                {w.vr ? (
-                  <span className="kryo-pill ml-2 border border-border px-1.5 py-px align-middle text-[9px] uppercase tracking-wider text-muted-foreground">
-                    headset
-                  </span>
-                ) : null}
+                {w.vr ? <Tag className="ml-2 align-middle">headset</Tag> : null}
               </span>
               <span className="kryo-ascii-art truncate text-[11px] text-muted-foreground">{w.detail}</span>
             </span>

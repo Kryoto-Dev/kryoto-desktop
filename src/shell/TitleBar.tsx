@@ -1,11 +1,14 @@
+import { NewDot } from '@/ui/FeatureNotice'
 import { ProfileLink, TeamName } from '@/ui/TeamName'
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { flushSync } from 'react-dom'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Bell, ChevronDown, Expand, Megaphone, Shrink } from 'lucide-react'
+import { Bell, ChevronDown, Expand, Megaphone, Shrink } from '@/ui/pixel-icons'
 import { artSrc } from '@/lib/art'
 import { Matrix, MenuButton, MenuList, type MenuEntry } from '@/ui'
 import { KryoMark } from '@/ui/ascii/KryoMark'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
+import { PreviewReportButton } from '@/shell/PreviewReport'
 import { KryosCoin, compactKryos } from '@/ui/KryosCoin'
 import { closeWindow, isTauri, minimizeWindow, toggleFullscreen, toggleMaximize, useWindowState } from '@/lib/window'
 import { openInbox } from '@/lib/popup'
@@ -15,13 +18,53 @@ import type { Account } from '@/hooks/useAccount'
 import type { Inbox, News } from '@/hooks/useInbox'
 
 /**
- * The window's top strip - Forge's title bar, with Steam's jobs in it.
- *
- * Left: the mark and the menus (Kryoto, View, Games, Help). Right: what is new
- * on kryo.to, the notification bell, the account, full screen, and the window
- * buttons. Everything that is not a control drags the window, and a
- * double-click on it maximizes. Menus open in the menu view, over the Store,
- * without hiding it.
+ * What gives way when the row is short, in order. First room is won back: the
+ * tabs drop their icons, Add to library becomes its icon, the address may get
+ * narrower than it likes. Then the menus (Kryoto, View, Games, Help) fold into
+ * one menu on the K// mark, and the rest folds into the account menu. The row
+ * never wraps: each step is one thing a menu can do too, so a narrow window
+ * loses room and not features.
+ */
+export const FOLD = { tabIcons: 1, addIcon: 2, menus: 3, address: 4, news: 5, kryos: 6, fullscreen: 7, profile: 8, labels: 9 }
+
+/**
+ * How far the row has to fold to fit, measured and not guessed from the window:
+ * a long name or a big font needs it sooner. `content` is whatever changes the
+ * row's width without the window changing.
+ */
+export function useRowFold(content: string) {
+  const row = useRef<HTMLElement | null>(null)
+  const [fold, setFold] = useState(0)
+  const [width, setWidth] = useState(0)
+  useEffect(() => {
+    if (!row.current) return
+    // In step with the resize, so a frame never shows the row unfolded.
+    const el = row.current
+    const watch = new ResizeObserver(() =>
+      flushSync(() => {
+        setFold(0)
+        setWidth(el.clientWidth)
+      }),
+    )
+    watch.observe(el)
+    return () => watch.disconnect()
+  }, [])
+  useLayoutEffect(() => setFold(0), [content])
+  useLayoutEffect(() => {
+    // The navigation takes what is left, so it is where the row runs out.
+    const nav = row.current?.querySelector('nav')
+    if (nav && nav.scrollWidth > nav.clientWidth && fold < FOLD.labels) setFold(fold + 1)
+  }, [fold, width, content])
+  return { row, fold }
+}
+
+/**
+ * The window's one row: the mark, the menus, the client's navigation (`nav`), then what is
+ * new on kryo.to, the bell, the Kryos, the account, full screen and the window
+ * buttons. The empty parts drag the window and a double-click on them
+ * maximizes. They are `.drag` areas beside the controls, never around them:
+ * inside a drag area a control loses its cursor. Menus open in the menu view,
+ * or the Store's page when the Store is showing, over it without hiding it.
  */
 export function TitleBar({
   offline = false,
@@ -30,61 +73,92 @@ export function TitleBar({
   news,
   menus,
   accountMenu,
+  newSettings = false,
+  nav,
+  rowRef,
+  fold = 0,
   onNews,
   onOpenNotification,
   onMarkRead,
   onAllNotifications,
   onKryos,
+  where = '',
 }: {
   /** No connection: a quiet pill says so, and what needs kryo.to waits. */
   offline?: boolean
   account: Account
   inbox: Inbox
   news: News | null
+  /** Kryoto, View, Games, Help: their own buttons, or one menu on the mark when the row is short. */
   menus: { label: string; items: MenuEntry[] }[]
   accountMenu: MenuEntry[]
+  /** A dot on the account menu: something new in Settings the player has not opened. */
+  newSettings?: boolean
+  /** Back, forward, the tabs and the address: `NavBar`. */
+  nav: ReactNode
+  rowRef: RefObject<HTMLElement | null>
+  /** How much has folded away (`useRowFold`). */
+  fold?: number
   onNews: () => void
   onOpenNotification: (url: string | null) => void
   onMarkRead: () => void
   onAllNotifications: () => void
   /** The coin beside the account: opens the Kryos wallet in the Store. */
   onKryos: () => void
+  /** Where the player is, for Kryoto Desktop Preview's Report button: a Store page or a tab. */
+  where?: string
 }) {
   const { fullscreen } = useWindowState()
 
   const initial = (account.displayName || account.username || '?').slice(0, 1).toUpperCase()
 
   return (
-    <header className="relative z-50 flex h-9 shrink-0 select-none items-stretch border-b border-border bg-background">
-      <div data-maximize className="drag flex items-center pl-3.5 pr-2">
-        <KryoMark className="pointer-events-none h-3.5" />
-      </div>
-      <nav aria-label="Menus" className="no-drag flex items-center">
-        {menus.map((m) => (
+    <header ref={rowRef} className="relative z-50 flex h-13 shrink-0 select-none items-stretch border-b border-border bg-background">
+      {fold >= FOLD.menus ? (
+        <div className="no-drag flex shrink-0 items-center pl-2 pr-1">
           <MenuButton
-            key={m.label}
-            native={`title:${m.label}`}
-            trigger={m.label}
-            items={m.items}
-            className="kryo-pill h-7 px-2.5 text-[11px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground aria-expanded:bg-secondary aria-expanded:text-foreground"
+            native="title:menus"
+            label="Menu"
+            trigger={<KryoMark className="pointer-events-none h-3.5" />}
+            items={menus.flatMap((m, i) => [...(i ? [{ separator: true } as MenuEntry] : []), { heading: m.label } as MenuEntry, ...m.items])}
+            className="kryo-pill flex h-8 items-center px-1.5 hover:bg-secondary aria-expanded:bg-secondary"
           />
-        ))}
-      </nav>
-      <div data-maximize className="drag flex grow items-center justify-center gap-2">
+        </div>
+      ) : (
+        <>
+          <div data-maximize className="drag flex shrink-0 items-center pl-3.5 pr-2">
+            <KryoMark className="pointer-events-none h-3.5" />
+          </div>
+          <div role="group" aria-label="Menus" className="no-drag flex shrink-0 items-center pr-2">
+            {menus.map((m) => (
+              <MenuButton
+                key={m.label}
+                native={`title:${m.label}`}
+                trigger={m.label}
+                items={m.items}
+                className="kryo-pill h-7 px-2.5 text-[11px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground aria-expanded:bg-secondary aria-expanded:text-foreground"
+              />
+            ))}
+          </div>
+        </>
+      )}
+      {nav}
+      <div data-maximize className="drag min-w-6 flex-1" />
+
+      <div className="no-drag flex shrink-0 items-center gap-2 pr-1.5">
         {offline ? (
           <span
             title="No connection. The library, your games and settings work as usual; the Store and downloads wait for it."
-            className="no-drag kryo-pill pointer-events-auto flex items-center gap-1.5 border border-border px-2.5 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground"
+            className="kryo-pill flex h-6 items-center gap-1.5 border border-border px-2 text-[10px] uppercase tracking-wider text-muted-foreground"
           >
             <Matrix state="connect" className="size-3" />
             Offline
           </span>
         ) : null}
-        <DevEndpointNotice className="no-drag" />
-      </div>
-
-      <div className="no-drag flex items-center gap-1.5 pr-2">
-        {news?.version ? (
+        <DevEndpointNotice compact />
+        {/* Kryoto Desktop Preview only (src/lib/endpoint.ts IS_PREVIEW_BUILD). */}
+        <PreviewReportButton page={where} username={account.guest ? null : account.username} />
+        {news?.version && fold < FOLD.news ? (
           <button
             type="button"
             onClick={onNews}
@@ -123,6 +197,7 @@ export function TitleBar({
                     { heading: 'Notifications' },
                     ...inbox.notifications.map((n) => ({ label: n.title, onSelect: () => onOpenNotification(n.url) })),
                     { separator: true },
+                    ...(inbox.unreadCount ? [{ label: 'Mark all read', onSelect: onMarkRead }] : []),
                     { label: 'See all', onSelect: onAllNotifications },
                   ]}
                 />
@@ -133,7 +208,7 @@ export function TitleBar({
 
         {/* Your Kryos, as on kryo.to: the coin and the amount. A click opens
             the wallet, where they are claimed and spent. */}
-        {!account.guest && typeof account.kryos === 'number' ? (
+        {!account.guest && typeof account.kryos === 'number' && fold < FOLD.kryos ? (
           <button
             type="button"
             onClick={onKryos}
@@ -155,10 +230,10 @@ export function TitleBar({
               )}
               <span className="max-w-40 truncate"><TeamName username={account.guest ? null : account.username}>{account.displayName || account.username}</TeamName></span>
           </ProfileLink>
-          <MenuButton native="account" label="Account menu" align="right" items={accountMenu} className="kryo-pill p-1 text-muted-foreground hover:text-foreground" trigger={<ChevronDown className="size-3" aria-hidden />} />
+          <MenuButton native="account" label="Account menu" align="right" items={accountMenu} className="kryo-pill p-1 text-muted-foreground hover:text-foreground" trigger={<span className="relative inline-flex"><ChevronDown className="size-3" aria-hidden />{newSettings ? <NewDot className="absolute -right-1 -top-1" /> : null}</span>} />
         </div>
 
-        {isTauri() ? (
+        {isTauri() && fold < FOLD.fullscreen ? (
           <button
             type="button"
             aria-label={fullscreen ? 'Leave full screen' : 'Full screen'}
@@ -184,7 +259,7 @@ export function TitleBar({
  * Maximize follows the window (a drag to the top of the screen, a double-click
  * on the bar, Win+Up), not just this button, and hides in full screen.
  */
-function WindowControls() {
+export function WindowControls() {
   const { maximized, fullscreen } = useWindowState()
   const active = useWindowFocus()
   const glyphs = isWindowsHost()

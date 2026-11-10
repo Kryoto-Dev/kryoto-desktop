@@ -1,6 +1,6 @@
 /**
  * Render Kryoto Desktop's sounds (src/lib/sound-recipes.ts) to MP3s for
- * review, with the same tones, envelopes, filters and echo the app plays live
+ * review, with the same tones, envelopes, filters and room the app plays live
  * through Web Audio (src/lib/sound.ts).
  *
  *   pnpm exec tsx scripts/render-sounds.mts <out-folder>
@@ -10,7 +10,7 @@
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { SOUNDS, lengthOf, type Recipe, type Voice } from '../src/lib/sound-recipes.ts'
+import { ROOM, SOUNDS, lengthOf, type Recipe, type Voice } from '../src/lib/sound-recipes.ts'
 
 const RATE = 44100
 /** The app's default master volume (sound.ts). */
@@ -102,11 +102,24 @@ function render(recipe: Recipe): Float32Array {
       out[start + i]! += s * v.gain * envelope(v, t)
     }
   }
-  if (recipe.echo) {
-    const d = Math.floor(recipe.echo.delay * RATE)
+  if (recipe.room) {
+    // sound.ts's room: each comb is a delay whose output goes back into it
+    // through a lowpass and the feedback gain; the wet part is their sum.
     const wet = new Float32Array(out.length)
-    for (let i = d; i < out.length; i++) wet[i] = (out[i - d]! + wet[i - d]! * recipe.echo.feedback)
-    for (let i = 0; i < out.length; i++) out[i]! += wet[i]! * recipe.echo.mix
+    for (const c of ROOM.combs) {
+      const d = Math.max(1, Math.round(c * (recipe.room.size ?? 1) * RATE))
+      const line = new Float32Array(out.length)
+      const damped = new Float32Array(out.length)
+      const lp = new Biquad()
+      lp.set('lowpass', ROOM.damp, 0.7071)
+      for (let i = 0; i < out.length; i++) {
+        line[i] = i >= d ? out[i - d]! + ROOM.feedback * damped[i - d]! : 0
+        damped[i] = lp.run(line[i]!)
+        wet[i]! += line[i]!
+      }
+    }
+    const mix = recipe.room.mix / ROOM.combs.length
+    for (let i = 0; i < out.length; i++) out[i]! += wet[i]! * mix
   }
   for (let i = 0; i < out.length; i++) out[i] = Math.max(-1, Math.min(1, out[i]! * MASTER * PREVIEW_GAIN))
   return out

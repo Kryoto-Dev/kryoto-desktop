@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowUpRight, Lock, LogOut, MonitorSmartphone } from 'lucide-react'
+import { ArrowUpRight, Lock, LogOut, MonitorSmartphone } from '@/ui/pixel-icons'
 import '../styles.css'
 import { on, useWebBackend } from '@/lib/bridge'
 import type { Account } from '@/hooks/useAccount'
@@ -11,7 +11,7 @@ import { useSocialBadge } from '@/hooks/useSocialBadge'
 import { accept, decline, hangUp, subscribe as onCall, toggleDeafen, toggleMute } from '@/lib/calls'
 import { startActiveBeacon, type ChatMessage } from '@/lib/chat'
 import { applyLook } from '@/lib/settings'
-import { Button, Label } from '@/ui'
+import { Busy, Button, Label } from '@/ui'
 import { API_BASE, api, startSignIn, waitForToken, type DeviceStart } from './api'
 import { createBackend } from './backend'
 import { callElsewhere, EMBEDDED, EXPECTED_USER, fromSite, holdEngineLock, setEngineInCall, toSite } from './embed'
@@ -44,6 +44,7 @@ async function loadMe(token: string): Promise<Me | null> {
       displayName: u.displayName ?? null,
       avatarUrl: u.avatarUrl ?? null,
       supporter: !!(u.isSupporter || (Array.isArray(u.perks) && u.perks.includes('ad_free'))),
+      rank: typeof u.donationTier === 'string' ? u.donationTier : null,
       chat: !!f.chat,
       friends: !!f.friends,
       groups: !!f.chat_groups,
@@ -400,7 +401,7 @@ function App() {
   }, [state, me, error])
 
   if (state === 'unavailable') return <Frame><p className="max-w-sm text-sm text-muted-foreground">{error ?? 'Chat is not available for your account yet.'}</p></Frame>
-  if (state === 'loading') return <Frame><p className="text-xs text-muted-foreground">Loading...</p></Frame>
+  if (state === 'loading') return <Frame><Busy className="size-5 text-muted-foreground" label="Loading" /></Frame>
   if (state === 'signin') return EMBEDDED ? <EmbeddedSignIn onToken={save} /> : <SignIn onToken={save} />
   if (state === 'anonymous') return <Frame><p className="max-w-sm text-sm">You need to turn off anonymous mode to use this feature.</p></Frame>
   if (state === 'other-account')

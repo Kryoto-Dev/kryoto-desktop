@@ -1,14 +1,14 @@
-import { call, errorText } from '@/lib/bridge'
+import { call, errorText, isTauri, on } from '@/lib/bridge'
 import { logError, logWarn } from '@/lib/log'
 
 /**
  * Play sessions on their way to kryo.to, kept until they arrive.
  *
  * A session is reported through the Store page's own session, so a game closed
- * while that page was not loaded ("Open kryo.to first", 16 reports in 0.2.3)
- * used to lose its play time for good. It waits here instead, in this PC's
- * storage, and goes the next time a report can be made. The key on each makes
- * a second send harmless: kryo.to counts a session once.
+ * while that page was not loaded ("Open kryo.to first", 16 reports in 0.2.3), or
+ * while kryo.to was down, used to lose its play time for good. It waits here
+ * instead, in this PC's storage, until kryo.to has answered for it. The key on
+ * each makes a second send harmless: kryo.to counts a session once.
  */
 
 type PendingPlay = { slug: string; startedAt: number; seconds: number; key: string }
@@ -40,34 +40,36 @@ export function isExpectedReportError(e: unknown): boolean {
   return text.startsWith('Open kryo.to first') || text.startsWith('Not a kryo.to game')
 }
 
-/** Send one session; keep it for later when kryo.to is not reachable yet. */
-export async function reportPlay(play: PendingPlay): Promise<void> {
+function done(key: string) {
+  write(read().filter((p) => p.key !== key))
+}
+
+// kryo.to has the session, or has refused it for good (store_play_done). Until
+// then it stays here: a page sending to a site that is down hears nothing back.
+if (isTauri()) void on<string>('play-reported', done)
+
+async function send(play: PendingPlay) {
   try {
     await call('store_report_play', play)
   } catch (e) {
-    if (errorText(e).startsWith('Open kryo.to first')) {
-      write([...read().filter((p) => p.key !== play.key), play])
-      logWarn('playtime', `${play.slug}: kept for later (${errorText(e)})`)
-    } else if (isExpectedReportError(e)) {
-      logWarn('playtime', `${play.slug}: ${errorText(e)}`)
-    } else {
-      logError('playtime', e)
-    }
+    if (errorText(e).startsWith('Open kryo.to first')) return logWarn('playtime', `${play.slug}: kept for later (${errorText(e)})`)
+    // Not one kryo.to can ever take.
+    done(play.key)
+    if (isExpectedReportError(e)) logWarn('playtime', `${play.slug}: ${errorText(e)}`)
+    else logError('playtime', e)
   }
 }
 
-/** Try every kept session again. Called on a timer; quiet when there is nothing. */
+/** Keep one session, and send it. */
+export async function reportPlay(play: PendingPlay): Promise<void> {
+  write([...read().filter((p) => p.key !== play.key), play])
+  await send(play)
+}
+
+/** Try every kept session again: on a timer, and when kryo.to is back. Quiet when there is nothing. */
 export async function flushPlays(): Promise<void> {
   const now = Math.floor(Date.now() / 1000)
   const list = read().filter((p) => now - p.startedAt < MAX_AGE_SECS)
-  if (list.length === 0) return
-  const left: PendingPlay[] = []
-  for (const play of list) {
-    try {
-      await call('store_report_play', play)
-    } catch (e) {
-      if (errorText(e).startsWith('Open kryo.to first')) left.push(play)
-    }
-  }
-  write(left)
+  write(list)
+  for (const play of list) await send(play)
 }

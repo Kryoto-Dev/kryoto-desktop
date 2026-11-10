@@ -21,18 +21,45 @@ use crate::library::{LibraryGame, Running};
 const POLL: Duration = Duration::from_secs(2);
 /// How long a cached list is trusted before Steam is asked again.
 const SCHEMA_FRESH: Duration = Duration::from_secs(7 * 24 * 3600);
+/// How long "Steam lists none" is trusted. Steam answers a busy moment with an
+/// empty list too, and a week of no achievements for that is too long.
+const EMPTY_SCHEMA_FRESH: Duration = Duration::from_secs(3600);
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder().user_agent("Kryoto Desktop").build().unwrap_or_default()
 }
 
+/// When this game's emulator last unlocked an achievement on this PC: a sign
+/// it was played here before, for a game whose hours nothing remembers
+/// (library.rs `playtime_offer`). The saves are the PC's own folders on
+/// Windows, the game's prefix on Linux.
+pub fn last_unlock<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<u64> {
+    let appid = appid_of(Path::new(&game.install_dir))?;
+    ach::read_unlocked(&roots_of(app, game), &appid).into_iter().filter_map(|u| u.time).max()
+}
+
+/// Where this game's emulator saves: the PC's own folders on Windows, its
+/// Wine/Proton prefix on Linux, and wherever the build's own settings send
+/// its saves (a portable gbe_fork build). The same place the watcher reads.
+pub fn roots_of<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Roots {
+    let roots = if cfg!(windows) {
+        Roots::from_env()
+    } else {
+        crate::library::plan_for(app, game, None).map(|(plan, _)| roots_for(&plan.env)).unwrap_or_else(|_| Roots::from_env())
+    };
+    roots.with_game(Path::new(&game.install_dir))
+}
+
 /// The Steam AppID of an installed game: what the emulator was told, or what
-/// Forge recorded on the release.
+/// Forge recorded on the release. RUNE, CODEX and OnlineFix builds have no
+/// `steam_appid.txt`; they keep it in their own ini, and without it such a game
+/// showed no achievements at all.
 pub fn appid_of(install_dir: &Path) -> Option<String> {
     let digits = |s: String| {
         let s = s.trim().trim_start_matches('\u{feff}').to_string();
         (!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) && s != "480").then_some(s)
     };
+    let mut from_ini = None;
     for entry in walkdir::WalkDir::new(install_dir).max_depth(6).into_iter().filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
         if name == "steam_appid.txt" {
@@ -45,9 +72,26 @@ pub fn appid_of(install_dir: &Path) -> Option<String> {
             if let Some(id) = id.and_then(digits) {
                 return Some(id);
             }
+        } else if from_ini.is_none() && matches!(name.as_str(), "steam_emu.ini" | "onlinefix.ini" | "rune.ini") {
+            from_ini = std::fs::read(entry.path()).ok().and_then(|b| ini_appid(&String::from_utf8_lossy(&b))).and_then(digits);
         }
     }
-    None
+    from_ini
+}
+
+/// The AppID in an emulator's ini: OnlineFix's `RealAppId`, whose `FakeAppId` is
+/// only what it tells Steam, else everybody else's `AppId`.
+fn ini_appid(text: &str) -> Option<String> {
+    let value = |key: &str| {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with([';', '#']))
+            .filter_map(|l| l.split_once('='))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.split([';', '#']).next().unwrap_or("").trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    value("RealAppId").or_else(|| value("AppId"))
 }
 
 /// Where this game's emulator saves: the PC's own folders, or the Wine/Proton
@@ -71,6 +115,7 @@ pub fn roots_for(env: &[(String, String)]) -> Roots {
     Roots {
         app_data: user.map(|u| u.join("AppData").join("Roaming")),
         public_documents: Some(users.join("Public").join("Documents")),
+        game_saves: Vec::new(),
     }
 }
 
@@ -112,18 +157,17 @@ fn cache_file<R: Runtime>(app: &AppHandle<R>, appid: &str) -> Option<PathBuf> {
 async fn schema<R: Runtime>(app: &AppHandle<R>, appid: &str) -> Vec<Achievement> {
     let file = cache_file(app, appid);
     let cached: Option<(Vec<Achievement>, bool)> = file.as_ref().and_then(|f| {
-        let fresh = std::fs::metadata(f)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| SystemTime::now().duration_since(t).ok())
-            .is_some_and(|age| age < SCHEMA_FRESH);
-        let list = serde_json::from_slice(&std::fs::read(f).ok()?).ok()?;
-        Some((list, fresh))
+        let age = std::fs::metadata(f).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
+        let list: Vec<Achievement> = serde_json::from_slice(&std::fs::read(f).ok()?).ok()?;
+        let limit = if list.is_empty() { EMPTY_SCHEMA_FRESH } else { SCHEMA_FRESH };
+        Some((list, age.is_some_and(|age| age < limit)))
     });
     if let Some((list, true)) = &cached {
         return list.clone();
     }
     match ach::fetch_schema(&client(), appid, "english").await {
+        // An empty answer never replaces a list that had something in it.
+        Ok(list) if list.is_empty() && cached.as_ref().is_some_and(|(old, _)| !old.is_empty()) => cached.map(|(old, _)| old).unwrap_or_default(),
         Ok(list) => {
             if let Some(f) = &file {
                 let _ = std::fs::create_dir_all(f.parent().unwrap_or(Path::new(".")));
@@ -168,11 +212,13 @@ fn named_tracking(source: &str) -> (Tracking, Option<String>) {
         return (Tracking::Unsupported, Some("Kryoto Online".into()));
     } else if name.contains("gbefork") || name.contains("goldberg") {
         "gbe_fork / Goldberg"
+    } else if name.contains("empress") {
+        "EMPRESS"
     } else if name.contains("rune") {
         "RUNE"
     } else if name.contains("codex") {
         "CODEX"
-    } else if name.contains("onlinefix") || name == "ofme" {
+    } else if name.contains("onlinefix") || name.ends_with("ofme") {
         "OnlineFix"
     } else {
         return (Tracking::Unknown, None);
@@ -234,7 +280,8 @@ pub fn merge(list: Vec<Achievement>, unlocks: &[Unlock]) -> GameAchievements {
     let mut out: Vec<GameAchievement> = list
         .into_iter()
         .map(|a| {
-            let u = unlocks.iter().find(|u| u.name == a.name);
+            // Emulators do not all keep Steam's case.
+            let u = unlocks.iter().find(|u| u.name.eq_ignore_ascii_case(&a.name));
             GameAchievement { unlocked: u.is_some(), unlocked_at: u.and_then(|u| u.time), achievement: a }
         })
         .collect();
@@ -265,8 +312,7 @@ pub async fn game_achievements(app: AppHandle, id: String) -> Result<GameAchieve
     let list = schema(&app, &appid).await;
     // Where the game saves: its Wine/Proton prefix on Linux, the PC's own
     // folders on Windows - the same place the watcher reads while it runs.
-    let roots = crate::library::plan_for(&app, &game, None).map(|(plan, _)| roots_for(&plan.env)).unwrap_or_else(|_| Roots::from_env());
-    let unlocks = ach::read_unlocked(&roots, &appid);
+    let unlocks = ach::read_unlocked(&roots_of(&app, &game), &appid);
     let mut out = merge(list, &unlocks);
     out.appid = Some(appid);
     out.tracking = tracking;
@@ -302,7 +348,7 @@ pub fn watch<R: Runtime>(app: AppHandle<R>, game: &LibraryGame, roots: Roots) {
                         continue;
                     }
                     let list = list.get_or_insert_with(|| tauri::async_runtime::block_on(schema(&app, &appid)));
-                    let a = list.iter().find(|a| a.name == u.name);
+                    let a = list.iter().find(|a| a.name.eq_ignore_ascii_case(&u.name));
                     let name = a.map(|a| a.display_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| u.name.clone());
                     let body = a.map(|a| a.description.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| title.clone());
                     crate::logging::info("achievements", &format!("{title}: unlocked {name}"));
@@ -358,6 +404,35 @@ mod tests {
         for source in ["Steam (DRM-free)", "Kryoto Original release", "unknown repack", "custom", ""] {
             assert_eq!(named_tracking(source), (Tracking::Unknown, None));
         }
+    }
+
+    #[test]
+    fn a_release_labelled_by_steam_and_its_crack_is_read_as_the_crack() {
+        assert_eq!(release_tracking("Steam + OFME").0, Tracking::Supported);
+        assert_eq!(release_tracking("Steam + EMPRESS").0, Tracking::Supported);
+    }
+
+    #[test]
+    fn the_appid_comes_from_an_emulators_ini_when_there_is_no_txt() {
+        assert_eq!(ini_appid("[Settings]\nFakeAppId=480\nRealAppId=620\n").as_deref(), Some("620"));
+        assert_eq!(ini_appid("[Settings]\r\n; AppId=1\r\nAppId = 620 ; the game\r\n").as_deref(), Some("620"));
+        assert_eq!(ini_appid("[Settings]\nName=x\n"), None);
+        let dir = std::env::temp_dir().join(format!("kryo-appid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/steam_emu.ini"), "[Settings]\nAppId=620\n").unwrap();
+        assert_eq!(appid_of(&dir).as_deref(), Some("620"));
+        // The plain file is still what counts when both are there.
+        std::fs::write(dir.join("steam_appid.txt"), "400").unwrap();
+        assert_eq!(appid_of(&dir).as_deref(), Some("400"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unlock_counts_whatever_case_the_emulator_kept() {
+        let a = Achievement { name: "ACH_Win".into(), display_name: "Win".into(), description: String::new(), hidden: false, icon: None, icon_gray: None, percent: None };
+        let out = merge(vec![a], &[Unlock { name: "ach_win".into(), time: Some(5) }]);
+        assert_eq!(out.unlocked, 1);
     }
 
     #[test]

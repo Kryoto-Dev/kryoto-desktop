@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { BatteryCharging, BatteryMedium, Gamepad2, RotateCcw, Vibrate } from 'lucide-react'
+import { BatteryCharging, BatteryMedium, Gamepad2, RotateCcw, Vibrate } from '@/ui/pixel-icons'
 import { Button, Caption, Check, Dropdown, Matrix, Section, Segmented } from '@/ui'
 import { PadArtView, PadBadge, type Callout } from '@/controller/PadArtView'
 import { PadSetup } from '@/controller/PadSetup'
+import { errorText } from '@/lib/bridge'
 import { openExternal } from '@/lib/window'
 import { clearPadRequest, savePadConfig, usePadInput, usePadStore } from '@/hooks/usePads'
 import { isWindowsHost } from '@/lib/library'
@@ -26,7 +27,7 @@ import { PAD_FAMILIES, type PadControl, type PadFamily } from '@/lib/pad-art'
 import { cn } from '@/lib/utils'
 
 /**
- * Settings > Controller (kryo.to feature flag `controller`): the pads that are
+ * Settings > Devices, Controller (kryo.to feature flag `controller`): the pads that are
  * plugged in or were before, drawn as they look and lit up as you press, what
  * each button is called on it, which job it does in games, and how the pad
  * moves around Kryoto. A pad Kryoto does not know (or reads wrong) is set up
@@ -41,7 +42,7 @@ const MATCHED: Record<PadInfo['model']['matched'], string> = {
 }
 
 export function ControllerPane() {
-  const { pads, config, requested } = usePadStore()
+  const { pads, config, requested, startError } = usePadStore()
   const known = useMemo(() => {
     // Plugged in first, then the ones seen before.
     const list: { guid: string; pad: PadInfo | null; name: string }[] = pads.map((p) => ({ guid: p.guid, pad: p, name: p.name }))
@@ -70,7 +71,8 @@ export function ControllerPane() {
   useEffect(() => {
     // Follow a new connection instead of leaving the test drawing on a
     // saved, disconnected profile after its instance/backend changes.
-    if (pads.length && !pads.some(p => p.guid === chosen)) {
+    // A pad asked for by its notification comes first.
+    if (!requested && pads.length && !pads.some(p => p.guid === chosen)) {
       setChosen(pads[0]!.guid)
       setSetup(false)
     }
@@ -92,12 +94,16 @@ export function ControllerPane() {
     if (last) document.getElementById(`pad-row-${last.control}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   }, [last])
 
+  const [failed, setFailed] = useState<string | null>(null)
+  const save = (next: PadConfig) => {
+    setFailed(null)
+    void savePadConfig(next).catch((e: unknown) => setFailed(`Not saved: ${errorText(e)}`))
+  }
   const setPrefs = (patch: Partial<PadPrefs>) => {
     if (!config || !current) return
-    const next: PadConfig = { ...config, pads: { ...config.pads, [current.guid]: { ...prefs, ...patch } } }
-    void savePadConfig(next).catch(() => {})
+    save({ ...config, pads: { ...config.pads, [current.guid]: { ...prefs, ...patch } } })
   }
-  const setFlag = (key: 'navigate' | 'notify' | 'games' | 'haptics' | 'virtualPad', v: boolean) => config && void savePadConfig({ ...config, [key]: v }).catch(() => {})
+  const setFlag = (key: 'navigate' | 'notify' | 'games' | 'haptics' | 'virtualPad', v: boolean) => config && save({ ...config, [key]: v })
   const windows = isWindowsHost()
   const name = (c: PadControl) => padLabel(family, c).long
   const pad = current?.pad ?? null
@@ -112,20 +118,25 @@ export function ControllerPane() {
     window.addEventListener('focus', checkDriver)
     return () => { window.clearInterval(timer); window.removeEventListener('focus', checkDriver) }
   }, [windows])
-  const forgetSetup = () =>
-    pad && void padApi.saveSetup(pad.guid, pad.name, null).then((c) => savePadConfig(c)).catch(() => {})
+  const forgetSetup = () => {
+    if (!pad) return
+    setFailed(null)
+    void padApi.saveSetup(pad.guid, pad.name, null).then((c) => savePadConfig(c)).catch((e: unknown) => setFailed(`Not saved: ${errorText(e)}`))
+  }
 
   return (
     <>
+      {failed ? (
+        <p role="alert" className="kryo-radius sticky top-2 z-10 border border-destructive/40 bg-card px-3 py-2 text-xs text-destructive">
+          {failed}
+        </p>
+      ) : null}
       <div className="grid gap-3">
-        {pad?.mapped ? <div className="kryo-radius flex flex-wrap items-center gap-3 border border-border bg-card p-4">
-          <div className="min-w-0 grow">
-            <p className="text-sm font-bold text-foreground">Ready to use</p>
-            <p className="mt-1 text-xs text-muted-foreground">Press buttons and move the sticks to test them below. If a button is wrong, run the guided setup.</p>
-          </div>
-          <Button size="sm" onClick={() => setSetup(true)}>Fix button layout</Button>
-        </div> : null}
-        {known.length ? (
+        {startError ? (
+          <p role="alert" className="text-xs text-destructive">
+            Controllers could not start: {startError}
+          </p>
+        ) : known.length ? (
           <div role="tablist" aria-label="Controllers" className="flex flex-wrap gap-2">
             {known.map((k) => (
               <button
@@ -239,7 +250,7 @@ export function ControllerPane() {
         )}
         {current?.pad ? (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" disabled={!current.pad.rumble} onClick={() => current.pad && void padApi.rumble(current.pad.id).catch(() => {})} title={current.pad.rumble ? undefined : 'This controller cannot rumble.'}>
+            <Button size="sm" disabled={!current.pad.rumble} onClick={() => current.pad && void padApi.rumble(current.pad.id).catch((e: unknown) => setFailed(`It did not rumble: ${errorText(e)}`))} title={current.pad.rumble ? undefined : 'This controller cannot rumble.'}>
               <Vibrate className="size-3.5" />
               Test rumble
             </Button>
@@ -251,8 +262,8 @@ export function ControllerPane() {
         title="Buttons"
         hint={
           windows
-            ? 'What each button does in games. Give a button another job and the button that had it takes over the old one. Games get it through the virtual Xbox controller (below).'
-            : 'What each button does in games. Give a button another job and the button that had it takes over the old one. SDL games, Wine and Proton all follow this.'
+            ? 'Give a button another job and the button that had it takes over the old one. Games get it through the virtual Xbox controller (below).'
+            : 'Give a button another job and the button that had it takes over the old one. SDL games, Wine and Proton all follow this.'
         }
       >
         <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
@@ -294,7 +305,12 @@ export function ControllerPane() {
               Reset all buttons
             </Button>
             {!windows && current.pad && !prefs.sdl ? (
-              <span className="text-[11px] text-warning">Set this controller up first, so games can be given these changes.</span>
+              <span className="flex flex-wrap items-center gap-2 text-[11px] text-warning">
+                Set this controller up first, so games can be given these changes.
+                <Button size="sm" onClick={() => setSetup(true)}>
+                  Set up controller
+                </Button>
+              </span>
             ) : null}
           </div>
         ) : null}

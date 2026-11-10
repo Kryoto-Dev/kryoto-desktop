@@ -19,6 +19,9 @@ import { cn } from '@/lib/utils'
 /** One character cell on screen, in CSS pixels (the lettering's 3:5), at `cell` 1. */
 const BASE_CW = 6
 const BASE_CH = 10
+/** The start box (lib/window.ts, `splash`): the scene is drawn for this at `cell` 1. */
+const BOX_W = 340
+const BOX_H = 380
 
 const MARK = word('K//')
 
@@ -49,20 +52,27 @@ function reducedMotion() {
 }
 
 /**
- * `cell` scales the characters: 1 for the start box, more where the same
- * scene fills a bigger screen (Big Picture), so it stays crisp, not stretched.
+ * The characters scale with the room there is, 1 in the start box, so the mark
+ * holds the same share of any window, and stays crisp, not stretched. `fit`
+ * adjusts that share. It is laid out again when the size changes: the scene
+ * can start before its window has settled (Big Picture going full screen, a
+ * window a compositor sized itself). `onMark` says where the mark ends, for
+ * whatever goes under it.
  * `settled` draws the mark as the opening leaves it, at once (Kryoto Mobile's
  * Welcome after a sign-out).
  */
 export function SplashScene({
   onRevealed,
   className,
-  cell = 1,
+  fit = 1,
+  onMark,
   settled = false,
 }: {
   onRevealed: () => void
   className?: string
-  cell?: number
+  fit?: number
+  /** The mark's bottom edge in the scene, and the scale it is drawn at. */
+  onMark?: (bottom: number, cell: number) => void
   settled?: boolean
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -83,57 +93,80 @@ export function SplashScene({
     }
 
     // ---- The grid -----------------------------------------------------------
-    const CW = BASE_CW * cell
-    const CH = BASE_CH * cell
-    const box = canvas.getBoundingClientRect()
-    const width = Math.max(1, box.width)
-    const height = Math.max(1, box.height)
-    const dpr = window.devicePixelRatio || 1
-    canvas.width = Math.round(width * dpr)
-    canvas.height = Math.round(height * dpr)
-    const cols = Math.floor(width / CW)
-    const rows = Math.floor(height / CH)
-    const ox = (width - cols * CW) / 2
-    const oy = (height - rows * CH) / 2
     const color = getComputedStyle(canvas).color
-
-    // The mark, a little above the middle, in cells and in pixels.
     const markCols = Math.max(...MARK.map((l) => Array.from(l).length))
     const markRows = MARK.length
-    const mc0 = Math.round((cols - markCols) / 2)
-    const mr0 = Math.round(rows * 0.42 - markRows / 2)
-    const cx = ox + (mc0 + markCols / 2) * CW
-    const cy = oy + (mr0 + markRows / 2) * CH
-    const markCells: { c: number; r: number; ch: string; order: number }[] = []
-    MARK.forEach((line, r) =>
-      Array.from(line).forEach((ch, c) => {
-        if (ch === ' ') return
-        // Fills left to right, with some grain so it does not read as a wipe.
-        markCells.push({ c: mc0 + c, r: mr0 + r, ch, order: 0.62 * (c / markCols) + 0.38 * rand(c, r) })
-      }),
-    )
+    let width = 1
+    let height = 1
+    let dpr = 1
+    let CW = BASE_CW
+    let CH = BASE_CH
+    let cols = 0
+    let rows = 0
+    let ox = 0
+    let oy = 0
+    let cx = 0
+    let cy = 0
+    let mc0 = 0
+    let mr0 = 0
+    let reach = 0
+    let markCells: { c: number; r: number; ch: string; order: number }[] = []
+    let dust: { c: number; r: number; speed: number; phase: number }[] = []
+    let heat = new Float32Array(0)
 
-    // Faint dust in the dark, twinkling.
-    const dust = Array.from({ length: Math.round((cols * rows) / 40) }, (_, i) => ({
-      c: Math.floor(rand(i, 1) * cols),
-      r: Math.floor(rand(i, 2) * rows),
-      speed: 0.8 + rand(i, 3) * 1.6,
-      phase: rand(i, 4) * Math.PI * 2,
-    }))
+    const measure = () => {
+      const box = canvas.getBoundingClientRect()
+      width = Math.max(1, box.width)
+      height = Math.max(1, box.height)
+      dpr = window.devicePixelRatio || 1
+      const cell = Math.max(0.5, Math.min(width / BOX_W, height / BOX_H) * fit)
+      CW = BASE_CW * cell
+      CH = BASE_CH * cell
+      canvas.width = Math.round(width * dpr)
+      canvas.height = Math.round(height * dpr)
+      cols = Math.floor(width / CW)
+      rows = Math.floor(height / CH)
+      ox = (width - cols * CW) / 2
+      oy = (height - rows * CH) / 2
+
+      // The mark, a little above the middle, in cells and in pixels.
+      mc0 = Math.round((cols - markCols) / 2)
+      mr0 = Math.round(rows * 0.42 - markRows / 2)
+      cx = ox + (mc0 + markCols / 2) * CW
+      cy = oy + (mr0 + markRows / 2) * CH
+      markCells = []
+      MARK.forEach((line, r) =>
+        Array.from(line).forEach((ch, c) => {
+          if (ch === ' ') return
+          // Fills left to right, with some grain so it does not read as a wipe.
+          markCells.push({ c: mc0 + c, r: mr0 + r, ch, order: 0.62 * (c / markCols) + 0.38 * rand(c, r) })
+        }),
+      )
+
+      // Faint dust in the dark, twinkling.
+      dust = Array.from({ length: Math.round((cols * rows) / 40) }, (_, i) => ({
+        c: Math.floor(rand(i, 1) * cols),
+        r: Math.floor(rand(i, 2) * rows),
+        speed: 0.8 + rand(i, 3) * 1.6,
+        phase: rand(i, 4) * Math.PI * 2,
+      }))
+      reach = Math.hypot(width, height) * 0.6
+      heat = new Float32Array(cols * rows)
+      onMark?.(oy + (mr0 + markRows) * CH, cell)
+    }
+    measure()
 
     // ---- Who flies where ----------------------------------------------------
-    const reach = Math.hypot(width, height) * 0.6
     const cards = Array.from({ length: CARDS }, (_, i) => ({
       start: FIRST_MS + i * STAGGER_MS,
       theta0: (i / CARDS) * Math.PI * 2 - Math.PI / 2 + (rand(i, 5) - 0.5) * 0.6,
-      r0: reach + rand(i, 6) * 30,
+      extra: rand(i, 6) * 30,
       swirl: (i % 2 ? 1 : -1) * (0.8 + rand(i, 7) * 0.7),
       fill: CASE_FILLS[i % CASE_FILLS.length]!,
       done: false,
     }))
     const burstAt = FIRST_MS + (CARDS - 1) * STAGGER_MS + FLIGHT_MS
 
-    const heat = new Float32Array(cols * rows)
     let landed = 0
     let lastLanding = -Infinity
     let burst = false
@@ -186,7 +219,7 @@ export function SplashScene({
           }
           const e = pull(p)
           const theta = card.theta0 + card.swirl * e
-          const r = card.r0 * (1 - e)
+          const r = (reach + card.extra) * (1 - e)
           const x = cx + Math.cos(theta) * r
           const y = cy + Math.sin(theta) * r * 0.85
           const sprite = e < 0.5 ? caseBig(card.fill) : e < 0.78 ? caseSmall(card.fill) : e < 0.92 ? ['▪'] : ['·']
@@ -265,12 +298,25 @@ export function SplashScene({
     if (still) frame(performance.now())
     else raf = requestAnimationFrame(frame)
 
+    const follow = () => {
+      const box = canvas.getBoundingClientRect()
+      if (box.width === width && box.height === height && (window.devicePixelRatio || 1) === dpr) return
+      measure()
+      if (still) frame(performance.now())
+    }
+    const watch = new ResizeObserver(follow)
+    watch.observe(canvas)
+    // A window moved to a screen with another scale changes no size.
+    window.addEventListener('resize', follow)
+
     // Whatever happens to the frames (a hidden window gets none), the splash
     // never waits on them past this.
     timers.push(window.setTimeout(reveal, burstAt + 1500))
 
     return () => {
       cancelAnimationFrame(raf)
+      watch.disconnect()
+      window.removeEventListener('resize', follow)
       for (const id of timers) window.clearTimeout(id)
     }
     // Runs once: the scene is a one-off.

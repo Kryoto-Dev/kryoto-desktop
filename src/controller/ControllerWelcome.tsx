@@ -7,16 +7,16 @@ import type { PadControl } from '@/lib/pad-art'
 
 /**
  * The first time controller support is on for an account: a card at the top
- * of the Library saying so, with the pad drawn and its buttons lighting in
- * turn, how to move around, and the way into Big Picture. It was only in
- * Settings before, where nobody looks for it. Once dismissed, it stays gone.
+ * of Settings > Devices saying so, with the pad drawn and its buttons lighting
+ * in turn, how to move around, and the way into Big Picture. A pad connecting
+ * says so in a notice that opens it. Once dismissed, it stays gone.
  */
 const SEEN = 'kryoto.pad-welcome'
 
 /** The buttons the drawing lights, one after another. */
 const TOUR: PadControl[] = ['dpup', 'dpright', 'dpdown', 'dpleft', 'a', 'b', 'leftshoulder', 'rightshoulder', 'leftstick', 'rightstick']
 
-export function ControllerWelcome({ onBigPicture, onSetup }: { onBigPicture: () => void; onSetup: () => void }) {
+export function ControllerWelcome({ onBigPicture }: { onBigPicture: () => void }) {
   const { on, pads, config } = usePadStore()
   const [seen, setSeen] = useState(() => {
     try {
@@ -26,11 +26,13 @@ export function ControllerWelcome({ onBigPicture, onSetup }: { onBigPicture: () 
     }
   })
   const [beat, setBeat] = useState(0)
+  const shown = on && !seen
   useEffect(() => {
+    if (!shown) return
     const t = window.setInterval(() => setBeat((n) => n + 1), 520)
     return () => window.clearInterval(t)
-  }, [])
-  if (!on || seen) return null
+  }, [shown])
+  if (!shown) return null
 
   const pad = pads[0] ?? null
   const family = familyOf(pad, pad ? config?.pads[pad.guid] : null)
@@ -76,7 +78,6 @@ export function ControllerWelcome({ onBigPicture, onSetup }: { onBigPicture: () 
           <Button variant="primary" onClick={onBigPicture}>
             Open Big Picture
           </Button>
-          <Button onClick={onSetup}>{pad && !pad.mapped ? 'Set up my controller' : 'Controller settings'}</Button>
           <Button variant="ghost" onClick={dismiss}>
             Got it
           </Button>

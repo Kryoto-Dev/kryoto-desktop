@@ -1,13 +1,15 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { containDialog } from './dialog-focus'
-import { Check as CheckIcon, ChevronDown, Copy, X } from 'lucide-react'
+import { Check as CheckIcon, ChevronDown, Copy, X } from '@/ui/pixel-icons'
 import { cn } from '@/lib/utils'
-import { isTauri } from '@/lib/bridge'
+import { isTauri, isWeb } from '@/lib/bridge'
+import { anchorId, anchorOf } from '@/lib/setting-anchor'
 
-export { Busy } from './Busy'
+import { Busy } from './Busy'
+export { Busy }
 export { Matrix, type MatrixState } from './Matrix'
-import { closeMenu, justClosed, onPopupChange, openMenu, popupOpen } from '@/lib/popup'
+import { closeMenu, onPopupChange, openMenu, popupOpen, pressHandled, warmMenus } from '@/lib/popup'
 
 /**
  * The client's primitives, in kryo.to's voice: tracked uppercase labels,
@@ -30,21 +32,109 @@ export function Caption({ children, className }: { children: ReactNode; classNam
   )
 }
 
-/* ── Buttons ─────────────────────────────────────────────── */
-
-type ButtonProps = React.ComponentProps<'button'> & {
-  variant?: 'primary' | 'outline' | 'ghost' | 'danger'
-  size?: 'sm' | 'md' | 'lg'
+/** A small outlined word beside a name: Current, Running, headset. */
+export function Tag({ children, tone, title, className }: { children: ReactNode; tone?: 'primary'; title?: string; className?: string }) {
+  return (
+    <span
+      title={title}
+      className={cn(
+        'kryo-pill inline-flex shrink-0 items-center gap-1 border px-1.5 py-px text-[9px] uppercase tracking-wider',
+        tone === 'primary' ? 'border-primary/60 text-primary' : 'border-border text-muted-foreground',
+        className,
+      )}
+    >
+      {children}
+    </span>
+  )
 }
 
-/** Pill buttons. `primary` is the white pill - one per surface. */
-export function Button({ variant = 'outline', size = 'md', className, ...rest }: ButtonProps) {
+/** A figure with its caption, in a `dl`: Play time, Speed. */
+export function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid gap-1">
+      <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</dt>
+      <dd className="m-0 text-sm tabular-nums text-foreground">{value}</dd>
+    </div>
+  )
+}
+
+/** One line of a two-column `dl`: Developer, Build, Folder. `mono` is for paths and options. */
+export function Fact({ k, v, mono = false }: { k: string; v: string; mono?: boolean }) {
+  return (
+    <>
+      <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">{k}</dt>
+      <dd className={cn('m-0 select-text break-all text-foreground/90', mono && 'kryo-ascii-art text-[11px]')}>{v}</dd>
+    </>
+  )
+}
+
+/* ── Buttons ─────────────────────────────────────────────── */
+
+type ButtonProps = Omit<React.ComponentProps<'button'>, 'onClick'> & {
+  variant?: 'primary' | 'outline' | 'ghost' | 'danger'
+  size?: 'sm' | 'md' | 'lg'
+  /** Return the work's promise and the button looks after itself; see `Button`. */
+  onClick?: (e: React.MouseEvent<HTMLButtonElement>) => unknown
+  /** Working, for work the button did not start or that outlives its promise. */
+  busy?: boolean
+  /** What it says while working, when its own word would read wrong ("Trying again"). */
+  busyLabel?: ReactNode
+}
+
+/** How long work runs before its button shows the matrix. */
+const BUSY_AFTER_MS = 120
+
+/** A pressed button's work failed and nothing else said so (the shell shows a notice). */
+export const ACTION_FAILED_EVENT = 'kryo:action-failed'
+
+/**
+ * Pill buttons. `primary` is the white pill - one per surface.
+ *
+ * Every press shows it was heard: when `onClick` returns a promise, the button
+ * cannot be pressed again until the work ends, and the matrix takes the label's
+ * place (the button keeps its width; work done in a blink draws nothing). Work
+ * that fails with nothing to catch it is reported (ACTION_FAILED_EVENT), so a
+ * press never ends in silence.
+ */
+export function Button({ variant = 'outline', size = 'md', className, busy = false, busyLabel, onClick, disabled, children, ...rest }: ButtonProps) {
+  const [running, setRunning] = useState(false)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
+  const working = busy || running
+  // A beat before the matrix shows: a quick job should not flash.
+  const [showing, setShowing] = useState(false)
+  useEffect(() => {
+    if (!running) return setShowing(false)
+    const t = window.setTimeout(() => setShowing(true), BUSY_AFTER_MS)
+    return () => window.clearTimeout(t)
+  }, [running])
+  const visible = busy || showing
+  const masked = visible && !busyLabel
+  const press = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (working) return
+    const work = onClick?.(e)
+    if (!(work instanceof Promise)) return
+    setRunning(true)
+    work
+      .catch((error: unknown) => window.dispatchEvent(new CustomEvent(ACTION_FAILED_EVENT, { detail: error })))
+      .finally(() => alive.current && setRunning(false))
+  }
   return (
     <button
       type="button"
       {...rest}
+      disabled={disabled || working}
+      aria-busy={working || undefined}
+      onClick={press}
       className={cn(
         'kryo-pill kryo-press inline-flex shrink-0 items-center justify-center gap-2 font-bold uppercase tracking-wider disabled:opacity-40',
+        working && 'disabled:opacity-100',
+        visible && busyLabel && '[&>svg]:hidden',
         size === 'sm' && 'h-7 px-3 text-[10px]',
         size === 'md' && 'h-9 px-4 text-[11px]',
         size === 'lg' && 'h-12 px-8 text-sm tracking-[0.2em]',
@@ -55,10 +145,23 @@ export function Button({ variant = 'outline', size = 'md', className, ...rest }:
         variant === 'danger' &&
           'border border-destructive/50 text-destructive hover:bg-destructive hover:text-destructive-foreground',
         className,
+        masked && 'relative text-transparent hover:text-transparent [&>svg]:invisible',
       )}
-    />
+    >
+      {masked ? (
+        <span aria-hidden className={cn('absolute inset-0 grid place-items-center', variant === 'primary' ? 'text-primary-foreground' : 'text-foreground')}>
+          <Busy className="size-3.5" />
+        </span>
+      ) : visible ? (
+        <Busy className="size-3 shrink-0" />
+      ) : null}
+      {visible && busyLabel ? busyLabel : children}
+    </button>
   )
 }
+
+export const iconButtonCls =
+  'kryo-pill kryo-press inline-grid size-8 shrink-0 place-items-center border border-border text-muted-foreground hover:border-foreground hover:text-foreground disabled:opacity-30'
 
 /** A round icon button, for chrome. */
 export function IconButton({
@@ -73,10 +176,7 @@ export function IconButton({
       aria-label={label}
       title={label}
       {...rest}
-      className={cn(
-        'kryo-pill kryo-press inline-grid size-8 shrink-0 place-items-center border border-border text-muted-foreground hover:border-foreground hover:text-foreground disabled:opacity-30',
-        className,
-      )}
+      className={cn(iconButtonCls, className)}
     >
       {children}
     </button>
@@ -125,7 +225,7 @@ export function Modal({
         aria-modal="true"
         aria-label={title}
         className={cn(
-          'kryo-pop kryo-radius grid max-h-[calc(100vh-48px)] w-full grid-rows-[auto_1fr_auto] overflow-hidden border border-border bg-card shadow-2xl shadow-black/60',
+          'kryo-pop kryo-radius grid max-h-[calc(100vh-48px)] w-full grid-rows-[auto_1fr_auto] overflow-hidden border border-border bg-card shadow-2xl shadow-black/60 outline-none',
           wide ? 'h-[min(620px,calc(100vh-48px))] max-w-4xl' : 'max-w-lg',
         )}
       >
@@ -161,7 +261,7 @@ export function Panes<T extends string>({
   children: ReactNode
 }) {
   return (
-    <div className="-m-5 grid h-full min-h-0 grid-cols-[180px_1fr]">
+    <div className="-m-5 grid h-[calc(100%+2.5rem)] min-h-0 grid-cols-[180px_1fr]">
       <nav aria-label="Sections" className="grid content-start gap-1 border-r border-border p-3">
         {tabs.map(([id, label]) => (
           <button
@@ -185,9 +285,10 @@ export function Panes<T extends string>({
   )
 }
 
-export function Section({ title, children, hint }: { title: string; children: ReactNode; hint?: ReactNode }) {
+/** A titled group of settings. Its id is its address in Settings (lib/settings-links.ts): "Desktop pet" is `setting-desktop-pet`. */
+export function Section({ title, children, hint, anchor }: { title: string; children: ReactNode; hint?: ReactNode; anchor?: string }) {
   return (
-    <section className="grid gap-2.5">
+    <section id={anchorId(anchor ?? anchorOf(title))} className="grid gap-2.5">
       <Caption className="font-bold text-foreground/80">{title}</Caption>
       {hint ? <p className="text-xs leading-relaxed text-muted-foreground">{hint}</p> : null}
       {children}
@@ -219,7 +320,7 @@ export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry
         'separator' in item ? (
           <div key={i} className="my-1 h-px bg-border" />
         ) : 'heading' in item ? (
-          <div key={i} className="px-3 pb-1 pt-2">
+          <div key={i} className="px-3 pb-0.5 pt-1.5">
             <Caption>{item.heading}</Caption>
           </div>
         ) : (
@@ -233,14 +334,14 @@ export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry
               item.onSelect()
             }}
             className={cn(
-              'flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs transition-colors disabled:opacity-40',
+              'flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors disabled:opacity-40',
               item.danger
                 ? 'text-destructive hover:bg-destructive hover:text-destructive-foreground focus:bg-destructive focus:text-destructive-foreground'
                 : 'text-foreground hover:bg-primary hover:text-primary-foreground focus:bg-primary focus:text-primary-foreground',
             )}
           >
             {item.icon ? <span className="grid size-3.5 place-items-center [&>svg]:size-3.5">{item.icon}</span> : null}
-            <span className="grow truncate">{item.label}</span>
+            <span className="min-w-0 grow truncate">{item.label}</span>
             {item.hint ? <span className="text-[10px] tracking-wider opacity-60">{item.hint}</span> : null}
           </button>
         ),
@@ -249,14 +350,100 @@ export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry
   )
 }
 
-const MENU_PANEL = 'kryo-pop kryo-radius absolute z-[400] min-w-52 overflow-hidden border border-border bg-popover py-1 shadow-2xl shadow-black/60'
+export const MENU_PANEL = 'kryo-pop kryo-radius min-w-52 max-w-[min(420px,calc(100vw-16px))] overflow-y-auto overflow-x-hidden border border-border bg-popover py-1 shadow-2xl shadow-black/60'
 
-/** Close on a click elsewhere or Escape. */
+/** How close to the window's edge anything that floats may come. */
+const WINDOW_EDGE = 8
+
+/**
+ * Whatever opens from a control: a dropdown's list, a page menu, a picker, a
+ * right-click menu. Always through here, so nothing has to think about it:
+ * drawn on `document.body` above every layer, where no `overflow` can cut it
+ * and no stacking context can cover it, then placed by its control. It opens
+ * on `side` and turns to the other one when that has more room, stays inside
+ * the window, scrolls when it is taller than the room, and follows its control
+ * while the page under it scrolls.
+ *
+ * `anchor` says where the control is now; `match` makes it at least that wide.
+ * `data-kryo-float` keeps it alive inside an open dialog (ui/dialog-focus.ts)
+ * and tells `useDismiss` a press in it is not a press elsewhere.
+ */
+export function Floating({
+  anchor,
+  side = 'bottom',
+  align = 'left',
+  gap = 6,
+  match = false,
+  panelRef,
+  className,
+  children,
+  ...rest
+}: Omit<React.ComponentProps<'div'>, 'ref'> & {
+  anchor: () => Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom' | 'width'> | null | undefined
+  side?: 'top' | 'bottom'
+  align?: 'left' | 'right'
+  gap?: number
+  match?: boolean
+  panelRef?: React.RefObject<HTMLDivElement | null>
+}) {
+  const box = useRef<HTMLDivElement | null>(null)
+  const where = useRef(anchor)
+  where.current = anchor
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    const place = () => {
+      const a = where.current()
+      if (!a) return
+      el.style.maxHeight = ''
+      if (match) el.style.minWidth = `${a.width}px`
+      // Offset sizes: the opening animation's scale must not count.
+      const width = el.offsetWidth
+      const height = el.offsetHeight
+      const below = window.innerHeight - a.bottom - gap - WINDOW_EDGE
+      const above = a.top - gap - WINDOW_EDGE
+      const down = side === 'bottom' ? height <= below || below >= above : height > above && below > above
+      const room = Math.max(0, down ? below : above)
+      el.style.maxHeight = `${Math.min(height, room)}px`
+      // Clamped: a control scrolled out of the window takes its list only as far as the edge.
+      const top = down ? a.bottom + gap : a.top - gap - Math.min(height, room)
+      el.style.top = `${Math.max(WINDOW_EDGE, Math.min(top, window.innerHeight - Math.min(height, room) - WINDOW_EDGE))}px`
+      const left = align === 'right' ? a.right - width : a.left
+      el.style.left = `${Math.max(WINDOW_EDGE, Math.min(left, window.innerWidth - width - WINDOW_EDGE))}px`
+    }
+    place()
+    const watch = new ResizeObserver(place)
+    watch.observe(el)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      watch.disconnect()
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [side, align, gap, match])
+  return createPortal(
+    <div
+      {...rest}
+      ref={(el) => {
+        box.current = el
+        if (panelRef) panelRef.current = el
+      }}
+      data-kryo-float=""
+      className={cn('fixed left-0 top-0 z-[800]', className)}
+    >
+      {children}
+    </div>,
+    document.body,
+  )
+}
+
+/** Close on a click elsewhere or Escape. A press in a `Floating` panel belongs to whatever opened it. */
 export function useDismiss(open: boolean, ref: React.RefObject<HTMLElement | null>, close: () => void) {
   useEffect(() => {
     if (!open) return
     const onDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) close()
+      if (ref.current && !ref.current.contains(e.target as Node) && !(e.target as Element).closest?.('[data-kryo-float]')) close()
     }
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close()
     window.addEventListener('pointerdown', onDown)
@@ -304,11 +491,11 @@ export function MenuButton({
   }
   useDismiss(open, ref, closeBrowser)
   const nativeOpenNow = useNativeOpen(native)
-  const useNative = !!native && isTauri()
-  const openNative = (el: HTMLElement) => {
+  const useNative = !!native && isTauri() && !isWeb()
+  const openNative = (el: HTMLElement, keyboard = false) => {
     const anchor = el.getBoundingClientRect()
     if (nativeOpen) nativeOpen(anchor)
-    else void openMenu(native!, anchor, items ?? [], align)
+    else void openMenu(native!, anchor, items ?? [], align, undefined, keyboard)
   }
   return (
     <div ref={ref} className="relative flex">
@@ -322,7 +509,7 @@ export function MenuButton({
         onKeyDown={(e) => {
           if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
           e.preventDefault()
-          if (useNative) openNative(e.currentTarget)
+          if (useNative) openNative(e.currentTarget, true)
           else setOpen(true)
         }}
         onClick={(e) => {
@@ -334,13 +521,17 @@ export function MenuButton({
             if (popupOpen() !== native) openNative(e.currentTarget)
             return
           }
-          // A second press on the trigger closes its menu.
-          if (nativeOpenNow || justClosed(native!)) return closeMenu()
-          openNative(e.currentTarget)
+          // The press closed it already, or it is still coming: a second press
+          // on the trigger closes its menu, and never one nobody has seen yet.
+          if (pressHandled(native!)) return
+          if (nativeOpenNow) return closeMenu()
+          // No pointer: Enter or Space.
+          openNative(e.currentTarget, e.detail === 0)
         }}
         // Like a menu bar: with one of its menus open, pointing at a sibling
         // (same id prefix, `title:...`) opens that one instead.
         onPointerEnter={(e) => {
+          if (useNative) warmMenus()
           const cur = popupOpen()
           if (useNative && cur && cur !== native && cur.split(':')[0] === native!.split(':')[0]) {
             hoverOpened = { menu: native!, at: Date.now() }
@@ -351,9 +542,9 @@ export function MenuButton({
         {trigger}
       </button>
       {open && !useNative ? (
-        <div role="menu" className={cn(MENU_PANEL, 'top-[calc(100%+6px)]', align === 'right' ? 'right-0' : 'left-0')}>
+        <Floating role="menu" anchor={() => ref.current?.getBoundingClientRect()} align={align} className={MENU_PANEL}>
           {panel ? panel(closeBrowser) : <MenuList items={items ?? []} onDone={closeBrowser} />}
-        </div>
+        </Floating>
       ) : null}
     </div>
   )
@@ -381,18 +572,11 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
   const ref = useRef<HTMLDivElement | null>(null)
   const trigger = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   useLayoutEffect(() => () => { if (trigger.current?.isConnected) trigger.current.focus() }, [])
-  const [pos, setPos] = useState({ x, y })
   useDismiss(true, ref, onClose)
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const r = el.getBoundingClientRect()
-    setPos({ x: Math.min(x, window.innerWidth - r.width - 8), y: Math.min(y, window.innerHeight - r.height - 8) })
-  }, [x, y])
   return (
-    <div ref={ref} role="menu" className={cn(MENU_PANEL, 'fixed z-[700] max-h-[calc(100vh-16px)] overflow-y-auto')} style={{ left: Math.max(8, pos.x), top: Math.max(8, pos.y) }}>
+    <Floating role="menu" panelRef={ref} anchor={() => ({ left: x, right: x, top: y, bottom: y, width: 0 })} gap={0} className={MENU_PANEL}>
       <MenuList items={items} onDone={onClose} />
-    </div>
+    </Floating>
   )
 }
 
@@ -501,9 +685,10 @@ export function Dropdown<T extends string>({
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
+  const list = useRef<HTMLDivElement | null>(null)
   const id = useId()
   useLayoutEffect(() => {
-    if (open) (ref.current?.querySelector<HTMLElement>('[aria-selected="true"]') ?? ref.current?.querySelector<HTMLElement>('[role="option"]'))?.focus()
+    if (open) (list.current?.querySelector<HTMLElement>('[aria-selected="true"]') ?? list.current?.querySelector<HTMLElement>('[role="option"]'))?.focus({ preventScroll: true })
   }, [open])
   const dismiss = () => {
     setOpen(false)
@@ -533,14 +718,15 @@ export function Dropdown<T extends string>({
         <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
       </button>
       {open ? (
-        <div id={id} role="listbox" aria-label={label ?? current?.label ?? 'Choose'} onKeyDown={(e) => {
+        <Floating id={id} role="listbox" panelRef={list} anchor={() => ref.current?.getBoundingClientRect()} gap={4} match aria-label={label ?? current?.label ?? 'Choose'} onKeyDown={(e) => {
+          if (e.key === 'Tab') return dismiss()
           if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
           e.preventDefault()
           const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="option"]')]
           const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement)
           const index = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (currentIndex + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
           items[index]?.focus()
-        }} className={cn(MENU_PANEL, 'left-0 right-0 top-[calc(100%+4px)] max-h-64 overflow-auto')}>
+        }} className={cn(MENU_PANEL, 'max-h-64')}>
           {options.map((o) => (
             <button
               key={o.value}
@@ -558,7 +744,7 @@ export function Dropdown<T extends string>({
               {o.hint ? <span className="text-[10px] opacity-60">{o.hint}</span> : null}
             </button>
           ))}
-        </div>
+        </Floating>
       ) : null}
     </div>
   )

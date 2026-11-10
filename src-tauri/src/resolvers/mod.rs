@@ -20,6 +20,7 @@
 //! agent, referer) and how many connections the host tolerates.
 
 mod browser;
+pub mod filez;
 #[cfg(windows)]
 mod ublock;
 mod buzzheavier;
@@ -72,7 +73,7 @@ pub(crate) fn host_matches(url: &str, re: &Regex) -> bool {
     url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).is_some_and(|h| re.is_match(&h))
 }
 
-fn hostname(url: &str) -> String {
+pub(crate) fn hostname(url: &str) -> String {
     url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase())).unwrap_or_default()
 }
 
@@ -130,7 +131,7 @@ const PAGE_HOSTS: &[(&str, &str)] = &[
     ("send.cm", "Send.cm"),
 ];
 
-fn domain_match(host: &str, domain: &str) -> bool {
+pub(crate) fn domain_match(host: &str, domain: &str) -> bool {
     host == domain || host.strip_suffix(domain).is_some_and(|rest| rest.ends_with('.'))
 }
 
@@ -144,6 +145,11 @@ fn page_host(url: &str) -> Option<&'static str> {
 pub fn classify(url: &str) -> Option<(Kind, &'static str)> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return None;
+    }
+    // filez.stream: a file link with its key, fetched and decrypted here
+    // (filez.rs). Without the key nothing can open it (see `never_opened`).
+    if filez::matches(url) && filez::parse(url).is_some() {
+        return Some((Kind::Api, "filez.stream"));
     }
     if pixeldrain::matches(url) {
         return Some((Kind::Api, "Pixeldrain"));
@@ -174,10 +180,11 @@ pub fn classify(url: &str) -> Option<(Kind, &'static str)> {
     page_host(url).map(|name| (Kind::Page, name))
 }
 
-/// Links never opened for a download. MEGA and filez.stream decrypt their
-/// files inside their own page and hand the browser a `blob:`, which nothing
-/// outside the page can fetch; any 0807.st link that is not the file itself
-/// (its `/d/` link deletes the file when opened).
+/// Links never opened for a download. MEGA decrypts its files inside its own
+/// page and hands the browser a `blob:`, which nothing outside the page can
+/// fetch; a filez.stream address without its key (a file link with one is
+/// `classify`'s, filez.rs) is the same; any 0807.st link that is not the file
+/// itself (its `/d/` link deletes the file when opened).
 fn never_opened(url: &str) -> bool {
     let host = hostname(url);
     ["mega.nz", "mega.io", "mega.co.nz", "filez.stream", "0807.st"].iter().any(|d| domain_match(&host, d))
@@ -202,6 +209,28 @@ pub fn classify_any(url: &str) -> Option<(Kind, String)> {
 pub async fn resolve<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolved, String> {
     let (kind, name) = classify_any(url).ok_or_else(|| format!("Kryoto can't download from {}. Open it in your browser instead.", hostname(url)))?;
     let started = std::time::Instant::now();
+    // filez.stream has a way of its own end to end (its key, its check, its
+    // grants), and no page button to fall back to.
+    if name == "filez.stream" {
+        let result = filez::resolve(app, url).await;
+        match &result {
+            Ok(_) => crate::logging::info("resolver", &format!("filez.stream ready in {}ms", started.elapsed().as_millis())),
+            Err(e) => crate::logging::error("resolver", &format!("filez.stream: {e}")),
+        }
+        return result.map_err(|e| format!("filez.stream: {e}"));
+    }
+    // Patchbay: the player's debrid service first, for a host it supports.
+    // Whatever it can't do, the usual way below still can.
+    if kind != Kind::Direct {
+        match crate::patchbay::debrid::try_resolve(app, url).await {
+            Some((service, Ok(r))) => {
+                crate::logging::info("resolver", &format!("{name} through {service} in {}ms", started.elapsed().as_millis()));
+                return Ok(r);
+            }
+            Some((service, Err(e))) => crate::logging::warn("resolver", &format!("{name}: {service}: {e}; the usual way instead")),
+            None => {}
+        }
+    }
     let result = match kind {
         Kind::Direct => Ok(Resolved {
             url: url.to_string(),
@@ -305,6 +334,9 @@ mod tests {
         // Never opened: MEGA's files only exist inside its page, and 0807's
         // deletion link deletes the file.
         assert_eq!(classify_any("https://mega.nz/file/abc#key"), None);
+        // filez.stream: a file link with its key is Kryoto's to fetch; anything else there is not.
+        assert_eq!(classify_any("https://filez.stream/Ab12Cd34#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), Some((Kind::Api, "filez.stream".into())));
+        assert_eq!(classify_any("https://filez.stream/Ab12Cd34"), None);
         assert_eq!(classify_any("https://0807.st/d/deletiontoken"), None);
         assert_eq!(classify_any("magnet:?xt=urn:btih:abc"), None);
         assert_eq!(classify_any("file:///C:/Windows"), None);

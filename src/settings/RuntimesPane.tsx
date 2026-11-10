@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Check as CheckIcon, Download, RotateCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Check as CheckIcon, Download, RotateCw, ShieldCheck, Trash2 } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Check, Section } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { formatBytes } from '@/lib/downloads'
@@ -16,6 +16,7 @@ export function RuntimesPane() {
   const [list, setList] = useState<Runtime[] | null>(null)
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [note, setNote] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [ask, setAsk] = useState(asksAtStartup)
   const progress = useRuntimesProgress()
   const running = busy(progress)
@@ -28,7 +29,7 @@ export function RuntimesPane() {
         // Start with the missing recommended ones ticked.
         setPicked((cur) => (cur.size ? cur : new Set(l.filter((r) => !r.installed && r.recommended).map((r) => r.id))))
       })
-      .catch((e: unknown) => setNote(errorText(e)))
+      .catch((e: unknown) => setError(errorText(e)))
   }, [])
   useEffect(refresh, [refresh])
   // A finished job changes what is installed.
@@ -55,7 +56,8 @@ export function RuntimesPane() {
     })
   const install = (ids: string[], repair: boolean) => {
     setNote(null)
-    void runtimesApi.install(ids, repair).catch((e: unknown) => setNote(errorText(e)))
+    setError(null)
+    void runtimesApi.install(ids, repair).catch((e: unknown) => setError(errorText(e)))
   }
 
   if (list && !list.length) {
@@ -144,10 +146,11 @@ export function RuntimesPane() {
               void runtimesApi
                 .clearCache()
                 .then((n) => {
+                  setError(null)
                   setNote(n ? `Freed ${formatBytes(n)}.` : 'Nothing to clear.')
                   refresh()
                 })
-                .catch((e: unknown) => setNote(errorText(e)))
+                .catch((e: unknown) => setError(errorText(e)))
             }
           >
             <Trash2 className="size-3" />
@@ -157,6 +160,7 @@ export function RuntimesPane() {
       </Section>
 
       {note ? <p className="text-xs text-muted-foreground" role="status">{note}</p> : null}
+      {error ? <p className="text-xs text-destructive" role="alert">{error}</p> : null}
     </>
   )
 }

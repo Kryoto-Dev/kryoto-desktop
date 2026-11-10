@@ -118,6 +118,13 @@ export function makeColors(theme, mode) {
   k.F = [...oklch(...site.fg), 255]
   k.D = [...oklch(...site.muted), 255]
   k.x = [...oklch(...site.fg), mode === 'dark' ? 46 : 34]
+  // Sponsor gold (y body, Y shade, u light, n outline) and the taco: fixed
+  // hues, so they read as gold in every palette, monochrome included.
+  const f = (L, C, h) => [...oklch(L, C, h), 255]
+  if (t.neon && mode === 'dark') Object.assign(k, { y: f(0.22, 0.06, 88), Y: f(0.14, 0.04, 85), u: f(0.32, 0.08, 92), n: f(0.88, 0.17, 92) })
+  else if (mode === 'light') Object.assign(k, { y: f(0.88, 0.16, 96), Y: f(0.76, 0.15, 82), u: f(0.96, 0.09, 100), n: f(0.34, 0.08, 62) })
+  else Object.assign(k, { y: f(0.86, 0.16, 96), Y: f(0.71, 0.15, 80), u: f(0.95, 0.1, 100), n: f(0.16, 0.04, 70) })
+  Object.assign(k, { t: f(0.82, 0.15, 80), T: f(0.64, 0.13, 60), v: f(0.74, 0.19, 140), r: f(0.62, 0.21, 28), m: f(0.44, 0.08, 45) })
   return k
 }
 
@@ -816,7 +823,13 @@ const SPR = {
   hourglass: ['AAAAA', '.kkk.', '..k..', '.p.p.', '.ppp.', 'AAAAA'],
   pat: ['.pppp.', 'pppppp', 'pppppp', 'pppppp', '.p.p..'],
   sign: ['AAAAAAAAAAAAA', 'AAAAAAAAAAAAA', 'AAAAAAAAAAAAA', 'AAAAAAAAAAAAA', 'AAAAAAAAAAAAA', 'AAAAAAAAAAAAA', 'AAAAAAAAAAAAA', '......P......', '......P......'],
+  taco: ['.v.r.v.r.', 'vmvrmvrmv', 'ttttttttt', 'tTtttTttt', '.ttttTtt.', '..TTTTT..'],
+  tacoS: ['.vrv.', 'tttTt', '.TTT.'],
+  // A stick of RAM: green board, black chips, gold pins with the key notch.
+  ram: ['vvvvvvvvvvvv', 'veevveevveev', 'veevveevveev', 'vvvvvvvvvvvv', 'tvtvtvt.tvtv'],
 }
+// Each bite is a rounded notch: deeper in the middle rows.
+const BITE = [-1, 0, 1, 1, 0, -1]
 
 function hash(a, b = 0) {
   let h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263)) | 0
@@ -1002,6 +1015,92 @@ function drawProps(g, P, A, t) {
         if (pr.crumbs) for (let i = 0; i < 3; i++) { const l = (pt * 1.5 + i / 3) % 1; g.set(x + 3 + i * 2, y + 3 + l * 9, 'A') }
         break
       }
+      case 'taco': {
+        // Lifted from the hand to the mouth, then eaten from the near end:
+        // the bitten end stays at the mouth, and crumbs drop after each bite.
+        const lift = pr.lift ?? 1
+        const x = Math.round(lerp(A.handR[0] - 1, A.mouth[0] + 3, lift))
+        const y = Math.round(lerp(A.handR[1] - 3, A.mouth[1] - 1, lift))
+        const edge = (pr.bites || 0) * 3
+        const rows = SPR.taco.map((r, j) => r.split('').map((c, i) => (edge && i < edge + BITE[j] ? '.' : c)).join(''))
+        if (edge < 9) sprite(g, x - Math.floor(edge), y, rows, { outline: 'o' })
+        if (pr.since != null)
+          for (let i = 0; i < 3; i++) {
+            const l = pr.since * 1.8 - i * 0.2
+            if (l >= 0 && l < 1) g.set(x + i * 2 - 1 + Math.round(l * (i - 1) * 2), y + 3 + l * l * (GROUND - y - 3), ['t', 'v', 'T'][i])
+          }
+        break
+      }
+      case 'ram': {
+        // Eaten like the taco: lifted to the mouth, bitten from the near end.
+        const lift = pr.lift ?? 1
+        const x = Math.round(lerp(A.handR[0] - 1, A.mouth[0] + 3, lift))
+        const y = Math.round(lerp(A.handR[1] - 3, A.mouth[1] - 1, lift))
+        const edge = (pr.bites || 0) * 3
+        const rows = SPR.ram.map((r, j) => r.split('').map((c, i) => (edge && i < edge + BITE[j] ? '.' : c)).join(''))
+        if (edge < 12) sprite(g, x - Math.floor(edge), y, rows, { outline: 'o' })
+        if (pr.since != null)
+          for (let i = 0; i < 3; i++) {
+            const l = pr.since * 1.8 - i * 0.2
+            if (l >= 0 && l < 1) g.set(x + i * 2 - 1 + Math.round(l * (i - 1) * 2), y + 3 + l * l * (GROUND - y - 3), ['v', 'e', 't'][i])
+          }
+        break
+      }
+      case 'juggle':
+        // Small tacos between the hands: `from`/`to` are 0 (left) or 1
+        // (right), `to: 'mouth'` is one being gulped down, and a taco with no
+        // `to` waits in its hand (stacked when two share one).
+        for (const it of pr.items) {
+          const [hx, hy] = it.from ? A.handR : A.handL
+          const start = [hx, hy - 2 - (it.stack || 0) * 3]
+          let x = start[0]
+          let y = start[1]
+          if (it.to === 'mouth') {
+            if (it.u >= 1) continue
+            x = lerp(start[0], A.mouth[0], it.u)
+            y = lerp(start[1], A.mouth[1], it.u) - Math.sin(it.u * Math.PI) * 4
+          } else if (it.to != null) {
+            const end = it.to ? A.handR : A.handL
+            x = lerp(start[0], end[0], it.u)
+            y = lerp(start[1], end[1] - 2, it.u) - 4 * (pr.peak ?? 20) * it.u * (1 - it.u)
+          }
+          sprite(g, x - 2, y - 1, SPR.tacoS, { outline: 'o' })
+        }
+        break
+      case 'toss': {
+        // Thrown up out of the frame, then dropped straight into the mouth.
+        const p = pr.p
+        if (p >= 0.45 && p < 0.6) break
+        const [hx, hy] = A.handR
+        const [mx, my] = A.mouth
+        const up = p < 0.45 ? p / 0.45 : 0
+        const down = p >= 0.6 ? (p - 0.6) / 0.4 : 0
+        const x = p < 0.45 ? lerp(hx - 1, mx + 2, up) : mx
+        const y = p < 0.45 ? lerp(hy - 3, -8, 1 - (1 - up) * (1 - up)) : lerp(-8, my - 3, down * down)
+        if (p < 1) sprite(g, x - 4, y, SPR.taco, { outline: 'o' })
+        break
+      }
+      case 'tacobed': {
+        // A big tortilla folding up round the mascot from the ground, like a
+        // blanket, with the fillings tucked in along its rim once it is up.
+        const v = Math.max(0, Math.min(1, pr.v))
+        if (!v) break
+        const cx = 24 + P.dx
+        const rim = GROUND - 5
+        const bot = GROUND + 1
+        const top = Math.round(bot - v * (bot - rim))
+        const m = new Mask().ellipse(cx, rim, 14, bot - rim + 0.5)
+        for (let y = 0; y < Math.max(top, rim); y++) for (let x = 0; x < W; x++) m.put(x, y, 0)
+        fill(g, m, 't', { shade: 'T' })
+        for (const [sx, sy] of [[-8, 3], [-3, 5], [4, 2], [9, 4], [1, 7]]) if (m.has(cx + sx, rim + sy)) g.set(cx + sx, rim + sy, 'T')
+        if (v >= 1)
+          for (let x = Math.round(cx - 12); x <= cx + 11; x++) {
+            const i = x - Math.round(cx - 12)
+            g.set(x, rim - 1, i % 5 === 2 ? 'r' : 'v')
+            if (i % 3 === 0) g.set(x, rim - 2, i % 5 === 2 ? 'r' : 'v')
+          }
+        break
+      }
       case 'magnifier': {
         const [x, y] = A.handR
         sprite(g, x - 2, y - 6, SPR.magnifier, { outline: 'o', flip: !!pr.flip })
@@ -1127,7 +1226,7 @@ function drawProps(g, P, A, t) {
 export const BASE = {
   dx: 0, dy: 0, sx: 1, sy: 1, lean: 0, flip: false,
   eyes: 'open', eyesR: null, look: [0, 0], brow: null, mouth: 'smile', blush: false,
-  armL: 14, armR: 14, step: 0, tail: 0, ear: 0, wag: 1, melt: 0, screen: null, props: [], clip: false,
+  armL: 14, armR: 14, step: 0, tail: 0, ear: 0, wag: 1, melt: 0, gold: 0, shine: null, screen: null, props: [], clip: false,
 }
 
 export const CATEGORIES = [
@@ -1383,6 +1482,29 @@ def('eat', 'Snack', 'play', 3.2, (t) => {
     mouth: bites >= 4 ? 'cat' : pick(t, ['open', 'flat'], 5), props: [{ type: 'cookie', bites, crumbs: bites > 0 && bites < 4 }],
   }
 })
+// The PC's memory is nearly full, so it eats some: a stick of RAM in four
+// bites (Desktop's pet, when memory runs high; suggestion #52).
+def('ramsnack', 'RAM snack', 'ctx', 5.4, (t) => {
+  if (t < 0.5) return { eyes: 'wide', mouth: 'o', ear: -1, screen: { mode: 'text', text: 'RAM' } }
+  if (t < 1) {
+    const p = (t - 0.5) / 0.5
+    return { armR: lerp(20, 125, p), armL: lerp(14, 110, p), eyes: 'open', mouth: 'open', props: [{ type: 'ram', lift: p }] }
+  }
+  if (t < 4.2) {
+    const k = Math.min(3, Math.floor((t - 1) / 0.8))
+    const u = t - 1 - k * 0.8
+    const bit = u >= 0.2
+    const bites = k + (bit ? 1 : 0)
+    const chew = bit && u >= 0.35
+    return {
+      armR: 125, armL: 110, wag: 2,
+      eyes: chew ? pick(t, ['happy', 'closed'], 4) : 'open', mouth: !bit ? 'open' : chew ? pick(t, ['cat', 'small'], 6) : 'flat',
+      sy: bit && !chew ? 0.95 : 1, sx: bit && !chew ? 1.04 : 1,
+      props: [{ type: 'ram', bites, since: bit ? u - 0.2 : null }],
+    }
+  }
+  return { eyes: 'happy', mouth: 'cat', blush: true, armL: 40, armR: 40, sx: 1.06, dy: t < 4.6 ? Math.round(2 * hop((t - 4.2) / 0.4)) : 0 }
+}, { still: 2.6 })
 def('drink', 'Coffee', 'play', 3, (t) => {
   const up = t > 0.6 && t < 1.8
   return {
@@ -1555,6 +1677,153 @@ def('puddle', 'Puddle', 'own', 3.2, (t) => {
   if (t < 2.4) return { sy: 1.3, sx: 0.8, eyes: 'wide', mouth: 'o', dy: 3 }
   return { sy: t < 2.55 ? 0.86 : 1, sx: t < 2.55 ? 1.12 : 1, eyes: 'happy', mouth: 'open' }
 }, { only: 'blip' })
+
+// --- sponsor: sirgoldentaco's taco break. Turns gold, pulls out a taco and
+// eats it in three bites. Rare on purpose: the stage plays it now and then
+// when idle, and sometimes on a click. `still` is the frame reduced motion holds.
+def('taco', 'Taco break', 'idle', 6, (t) => {
+  const gold = t < 0.7 ? t / 0.7 : t > 5.3 ? (6 - t) / 0.7 : 1
+  if (t < 0.7) return { gold, eyes: t < 0.35 ? 'open' : 'wide', mouth: 'o', ear: -1 }
+  if (t < 1.1) return { gold, armR: 0, lean: 1, look: [1, 0], mouth: 'smirk' }
+  if (t < 1.6) {
+    const p = (t - 1.1) / 0.5
+    return { gold, armR: lerp(20, 125, p), armL: lerp(14, 110, p), eyes: 'star', mouth: 'open', ear: -1, props: [{ type: 'taco', lift: p }] }
+  }
+  if (t < 4.4) {
+    const k = Math.min(2, Math.floor((t - 1.6) / 0.8))
+    const u = t - 1.6 - k * 0.8
+    const bit = u >= 0.2
+    const bites = k + (bit ? 1 : 0)
+    const chew = bit && u >= 0.35
+    return {
+      gold, armR: 125, armL: 110, blush: bites >= 3, wag: 2,
+      eyes: chew ? pick(t, ['happy', 'closed'], 4) : 'open', mouth: !bit ? 'open' : chew ? pick(t, ['cat', 'small'], 6) : 'flat',
+      sy: bit && !chew ? 0.95 : 1, sx: bit && !chew ? 1.04 : 1,
+      props: [{ type: 'taco', bites, since: bit ? u - 0.2 : null }],
+    }
+  }
+  if (t < 5.3) return {
+    gold, eyes: 'happy', blush: true, mouth: 'cat', armL: 150, armR: 150, wag: 2, ear: -1,
+    dy: t < 4.85 ? Math.round(3 * hop((t - 4.4) / 0.45)) : 0, props: [{ type: 'hearts', n: 2 }],
+  }
+  return { gold, eyes: 'happy', mouth: 'smile', blush: true }
+}, { still: 2.5, sponsor: true })
+
+// More of the sponsor's gold, so the taco is not the only trick: each one
+// turns gold, does its bit and fades back, and none ends holding a taco.
+const goldFor = (t, dur) => Math.max(0, Math.min(1, t / 0.7, (dur - t) / 0.7))
+
+// Three small tacos in a cascade: a throw every third of a flight,
+// alternating hands. After the last catches it gulps them down, one by one.
+const JUGGLE = { T: 0.72, from: 0.8, until: 3.9, gulp: 4.75 }
+def('tacojuggle', 'Taco juggling', 'idle', 6.2, (t) => {
+  const gold = goldFor(t, 6.2)
+  const { T, from, until, gulp } = JUGGLE
+  const d = T / 3
+  const items = []
+  const held = []
+  for (let i = 0; i < 3; i++) {
+    const s = from + i * d
+    const first = i % 2
+    if (t < s) {
+      items.push({ from: first, stack: i === 2 ? 1 : 0 })
+      continue
+    }
+    const flights = Math.ceil((until - s) / T)
+    const land = s + flights * T
+    if (t < land) {
+      const u = (t - s) / T
+      const n = Math.floor(u)
+      items.push({ from: (first + n) % 2, to: (first + n + 1) % 2, u: u - n })
+    } else held.push({ land, hand: (first + flights) % 2 })
+  }
+  held.sort((a, b) => a.land - b.land)
+  let swallowed = 0
+  held.forEach((h, k) => {
+    const g0 = gulp + k * 0.3
+    if (t >= g0 + 0.2) swallowed++
+    const stack = held.slice(0, k).filter((o, j) => o.hand === h.hand && t < gulp + j * 0.3).length
+    items.push(t < g0 ? { from: h.hand, stack } : { from: h.hand, to: 'mouth', u: (t - g0) / 0.2 })
+  })
+  if (t < from) {
+    const p = Math.max(0, (t - 0.3) / 0.5)
+    return { gold, armL: lerp(14, 72, p), armR: lerp(14, 72, p), eyes: t < 0.3 ? 'open' : 'star', mouth: 'o', props: t < 0.3 ? [] : [{ type: 'juggle', items }] }
+  }
+  // Each throw lifts its hand for a moment, and the eyes follow the taco across.
+  const k = Math.floor((t - from) / d)
+  const lift = t < until + T && (t - from) % d < 0.12
+  if (t < gulp) return {
+    gold, armL: 72 + (lift && k % 2 === 0 ? 18 : 0), armR: 72 + (lift && k % 2 === 1 ? 18 : 0),
+    look: t < until ? [k % 2 === 0 ? 1 : -1, -1] : [0, 0], eyes: t < until ? open(t, 2.2) : 'happy',
+    mouth: t < until ? 'tongue' : 'smile', dy: t < until ? 0 : pick(t, [0, 1], 6), props: [{ type: 'juggle', items }],
+  }
+  const gulping = held.some((h, j) => t >= gulp + j * 0.3 && t < gulp + j * 0.3 + 0.25)
+  const down = swallowed < 3 ? 72 : lerp(72, 14, (t - gulp - 0.8) / 0.4)
+  return {
+    gold, armL: down, armR: down, eyes: swallowed < 3 ? 'open' : 'happy', mouth: gulping ? 'o' : swallowed < 3 ? 'cat' : 'smile',
+    blush: swallowed >= 3, sy: gulping ? 1.04 : 1, props: [{ type: 'juggle', items }],
+  }
+}, { still: 2.2, sponsor: true })
+
+// Shows off: stands proud while a band of light slides up through the gold, twice.
+def('tacoshimmer', 'Gold shimmer', 'idle', 5.2, (t) => {
+  const gold = goldFor(t, 5.2)
+  const sweep = (a) => (t >= a && t < a + 1.4 ? lerp(0, 50, (t - a) / 1.4) : null)
+  const shine = sweep(0.8) ?? sweep(2.8)
+  const proud = t > 0.4 && t < 4.6
+  return {
+    gold, shine, armL: 32, armR: 32, sy: proud ? 1.04 : 1, sx: proud ? 0.97 : 1,
+    look: t < 2.4 ? [-1, 0] : t < 4.4 ? [1, 0] : [0, 0], lean: t > 1.6 && t < 2.4 ? -1 : t > 3.6 && t < 4.4 ? 1 : 0,
+    eyes: shine == null && t > 2.2 && t < 2.8 ? 'happy' : open(t, 2.6, 0.4), mouth: t < 0.6 ? 'smile' : 'smirk', blush: t > 4.4,
+  }
+}, { still: 1.5, sponsor: true })
+
+// A nap tucked into a tortilla: it folds up from the ground, and down again on waking.
+def('taconap', 'Taco nap', 'idle', 7.2, (t) => {
+  const gold = goldFor(t, 7.2)
+  if (t < 0.7) {
+    const up = t >= 0.25
+    return { gold, eyes: up ? 'squeeze' : 'sleepy', mouth: up ? 'yawn' : 'small', armL: up ? 170 : 14, armR: up ? 170 : 14, sy: up ? 1.05 : 1 }
+  }
+  if (t < 1.3) return { gold, eyes: 'sleepy', mouth: 'small', sy: 0.96, props: [{ type: 'tacobed', v: (t - 0.7) / 0.6 }] }
+  if (t < 5.7) return {
+    gold, eyes: 'closed', mouth: t % 2 < 1 ? 'small' : 'o', sy: t % 2 < 1 ? 1 : 0.97, ear: 1, wag: 0, blush: true,
+    armL: 4, armR: 4, props: [{ type: 'tacobed', v: 1 }, { type: 'zzz', t: t - 1.3 }], screen: { mode: 'text', text: 'ZZZ' },
+  }
+  if (t < 6.2) return { gold, eyes: t < 5.9 ? 'sleepy' : 'open', mouth: 'o', sy: 0.96, props: [{ type: 'tacobed', v: 1 - (t - 5.7) / 0.5 }] }
+  const reach = t < 6.7
+  return { gold, eyes: reach ? 'squeeze' : 'happy', mouth: reach ? 'o' : 'smile', armL: reach ? 170 : 14, armR: reach ? 170 : 14, sy: reach ? 1.05 : 1 }
+}, { still: 3, sponsor: true })
+
+// Dances with a taco held high like a maraca, spins, then throws it up out of
+// sight and catches it in its mouth.
+def('tacodance', 'Taco dance', 'idle', 6.4, (t) => {
+  const gold = goldFor(t, 6.4)
+  if (t < 0.7) {
+    const up = t >= 0.3
+    return { gold, armR: up ? lerp(14, 160, (t - 0.3) / 0.4) : 14, eyes: up ? 'star' : 'open', mouth: 'open', props: up ? [{ type: 'taco', lift: 0 }] : [] }
+  }
+  if (t < 4.7) {
+    const b = Math.floor((t - 0.7) / 0.5)
+    const ph = ((t - 0.7) % 0.5) / 0.5
+    const props = [{ type: 'taco', lift: 0 }, { type: 'notes', t: t - 0.7 }]
+    if (b < 4) return {
+      gold, dx: [-2, 0, 2, 0][b], dy: ph < 0.4 ? 1 : 0, lean: [-1, 0, 1, 0][b], step: [-1, 0, 1, 0][b], tail: [-1, 0, 1, 0][b],
+      armR: pick(t, [160, 145], 8), armL: [40, 150, 40, 150][b], eyes: 'happy', mouth: 'open', props,
+    }
+    if (b < 6) return { gold, dy: Math.round(3 * hop(ph)), armL: 165, armR: 165, eyes: ph > 0.3 && ph < 0.8 ? 'happy' : 'open', mouth: 'grin', props }
+    const k = Math.floor((t - 3.7) * 8)
+    return { gold, sx: [1, 0.7, 0.3, 0.7, 1, 0.7, 0.3, 0.7][k] ?? 1, flip: k >= 2 && k < 6, armL: 165, armR: 165, eyes: 'happy', mouth: 'open', props }
+  }
+  if (t < 5.7) {
+    const p = t - 4.7
+    return {
+      gold, armR: p < 0.1 ? 170 : 120, armL: 40, look: p < 0.75 ? [0, -1] : [0, 0], eyes: p < 0.6 ? 'open' : 'wide',
+      mouth: p < 0.6 ? 'smile' : 'big', sy: p > 0.95 ? 0.92 : 1, props: [{ type: 'toss', p }],
+    }
+  }
+  return { gold, eyes: 'happy', blush: true, mouth: pick(t, ['cat', 'small'], 6), sy: t < 5.8 ? 0.94 : 1 }
+}, { still: 1.2, sponsor: true })
 def('stretchy', 'Stretch tall', 'own', 2, (t) => {
   if (t < 0.9) return { sy: lerp(1, 1.5, t / 0.9), sx: lerp(1, 0.78, t / 0.9), look: [0, -1], eyes: 'wide', mouth: 'o', armL: 170, armR: 170 }
   if (t < 1.1) return { sy: 0.75, sx: 1.2, eyes: 'squeeze', mouth: 'flat' }
@@ -1583,6 +1852,32 @@ export function render(mascot, anim, t, opts = {}) {
   return compose(M, pose, local, { theme: opts.theme || 'monochrome', mode: opts.mode || 'dark', extras: opts.extras !== false })
 }
 
+// Sponsor gold washes over the body from the feet up, a cell at a time in an
+// ordered dither, so it steps in like the rest of the motion. `v` is 0..1.
+const GOLD = { o: 'n', b: 'y', B: 'Y', h: 'u', k: 'u', J: 'y', j: 'Y' }
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
+function goldTint(g, v) {
+  for (let y = 0; y < g.h; y++)
+    for (let x = 0; x < g.w; x++) {
+      const k = GOLD[g.px[y * g.w + x]]
+      if (!k) continue
+      const at = Math.min(1, Math.max(0, (GROUND - y) / 30)) * 0.7 + (BAYER[(y % 4) * 4 + (x % 4)] / 16) * 0.3
+      if (at < v) g.px[y * g.w + x] = k
+    }
+}
+
+// A band of light gold sliding up through the gold body on a slant; `s` is
+// where the band is, 0 at the feet to about 50 past the head.
+function shine(g, s) {
+  for (let y = 0; y < g.h; y++)
+    for (let x = 0; x < g.w; x++) {
+      const k = g.px[y * g.w + x]
+      if (k !== 'y' && k !== 'Y') continue
+      const d = x * 0.5 + (GROUND - y) - s
+      if (d >= 0 && d < 2.5) g.px[y * g.w + x] = 'u'
+    }
+}
+
 export function compose(M, P, t, ctx) {
   const g = new Grid()
   if (!P.clip && P.melt < 0.3) {
@@ -1591,6 +1886,8 @@ export function compose(M, P, t, ctx) {
   }
   const mg = new Grid()
   const a = M.draw(mg, P, ctx, t)
+  if (P.gold > 0) goldTint(mg, P.gold)
+  if (P.shine != null) shine(mg, P.shine)
   if (ctx.extras && !(THEMES[ctx.theme].neon && ctx.mode === 'dark')) accessory(mg, ctx.theme, a)
   const shift = (y) => Math.round((P.lean * (GROUND - y)) / 20)
   for (let y = 0; y < H; y++)

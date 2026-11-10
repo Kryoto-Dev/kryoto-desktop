@@ -252,6 +252,67 @@ fn start(app: &AppHandle, token: Zeroizing<String>, user_id: u64) -> Result<(), 
     Ok(())
 }
 
+/// What chat does about who the Store says is signed in.
+#[derive(Debug, PartialEq)]
+enum Follow {
+    Nothing,
+    /// Somebody else's chat is connected: it stops.
+    Pause,
+    /// Its account is back: it carries on.
+    Resume,
+}
+
+/// `chat_user` is the account chat is on, `store_user` the one signed in to
+/// kryo.to (`None` when nobody is). Pure, for the tests.
+fn follow(chat_user: u64, store_user: Option<u64>, connected: bool, paused: bool) -> Follow {
+    match (store_user == Some(chat_user), connected, paused) {
+        (false, true, _) => Follow::Pause,
+        (true, false, true) => Follow::Resume,
+        _ => Follow::Nothing,
+    }
+}
+
+/// The account the Store last named, once it has said (`Some(None)`: nobody).
+static STORE_USER: std::sync::Mutex<Option<Option<u64>>> = std::sync::Mutex::new(None);
+/// Chat stopped because of `follow_account`, and comes back with its account.
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Who is signed in to kryo.to, as the Store reports it: an account's id, or
+/// `None` when nobody is. Chat has a sign-in of its own, so signing out of
+/// kryo.to left it connected: messages and calls kept coming for the account
+/// that had left, and the next person to sign in here was shown them. It stops
+/// while the Store is anyone else's, keeps its keys and messages, and carries
+/// on when that account is back.
+pub fn follow_account(app: &AppHandle, id: Option<&str>) {
+    use std::sync::atomic::Ordering;
+    let store_user = match id {
+        Some(id) => match id.parse::<u64>() {
+            Ok(user) => Some(user),
+            // Signed in, but the page did not say who.
+            Err(_) => return,
+        },
+        None => None,
+    };
+    *STORE_USER.lock().unwrap_or_else(|e| e.into_inner()) = Some(store_user);
+    let Some(account) = account_file(app).ok().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str::<Account>(&t).ok()) else { return };
+    let state = app.state::<ChatState>();
+    let connected = state.chat.lock().expect("chat state").is_some();
+    match follow(account.user_id, store_user, connected, PAUSED.load(Ordering::SeqCst)) {
+        Follow::Nothing => {}
+        Follow::Pause => {
+            PAUSED.store(true, Ordering::SeqCst);
+            stop_task(&state);
+            crate::system::set_unread_badge(app, 0);
+            set_status(app, ChatStatus::SignInNeeded);
+            logging::info("chat", "stopped: another account, or none, is signed in to kryo.to");
+        }
+        Follow::Resume => {
+            PAUSED.store(false, Ordering::SeqCst);
+            autostart(app);
+        }
+    }
+}
+
 /// At launch: if chat was turned on here before, connect again.
 pub fn autostart(app: &AppHandle) {
     let app = app.clone();
@@ -349,8 +410,10 @@ pub async fn chat_enable(app: AppHandle) -> Result<ChatStatus, String> {
     let base = api_base(&app);
 
     let existing = secrets::read(secrets::SESSION)?;
+    // Another account's session stays out of it: this is who the Store says is here.
+    let store_user = *STORE_USER.lock().unwrap_or_else(|e| e.into_inner());
     let valid = match &existing {
-        Some(t) => auth::me(&base, t).await?.is_some(),
+        Some(t) => auth::me(&base, t).await?.is_some_and(|me| store_user.is_none_or(|user| user == Some(me.id))),
         None => false,
     };
     let token = match existing {
@@ -380,6 +443,7 @@ pub async fn chat_enable(app: AppHandle) -> Result<ChatStatus, String> {
     std::fs::write(account_file(&app)?, serde_json::to_string(&Account { user_id: me.id }).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     start(&app, token, me.id)?;
+    PAUSED.store(false, std::sync::atomic::Ordering::SeqCst);
     logging::info("chat", "turned on for this PC");
     Ok(ChatStatus::Connecting)
 }
@@ -516,12 +580,6 @@ pub async fn chat_mark_read(app: AppHandle, state: State<'_, ChatState>, peer: S
     r
 }
 
-/// Search this PC's messages. Nothing is searched anywhere else.
-#[tauri::command]
-pub async fn chat_search(state: State<'_, ChatState>, query: String) -> Result<Vec<km_store_sqlcipher::MessageRow>, String> {
-    current(&state)?.search(&query).await
-}
-
 #[tauri::command]
 pub async fn chat_settings_get(state: State<'_, ChatState>) -> Result<Settings, String> {
     Ok(current(&state)?.settings().await)
@@ -594,6 +652,41 @@ pub async fn chat_backup_delete(state: State<'_, ChatState>) -> Result<(), Strin
 #[tauri::command]
 pub async fn chat_devices(state: State<'_, ChatState>) -> Result<Vec<identity::MyDevice>, String> {
     current(&state)?.my_devices().await
+}
+
+/// The gateway's own HTTP routes, with the account's session token: no chat
+/// device needed (kryoto-gateway src/devices.rs).
+async fn gateway_request(method: reqwest::Method, path: &str) -> Result<serde_json::Value, String> {
+    let token = secrets::read(secrets::SESSION)?.ok_or("Sign in to chat first.")?;
+    let r = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?
+        .request(method, format!("{}{path}", gateway_http()))
+        .bearer_auth(token.as_str())
+        .send()
+        .await
+        .map_err(|_| "Could not reach the chat server. Check your connection.".to_string())?;
+    match r.status() {
+        s if s == reqwest::StatusCode::NO_CONTENT => Ok(serde_json::Value::Null),
+        s if s.is_success() => r.json().await.map_err(|_| "The chat server sent an unexpected answer.".to_string()),
+        reqwest::StatusCode::UNAUTHORIZED => Err("Sign in again.".into()),
+        reqwest::StatusCode::NOT_FOUND => Err("That device is not on your account any more.".into()),
+        s => Err(format!("The chat server answered {}. Try again in a moment.", s.as_u16())),
+    }
+}
+
+/// The account's chat devices, with no chat device on this PC: a PC turned
+/// away at the limit makes room with this.
+#[tauri::command]
+pub async fn chat_account_devices() -> Result<serde_json::Value, String> {
+    gateway_request(reqwest::Method::GET, "/v1/devices").await
+}
+
+#[tauri::command]
+pub async fn chat_account_device_remove(id: String) -> Result<(), String> {
+    let id: u64 = id.parse().map_err(|_| "Not a device.".to_string())?;
+    gateway_request(reqwest::Method::DELETE, &format!("/v1/devices/{id}")).await.map(|_| ())
 }
 
 #[tauri::command]
@@ -708,9 +801,10 @@ pub async fn room_list(app: AppHandle, after: Option<String>) -> Result<serde_js
 }
 
 #[tauri::command]
-pub async fn room_post(app: AppHandle, text: String) -> Result<serde_json::Value, String> {
+pub async fn room_post(app: AppHandle, text: String, reply_to: Option<String>) -> Result<serde_json::Value, String> {
     let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
-    auth::api(&api_base(&app), &token, reqwest::Method::POST, "/api/chat/room", Some(serde_json::json!({ "text": text }))).await
+    let reply_to = reply_to.filter(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()));
+    auth::api(&api_base(&app), &token, reqwest::Method::POST, "/api/chat/room", Some(serde_json::json!({ "text": text, "replyTo": reply_to }))).await
 }
 
 #[tauri::command]
@@ -769,6 +863,47 @@ pub async fn chat_people(app: AppHandle, ids: Vec<String>) -> Result<serde_json:
     let ids = ids.iter().map(|i| user_id(i)).collect::<Result<Vec<_>, _>>()?;
     let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
     auth::people(&api_base(&app), &token, &ids).await
+}
+
+// ---- mentions (kryo.to lib/mentions.ts) -----------------------------------------
+
+/// People to offer in the `@` list for the public room: never anonymous accounts.
+#[tauri::command]
+pub async fn chat_mention_search(app: AppHandle, query: String) -> Result<serde_json::Value, String> {
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    let q: String = query.chars().take(32).collect();
+    let path = format!("/api/mentions?q={}", url_escape(&q));
+    auth::api(&api_base(&app), &token, reqwest::Method::GET, &path, None).await
+}
+
+/// How stored mentions read now, masked by the site (anonymous people carry no name).
+#[tauri::command]
+pub async fn chat_mention_lookup(app: AppHandle, ids: Vec<String>) -> Result<serde_json::Value, String> {
+    let ids = ids.iter().take(64).map(|i| user_id(i)).collect::<Result<Vec<_>, _>>()?;
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    let path = format!("/api/mentions?ids={}", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+    auth::api(&api_base(&app), &token, reqwest::Method::GET, &path, None).await
+}
+
+/// Ask the site to tell the people an encrypted message mentions. Only the ids
+/// and the message id leave this PC, never what was said.
+#[tauri::command]
+pub async fn chat_mention_notify(app: AppHandle, ids: Vec<String>, message: String, group: bool) -> Result<(), String> {
+    let ids = ids.iter().take(20).map(|i| user_id(i)).collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() || message.is_empty() || message.len() > 80 || !message.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Ok(());
+    }
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    let ids: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+    let body = serde_json::json!({ "ids": ids, "message": message, "group": group });
+    auth::api(&api_base(&app), &token, reqwest::Method::POST, "/api/chat/mentions", Some(body)).await.map(|_| ())
+}
+
+/// Percent-encode a query value (letters, digits and `-_.~` stay).
+fn url_escape(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
 }
 
 #[tauri::command]
@@ -929,6 +1064,20 @@ fn whoami() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_stays_with_its_own_account() {
+        // Signed out, or somebody else signed in: it stops.
+        assert_eq!(follow(7, None, true, false), Follow::Pause);
+        assert_eq!(follow(7, Some(8), true, false), Follow::Pause);
+        // Its own account is here and it is on: nothing to do.
+        assert_eq!(follow(7, Some(7), true, false), Follow::Nothing);
+        // Back from signing out.
+        assert_eq!(follow(7, Some(7), false, true), Follow::Resume);
+        // Never stopped by this: turned off, locked, or not yet started at launch.
+        assert_eq!(follow(7, Some(7), false, false), Follow::Nothing);
+        assert_eq!(follow(7, None, false, true), Follow::Nothing);
+    }
 
     #[test]
     fn export_dates_are_iso_utc() {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, LifeBuoy, RotateCcw, X } from 'lucide-react'
+import { Check, LifeBuoy, RotateCcw, X } from '@/ui/pixel-icons'
 import { Button, Busy, Dropdown, Segmented } from '@/ui'
 import { MARK_H, MARK_PATH, MARK_W } from '@/ui/ascii/mark'
 import { errorText } from '@/lib/bridge'
@@ -97,19 +97,19 @@ export function RepairPanel({ backend, portable = false, initialOnline = false, 
       </fieldset>
       <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">Close the game first. Changing its source can break a working game. Kryoto backs up the emulator files; use Undo if the game stops working.</p>
       {forAchievements ? <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">gbe_fork and RUNE support achievement tracking, but they cannot provide Kryoto Online multiplayer. If one does not work, Undo and try another. Switching does not recover achievements the previous emulator never recorded.</p> : mode === 'online' ? <p className="text-[11px] text-muted-foreground">Kryoto Online needs Steam running and does not work with every game.</p> : null}
-      {forAchievements ? <Button onClick={() => void run()} disabled={busy || undo || !selected}>{busy ? <Busy className="size-4" /> : null} Switch to {selected?.label ?? 'emulator'}</Button> : <button type="button" onClick={() => void run()} disabled={busy || undo || !sources.length} aria-label="Start game repair" className="grid h-24 w-44 place-items-center text-primary transition-opacity hover:opacity-75 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:cursor-default disabled:opacity-50">
+      {forAchievements ? <Button onClick={() => run()} disabled={busy || undo || !selected}>{busy ? <Busy className="size-4" /> : null} Switch to {selected?.label ?? 'emulator'}</Button> : <button type="button" onClick={() => void run()} disabled={busy || undo || !sources.length} aria-label="Start game repair" className="grid h-24 w-44 place-items-center text-primary transition-opacity hover:opacity-75 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:cursor-default disabled:opacity-50">
         {busy ? <Busy className="size-9" /> : <svg viewBox={`0 0 ${MARK_W} ${MARK_H}`} className="w-36" aria-hidden="true"><path d={MARK_PATH} fill="currentColor" /></svg>}
       </button>}
       <p className="min-h-9 max-w-sm text-xs leading-relaxed" role="status" aria-live="polite" aria-atomic="true">{status}</p>
       {result && !answer ? <div className="flex gap-2">
         <Button size="sm" onClick={() => { setAnswer('working'); setStatus(portable ? 'You may delete auto-fixer-gbef.exe.' : 'The game works. Your backup is kept for Undo.') }}><Check className="size-4" aria-hidden="true" /> Working</Button>
-        <Button size="sm" variant="outline" onClick={() => void contact()}><X className="size-4" aria-hidden="true" /> Not working</Button>
+        <Button size="sm" variant="outline" onClick={() => contact()}><X className="size-4" aria-hidden="true" /> Not working</Button>
       </div> : null}
       {result?.warnings.length ? <details className="max-w-sm text-left text-xs text-muted-foreground"><summary>Repair notes</summary><ul className="mt-2 grid gap-1">{result.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></details> : null}
       <div className="flex flex-wrap justify-center gap-2">
-        {undo ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => void restore()}><RotateCcw className="size-3.5" aria-hidden="true" /> Undo repair</Button> : null}
-        {(answer === 'broken' || error) ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => void contact()}><LifeBuoy className="size-3.5" aria-hidden="true" /> Copy support report</Button> : null}
-        {report ? <Button size="sm" variant="outline" onClick={() => void backend.openSupport().catch((e: unknown) => setError(errorText(e)))}>Contact support</Button> : null}
+        {undo ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => restore()}><RotateCcw className="size-3.5" aria-hidden="true" /> Undo repair</Button> : null}
+        {(answer === 'broken' || error) ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => contact()}><LifeBuoy className="size-3.5" aria-hidden="true" /> Copy support report</Button> : null}
+        {report ? <Button size="sm" variant="outline" onClick={() => backend.openSupport().catch((e: unknown) => setError(errorText(e)))}>Contact support</Button> : null}
       </div>
       {error ? <p className="max-w-sm break-words text-xs text-destructive" role="alert">{error}</p> : null}
     </section>

@@ -1,17 +1,18 @@
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 import { gameContext } from './context'
-import { ChevronDown, Play, Square } from 'lucide-react'
+import { ChevronDown, Play, Square } from '@/ui/pixel-icons'
 import { Button, Label, MenuButton } from '@/ui'
 import { capsulesFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
+import { formatBytes } from '@/lib/downloads'
+import { useDiskSizes } from '@/hooks/useDiskSizes'
 import { usePersisted } from '@/hooks/usePersisted'
 import { useLivePlaytime } from '@/hooks/useLivePlaytime'
 import { Art } from '@/library/Art'
 import { coverFor, heroFor } from '@/lib/game-artwork'
 import { cn } from '@/lib/utils'
 import { BranchTag } from '@/library/BranchTag'
-
-export { Art }
+import { VrTag } from '@/library/VrTag'
 
 /** A small Stop for a game that is running, where a card or row has no room for the big one. */
 export function StopChip({ game, onStop, className }: { game: LibraryGame; onStop: (game: LibraryGame) => void; className?: string }) {
@@ -36,13 +37,14 @@ function LivePlaytime({ game, running }: { game: LibraryGame; running: boolean }
   return <>{formatPlaytime(useLivePlaytime(game, running))}</>
 }
 
-type Sort = 'alpha' | 'recent' | 'playtime' | 'added'
+type Sort = 'alpha' | 'recent' | 'playtime' | 'added' | 'size'
 
 const SORTS: Record<Sort, string> = {
   alpha: 'A to Z',
   recent: 'Last played',
   playtime: 'Hours played',
   added: 'Recently added',
+  size: 'Size on disk',
 }
 const isSort = (v: string): v is Sort => v in SORTS
 
@@ -51,7 +53,6 @@ const isSort = (v: string): v is Sort => v in SORTS
  * Steam's Recent shelf and every game as a poster grid with Play on hover.
  */
 export function LibraryHome({
-  top,
   games,
   running,
   onOpen,
@@ -59,8 +60,6 @@ export function LibraryHome({
   onStop,
   onContext,
 }: {
-  /** Above everything else (the controller welcome). */
-  top?: React.ReactNode
   games: LibraryGame[]
   running: Set<string>
   onOpen: (id: string) => void
@@ -69,24 +68,31 @@ export function LibraryHome({
   onContext: (game: LibraryGame, x: number, y: number) => void
 }) {
   const [sort, setSort] = usePersisted<Sort>('kryoto.library.sort', 'alpha', isSort)
+  const { sizes, measuring } = useDiskSizes(games, sort === 'size')
   const recent = useMemo(
     () => games.filter((g) => g.lastPlayed).sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0)),
     [games],
   )
+  // Sizes arrive one game at a time. The grid waits for the last of them and
+  // moves once, instead of reshuffling under the pointer with every answer.
+  const settledSizes = useRef(sizes)
+  if (!measuring) settledSizes.current = sizes
+  const orderBy = settledSizes.current
   const sorted = useMemo(() => {
     const list = games.slice()
-    if (sort === 'alpha') list.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }))
+    if (sort === 'alpha' || (sort === 'size' && !Object.keys(orderBy).length)) list.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }))
     if (sort === 'recent') list.sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0))
     if (sort === 'playtime') list.sort((a, b) => b.playtimeSeconds - a.playtimeSeconds)
     if (sort === 'added') list.sort((a, b) => b.addedAt - a.addedAt)
+    // Heaviest first; a game not measured yet, or with no folder, goes last.
+    if (sort === 'size') list.sort((a, b) => (orderBy[b.id]?.bytes ?? 0) - (orderBy[a.id]?.bytes ?? 0) || a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }))
     return list
-  }, [games, sort])
+  }, [games, sort, orderBy])
   const last = recent[0]
   const ctx = (g: LibraryGame) => gameContext((x, y) => onContext(g, x, y))
 
   return (
     <div className="grid min-h-0 grow content-start gap-8 overflow-auto p-6">
-      {top}
       {last ? (
         <section
           {...ctx(last)}
@@ -114,7 +120,13 @@ export function LibraryHome({
                 </Button>
               )}
               <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                <LivePlaytime game={last} running={running.has(last.id)} /> played
+                {last.playtimeSeconds || running.has(last.id) ? (
+                  <>
+                    <LivePlaytime game={last} running={running.has(last.id)} /> played
+                  </>
+                ) : (
+                  'Not played yet'
+                )}
               </span>
             </div>
           </div>
@@ -139,10 +151,10 @@ export function LibraryHome({
                 <span className="grid gap-0.5 px-3 py-2.5">
                   <span className="flex min-w-0 items-center gap-1.5">
                     <span className="truncate text-xs font-bold text-foreground">{g.title}</span>
-                    <BranchTag branch={g.steamBranch} />
+                    <BranchTag branch={g.steamBranch} launcher={g.launcher} />
                   </span>
                   <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                    {running.has(g.id) ? <>Running now · <LivePlaytime game={g} running /></> : `${formatLastPlayed(g.lastPlayed)} · ${formatPlaytime(g.playtimeSeconds)}`}
+                    {running.has(g.id) ? <>Running now · <LivePlaytime game={g} running /></> : g.playtimeSeconds ? `${formatLastPlayed(g.lastPlayed)} · ${formatPlaytime(g.playtimeSeconds)}` : formatLastPlayed(g.lastPlayed)}
                   </span>
                 </span>
               </button>
@@ -156,6 +168,7 @@ export function LibraryHome({
       <section className="grid min-w-0 gap-3">
         <div className="flex items-center gap-3">
           <Label>All games · {games.length}</Label>
+          {sort === 'size' && measuring > 0 ? <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Measuring {measuring} more</span> : null}
           <span className="h-px grow bg-border" />
           <MenuButton
             align="right"
@@ -179,7 +192,15 @@ export function LibraryHome({
               <button type="button" onClick={() => onOpen(g.id)} className="kryo-square absolute inset-0" aria-label={`Open ${g.title}`}>
                 <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />
               </button>
-              <BranchTag branch={g.steamBranch} className="pointer-events-none absolute right-2 top-2 backdrop-blur" />
+              <span className="pointer-events-none absolute right-2 top-2 flex flex-col items-end gap-1">
+                <BranchTag branch={g.steamBranch} launcher={g.launcher} className="backdrop-blur" />
+                <VrTag vr={g.vr} className="backdrop-blur" />
+              </span>
+              {sort === 'size' && sizes[g.id]?.bytes ? (
+                <span className="kryo-pill pointer-events-none absolute bottom-3 left-2 bg-background/80 px-2 py-0.5 text-[10px] font-bold tabular-nums text-foreground backdrop-blur">
+                  {formatBytes(sizes[g.id]?.bytes)}
+                </span>
+              ) : null}
               {running.has(g.id) ? (
                 <span className="kryo-pill absolute left-2 top-2 flex items-center gap-1 bg-background/80 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-success backdrop-blur">
                   <span className="kryo-blink size-1.5 rounded-full bg-success" />

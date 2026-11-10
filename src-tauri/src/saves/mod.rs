@@ -9,9 +9,15 @@
 //! it starts, puts back saves another PC made since. Everything for one game
 //! lives in `<app data>/saves/<game id>/`: its rules, its sync state, a hash
 //! cache, and local backups of whatever a restore replaced.
+//!
+//! With a saves server of the player's own (Settings > Patchbay), all of that
+//! goes there instead, and needs neither kryo.to's flag nor the perk. What
+//! this PC knows about each place (the account, each game's sync state) is
+//! kept apart per place, so switching between them, and back, mixes nothing.
 
 pub mod api;
 mod known;
+pub(crate) mod local;
 pub mod precise;
 mod sync;
 pub mod tracer;
@@ -29,7 +35,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::library::LibraryGame;
 
-pub use sync::{after_exit, before_launch};
+pub use sync::{after_exit, before_launch, bring_from_hydra, catch_up};
 
 pub(crate) fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -79,18 +85,77 @@ pub struct Account {
     pub last_sync: Option<u64>,
 }
 
-static ACCOUNT: Mutex<Option<Account>> = Mutex::new(None);
+/// The account as last read, and the place it is for (`place`).
+static ACCOUNT: Mutex<Option<(String, Account)>> = Mutex::new(None);
 
-fn account_file<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    Some(base_dir(app)?.join("account.json"))
+/// Where save versions are kept.
+pub(crate) enum Target {
+    /// The kryo.to account (a supporter perk).
+    Account,
+    /// A folder on this PC (local.rs), for everyone.
+    Local(PathBuf),
+    /// The player's own server (Settings > Patchbay).
+    Own(crate::patchbay::Own),
+}
+
+/// Settings' choice (`saves_mode`). Before there was one, an own server set
+/// in Patchbay was used whenever there was one, and that still holds.
+pub(crate) fn target<R: Runtime>(app: &AppHandle<R>) -> Target {
+    let s = crate::settings::load(app);
+    match s.saves_mode.as_str() {
+        "local" if !s.saves_local_dir.trim().is_empty() => Target::Local(PathBuf::from(s.saves_local_dir.trim())),
+        "account" => Target::Account,
+        _ => crate::patchbay::saves(app).map(Target::Own).unwrap_or(Target::Account),
+    }
+}
+
+/// Where versions are kept, for a sentence: "your kryo.to account",
+/// "D:\Kryoto Saves", or the own server's host.
+pub(crate) fn where_kept<R: Runtime>(app: &AppHandle<R>) -> String {
+    match target(app) {
+        Target::Account => "your kryo.to account".into(),
+        Target::Local(dir) => dir.to_string_lossy().into_owned(),
+        Target::Own(o) => o.host,
+    }
+}
+
+/// The ledger name for the local place: one per folder, so pointing it at
+/// another folder starts that folder's own history.
+pub(crate) const LOCAL_PLACE: &str = "local";
+
+/// Where saves go: `""` for kryo.to, `local-<key>` for a folder on this PC,
+/// or the own server's ledger key.
+pub(crate) fn place<R: Runtime>(app: &AppHandle<R>) -> String {
+    match target(app) {
+        Target::Account => String::new(),
+        Target::Local(dir) => format!("{LOCAL_PLACE}-{}", crate::patchbay::ledger_key(&dir.to_string_lossy())),
+        Target::Own(o) => crate::patchbay::ledger_key(&o.base),
+    }
+}
+
+/// A file name for this place: `account.json`, or `account-<key>.json`.
+fn per_place(name: &str, place: &str) -> String {
+    if place.is_empty() { format!("{name}.json") } else { format!("{name}-{place}.json") }
+}
+
+fn account_file<R: Runtime>(app: &AppHandle<R>, place: &str) -> Option<PathBuf> {
+    Some(base_dir(app)?.join(per_place("account", place)))
 }
 
 pub(crate) fn account<R: Runtime>(app: &AppHandle<R>) -> Account {
+    let place = place(app);
     let mut slot = ACCOUNT.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.is_none() {
-        *slot = Some(account_file(app).map(|f| read_json(&f)).unwrap_or_default());
+    if slot.as_ref().is_none_or(|(p, _)| *p != place) {
+        let mut a: Account = account_file(app, &place).map(|f| read_json(&f)).unwrap_or_default();
+        // A folder on this PC or the player's own server: no kryo.to flag or
+        // account involved. The name keeps each game's sync state tied to it.
+        if !place.is_empty() {
+            a.username = Some(if place.starts_with(LOCAL_PLACE) { place.clone() } else { format!("patchbay:{place}") });
+            a.feature = true;
+        }
+        *slot = Some((place, a));
     }
-    slot.clone().unwrap_or_default()
+    slot.as_ref().map(|(_, a)| a.clone()).unwrap_or_default()
 }
 
 pub(crate) fn update_account<R: Runtime>(app: &AppHandle<R>, f: impl FnOnce(&mut Account)) {
@@ -100,10 +165,14 @@ pub(crate) fn update_account<R: Runtime>(app: &AppHandle<R>, f: impl FnOnce(&mut
     if a == before {
         return;
     }
-    if let Ok(mut slot) = ACCOUNT.lock() {
-        *slot = Some(a.clone());
+    let place = place(app);
+    if !place.is_empty() {
+        a.feature = true;
     }
-    if let Some(file) = account_file(app) {
+    if let Ok(mut slot) = ACCOUNT.lock() {
+        *slot = Some((place.clone(), a.clone()));
+    }
+    if let Some(file) = account_file(app, &place) {
         let _ = write_json(&file, &a);
     }
     let _ = app.emit("cloud-saves", status_of(app, &a));
@@ -112,6 +181,10 @@ pub(crate) fn update_account<R: Runtime>(app: &AppHandle<R>, f: impl FnOnce(&mut
 /// kryo.to said who is signed in and whether cloud saves are on for them.
 /// Another account signing in starts from scratch.
 pub fn set_account<R: Runtime>(app: &AppHandle<R>, username: Option<&str>, feature: bool) {
+    // Saving to the player's own server: kryo.to's account has no say in it.
+    if !place(app).is_empty() {
+        return;
+    }
     update_account(app, |a| {
         if a.username.as_deref() != username {
             *a = Account { username: username.map(str::to_string), ..Default::default() };
@@ -393,10 +466,13 @@ pub struct GameState {
     /// The last thing that went wrong, for the game page.
     pub error: Option<String>,
     pub too_big: bool,
+    /// The backup when the game closed did not get through: tried again when
+    /// kryo.to next answers (`sync::catch_up`).
+    pub owed: bool,
 }
 
 pub(crate) fn state_file<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<PathBuf> {
-    Some(game_data(app, id)?.join("state.json"))
+    Some(game_data(app, id)?.join(per_place("state", &place(app))))
 }
 
 pub(crate) fn load_state<R: Runtime>(app: &AppHandle<R>, id: &str) -> GameState {
@@ -430,6 +506,12 @@ pub struct Status {
     pub last_sync: Option<u64>,
     /// Games with a conflict waiting.
     pub conflicts: Vec<String>,
+    /// The player's own server (Settings > Patchbay), by host; none for kryo.to.
+    pub endpoint: Option<String>,
+    /// Where versions are kept: `account`, `local` or `patchbay`.
+    pub mode: &'static str,
+    /// `local`: the folder.
+    pub local_dir: Option<String>,
 }
 
 pub(crate) fn status_of<R: Runtime>(app: &AppHandle<R>, a: &Account) -> Status {
@@ -447,7 +529,24 @@ pub(crate) fn status_of<R: Runtime>(app: &AppHandle<R>, a: &Account) -> Status {
         usage: a.usage.clone(),
         last_sync: a.last_sync,
         conflicts,
+        endpoint: match target(app) {
+            Target::Own(o) => Some(o.host),
+            _ => None,
+        },
+        mode: match target(app) {
+            Target::Account => "account",
+            Target::Local(_) => "local",
+            Target::Own(_) => "patchbay",
+        },
+        local_dir: match target(app) {
+            Target::Local(dir) => Some(dir.to_string_lossy().into_owned()),
+            _ => None,
+        },
     }
+}
+
+pub(crate) fn current_status<R: Runtime>(app: &AppHandle<R>) -> Status {
+    status_of(app, &account(app))
 }
 
 #[tauri::command(async)]
@@ -455,7 +554,7 @@ pub fn cloud_saves_status(app: AppHandle) -> Status {
     status_of(&app, &account(&app))
 }
 
-/// Ask kryo.to again for the perk, the allowance and what is stored.
+/// Ask kryo.to (or the own server) again for the perk, the allowance and what is stored.
 #[tauri::command]
 pub async fn cloud_saves_refresh(app: AppHandle) -> Result<Status, String> {
     if account(&app).feature {
@@ -867,6 +966,8 @@ pub fn cloud_saves_library(app: AppHandle) -> Vec<LibraryEntry> {
     let mut out: Vec<LibraryEntry> = crate::library::load(&app)
         .unwrap_or_default()
         .into_iter()
+        // Another launcher keeps its own games' saves.
+        .filter(|g| g.launcher.is_none())
         .map(|g| {
             let s = load_state(&app, &g.id);
             LibraryEntry { id: g.id, title: g.title, last_backup_at: s.last_backup_at, conflict: s.conflict, error: s.error, too_big: s.too_big }

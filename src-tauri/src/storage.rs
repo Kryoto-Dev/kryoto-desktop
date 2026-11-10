@@ -55,7 +55,8 @@ fn disk_space_of(path: &Path) -> Option<(u64, u64)> {
 /// mount point it lives under elsewhere (`/`, `/home`, `/mnt/games`).
 fn drive_of(path: &Path) -> String {
     if let Some(Component::Prefix(p)) = path.components().next() {
-        return p.as_os_str().to_string_lossy().trim_end_matches('\\').to_uppercase();
+        // A canonical path spells its drive \\?\C:, which is no name for a person.
+        return p.as_os_str().to_string_lossy().trim_start_matches(r"\\?\").trim_end_matches('\\').to_uppercase();
     }
     let full = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
@@ -87,16 +88,64 @@ pub fn game_folder(folders: &[String], install_dir: &str) -> Option<PathBuf> {
     None
 }
 
+/// The folder of a game added from somewhere else (brought over from Hydra,
+/// or picked in Add a game): its install folder, out of the subfolders
+/// engines put exes in (`bin`, `x64`, `Binaries\Win64`). Refused when that
+/// folder is not one game's own: a drive, the player's home or one of its
+/// usual folders, a library folder, or a folder another game in the library
+/// is also in. Moving it moves exactly that folder.
+pub fn outside_root(games: &[LibraryGame], folders: &[String], game: &LibraryGame) -> Result<PathBuf, String> {
+    const INNER: &[&str] = &["bin", "bin64", "bin32", "x64", "x86", "win64", "win32", "binaries", "retail", "_retail_", "release"];
+    let mut root = PathBuf::from(&game.install_dir).canonicalize().map_err(|_| "Its folder is not there any more.".to_string())?;
+    while root.file_name().is_some_and(|n| INNER.contains(&n.to_string_lossy().to_ascii_lowercase().as_str())) {
+        match root.parent() {
+            Some(p) if p.parent().is_some() => root = p.to_path_buf(),
+            _ => break,
+        }
+    }
+    let not_own = || Err("Its folder holds more than this game, so Kryoto does not move it. Move it yourself, then point Properties at the new place.".to_string());
+    // A drive (C:\) or one level under it (C:\Games) is a place, not a game.
+    if root.components().filter(|c| matches!(c, Component::Normal(_))).count() < 2 {
+        return not_own();
+    }
+    let canon = |p: &str| PathBuf::from(p).canonicalize().ok();
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).and_then(|h| h.canonicalize().ok());
+    if let Some(home) = &home {
+        let usual = ["", "Desktop", "Downloads", "Documents", "Games", "AppData", "AppData/Local", "AppData/Roaming", ".local/share"];
+        if usual.iter().any(|u| root == home.join(u)) || !root.starts_with(home) && home.starts_with(&root) {
+            return not_own();
+        }
+    }
+    for f in folders.iter().filter_map(|f| canon(f)) {
+        if root == f || f.starts_with(&root) {
+            return not_own();
+        }
+    }
+    let others = games.iter().filter(|g| g.id != game.id && !g.install_dir.is_empty()).filter_map(|g| canon(&g.install_dir));
+    for dir in others {
+        if dir.starts_with(&root) {
+            return not_own();
+        }
+    }
+    Ok(root)
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredGame {
     id: String,
     title: String,
     folder: String,
-    bytes: u64,
     last_played: Option<u64>,
     cover: Option<String>,
     nsfw: bool,
+    /// Brought over from Hydra (whose own list still points at this folder).
+    from_hydra: bool,
+    /// For a game outside the library folders: why it cannot be moved in.
+    blocked: Option<String>,
+    /// The launcher that keeps it, for a game that lives there.
+    launcher: Option<String>,
+    version: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -108,7 +157,6 @@ pub struct LibraryFolder {
     exists: bool,
     total: u64,
     free: u64,
-    games_bytes: u64,
     games: Vec<StoredGame>,
 }
 
@@ -120,22 +168,68 @@ pub struct StorageOverview {
     elsewhere: Vec<StoredGame>,
 }
 
-fn stored(g: &LibraryGame, folder: PathBuf) -> StoredGame {
+/// Why a game another launcher keeps cannot move.
+fn keeper(g: &LibraryGame) -> Option<String> {
+    g.launcher.as_deref().map(|l| {
+        let mut name = l.chars();
+        let name: String = name.next().map(|c| c.to_uppercase().chain(name).collect()).unwrap_or_default();
+        format!("{name} manages this game.")
+    })
+}
+
+fn stored(g: &LibraryGame, folder: PathBuf, blocked: Option<String>) -> StoredGame {
     StoredGame {
         id: g.id.clone(),
         title: g.title.clone(),
-        bytes: library::dir_size(&folder),
-        folder: folder.to_string_lossy().into_owned(),
+        folder: dunce::simplified(&folder).to_string_lossy().into_owned(),
         last_played: g.last_played,
         cover: g.custom_cover.clone().or_else(|| g.cover.clone()),
         nsfw: g.nsfw,
+        from_hydra: g.origin.as_deref().is_some_and(|o| o.starts_with("hydra:")),
+        blocked,
+        launcher: g.launcher.clone(),
+        version: g.version.clone(),
     }
 }
 
+/// Forget library folders that are gone from the disk and hold no game: the
+/// folder Kryoto made first, left behind when the default moved, sat in every
+/// list beside the real one. One with games stays, whatever its state: a drive
+/// that is unplugged comes back.
+pub fn forget_gone_folders<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let mut s = settings::load(app);
+    let gone: Vec<String> = s.library_folders.iter().filter(|f| !Path::new(f.as_str()).is_dir()).cloned().collect();
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let games = library::load(app)?;
+    let empty: Vec<String> = gone.into_iter().filter(|f| !games.iter().any(|g| path_is_in(&g.install_dir, f))).collect();
+    if empty.is_empty() {
+        return Ok(());
+    }
+    s.library_folders.retain(|f| !empty.iter().any(|e| same_path(e, f)));
+    crate::logging::info("storage", &format!("forgot {} library folder(s) no longer on disk", empty.len()));
+    settings::write(app, &s)
+}
+
+/// By the words alone: for folders that may not be there to ask.
+fn path_is_in(path: &str, folder: &str) -> bool {
+    let norm = |p: &str| {
+        let p = p.trim().trim_end_matches(['\\', '/']).replace('\\', "/");
+        if cfg!(windows) { p.to_lowercase() } else { p }
+    };
+    let (path, folder) = (norm(path), norm(folder));
+    path == folder || path.starts_with(&format!("{folder}/"))
+}
+
+/// What is where, at once. Sizes are not in it: walking every game's folder
+/// took the page tens of seconds on a hard disk, so the page asks for them one
+/// game at a time afterwards (`game_disk_size`).
 fn overview<R: Runtime>(app: &AppHandle<R>) -> Result<StorageOverview, String> {
     if !app.try_state::<Moving>().is_some_and(|moving| moving.0.load(Ordering::SeqCst)) {
         recover_move(app)?;
     }
+    forget_gone_folders(app)?;
     let s = settings::load(app);
     let folders = settings::all_folders(&s);
     let games = library::load(app)?;
@@ -151,28 +245,30 @@ fn overview<R: Runtime>(app: &AppHandle<R>) -> Result<StorageOverview, String> {
                 exists: path.is_dir(),
                 total,
                 free,
-                games_bytes: 0,
                 games: Vec::new(),
             }
         })
         .collect();
     let mut elsewhere = Vec::new();
     for g in &games {
+        // Another launcher's folder is that launcher's to manage and move.
+        if let Some(who) = keeper(g) {
+            elsewhere.push(stored(g, PathBuf::from(&g.install_dir), Some(who)));
+            continue;
+        }
         match game_folder(&folders, &g.install_dir) {
             Some(dir) => {
                 let at = out
                     .iter()
                     .position(|f| PathBuf::from(&f.path).canonicalize().is_ok_and(|r| dir.starts_with(r)))
                     .unwrap_or(0);
-                let item = stored(g, dir);
-                out[at].games_bytes += item.bytes;
-                out[at].games.push(item);
+                out[at].games.push(stored(g, dir, None));
             }
-            None => elsewhere.push(stored(g, PathBuf::from(&g.install_dir))),
+            None => elsewhere.push(match outside_root(&games, &folders, g) {
+                Ok(root) => stored(g, root, None),
+                Err(why) => stored(g, PathBuf::from(&g.install_dir), Some(why)),
+            }),
         }
-    }
-    for f in &mut out {
-        f.games.sort_by_key(|g| std::cmp::Reverse(g.bytes));
     }
     Ok(StorageOverview { folders: out, elsewhere })
 }
@@ -180,6 +276,26 @@ fn overview<R: Runtime>(app: &AppHandle<R>) -> Result<StorageOverview, String> {
 #[tauri::command]
 pub async fn storage_overview(app: AppHandle) -> Result<StorageOverview, String> {
     tauri::async_runtime::spawn_blocking(move || overview(&app)).await.map_err(|e| e.to_string())?
+}
+
+/// The library folders and their free space only, without sizing every game
+/// (that walks whole drives): for the install prompt's folder choice.
+#[tauri::command]
+pub async fn storage_folders(app: AppHandle) -> Result<Vec<LibraryFolder>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = forget_gone_folders(&app);
+        let s = settings::load(&app);
+        settings::all_folders(&s)
+            .iter()
+            .map(|f| {
+                let path = PathBuf::from(f);
+                let (total, free) = disk_space(&path).unwrap_or((0, 0));
+                LibraryFolder { path: f.clone(), drive: drive_of(&path), is_default: same_path(f, &s.library_dir), exists: path.is_dir(), total, free, games: Vec::new() }
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Add a library folder. Made if it does not exist yet.
@@ -191,7 +307,7 @@ pub fn storage_add_folder(app: AppHandle, path: String) -> Result<(), String> {
     }
     std::fs::create_dir_all(&path).map_err(|e| format!("Cannot use {path}: {e}"))?;
     let mut s = settings::load(&app);
-    if settings::all_folders(&s).iter().any(|f| same_path(f, &path)) {
+    if settings::all_folders(&s).iter().any(|f| settings::same_folder(f, &path)) {
         return Err("That folder is already a library folder.".into());
     }
     s.library_folders.push(path.clone());
@@ -288,13 +404,33 @@ pub fn recover_move<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     };
     let journal: MoveJournal = serde_json::from_str(&text).map_err(|e| format!("The move recovery record is damaged: {e}"))?;
     let games = library::load(app)?;
-    let game = games.iter().find(|g| g.id == journal.id).ok_or("The interrupted move's game is no longer in the library. Both folders have been kept.")?;
+    // With the game gone from the library, or moved again since, there is
+    // nothing left to put back: keep the record and both folders, but stop it
+    // blocking Storage and every move for good (it survived reinstalls).
+    let Some(game) = games.iter().find(|g| g.id == journal.id) else {
+        return set_aside(&path, &journal, "its game is no longer in the library");
+    };
+    if !same_path(&game.install_dir, &journal.old_dir) && !same_path(&game.install_dir, &journal.new_dir) {
+        return set_aside(&path, &journal, "the game's library entry changed since");
+    }
     recover_paths(&journal, &game.install_dir)?;
     if journal.from.exists() && journal.dest.exists() {
         let extra = if same_path(&game.install_dir, &journal.new_dir) { &journal.from } else { &journal.dest };
         crate::logging::warn("storage", &format!("An interrupted move kept a second folder at {}. Inspect it before removing it.", extra.display()));
     }
     std::fs::remove_file(path).map_err(|e| e.to_string())
+}
+
+/// Rename a recovery record that can no longer be acted on to `storage-move-<time>.kept.json`, deleting nothing.
+fn set_aside(path: &Path, journal: &MoveJournal, why: &str) -> Result<(), String> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let kept = path.with_file_name(format!("storage-move-{stamp}.kept.json"));
+    std::fs::rename(path, &kept).map_err(|e| format!("Could not set the interrupted move's record aside: {e}"))?;
+    crate::logging::warn(
+        "storage",
+        &format!("An interrupted move was not finished because {why}. Nothing was deleted: look in {} and {}. Record kept at {}.", journal.from.display(), journal.dest.display(), kept.display()),
+    );
+    Ok(())
 }
 
 fn recover_paths(journal: &MoveJournal, install_dir: &str) -> Result<(), String> {
@@ -383,20 +519,28 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     if !folders.iter().any(|f| same_path(f, to)) {
         return Err("That is not one of your library folders.".into());
     }
-    let game = library::load(app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
-    let from = game_folder(&folders, &game.install_dir)
-        .ok_or("This game was added from its own folder, so Kryoto does not move it. Move it yourself, then point Properties at the new place.")?;
+    let games = library::load(app)?;
+    let game = games.iter().find(|g| g.id == id).cloned().ok_or("That game is no longer in the library.")?;
+    if let Some(who) = keeper(&game) {
+        return Err(who);
+    }
+    // A game added from elsewhere moves in with its whole own folder.
+    let from = match game_folder(&folders, &game.install_dir) {
+        Some(from) => from,
+        None => outside_root(&games, &folders, &game)?,
+    };
     let name = from.file_name().ok_or("That game folder has no name.")?.to_owned();
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
     let target_root = PathBuf::from(to).canonicalize().map_err(|e| e.to_string())?;
     let dest = target_root.join(&name);
     let rest = install_suffix(&from, Path::new(&game.install_dir))?;
-    let new_dir = dest.join(rest).to_string_lossy().into_owned();
+    // The game's own folder itself, or a folder inside it; never a trailing separator.
+    let new_dir = dunce::simplified(&if rest.as_os_str().is_empty() { dest.clone() } else { dest.join(rest) }).to_string_lossy().into_owned();
     if target_root.canonicalize().ok().as_deref() == from.parent() {
         return Err("It is already in that folder.".into());
     }
     if dest.exists() {
-        return Err(format!("{} already exists. Rename or remove it first.", dest.display()));
+        return Err(format!("{} already exists. Rename or remove it first.", dunce::simplified(&dest).display()));
     }
     let total = library::dir_size(&from);
     if let Some((_, free)) = disk_space(&target_root) {
@@ -500,6 +644,27 @@ fn human(bytes: u64) -> String {
     if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.0} MB", bytes as f64 / 1_048_576.0) }
 }
 
+/// `human`, for the other modules' messages and logs.
+pub fn human_size(bytes: u64) -> String {
+    human(bytes)
+}
+
+/// Both folders are on one drive.
+pub fn same_drive(a: &Path, b: &Path) -> bool {
+    drive_of(a) == drive_of(b)
+}
+
+/// Before a download starts: room for what is left of the archive where it is
+/// written, and for about as much again unpacked in the library. With a download
+/// folder on another drive, each drive only needs its own share.
+pub fn check_download_room(archive_dir: &Path, library: &Path, archive_left: u64, unpacked: u64, what: &str) -> Result<(), String> {
+    if same_drive(archive_dir, library) {
+        return check_room(library, archive_left + unpacked, what);
+    }
+    check_room(archive_dir, archive_left, what)?;
+    check_room(library, unpacked, what)
+}
+
 /// Before a download lands: is there room for the archive and what it unpacks
 /// to? `needed` is the caller's estimate. An error names both numbers.
 pub fn check_room(folder: &Path, needed: u64, what: &str) -> Result<(), String> {
@@ -518,6 +683,32 @@ pub fn check_room(folder: &Path, needed: u64, what: &str) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outside_game_moves_with_its_own_folder_only() {
+        let base = std::env::temp_dir().join(format!("kryoto-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let hades = base.join("Hydra Games").join("Hades");
+        std::fs::create_dir_all(hades.join("x64")).unwrap();
+        std::fs::create_dir_all(base.join("Hydra Games").join("Loose")).unwrap();
+        let lib = base.join("Kryoto Games");
+        std::fs::create_dir_all(&lib).unwrap();
+        let game = |id: &str, dir: &Path| LibraryGame { id: id.into(), title: id.into(), install_dir: dir.to_string_lossy().into(), ..Default::default() };
+        let folders = vec![lib.to_string_lossy().into_owned()];
+        // Out of the engine's x64 folder, to the game's own.
+        let h = game("hades", &hades.join("x64"));
+        let games = vec![h.clone()];
+        assert_eq!(outside_root(&games, &folders, &h).unwrap(), hades.canonicalize().unwrap());
+        // A folder that also holds another game is not this game's to move.
+        let loose = game("loose", &base.join("Hydra Games"));
+        let both = vec![h.clone(), loose.clone()];
+        assert!(outside_root(&both, &folders, &loose).is_err());
+        // Nor a library folder, nor a drive.
+        assert!(outside_root(&games, &folders, &game("lib", &lib)).is_err());
+        let drive = Path::new(&std::env::temp_dir()).ancestors().last().unwrap().to_path_buf();
+        assert!(outside_root(&games, &folders, &game("drive", &drive)).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn fixture() -> (PathBuf, MoveJournal) {
         let root = std::env::temp_dir().join(format!("kryoto-move-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -608,6 +799,23 @@ mod tests {
         recover_paths(&journal, &journal.new_dir).unwrap();
         assert!(journal.dest.join("bin/game.exe").exists());
         assert!(recover_paths(&journal, "unrelated edit").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_record_nothing_can_act_on_is_set_aside_and_both_folders_stay() {
+        let (root, journal) = fixture();
+        let record = root.join("storage-move.json");
+        save_journal(&record, &journal).unwrap();
+        copy_tree(&journal.from, &journal.dest, &mut |_| {}).unwrap();
+        set_aside(&record, &journal, "its game is no longer in the library").unwrap();
+        assert!(!record.exists());
+        let kept = std::fs::read_dir(&root).unwrap().filter_map(|e| e.ok()).any(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with("storage-move-") && name.ends_with(".kept.json")
+        });
+        assert!(kept);
+        assert!(journal.from.join("bin/game.exe").exists() && journal.dest.join("bin/game.exe").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

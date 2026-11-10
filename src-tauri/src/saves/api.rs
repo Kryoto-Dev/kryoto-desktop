@@ -3,6 +3,13 @@
 //! request from here. Storage itself is reached through the short-lived
 //! addresses kryo.to hands out, with a separate client that carries no
 //! cookies.
+//!
+//! With a saves server of the player's own in Settings > Patchbay
+//! (patchbay/), the same API is asked of that server instead, with its
+//! bearer token and no kryo.to cookie: kryo.to then sees none of it.
+//!
+//! With save versions kept on this PC (Settings > Cloud, local.rs), the same
+//! calls are answered from that folder, and nothing goes over the network.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -130,7 +137,18 @@ impl std::fmt::Display for ApiError {
 pub struct Api {
     http: reqwest::Client,
     base: String,
-    cookie: String,
+    auth: Auth,
+    /// Who answers, for messages: kryo.to, or the own server's host.
+    place: String,
+}
+
+enum Auth {
+    /// The Store view's kryo.to cookies.
+    Cookie(String),
+    /// The player's own server (Patchbay), with or without a token.
+    Own(crate::patchbay::Own),
+    /// A folder on this PC.
+    Local(super::local::LocalStore),
 }
 
 fn ua() -> &'static str {
@@ -151,6 +169,17 @@ impl Api {
     /// As the account signed in to the Store. Call from async code or a
     /// worker thread, never a synchronous command on the main thread.
     pub fn new<R: Runtime>(app: &AppHandle<R>) -> Result<Api, ApiError> {
+        match super::target(app) {
+            super::Target::Own(own) => {
+                return Ok(Api { http: crate::patchbay::client(), base: own.base.clone(), place: own.host.clone(), auth: Auth::Own(own) });
+            }
+            super::Target::Local(dir) => {
+                let keep = crate::settings::load(app).saves_local_keep;
+                let place = dir.to_string_lossy().into_owned();
+                return Ok(Api { http: reqwest::Client::new(), base: String::new(), place, auth: Auth::Local(super::local::LocalStore::new(dir, keep)) });
+            }
+            super::Target::Account => {}
+        }
         let base = crate::settings::catalog_endpoint(&crate::settings::load(app));
         let url = url::Url::parse(&base).map_err(|e| ApiError::Other(e.to_string()))?;
         let cookie = app
@@ -165,16 +194,24 @@ impl Api {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ApiError::Other(e.to_string()))?;
-        Ok(Api { http, base, cookie })
+        Ok(Api { http, base, auth: Auth::Cookie(cookie), place: "kryo.to".into() })
     }
 
     async fn send(&self, req: reqwest::RequestBuilder) -> Result<serde_json::Value, ApiError> {
-        let res = req.header("cookie", &self.cookie).send().await.map_err(|e| ApiError::Other(format!("Could not reach kryo.to: {e}")))?;
+        let req = match &self.auth {
+            Auth::Cookie(cookie) => req.header("cookie", cookie),
+            Auth::Own(own) => crate::patchbay::authorize(req, own),
+            Auth::Local(_) => return Err(ApiError::Other("Saves kept on this PC need no network.".into())),
+        };
+        let res = req.send().await.map_err(|e| ApiError::Other(format!("Could not reach {}: {e}", self.place)))?;
         let status = res.status().as_u16();
         let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
-        let message = || body.get("error").and_then(|e| e.as_str()).unwrap_or("kryo.to could not do that.").to_string();
+        let message = || body.get("error").and_then(|e| e.as_str()).map(str::to_string).unwrap_or_else(|| format!("{} could not do that.", self.place));
+        let own = matches!(self.auth, Auth::Own(_));
         match status {
             200..=299 => Ok(body),
+            401 | 403 if own => Err(ApiError::Other(format!("{} refused the token. Check it in Settings > Patchbay.", self.place))),
+            404 if own => Err(ApiError::Other(format!("{} has no cloud saves at this address. Check it in Settings > Patchbay.", self.place))),
             401 => Err(ApiError::SignedOut),
             403 if body.get("perk").and_then(|p| p.as_bool()) == Some(false) => Err(ApiError::NoPerk),
             404 => Err(ApiError::Off),
@@ -191,31 +228,50 @@ impl Api {
     }
 
     pub async fn list(&self) -> Result<List, ApiError> {
+        if let Auth::Local(store) = &self.auth {
+            return store.list();
+        }
         let v = self.send(self.http.get(self.url("/api/saves"))).await?;
         serde_json::from_value(v).map_err(|e| ApiError::Other(e.to_string()))
     }
 
     pub async fn head(&self, game_key: &str) -> Result<Head, ApiError> {
+        if let Auth::Local(store) = &self.auth {
+            return store.head(game_key);
+        }
         let v = self.send(self.http.get(self.url("/api/saves")).query(&[("gameKey", game_key)])).await?;
         serde_json::from_value(v).map_err(|e| ApiError::Other(e.to_string()))
     }
 
     pub async fn prepare(&self, body: serde_json::Value) -> Result<Prepared, ApiError> {
+        if let Auth::Local(store) = &self.auth {
+            return store.prepare(body);
+        }
         let v = self.send(self.http.post(self.url("/api/saves/prepare")).json(&body)).await?;
         serde_json::from_value(v).map_err(|e| ApiError::Other(e.to_string()))
     }
 
     pub async fn claim(&self, upload_id: &str) -> Result<Version, ApiError> {
+        if let Auth::Local(store) = &self.auth {
+            return store.claim(upload_id);
+        }
         let v = self.send(self.http.post(self.url("/api/saves/claim")).json(&json!({ "uploadId": upload_id }))).await?;
         serde_json::from_value(v.get("version").cloned().unwrap_or_default()).map_err(|e| ApiError::Other(e.to_string()))
     }
 
     pub async fn link(&self, version_id: &str) -> Result<Link, ApiError> {
+        if let Auth::Local(store) = &self.auth {
+            return store.link(version_id);
+        }
         let v = self.send(self.http.post(self.url("/api/saves/link")).json(&json!({ "versionId": version_id }))).await?;
         serde_json::from_value(v).map_err(|e| ApiError::Other(e.to_string()))
     }
 
     pub async fn rules(&self, keys: &[String]) -> Result<HashMap<String, Vec<kryoto_saves::Rule>>, ApiError> {
+        // On this PC there are no other players' locations to learn from.
+        if matches!(self.auth, Auth::Local(_)) {
+            return Ok(HashMap::new());
+        }
         let v = self.send(self.http.get(self.url("/api/saves/rules")).query(&[("gameKeys", keys.join(","))])).await?;
         let rules = v.get("rules").cloned().unwrap_or_default();
         // A rule this version cannot read is skipped, not the whole answer.
@@ -225,6 +281,9 @@ impl Api {
 
     /// `traced`: Windows saw the game write these (precise finding).
     pub async fn report_rules(&self, game_key: &str, rules: &[kryoto_saves::Rule], traced: bool) -> Result<(), ApiError> {
+        if matches!(self.auth, Auth::Local(_)) {
+            return Ok(());
+        }
         let rules: Vec<_> = rules.iter().take(20).map(|r| json!({ "kind": r.kind, "root": r.root, "path": r.path, "excludes": r.excludes, "source": "detected" })).collect();
         self.send(self.http.post(self.url("/api/saves/rules/report")).json(&json!({ "gameKey": game_key, "rules": rules, "traced": traced }))).await.map(|_| ())
     }
@@ -233,6 +292,10 @@ impl Api {
 /// PUT a backup to the address kryo.to gave, with exactly the headers it
 /// signed (the MD5 and length), so storage takes these bytes and no others.
 pub async fn upload(url: &str, headers: &HashMap<String, String>, file: &Path, size: u64, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<(), String> {
+    // A folder on this PC: the backup is copied in.
+    if let Some(dest) = super::local::path_of(url) {
+        return super::local::copy(file, &dest, size, sent).await.map(|_| ());
+    }
     let client = storage_client();
     let sent = std::sync::Arc::new(sent);
     let mut last = String::new();
@@ -293,6 +356,10 @@ fn counted(file: tokio::fs::File, sent: std::sync::Arc<impl Fn(u64) + Send + Syn
 pub async fn download(url: &str, out: &Path, max: u64, on_got: impl Fn(u64, u64)) -> Result<(), String> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
+    if let Some(src) = super::local::path_of(url) {
+        let total = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+        return super::local::copy(&src, out, max, |done| on_got(done, total.max(done))).await.map(|_| ());
+    }
     let res = storage_client().get(url).send().await.map_err(|e| format!("Could not download the backup: {e}"))?;
     if !res.status().is_success() {
         return Err(format!("Could not download the backup ({}).", res.status()));

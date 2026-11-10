@@ -70,7 +70,8 @@ fn progress(app: &AppHandle, id: &str, text: &str, percent: Option<u8>) {
 pub fn can_launch(app: &AppHandle, game: &LibraryGame) -> Result<(), String> {
     let root = root(app, game)?;
     journal::check_idle(&root)?;
-    if journal::load(&root)?.is_some_and(|r| r.state == "pending") {
+    // "Keep my files": what is in the folder is what the player wants to run.
+    if !game.keep_files && journal::load(&root)?.is_some_and(|r| r.state == "pending") {
         return Err(
             "A repair was interrupted. Undo it under Properties > Repair before starting the game."
                 .into(),
@@ -218,7 +219,7 @@ pub async fn repair_apply(
     Ok(report)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn repair_undo(app: AppHandle, game_id: String) -> Result<(), String> {
     let before = game(&app, &game_id)?;
     if app

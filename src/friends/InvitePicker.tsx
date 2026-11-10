@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Gamepad2, Search } from 'lucide-react'
+import { Gamepad2, Search } from '@/ui/pixel-icons'
 import { artSrc } from '@/lib/art'
 import { errorText } from '@/lib/bridge'
 import { chatSendInvite, onlineLobby } from '@/lib/chat'

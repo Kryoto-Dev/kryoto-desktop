@@ -1,6 +1,12 @@
 import { call, isTauri } from '@/lib/bridge'
 
-const DEFAULT_ENDPOINT = 'https://kryo.to'
+/**
+ * The site this app talks to: kryo.to, or the Kryoto Preview for the preview
+ * builds (built with VITE_KRYOTO_CHANNEL=preview; kryo.to docs/preview.md).
+ */
+export const IS_PREVIEW_BUILD = import.meta.env.VITE_KRYOTO_CHANNEL === 'preview'
+export const SITE_ORIGIN = IS_PREVIEW_BUILD ? 'https://preview.kryo.to' : 'https://kryo.to'
+const DEFAULT_ENDPOINT = SITE_ORIGIN
 
 let endpoint: Promise<string> | null = null
 

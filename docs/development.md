@@ -103,6 +103,6 @@ Changes are listed in kryo.to's changelog; this app has none of its own.
 | `src/lib/updates.ts`, `src/shell/UpdatePrompt.tsx` | the in-app updater: the check on launch, the prompt, Check for updates in About |
 | `src-tauri/src/logging.rs` | the log file, crash capture, reports to kryo.to |
 | `src/boot` | the start box and sign-in |
-| `src/shell`, `src/library`, `src/downloads`, `src/settings`, `src/community`, `src/friends` | the app |
+| `src/shell`, `src/library`, `src/downloads`, `src/settings`, `src/friends` | the app |
 | `src/ui/ascii` | the K// mark (traced from kryo.to's) and the block lettering, as vectors |
 | `scripts/brand.mjs` | icons and installer art, generated from the same code |

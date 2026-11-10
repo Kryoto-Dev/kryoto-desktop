@@ -1,6 +1,6 @@
 [package]
 name = "kryoto-desktop"
-version = "0.2.35"
+version = "0.3.0"
 description = "Kryoto's native desktop launcher shell."
 authors = ["Kryoto"]
 license = "MIT"
@@ -17,6 +17,10 @@ tauri-build = { version = "2", features = [] }
 kryoto-repair = { path = "../crates/kryoto-repair" }
 # Cloud saves: finding a game's saves, packing and restoring them (saves/).
 kryoto-saves = { path = "../crates/kryoto-saves" }
+# Bringing a Hydra Launcher library over, read-only, and matching it (hydra.rs).
+kryoto-import = { path = "../crates/kryoto-import" }
+# Plain paths (no `\\?\` prefix) for folders shown to the player and stored (storage.rs).
+dunce = "1"
 # Watching where a game writes while it runs (saves/tracer.rs).
 notify = { version = "8", default-features = false }
 walkdir = "2"
@@ -30,10 +34,15 @@ tokio = { version = "1", features = ["sync", "fs", "io-util", "time", "net", "ma
 futures-util = "0.3"
 sevenz-rust = "0.6"
 sha2 = "0.10"
+# filez.stream downloads (resolvers/filez.rs): its files are AES-256-GCM in
+# 1 MiB chunks, keyed by HKDF-SHA256 from the link's #fragment, decrypted here.
+aes-gcm = "0.10"
+hkdf = "0.12"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "network"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 regex = "1"
 base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 percent-encoding = "2"
 notify-rust = "4"
 tauri-plugin-updater = "2.13"
@@ -79,7 +88,11 @@ dev-plain-chat-store = ["km-store-sqlcipher/plain-sqlite-dev"]
 vigem-client = { version = "0.1", features = ["unstable_xtarget_notification"] }
 webview2-com = "0.39"
 windows = { version = "0.62", default-features = false }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_Etw", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_Etw", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Two pads at once, tested with virtual DualShock 4s (pad_games.rs).
+vigem-client = { version = "0.1", features = ["unstable_ds4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

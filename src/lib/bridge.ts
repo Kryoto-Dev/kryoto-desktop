@@ -38,9 +38,22 @@ export function isWeb() {
   return web !== null
 }
 
+/** Calls still waiting for their answer, so a page can tell when it has what it asked for (hooks/useSettled.ts). */
+let inFlight = 0
+export const callsInFlight = () => inFlight
+
 export function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (web) return web.call(command, args ?? {}) as Promise<T>
-  return isTauri() ? invoke<T>(command, args) : previewBackend().then(b => b.previewCall<T>(command, args))
+  const answer = web
+    ? (web.call(command, args ?? {}) as Promise<T>)
+    : isTauri()
+      ? invoke<T>(command, args)
+      : previewBackend().then(b => b.previewCall<T>(command, args))
+  inFlight++
+  const done = () => {
+    inFlight--
+  }
+  answer.then(done, done)
+  return answer
 }
 
 export function on<T>(event: string, handler: (payload: T) => void): Promise<() => void> {

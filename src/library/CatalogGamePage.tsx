@@ -1,13 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { isOnline } from '@/lib/online'
 import { gameContext } from './context'
-import { ChevronDown, Globe, Layers } from 'lucide-react'
-import { AsciiBar, Button, Caption, Card, IconButton, Label, MenuList, Modal, useDismiss } from '@/ui'
+import { FolderOpen, Globe, Layers } from '@/ui/pixel-icons'
+import { AsciiBar, Button, Caption, Card, Fact, IconButton, Label, Modal } from '@/ui'
 import { fetchCatalogGame, type CatalogGame } from '@/lib/library'
 import { isActive, phaseOf, progressOf, type Download as DownloadItem } from '@/lib/downloads'
 import { errorText } from '@/lib/bridge'
 import { GameBanner } from '@/library/Art'
-import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
+import { ListStatusMenu } from '@/library/GamePage'
+import type { SavedStatus } from '@/hooks/useSaved'
 import { InstallButton, VersionsList, type GetOurs } from '@/library/Versions'
+import { VrTag } from '@/library/VrTag'
 
 /**
  * A kryo.to game that is on one of your lists but not on this PC, opened in
@@ -27,6 +30,7 @@ export function CatalogGamePage({
   onStorePage,
   onDownloads,
   onContext,
+  onHaveIt,
 }: {
   slug: string
   /** What the list already knows, drawn while kryo.to answers. */
@@ -40,14 +44,13 @@ export function CatalogGamePage({
   onStorePage: () => void
   onDownloads: () => void
   onContext?: (x: number, y: number) => void
+  /** It is already on this PC: point at its .exe instead of downloading (Add a game). */
+  onHaveIt?: () => void
 }) {
   const [game, setGame] = useState<CatalogGame | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [statusOpen, setStatusOpen] = useState(false)
   const [versions, setVersions] = useState(false)
   const [installError, setInstallError] = useState<string | null>(null)
-  const statusRef = useRef<HTMLDivElement | null>(null)
-  useDismiss(statusOpen, statusRef, () => setStatusOpen(false))
 
   useEffect(() => {
     setGame(null)
@@ -57,7 +60,7 @@ export function CatalogGamePage({
       .then((g) => !cancelled && setGame(g))
       .catch((e) =>
         !cancelled &&
-        setError(navigator.onLine ? errorText(e) : 'This PC is offline. Its description and art come from kryo.to and show up once the connection is back.'),
+        setError(isOnline() ? errorText(e) : 'This PC is offline. Its description and art come from kryo.to and show up once the connection is back.'),
       )
     return () => {
       cancelled = true
@@ -77,7 +80,12 @@ export function CatalogGamePage({
         pending={!game && !error}
         banners={[game?.hero, ...(game?.screenshots.slice(0, 1) ?? []), game?.header, fallback.cover]}
         logo={game?.logo}
-        caption={<Caption>Not on this PC</Caption>}
+        caption={
+          <span className="flex items-center gap-2">
+            <Caption>Not on this PC</Caption>
+            <VrTag vr={game?.vr} />
+          </span>
+        }
       />
 
       <div className="kryo-radius relative z-10 mx-6 -mt-2 flex flex-wrap items-center gap-6 border border-border bg-card/90 p-4 backdrop-blur">
@@ -94,42 +102,11 @@ export function CatalogGamePage({
             title={title}
             onOurs={onInstall}
             onError={setInstallError}
-            onVersions={() => setVersions(true)}
             disabled={!game && !error}
           />
         )}
 
-        <div ref={statusRef} className="relative">
-          <button
-            type="button"
-            aria-expanded={statusOpen}
-            onClick={() => setStatusOpen((o) => !o)}
-            className="kryo-square grid gap-1 text-left"
-            title="Your list on kryo.to"
-          >
-            <Caption>On kryo.to</Caption>
-            <span className="flex items-center gap-1 text-sm text-foreground">
-              {savedStatus ? STATUS_LABEL[savedStatus] : 'Not listed'}
-              <ChevronDown className="size-3 text-muted-foreground" />
-            </span>
-          </button>
-          {statusOpen ? (
-            <div className="kryo-pop kryo-radius absolute left-0 top-[calc(100%+8px)] z-50 min-w-48 overflow-hidden border border-border bg-popover py-1 shadow-2xl shadow-black/60">
-              <MenuList
-                onDone={() => setStatusOpen(false)}
-                items={[
-                  ...STATUSES.map((st) => ({
-                    label: STATUS_LABEL[st],
-                    checked: savedStatus === st,
-                    hint: savedStatus === st ? 'now' : undefined,
-                    onSelect: () => onSetStatus(st),
-                  })),
-                  ...(savedStatus ? [{ separator: true } as const, { label: 'Take off my list', onSelect: () => onSetStatus(null) }] : []),
-                ]}
-              />
-            </div>
-          ) : null}
-        </div>
+        <ListStatusMenu status={savedStatus} onSet={onSetStatus} />
 
         <div className="ml-auto flex gap-2">
           <IconButton label="Builds" onClick={() => setVersions(true)}>
@@ -183,21 +160,14 @@ export function CatalogGamePage({
               {game.version ? <Fact k="Build" v={game.version} /> : null}
             </dl>
           ) : null}
-          <Button variant="outline" size="sm" onClick={onStorePage} className="w-fit">
-            <Globe className="size-3" />
-            Store page
-          </Button>
+          {onHaveIt ? (
+            <Button variant="ghost" size="sm" onClick={onHaveIt} className="w-fit">
+              <FolderOpen className="size-3" />
+              It's on this PC
+            </Button>
+          ) : null}
         </Card>
       </div>
     </section>
-  )
-}
-
-function Fact({ k, v }: { k: string; v: string }) {
-  return (
-    <>
-      <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">{k}</dt>
-      <dd className="m-0 select-text break-all text-foreground/90">{v}</dd>
-    </>
   )
 }
