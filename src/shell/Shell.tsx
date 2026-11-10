@@ -1467,6 +1467,12 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
             onPlay={play}
             onStop={(game) => void lib.stop(game.id)}
             onContext={(game, x, y) => setCtx({ game, x, y })}
+            saved={saved}
+            hiddenSlugs={hiddenSlugs}
+            downloads={dl}
+            onCatalogGame={(slug) => go({ kind: 'catalog', slug })}
+            onInstall={(slug) => openOurs(slug)}
+            onSavedContext={(entry, x, y) => setCtx({ saved: entry, x, y })}
           />
         )}
       </div>

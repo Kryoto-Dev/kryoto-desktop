@@ -31,6 +31,7 @@ let lastQuery = ''
  * Plan to Play, Favorite...), Steam's collections: games on this PC open as
  * usual, the rest are dimmed and open a page of their own in the Library.
  * The shelf picked is remembered, and the search while the client is open.
+ * On "On this PC", Kryoto's games are grouped under their status there.
  *
  * Games another launcher keeps (Steam, through Bridge) have a group of their
  * own under Kryoto's, with a way to take them all off the Library.
@@ -117,6 +118,21 @@ export function Sidebar({
   const secretGames = useMemo(() => list.filter((g) => g.hidden), [list])
   const shownGames = useMemo(() => list.filter((g) => !g.hidden), [list])
   const own = useMemo(() => shownGames.filter((g) => !g.launcher), [shownGames])
+  // This PC's games under the status they have on kryo.to (Playing, On Hold...),
+  // in the order the site lists them; the ones with none come last.
+  const ownGroups = useMemo(() => {
+    const statusOf = new Map(saved.map((e) => [e.slug, e.status]))
+    const by = new Map<SavedStatus | 'none', LibraryGame[]>()
+    for (const g of own) {
+      const st = (g.slug && statusOf.get(g.slug)) || 'none'
+      by.set(st, [...(by.get(st) ?? []), g])
+    }
+    const rest = by.get('none') ?? []
+    return [
+      ...STATUSES.filter((st) => by.has(st)).map((st) => ({ id: `status:${st}`, label: STATUS_LABEL[st], games: by.get(st)! })),
+      ...(rest.length ? [{ id: 'installed', label: by.size > 1 ? 'No status' : 'Installed', games: rest }] : []),
+    ]
+  }, [own, saved])
   const launchers = useMemo(() => [...new Set(shownGames.map((g) => g.launcher).filter((l): l is string => !!l))].sort(), [shownGames])
   const bySlug = useMemo(() => new Map(games.filter((g) => g.slug).map((g) => [g.slug!, g])), [games])
   // The saved games the player hid are in the Hidden group too, not on the shelves.
@@ -337,8 +353,14 @@ export function Sidebar({
             {listed.length === 0 ? <p className="px-2 py-3 text-xs text-muted-foreground">Nothing here.</p> : null}
           </>
         ) : null}
-        {shelf === 'installed' && own.length ? <Group label="Installed" count={own.length} open={isOpen('installed', true)} onToggle={() => flip('installed')} /> : null}
-        {(shelf === 'installed' && isOpen('installed', true) ? own : []).map(gameRow)}
+        {shelf === 'installed'
+          ? ownGroups.map((group) => (
+              <Fragment key={group.id}>
+                <Group label={group.label} count={group.games.length} open={isOpen(group.id, true)} onToggle={() => flip(group.id)} />
+                {isOpen(group.id, true) ? group.games.map(gameRow) : null}
+              </Fragment>
+            ))
+          : null}
         {shelf === 'installed'
           ? launchers.map((l) => {
               const kept = shownGames.filter((g) => g.launcher === l)
