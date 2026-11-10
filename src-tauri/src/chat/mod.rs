@@ -1076,6 +1076,12 @@ pub async fn chat_history_dismiss(state: State<'_, ChatState>, transfer_id: Stri
     Ok(())
 }
 
+/// On the new device, when nobody answered: a new request to every other device.
+#[tauri::command]
+pub async fn chat_history_ask_again(state: State<'_, ChatState>) -> Result<(), String> {
+    current(&state)?.history_ask_again(&engine::host_name()).await
+}
+
 /// This account has chat on another device: take over its identity with the
 /// recovery code of its key backup.
 #[tauri::command]

@@ -39,6 +39,7 @@ commands.allow = [
   "chat_history",
   "chat_history_answer",
   "chat_history_dismiss",
+  "chat_history_ask_again",
   "chat_reset_identity",
   "chat_unlock",
   "chat_send_invite",

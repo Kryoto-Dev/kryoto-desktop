@@ -306,6 +306,12 @@ export type HistoryIncoming = {
   from: string | null
   received: number
   total: number
+  /** When it first asked. */
+  askedAtMs: number
+  /** Waiting and nobody answered for a while (or receiving, and it stalled): the line says what to do. */
+  quiet: boolean
+  /** Waited a week: it no longer asks by itself. */
+  expired: boolean
 }
 /** On an older device: a new device of yours asked for its history. */
 export type HistoryOutgoing = {
@@ -326,6 +332,8 @@ export const chatHistory = () => call<HistoryState>('chat_history')
 export const chatHistoryAnswer = (transferId: string, send: boolean) => call<void>('chat_history_answer', { transferId, send })
 /** Put away a finished notice. */
 export const chatHistoryDismiss = (transferId: string) => call<void>('chat_history_dismiss', { transferId })
+/** On the new device, when nobody answered: a new request to every other device (one that said Not now asks again). */
+export const chatHistoryAskAgain = () => call<void>('chat_history_ask_again')
 
 export function useChatHistory(on_: boolean): HistoryState {
   const [state, setState] = useState<HistoryState>({ incoming: null, outgoing: [] })

@@ -2077,6 +2077,7 @@ pub fn run() {
             chat::chat_history,
             chat::chat_history_answer,
             chat::chat_history_dismiss,
+            chat::chat_history_ask_again,
             chat::chat_reset_identity,
             chat::chat_unlock,
             chat::chat_send_invite,

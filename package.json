@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "vite",
     "check:styles": "node scripts/check-styles.mjs",
-    "check": "node scripts/check-styles.mjs && tsc --noEmit && node --test src/web/send-rules.test.ts src/lib/playtime-math.test.ts",
-    "test": "node --test src/web/send-rules.test.ts src/lib/playtime-math.test.ts",
+    "check": "node scripts/check-styles.mjs && tsc --noEmit && node --test src/web/send-rules.test.ts src/web/history-rules.test.ts src/lib/playtime-math.test.ts",
+    "test": "node --test src/web/send-rules.test.ts src/web/history-rules.test.ts src/lib/playtime-math.test.ts",
     "build": "tsc --noEmit && vite build",
     "app:dev": "node scripts/dev.mjs",
     "app:dev:plain": "node scripts/dev.mjs -- --no-default-features --features dev-plain-chat-store",
