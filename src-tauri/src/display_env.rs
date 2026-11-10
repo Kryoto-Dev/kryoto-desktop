@@ -329,14 +329,12 @@ mod linux {
                 let Ok(kind) = e.file_type() else { continue };
                 if kind.is_dir() && depth < 5 {
                     stack.push((path, depth + 1));
-                } else if may_be_colour_emoji(&e.file_name().to_string_lossy()) {
-                    if super::colr_version_of_file(&path) == Some(1) {
-                        // Through a symlink fontconfig records the real file.
-                        let real = std::fs::canonicalize(&path).unwrap_or(path.clone());
-                        found.push(path.to_string_lossy().into_owned());
-                        if real != path {
-                            found.push(real.to_string_lossy().into_owned());
-                        }
+                } else if may_be_colour_emoji(&e.file_name().to_string_lossy()) && super::colr_version_of_file(&path) == Some(1) {
+                    // Through a symlink fontconfig records the real file.
+                    let real = std::fs::canonicalize(&path).unwrap_or(path.clone());
+                    found.push(path.to_string_lossy().into_owned());
+                    if real != path {
+                        found.push(real.to_string_lossy().into_owned());
                     }
                 }
             }
