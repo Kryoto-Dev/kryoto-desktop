@@ -233,6 +233,8 @@ try {
     // A window that went down while it was up (the Linux video crash) opened it again, in a loop.
     const news = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     news.on('pageerror', e => failures.push(e.message))
+    // The boot's game-runtimes question comes first otherwise, as in the checks below.
+    await news.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
     try {
       await news.goto(`${base}/?whatsnew`)
       const dialog = news.getByRole('dialog', { name: /^What's new in Kryoto Desktop/ })
