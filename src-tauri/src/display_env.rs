@@ -171,6 +171,14 @@ pub fn read_markers(never_drew: bool, renderer_crashed: bool, dmabuf_failed: boo
 /// of the file (the table directory, and the table's first two bytes when they
 /// are in it); a collection is read by its first font.
 pub fn colr_version(bytes: &[u8]) -> Option<u16> {
+    let at = colr_offset(bytes)?;
+    bytes.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+}
+
+/// Where a font file's COLR table starts, from its table directory (`bytes`,
+/// the start of the file). The table itself is usually megabytes further on:
+/// Fedora's Noto-COLRv1.ttf has it at 3.8 MB of 5 MB.
+pub fn colr_offset(bytes: &[u8]) -> Option<usize> {
     let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
     let u32_at = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
     let font = if bytes.get(..4) == Some(b"ttcf") { u32_at(12)? } else { 0 };
@@ -178,8 +186,28 @@ pub fn colr_version(bytes: &[u8]) -> Option<u16> {
     (0..tables.min(512)).find_map(|i| {
         let record = font + 12 + i * 16;
         (bytes.get(record..record + 4)? == b"COLR").then_some(())?;
-        u16_at(u32_at(record + 8)?)
+        u32_at(record + 8)
     })
+}
+
+/// A font file's COLR version, read where the table really is. Reading only the
+/// file's first 16 KB found no version for Fedora's emoji, so the 0.3.1
+/// candidate never hid it and the AppImage still crashed (KB-0116).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn colr_version_of_file(path: &std::path::Path) -> Option<u16> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 16 * 1024];
+    let n = file.read(&mut head).ok()?;
+    head.truncate(n);
+    if let Some(v) = colr_version(&head) {
+        return Some(v);
+    }
+    let at = colr_offset(&head)?;
+    file.seek(SeekFrom::Start(at as u64)).ok()?;
+    let mut v = [0u8; 2];
+    file.read_exact(&mut v).ok()?;
+    Some(u16::from_be_bytes(v))
 }
 
 /// A font file worth opening to look for COLRv1: colour emoji, by name.
@@ -302,11 +330,7 @@ mod linux {
                 if kind.is_dir() && depth < 5 {
                     stack.push((path, depth + 1));
                 } else if may_be_colour_emoji(&e.file_name().to_string_lossy()) {
-                    use std::io::Read;
-                    let mut head = vec![0u8; 16 * 1024];
-                    let Ok(n) = std::fs::File::open(&path).and_then(|mut f| f.read(&mut head)) else { continue };
-                    head.truncate(n);
-                    if colr_version(&head) == Some(1) {
+                    if super::colr_version_of_file(&path) == Some(1) {
                         // Through a symlink fontconfig records the real file.
                         let real = std::fs::canonicalize(&path).unwrap_or(path.clone());
                         found.push(path.to_string_lossy().into_owned());
@@ -711,6 +735,19 @@ mod tests {
         };
         assert_eq!(colr_version(&shifted), Some(1));
         assert!(may_be_colour_emoji("Noto-COLRv1.ttf") && may_be_colour_emoji("NotoColorEmoji.ttf"));
+        // The table far into the file, as in the real Noto-COLRv1.ttf (3.8 MB in):
+        // the start of the file does not hold the version, the file does (KB-0116).
+        let mut far = font(&[(b"CPAL", &[0, 0])]);
+        let start = far.len();
+        far[12..16].copy_from_slice(b"COLR");
+        far[20..24].copy_from_slice(&((start + 40_000) as u32).to_be_bytes());
+        far.resize(start + 40_000, 0);
+        far.extend([0, 1, 0, 0]);
+        assert_eq!(colr_version(&far[..16 * 1024]), None);
+        let path = std::env::temp_dir().join(format!("kryoto-colr-{}.ttf", std::process::id()));
+        std::fs::write(&path, &far).unwrap();
+        assert_eq!(colr_version_of_file(&path), Some(1));
+        let _ = std::fs::remove_file(&path);
         assert!(!may_be_colour_emoji("DejaVuSans.ttf") && !may_be_colour_emoji("emoji.txt"));
     }
 
