@@ -254,7 +254,7 @@ export function AddonsCard({
           {(allDlc ? dlcOffers : dlcOffers.slice(0, DLC_SHOWN)).map((a) => offerRow(a, dlcName(a.label), a.download_size ?? undefined, 'Add'))}
           {dlcOffers.length > DLC_SHOWN ? (
             <Button size="sm" variant="ghost" className="justify-self-start" onClick={() => setAllDlc((v) => !v)}>
-              {allDlc ? 'Show fewer' : `Show all ${dlcOffers.length} DLC`}
+              {allDlc ? 'Show fewer' : `Show ${dlcOffers.length - DLC_SHOWN} more DLC`}
             </Button>
           ) : null}
         </div>

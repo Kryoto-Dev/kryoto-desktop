@@ -463,7 +463,7 @@ export function GamePage({
 
       {!going && game.slug ? <UndoUpdate slug={game.slug} version={game.version ?? null} running={running} onDone={() => onGameChanged?.(game)} /> : null}
 
-      <div className="grid grid-cols-[minmax(0,1fr)_320px] items-start gap-4 p-6">
+      <div className="grid items-start gap-4 p-6 lg:grid-cols-[minmax(0,1fr)_320px] [&>*]:min-w-0">
         <div className="grid gap-4">
           {game.short ? (
             <Card>
