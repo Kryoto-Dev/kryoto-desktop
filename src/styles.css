@@ -579,6 +579,16 @@ html[data-window='popup'] [role='menuitem'] {
   border-radius: min(var(--kryo-radius), 6px);
 }
 
+/* Linux: the menu view's page is opaque in the window's own background, so the
+   corners around its rounded panel are the window's colour. Left transparent,
+   WebKitGTK filled it white: light square corners on every menu, because the
+   view's rounded shape (menus.rs) does not cut a WebKit view (KB-0273). Never
+   see-through: KB-0006. */
+html[data-os='linux'][data-window='popup'],
+html[data-os='linux'][data-window='popup'] body {
+  background: var(--background);
+}
+
 /* Linux cuts the menu view to the reader's corner style with a shape (menus.rs), so the panel takes the same corners. */
 html[data-os='linux'][data-window='popup'] .kryo-square.border.bg-popover {
   border-radius: var(--kryo-radius);

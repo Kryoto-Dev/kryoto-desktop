@@ -660,6 +660,13 @@ pub mod linux_shape {
     }
 
     /// A child view (the menu): rounded at `radius` at the size it was given.
+    ///
+    /// KB-0273: the view's GDK window is client-side, and WebKit's drawing does
+    /// not honour this shape, so it cuts nothing; the menu page fills its corners
+    /// with the window's background instead (styles.css). Making the window
+    /// native so X cuts it was tried: on WebKitGTK 2.50 and 2.52 nothing redrew
+    /// what it uncovered and the corners came out black. Kept for any system
+    /// that does honour it.
     pub fn view(widget: &gtk::Widget, w: i32, h: i32, radius: i32) {
         if radius > 0 && w > 2 * radius && h > 2 * radius {
             widget.shape_combine_region(Some(&rounded(w, h, radius)));
