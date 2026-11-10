@@ -108,6 +108,17 @@ export function emojiFor(name: string): EmojiEntry | null {
   return EMOJI_BY_NAME.get(name) ?? null
 }
 
+/**
+ * The mascots (every set but Kryoto's own) sit in their 128 px frame with
+ * room around them, filling about 70% of it. Renderers draw them with the
+ * `kryo-emoji-mascot` class (rich-text.css), which scales the art up to read
+ * the same size as an emoji that fills its frame, without moving the text.
+ */
+export function isMascotEmoji(name: string): boolean {
+  const e = EMOJI_BY_NAME.get(name)
+  return !!e && e.group !== 'kryo'
+}
+
 /** Site-relative address of an emoji's animation. */
 export function emojiPath(name: string): string {
   return EMOJI_BY_NAME.get(name)?.rank ? `/brand/rank/emoji/${name}_a.gif` : `/brand/discord/emoji/animated/${name}_a.gif`
@@ -181,6 +192,27 @@ export function withoutRankArt(text: string, held: string | null | undefined): s
 /** The text that puts an emoji or a sticker in. */
 export const emojiToken = (name: string) => `:${name}:`
 export const stickerToken = (id: string) => `[sticker:${id}]`
+
+// ---- Standard emoji ----------------------------------------------------------
+//
+// Everybody's ordinary emoji (😂, 👍🏽, 🏳️‍🌈) are text: written as the
+// characters, drawn by the reader's emoji font. The parser marks each one so
+// renderers draw it the size of ours; the pickers list them from
+// emoji-standard.ts.
+
+/**
+ * One standard emoji as people type it: a flag, a keycap, or a pictograph
+ * with its skin tone, variation selector and zero-width-joined parts.
+ * Text-style symbols (©, ★, ✓) stay text unless written with U+FE0F.
+ */
+export const STANDARD_EMOJI = String.raw`\p{Regional_Indicator}{2}|[#*0-9]️?⃣|(?:\p{Emoji_Modifier_Base}\p{Emoji_Modifier}|\p{Emoji_Presentation}|\p{Extended_Pictographic}️)(?:\p{Emoji_Modifier}|️|[\u{E0020}-\u{E007F}])*(?:‍(?:\p{Emoji_Modifier_Base}\p{Emoji_Modifier}|\p{Emoji_Presentation}|\p{Extended_Pictographic}️?)(?:\p{Emoji_Modifier}|️)*)*`
+
+const ONE_STANDARD = new RegExp(`^(?:${STANDARD_EMOJI})$`, 'u')
+
+/** Is this text exactly one standard emoji? */
+export function isStandardEmoji(text: string): boolean {
+  return text.length > 0 && text.length <= 32 && ONE_STANDARD.test(text)
+}
 
 /** Emoji whose name or label has every word of the query, best first. */
 export function searchEmoji(query: string): EmojiEntry[] {
