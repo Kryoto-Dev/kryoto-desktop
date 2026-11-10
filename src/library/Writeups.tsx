@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
 import { useAccount } from '@/hooks/useAccount'
 import { RichText } from '@/rich/RichText'
 import { EmojiButton } from '@/rich/RichEditor'
-import { emojiPath } from '@/rich/rich-catalog'
+import { emojiPath, isMascotEmoji } from '@/rich/rich-catalog'
 import { useAssetBase } from '@/rich/asset-base'
 
 /**
@@ -126,7 +126,7 @@ export function LibraryWriteups({ slug, onWeb, own = false }: { slug: string; on
             <p className="line-clamp-3 break-words text-sm leading-relaxed text-foreground/90">
               <RichText text={w.body} />
             </p>
-            <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Reactions">
+            <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Reactions">
               {rs.map((r) => (
                 <button
                   key={r.emoji}
@@ -136,11 +136,11 @@ export function LibraryWriteups({ slug, onWeb, own = false }: { slug: string; on
                   title={`${r.people.map((p) => p.name).join(', ') || 'Somebody'} reacted with :${r.emoji}:`}
                   onClick={() => void react(w.id, r.emoji, !r.mine)}
                   className={cn(
-                    'kryo-pill inline-flex h-7 items-center gap-1 border px-1.5 text-xs tabular-nums transition-colors disabled:cursor-default',
+                    'kryo-pill inline-flex h-8 items-center gap-1 border px-2 text-xs tabular-nums transition-colors disabled:cursor-default',
                     r.mine ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground enabled:hover:text-foreground',
                   )}
                 >
-                  <img src={`${base}${emojiPath(r.emoji)}`} alt={`:${r.emoji}:`} width={18} height={18} className="size-[18px]" />
+                  <img src={`${base}${emojiPath(r.emoji)}`} alt={`:${r.emoji}:`} width={22} height={22} className={cn('size-[22px]', isMascotEmoji(r.emoji) && 'kryo-emoji-mascot')} />
                   {r.count}
                 </button>
               ))}

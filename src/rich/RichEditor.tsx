@@ -10,7 +10,7 @@ import {
   type RefObject,
   type TextareaHTMLAttributes,
 } from 'react'
-import { Bold, Code, EyeOff, Italic, Lock, Search, Smile, Strikethrough } from '@/ui/pixel-icons'
+import { Apple, Bold, Clock, Code, Crown, EyeOff, Flag, Gamepad2, Globe, Heart, Italic, Lock, Package, PawPrint, Search, Smile, Sparkles, Strikethrough, Users } from '@/ui/pixel-icons'
 import { Floating } from '@/ui'
 import { openStorePage } from '@/lib/window'
 import { cn } from '@/lib/utils'
@@ -28,12 +28,14 @@ import {
   emojiPath,
   emojiToken,
   isEmojiName,
+  isMascotEmoji,
   searchEmoji,
   stickerPath,
   stickerToken,
   type EmojiEntry,
   type RankId,
 } from './rich-catalog'
+import type { StandardEmoji } from './emoji-standard'
 import { frequentEmoji, noteEmojiUse } from './emoji-usage'
 
 const isRank = (id: string): id is RankId => (RANKS as readonly string[]).includes(id)
@@ -225,7 +227,7 @@ export const RichTextarea = forwardRef<HTMLTextAreaElement, TextareaProps>(funct
 
   function pickCode(hit: CodeHit) {
     if (!code) return
-    if (hit.img) noteEmojiUse(hit.key)
+    noteEmojiUse(hit.img ? hit.key : (hit.char ?? ''))
     const end = code.start + 1 + code.query.length
     setCode(null)
     setHits([])
@@ -568,12 +570,101 @@ export function editableMentions(text: string, known: MentionCandidate[]): strin
   })
 }
 
-/** The emoji and sticker picker beside a text box. */
+type StandardModule = typeof import('./emoji-standard')
+let standardTable: StandardModule | null = null
+let standardLoading: Promise<StandardModule> | null = null
+/** The standard emoji, loaded the first time a picker opens (./emoji-standard.ts). */
+function loadStandard(): Promise<StandardModule> {
+  standardLoading ??= import('./emoji-standard')
+    .then((m) => (standardTable = m))
+    .catch((err) => {
+      standardLoading = null
+      throw err
+    })
+  return standardLoading
+}
+
+/** One cell of the picker: one of ours, or a standard emoji. */
+type PickItem =
+  | { kind: 'ours'; key: string; e: EmojiEntry; locked: RankId | null }
+  | { kind: 'std'; key: string; e: StandardEmoji }
+
+type PickSection = { id: string; label: string; rank: RankId | null; locked: boolean; items: PickItem[] }
+
+const ours = (e: EmojiEntry, locked: RankId | null = null): PickItem => ({ kind: 'ours', key: e.name, e, locked })
+const std = (e: StandardEmoji): PickItem => ({ kind: 'std', key: `std:${e.char}`, e })
+
+/** The picker's tabs along its top: each jumps to its first section. */
+const NAV: { id: string; label: string; Icon: typeof Smile }[] = [
+  { id: 'frequent', label: 'Frequently used', Icon: Clock },
+  { id: 'kryoto', label: 'Kryoto', Icon: Sparkles },
+  { id: 'ranks', label: 'Supporter sets', Icon: Crown },
+  { id: 'smileys', label: 'Smileys', Icon: Smile },
+  { id: 'people', label: 'People', Icon: Users },
+  { id: 'nature', label: 'Nature', Icon: PawPrint },
+  { id: 'food', label: 'Food', Icon: Apple },
+  { id: 'activity', label: 'Activity', Icon: Gamepad2 },
+  { id: 'travel', label: 'Travel', Icon: Globe },
+  { id: 'objects', label: 'Objects', Icon: Package },
+  { id: 'symbols', label: 'Symbols', Icon: Heart },
+  { id: 'flags', label: 'Flags', Icon: Flag },
+]
+
+/** Which tab a section belongs to. */
+function navOf(id: string): string {
+  if (id === 'frequent') return 'frequent'
+  if (isRank(id)) return 'ranks'
+  if (EMOJI_GROUPS.some((g) => g.id === id)) return 'kryoto'
+  return id
+}
+
+const capital = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s)
+/** Unicode's lower-case name as a title: "Grinning face", and a flag's place in capitals ("Flag: Costa Rica"). */
+const standardTitle = (name: string) => (name.startsWith('flag: ') ? `Flag: ${name.slice(6).split(' ').map(capital).join(' ')}` : capital(name))
+
+/** What the preview strip says about an emoji: big, with its name and shortcode. */
+function describeItem(item: PickItem): { name: string; code: string; note: string | null } {
+  if (item.kind === 'std') return { name: standardTitle(item.e.name), code: item.e.codes[0] ? `:${item.e.codes[0]}:` : '', note: null }
+  return { name: capital(item.e.label), code: `:${item.e.name}:`, note: item.locked ? `For ${RANK_LABEL[item.locked]}s and up` : null }
+}
+
+/** One emoji drawn in the picker: `size` is the box in px. */
+function PickArt({ item, size, base }: { item: PickItem; size: number; base: string }) {
+  if (item.kind === 'std') {
+    return (
+      <span aria-hidden className="leading-none" style={{ fontSize: Math.round(size / 1.375) }}>
+        <span className="kryo-emoji-char">{item.e.char}</span>
+      </span>
+    )
+  }
+  return (
+    <img
+      src={`${base}${emojiPath(item.e.name)}`}
+      alt=""
+      width={size}
+      height={size}
+      loading="lazy"
+      decoding="async"
+      draggable={false}
+      className={cn(isMascotEmoji(item.e.name) && 'kryo-emoji-mascot')}
+      style={{ width: size, height: size }}
+    />
+  )
+}
+
+/**
+ * The emoji and sticker picker beside a text box, the counterpart of
+ * kryo.to's: Kryoto's own emoji first, then everybody's standard ones by
+ * Unicode's groups (./emoji-standard.ts), with the ones picked most on top.
+ * The standard ones are text, so they are offered where the pick goes into
+ * text (`value` given); a reaction (`onPick` alone) is one of ours.
+ */
 export function EmojiButton({
   target,
   value,
   onValueChange,
   stickers = true,
+  standard,
   onPick,
   className,
   align = 'right',
@@ -583,6 +674,8 @@ export function EmojiButton({
   value?: string
   onValueChange?: (next: string) => void
   stickers?: boolean
+  /** Offer the standard emoji too. On wherever the pick is inserted into text. */
+  standard?: boolean
   onPick?: (token: string, kind: 'emoji' | 'sticker') => void
   className?: string
   align?: 'left' | 'right'
@@ -592,7 +685,12 @@ export function EmojiButton({
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<'emoji' | 'sticker'>('emoji')
   const [q, setQ] = useState('')
+  const [shown, setShown] = useState<PickItem | null>(null)
+  const [nav, setNav] = useState<string | null>(null)
+  const [table, setTable] = useState<StandardModule | null>(standardTable)
+  const withStandard = (standard ?? true) && value !== undefined
   const box = useRef<HTMLDivElement>(null)
+  const scroller = useRef<HTMLDivElement>(null)
   const base = useAssetBase()
 
   useEffect(() => {
@@ -611,9 +709,26 @@ export function EmojiButton({
     }
   }, [open])
 
-  function insert(token: string, kind: 'emoji' | 'sticker') {
+  useEffect(() => {
+    if (!open || !withStandard || table) return
+    let live = true
+    void loadStandard().then((m) => live && setTable(m), () => {})
+    return () => {
+      live = false
+    }
+  }, [open, withStandard, table])
+
+  useEffect(() => {
+    if (!open) {
+      setShown(null)
+      setNav(null)
+    }
+  }, [open])
+
+  function insert(token: string, kind: 'emoji' | 'sticker' | 'char') {
     if (kind === 'emoji') noteEmojiUse(token.slice(1, -1))
-    if (onPick && (kind === 'sticker' || value === undefined)) {
+    if (kind === 'char') noteEmojiUse(token)
+    if (onPick && kind !== 'char' && (kind === 'sticker' || value === undefined)) {
       onPick(token, kind)
       if (kind === 'sticker') setOpen(false)
       return
@@ -632,15 +747,77 @@ export function EmojiButton({
     })
   }
 
-  const list = searchEmoji(q).filter((e) => canUseRank(e.rank, rank))
   // Every rank's set shows; the ones above yours are locked, with where to get them.
   const stickerSets: (RankId | null)[] = [null, ...RANKS]
-  // The ones picked most on this device, read each time the panel opens (./emoji-usage.ts).
-  const frequent = useMemo(
-    () => (open ? frequentEmoji().map((n) => emojiFor(n)).filter((e): e is EmojiEntry => !!e && canUseRank(e.rank, rank)) : []),
-    [open, rank],
-  )
-  const groups: { id: string; label: string }[] = [...(frequent.length ? [{ id: 'frequent', label: 'Frequently used' }] : []), ...EMOJI_GROUPS, ...EMOJI_RANK_GROUPS]
+
+  const sections = useMemo((): PickSection[] => {
+    if (!open) return []
+    const query = q.trim()
+    if (query) {
+      const found: PickSection[] = [{ id: 'found', label: 'Kryoto', rank: null, locked: false, items: searchEmoji(query).filter((e) => canUseRank(e.rank, rank)).map((e) => ours(e)) }]
+      if (withStandard && table) found.push({ id: 'found-std', label: 'Emoji', rank: null, locked: false, items: table.searchStandard(query).map(std) })
+      return found.filter((s) => s.items.length)
+    }
+    // The ones picked most on this device, read each time the panel opens (./emoji-usage.ts).
+    const frequent: PickItem[] = []
+    for (const key of frequentEmoji()) {
+      const mine = emojiFor(key)
+      if (mine) {
+        if (canUseRank(mine.rank, rank)) frequent.push(ours(mine))
+      } else if (withStandard) {
+        frequent.push(std(table?.standardFor(key) ?? { char: key, name: '', codes: [], sub: '' }))
+      }
+    }
+    const usable = EMOJI_RANK_GROUPS.filter((g) => canUseRank(g.id, rank))
+    const locked = EMOJI_RANK_GROUPS.filter((g) => !canUseRank(g.id, rank))
+    const rankSection = (g: { id: RankId; label: string }, isLocked: boolean): PickSection => ({
+      id: g.id,
+      label: g.label,
+      rank: g.id,
+      locked: isLocked,
+      items: EMOJI.filter((e) => e.group === g.id).map((e) => ours(e, isLocked ? g.id : null)),
+    })
+    return [
+      ...(frequent.length ? [{ id: 'frequent', label: 'Frequently used', rank: null, locked: false, items: frequent }] : []),
+      ...EMOJI_GROUPS.map((g): PickSection => ({ id: g.id, label: g.label, rank: null, locked: false, items: EMOJI.filter((e) => e.group === g.id).map((e) => ours(e)) })),
+      ...usable.map((g) => rankSection(g, false)),
+      ...(withStandard && table ? table.standardGroups().map((g): PickSection => ({ id: g.id, label: g.label, rank: null, locked: false, items: g.emoji.map(std) })) : []),
+      // Sets above your rank last, so everybody's emoji are not behind them.
+      ...locked.map((g) => rankSection(g, true)),
+    ].filter((s) => s.items.length)
+  }, [open, q, rank, withStandard, table])
+
+  const byKey = useMemo(() => new Map(sections.flatMap((s) => s.items.map((i) => [i.key, i] as const))), [sections])
+  const tabs = NAV.filter((n) => sections.some((s) => navOf(s.id) === n.id))
+  const preview = shown ?? sections[0]?.items[0] ?? null
+  const about = preview ? describeItem(preview) : null
+
+  function itemFrom(el: EventTarget | null): PickItem | null {
+    const key = (el as HTMLElement | null)?.closest?.<HTMLElement>('[data-pick]')?.dataset.pick
+    return key ? (byKey.get(key) ?? null) : null
+  }
+
+  function jump(id: string) {
+    const list = scroller.current
+    const first = sections.find((s) => navOf(s.id) === id)
+    const el = first ? list?.querySelector<HTMLElement>(`[data-section="${first.id}"]`) : null
+    if (!list || !el) return
+    list.scrollTop = el.offsetTop - list.offsetTop
+    setNav(id)
+  }
+
+  /** The tab of the section at the top of the list follows the scroll. */
+  function onScroll() {
+    const list = scroller.current
+    if (!list || q) return
+    let current: string | null = null
+    for (const el of list.querySelectorAll<HTMLElement>('[data-section]')) {
+      if (el.offsetTop - list.offsetTop <= list.scrollTop + 8) current = el.dataset.section ?? null
+      else break
+    }
+    if (current) setNav(navOf(current))
+  }
+
   return (
     <div ref={box} className={cn('relative', className)}>
       <button
@@ -662,10 +839,10 @@ export function EmojiButton({
           side="top"
           align={align}
           gap={4}
-          className="kryo-radius w-72 overflow-y-auto border border-border bg-popover shadow-lg"
+          className="kryo-radius flex w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden border border-border bg-popover shadow-lg"
         >
           {stickers ? (
-            <div role="tablist" className="flex border-b border-border text-xs font-bold uppercase tracking-wider">
+            <div role="tablist" className="flex shrink-0 border-b border-border text-xs font-bold uppercase tracking-wider">
               {(['emoji', 'sticker'] as const).map((t) => (
                 <button
                   key={t}
@@ -681,46 +858,107 @@ export function EmojiButton({
             </div>
           ) : null}
           {tab === 'emoji' || !stickers ? (
-            <div className="p-2">
-              <label className="kryo-radius mb-2 flex items-center gap-1.5 border border-border bg-background px-2 py-1">
-                <Search className="size-3 text-muted-foreground" aria-hidden />
-                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find an emoji" aria-label="Find an emoji" className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none" />
-              </label>
-              <div className="max-h-56 overflow-y-auto">
-                {(q ? [{ id: 'found', label: 'Found' }] : groups).map((g) => {
-                  const setRank = isRank(g.id) ? g.id : null
-                  const locked = !q && !canUseRank(setRank, rank)
-                  const items = q ? list : g.id === 'frequent' ? frequent : locked ? EMOJI.filter((e) => e.group === g.id) : list.filter((e) => e.group === g.id)
-                  if (!items.length) return null
-                  return (
-                    <div key={g.id} className="mb-1.5">
-                      <RankHeading label={g.label} rank={setRank} locked={locked} />
-                      <div className="grid grid-cols-8 gap-0.5">
-                        {items.map((e) => (
+            <>
+              <div className="shrink-0 px-2 pt-2">
+                <label className="kryo-radius flex items-center gap-1.5 border border-border bg-background px-2 py-1">
+                  <Search className="size-3 text-muted-foreground" aria-hidden />
+                  <input
+                    value={q}
+                    onChange={(e) => {
+                      setQ(e.target.value)
+                      setShown(null)
+                      if (scroller.current) scroller.current.scrollTop = 0
+                    }}
+                    placeholder="Find an emoji"
+                    aria-label="Find an emoji"
+                    className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none"
+                  />
+                </label>
+                {!q && tabs.length > 1 ? (
+                  <div className="mt-1.5 flex items-center justify-between gap-0.5 border-b border-border pb-1.5">
+                    {tabs.map(({ id, label, Icon }) => (
+                      <button
+                        key={id}
+                        type="button"
+                        title={label}
+                        aria-label={label}
+                        aria-current={nav === id || undefined}
+                        onPointerDown={(ev) => ev.preventDefault()}
+                        onClick={() => jump(id)}
+                        className={cn(
+                          'kryo-radius inline-flex size-6 shrink-0 items-center justify-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring',
+                          nav === id ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        <Icon className="size-3.5" aria-hidden />
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <div
+                ref={scroller}
+                onScroll={onScroll}
+                onPointerOver={(ev) => {
+                  const item = itemFrom(ev.target)
+                  if (item) setShown(item)
+                }}
+                onFocus={(ev) => {
+                  const item = itemFrom(ev.target)
+                  if (item) setShown(item)
+                }}
+                onClick={(ev) => {
+                  const item = itemFrom(ev.target)
+                  if (!item) return
+                  if (item.kind === 'std') insert(item.e.char, 'char')
+                  else if (!item.locked) insert(emojiToken(item.e.name), 'emoji')
+                }}
+                className="max-h-64 min-h-0 flex-1 overflow-y-auto px-2 pb-1 pt-1.5"
+              >
+                {sections.map((s) => (
+                  <div key={s.id} data-section={s.id} className="mb-2">
+                    <RankHeading label={s.label} rank={s.rank} locked={s.locked} />
+                    <div className="grid grid-cols-8 gap-0.5">
+                      {s.items.map((item) => {
+                        const locked = item.kind === 'ours' && item.locked
+                        const label = item.kind === 'std' ? item.e.name || item.e.char : `:${item.e.name}:`
+                        return (
                           <button
-                            key={e.name}
+                            key={item.key}
                             type="button"
-                            title={locked && setRank ? `For ${RANK_LABEL[setRank]}s and up` : `:${e.name}:`}
-                            aria-disabled={locked || undefined}
+                            data-pick={item.key}
+                            aria-label={locked ? `${label}, for ${RANK_LABEL[locked]}s and up` : label}
+                            aria-disabled={locked ? true : undefined}
                             onPointerDown={(ev) => ev.preventDefault()}
-                            onClick={() => (locked ? undefined : insert(emojiToken(e.name), 'emoji'))}
                             className={cn(
-                              'kryo-radius flex aspect-square items-center justify-center focus-visible:bg-secondary focus-visible:outline-none',
+                              'kryo-radius flex aspect-square items-center justify-center overflow-hidden focus-visible:bg-secondary focus-visible:outline-none',
                               locked ? 'cursor-not-allowed opacity-40 grayscale' : 'hover:bg-secondary',
                             )}
                           >
-                            <img src={`${base}${emojiPath(e.name)}`} alt={`:${e.name}:`} width={26} height={26} loading="lazy" decoding="async" className="size-[26px]" />
+                            <PickArt item={item} size={30} base={base} />
                           </button>
-                        ))}
-                      </div>
+                        )
+                      })}
                     </div>
-                  )
-                })}
-                {q && !list.length ? <p className="py-4 text-center text-xs text-muted-foreground">No emoji called that.</p> : null}
+                  </div>
+                ))}
+                {q && !sections.length ? <p className="py-4 text-center text-xs text-muted-foreground">No emoji called that.</p> : null}
+                {withStandard && !table && !q ? <p className="py-2 text-center text-[11px] text-muted-foreground">Loading the other emoji...</p> : null}
               </div>
-            </div>
+              {about && preview ? (
+                <div className="flex h-14 shrink-0 items-center gap-2.5 border-t border-border px-2.5" aria-hidden>
+                  <span className="flex size-10 shrink-0 items-center justify-center overflow-hidden">
+                    <PickArt item={preview} size={40} base={base} />
+                  </span>
+                  <span className="grid min-w-0 leading-tight">
+                    <span className="truncate text-sm font-bold text-foreground">{about.name || about.code}</span>
+                    <span className="truncate font-mono text-[11px] text-muted-foreground">{about.note ?? about.code}</span>
+                  </span>
+                </div>
+              ) : null}
+            </>
           ) : (
-            <div className="max-h-64 overflow-y-auto p-2">
+            <div className="max-h-64 min-h-0 flex-1 overflow-y-auto p-2">
               {stickerSets.map((set) => {
                 const locked = !canUseRank(set, rank)
                 return (
@@ -740,7 +978,7 @@ export function EmojiButton({
                             locked ? 'cursor-not-allowed opacity-40 grayscale' : 'hover:bg-secondary',
                           )}
                         >
-                          <img src={`${base}${stickerPath(s.id) ?? ''}`} alt={s.label} width={76} height={76} loading="lazy" decoding="async" className="size-[76px]" />
+                          <img src={`${base}${stickerPath(s.id) ?? ''}`} alt={s.label} width={84} height={84} loading="lazy" decoding="async" className="size-[84px]" />
                         </button>
                       ))}
                     </div>

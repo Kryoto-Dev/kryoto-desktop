@@ -13,6 +13,7 @@
  *     {rainbow}text effects{/rainbow}   (lib/text-effects.ts, the perk)
  *     <@123> mentions          (lib/mentions.ts; resolved ones too)
  *     :telly_wave: emoji       [sticker:telly-says-hi] stickers (lib/rich-catalog.ts)
+ *     😂 standard emoji, which stay text and are marked to be drawn as big as ours
  *
  * A backslash keeps the next mark as itself (`\*not italic\*`). Long-form
  * pages (blog posts, the changelog) keep lib/markdown.ts, which reads the
@@ -25,7 +26,7 @@
 
 import { splitLinks, safeHref } from './autolink'
 import { MAX_MENTIONS, mentionLabel, parseResolved, type MentionIdentity } from './mentions'
-import { isEmojiName, stickerFor } from './rich-catalog'
+import { STANDARD_EMOJI, isEmojiName, stickerFor } from './rich-catalog'
 import { MAX_FX_SPANS, TEXT_EFFECTS, type TextEffectId } from './text-effects'
 
 export type RichInline =
@@ -38,6 +39,8 @@ export type RichInline =
   /** `who` is null for a stored `<@id>` nobody resolved (end-to-end chat): the app looks it up. */
   | { t: 'mention'; id: string | null; who: MentionIdentity | null }
   | { t: 'emoji'; name: string }
+  /** A standard emoji (rich-catalog.ts STANDARD_EMOJI), marked so it is drawn the size of ours. */
+  | { t: 'emojichar'; v: string }
   | { t: 'sticker'; id: string }
 
 export type RichBlock =
@@ -50,6 +53,10 @@ export const RICH_PARSE_LIMIT = 20_000
 /** Most emoji and stickers drawn from one text; the rest stay their words. */
 export const MAX_EMOJI = 60
 export const MAX_STICKERS = 3
+/** Standard emoji marked in one text; past this they are drawn as plain text. */
+export const MAX_EMOJI_CHARS = 300
+/** Most emoji a text of nothing but emoji may have to be drawn big. */
+export const JUMBO_MAX = 3
 
 /** Marks a backslash can keep as themselves. */
 const ESCAPABLE = '\\`*_~|[]{}<>:#'
@@ -60,12 +67,14 @@ const RAW_AT = /<@(\d{1,20})>/y
 const RESOLVED_AT = /\uE000@([^\uE001]{0,200})\uE001/y
 const EMOJI_AT = /:([a-z0-9_]{1,40}):/y
 const STICKER_AT = /\[sticker:([a-z0-9-]{1,40})\]/y
+const CHAR_AT = new RegExp(`(?:${STANDARD_EMOJI})`, 'uy')
+const ANY_CHAR = new RegExp(STANDARD_EMOJI, 'u')
 const LINK_AT = /\[([^[\]\n]{1,300})\]\(([^()\s]{1,2048})\)/y
 const ADDRESS_AT = /(?:https?:\/\/|www\.)[^\s<>"]+/iy
 const FENCE = /^ {0,3}```/
 const QUOTE = /^ {0,3}>(?: |$)/
 
-type Ctx = { fx: number; mentions: number; emoji: number; stickers: number; inLink: boolean }
+type Ctx = { fx: number; mentions: number; emoji: number; chars: number; stickers: number; inLink: boolean }
 
 /** Where a written link may go: our own pages by path, or an http(s) address. */
 function linkHref(url: string): string | null {
@@ -221,6 +230,17 @@ function inline(src: string, depth: number, ctx: Ctx): RichInline[] {
         continue
       }
     }
+    // A standard emoji starts past U+2000, or is a keycap (#, *, a digit, then U+FE0F or U+20E3).
+    if (ctx.chars < MAX_EMOJI_CHARS && (src.charCodeAt(i) > 0x2000 || src[i + 1] === '️' || src[i + 1] === '⃣')) {
+      const m = at(CHAR_AT, src, i)
+      if (m) {
+        flush()
+        out.push({ t: 'emojichar', v: m[0] })
+        ctx.chars++
+        i += m[0].length
+        continue
+      }
+    }
     if (ch === '[') {
       const s = ctx.stickers < MAX_STICKERS ? at(STICKER_AT, src, i) : null
       if (s && stickerFor(s[1]!)) {
@@ -272,7 +292,7 @@ export function parseRich(text: string): RichBlock[] {
   const source = text.replace(/\r\n?/g, '\n')
   const head = source.slice(0, RICH_PARSE_LIMIT)
   const tail = source.slice(RICH_PARSE_LIMIT)
-  const ctx: Ctx = { fx: 0, mentions: 0, emoji: 0, stickers: 0, inLink: false }
+  const ctx: Ctx = { fx: 0, mentions: 0, emoji: 0, chars: 0, stickers: 0, inLink: false }
   const lines = head.split('\n')
   const blocks: RichBlock[] = []
   let para: string[] = []
@@ -309,18 +329,19 @@ export function parseRich(text: string): RichBlock[] {
 
 /** Text with nothing to read in it, which can be drawn as it is. */
 export function isPlainRich(text: string): boolean {
-  return !/[`*_~|[{<:\\\n>\uE000]|https?:\/\/|www\./i.test(text)
+  return !/[`*_~|[{<:\\\n>\uE000]|https?:\/\/|www\./i.test(text) && !ANY_CHAR.test(text)
 }
 
 /**
- * Text that is only a few emoji (and spaces): drawn bigger, as a chat app
- * does, since a single emoji at line height is a speck.
+ * Text that is only one to three emoji (ours or standard, and spaces): drawn
+ * big ("jumbo"), as Discord does, since an emoji alone at line height is a speck.
  */
 export function isEmojiOnly(blocks: RichBlock[]): boolean {
   if (blocks.length !== 1 || blocks[0]!.t !== 'para') return false
   const c = blocks[0]!.c
-  const emoji = c.filter((n) => n.t === 'emoji').length
-  return emoji > 0 && emoji <= 6 && c.every((n) => n.t === 'emoji' || (n.t === 'text' && !n.v.trim()))
+  const isEmoji = (n: RichInline) => n.t === 'emoji' || n.t === 'emojichar'
+  const emoji = c.filter(isEmoji).length
+  return emoji > 0 && emoji <= JUMBO_MAX && c.every((n) => isEmoji(n) || (n.t === 'text' && !n.v.trim()))
 }
 
 function plainInline(nodes: RichInline[]): string {
@@ -330,6 +351,7 @@ function plainInline(nodes: RichInline[]): string {
         case 'text':
         case 'code':
         case 'fx':
+        case 'emojichar':
           return n.v
         case 'br':
           return '\n'

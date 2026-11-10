@@ -12,7 +12,10 @@
  * Pure apart from localStorage, and copied into Kryoto Desktop and Kryoto
  * Mobile (`pnpm sync:rich-text`).
  */
-import { isEmojiName } from './rich-catalog'
+import { isEmojiName, isStandardEmoji } from './rich-catalog'
+
+/** One of ours by name (`telly_wave`), or a standard emoji as itself (`😂`). */
+const isKept = (key: string) => isEmojiName(key) || isStandardEmoji(key)
 
 const KEY = 'kryo.emoji.used'
 /** How many emoji the row and the tally keep. */
@@ -22,13 +25,14 @@ const KEPT = 40
 const FADE = 0.97
 
 /**
- * A tally as it may be kept: only our emoji, sensible counts, the most used
+ * A tally as it may be kept: only emoji (ours by name, standard ones as
+ * themselves), sensible counts, the most used
  * KEPT of them. The server keeps the account's copy with this too.
  */
 export function cleanTally(raw: unknown): Record<string, number> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
   const entries = Object.entries(raw as Record<string, unknown>)
-    .filter((e): e is [string, number] => typeof e[1] === 'number' && Number.isFinite(e[1]) && e[1] > 0 && isEmojiName(e[0]))
+    .filter((e): e is [string, number] => typeof e[1] === 'number' && Number.isFinite(e[1]) && e[1] > 0 && isKept(e[0]))
     .map(([name, n]): [string, number] => [name, Math.min(Math.round(n * 1000) / 1000, 100_000)])
     .sort((a, b) => b[1] - a[1])
     .slice(0, KEPT)
@@ -98,7 +102,7 @@ function scheduleSave(): void {
   }, 4000)
 }
 
-/** Our emoji names, most used first. */
+/** Our emoji's names and standard emoji, most used first. */
 export function frequentEmoji(limit = FREQUENT_SHOWN): string[] {
   return Object.entries(read())
     .sort((a, b) => b[1] - a[1])
@@ -106,9 +110,9 @@ export function frequentEmoji(limit = FREQUENT_SHOWN): string[] {
     .map(([name]) => name)
 }
 
-/** Count one pick of `:name:` (anything that is not one of our emoji is ignored). */
+/** Count one pick of `:name:` or a standard emoji (anything else is ignored). */
 export function noteEmojiUse(name: string): void {
-  if (!isEmojiName(name)) return
+  if (!isKept(name)) return
   const tally = read()
   for (const k of Object.keys(tally)) tally[k] = tally[k]! * FADE
   tally[name] = (tally[name] ?? 0) + 1

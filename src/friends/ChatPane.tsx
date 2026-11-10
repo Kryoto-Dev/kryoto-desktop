@@ -708,19 +708,22 @@ export function ChatPane({
                   {m.outgoing && !(group && ['sent', 'delivered', 'read'].includes(m.status)) ? <StatusIcon status={m.status} /> : null}
                 </span>
                 {m.reactions.length > 0 ? (
-                  <span className="flex flex-wrap gap-1">
+                  <span className="flex flex-wrap gap-2">
                     {m.reactions.map((r) => (
                       <button
                         key={r.emoji}
                         type="button"
                         onClick={() => toggleReaction(m, r.emoji)}
                         className={cn(
-                          'kryo-pill border px-1.5 text-xs',
-                          r.userIds.includes(myId) ? 'border-primary' : 'border-border',
+                          'kryo-pill inline-flex h-8 items-center gap-1 border px-2 text-xs tabular-nums',
+                          r.userIds.includes(myId) ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground',
                         )}
                         aria-label={`${r.emoji} ${r.userIds.length}`}
                       >
-                        {r.emoji} {r.userIds.length > 1 ? r.userIds.length : ''}
+                        <span className="text-base leading-none">
+                          <span className="kryo-emoji-char">{r.emoji}</span>
+                        </span>
+                        {r.userIds.length > 1 ? r.userIds.length : null}
                       </button>
                     ))}
                   </span>
@@ -761,8 +764,8 @@ export function ChatPane({
                 {reactingTo === m.msgId ? (
                   <span className="kryo-pill flex gap-1 border border-border bg-card px-2 py-1">
                     {QUICK_REACTIONS.map((e) => (
-                      <button key={e} type="button" className="text-base" onClick={() => toggleReaction(m, e)} aria-label={`React ${e}`}>
-                        {e}
+                      <button key={e} type="button" className="kryo-radius inline-flex size-8 items-center justify-center text-lg hover:bg-secondary" onClick={() => toggleReaction(m, e)} aria-label={`React ${e}`}>
+                        <span className="kryo-emoji-char">{e}</span>
                       </button>
                     ))}
                   </span>
