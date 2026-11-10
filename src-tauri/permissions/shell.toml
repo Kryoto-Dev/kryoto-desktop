@@ -89,6 +89,7 @@ commands.allow = [
   "library_remove",
   "game_launch",
   "game_achievements",
+  "achievements_turn_on",
   "online_lobby",
   "steam_join_lobby",
   "game_launch_preview",

@@ -18,6 +18,10 @@ pub struct LocalRepair {
     pub previous_online: Option<LocalOnline>,
     pub previous_source: Option<String>,
     pub previous_overrides: bool,
+    /// Put in by the achievements switch on a game published DRM-free, not
+    /// chosen in Repair: an update takes it out for the new files and puts it
+    /// back after (downloads.rs `install`).
+    pub achievements: bool,
 }
 #[derive(Clone, Default)]
 struct Session {
@@ -35,7 +39,7 @@ struct Progress {
     percent: Option<u8>,
 }
 
-fn game(app: &AppHandle, id: &str) -> Result<LibraryGame, String> {
+fn game<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<LibraryGame, String> {
     library::load(app)?
         .into_iter()
         .find(|g| g.id == id)
@@ -48,7 +52,7 @@ fn root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Result<PathBuf, S
         .canonicalize()
         .map_err(|_| "The installed game folder cannot be found.".into())
 }
-fn log(app: &AppHandle, id: &str, text: &str, percent: Option<u8>) {
+fn log<R: Runtime>(app: &AppHandle<R>, id: &str, text: &str, percent: Option<u8>) {
     if let Some(sessions) = app.try_state::<Sessions>() {
         if let Ok(mut all) = sessions.0.lock() {
             let session = all.entry(id.into()).or_default();
@@ -56,7 +60,7 @@ fn log(app: &AppHandle, id: &str, text: &str, percent: Option<u8>) {
         }
     }
 }
-fn progress(app: &AppHandle, id: &str, text: &str, percent: Option<u8>) {
+fn progress<R: Runtime>(app: &AppHandle<R>, id: &str, text: &str, percent: Option<u8>) {
     log(app, id, text, percent);
     let _ = app.emit(
         "repair-progress",
@@ -99,6 +103,18 @@ pub async fn repair_apply(
     game_id: String,
     source: Emulator,
 ) -> Result<repair::RepairReport, String> {
+    apply(&app, &game_id, source, false).await
+}
+
+/// Repair's one way of putting an emulator into an installed game: the Repair
+/// panel, Kryoto Online, and the achievements switch (`achievements`).
+pub(crate) async fn apply<R: Runtime>(
+    app: &AppHandle<R>,
+    game_id: &str,
+    source: Emulator,
+    achievements: bool,
+) -> Result<repair::RepairReport, String> {
+    let (app, game_id) = (app.clone(), game_id.to_string());
     let before = game(&app, &game_id)?;
     if app
         .state::<library::Running>()
@@ -195,6 +211,7 @@ pub async fn repair_apply(
             previous_online: before.online.clone(),
             previous_source: before.source.clone(),
             previous_overrides: before.apply_overrides,
+            achievements,
         });
         current.source = Some(format!("Steam + {}", report.source));
         current.online = if source == Emulator::Online {

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State, Webview};
 
-use crate::achievements::{appid_of, tracking_of, Tracking};
+use crate::achievements::{appid_of, tracking_of};
 use crate::library::{LibraryGame, Running};
 
 /// How long a "no perk" answer stands before asking again.
@@ -146,7 +146,7 @@ fn tracked(app: &AppHandle) -> Vec<(LibraryGame, String)> {
         .filter(|g| g.launcher.is_none())
         .filter_map(|g| {
             let appid = appid_of(Path::new(&g.install_dir))?;
-            (tracking_of(&g).0 != Tracking::Unsupported).then_some((g, appid))
+            tracking_of(&g).0.records().then_some((g, appid))
         })
         .collect()
 }

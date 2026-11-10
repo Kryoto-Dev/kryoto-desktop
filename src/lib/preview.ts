@@ -1266,12 +1266,22 @@ Object.assign(HANDLERS, {
   game_achievements: (a: Record<string, unknown>) => {
     const g = games.find((g) => g.id === a.id) as Record<string, unknown> | undefined
     if (!g) throw new Error('That game is no longer in the library.')
+    // The sample's two DRM-free releases: Captain Hardcore ships Valve's own
+    // Steam dll (one button turns achievements on), Hollow Knight no Steam API.
+    if (/\(DRM-free\)/i.test(String(g.source ?? ''))) {
+      const fixable = g.title !== 'Hollow Knight'
+      return { appid: null, total: 0, unlocked: 0, list: [], tracking: fixable ? 'fixable' : 'absent', emulator: null, available: fixable ? 2 : 0 }
+    }
     const unsupported = !!g.online || /kryoto[ _-]*online|kryotoo\b/i.test(String(g.source ?? ''))
     const list = unsupported ? [] : [
       { name: 'PREVIEW_FIRST', displayName: 'First steps', description: 'Complete the first chapter.', hidden: false, icon: null, iconGray: null, percent: 75, unlocked: true, unlockedAt: now() - 86400 },
       { name: 'PREVIEW_SECRET', displayName: 'A hidden discovery', description: 'Find a secret.', hidden: true, icon: null, iconGray: null, percent: 12, unlocked: false, unlockedAt: null },
     ]
-    return { appid: null, total: list.length, unlocked: list.filter((a) => a.unlocked).length, list, tracking: unsupported ? 'unsupported' : 'supported', emulator: unsupported ? 'Kryoto Online' : 'gbe_fork / Goldberg' }
+    return { appid: null, total: list.length, unlocked: list.filter((a) => a.unlocked).length, list, tracking: unsupported ? 'unsupported' : 'supported', emulator: unsupported ? 'Kryoto Online' : 'gbe_fork / Goldberg', available: list.length }
+  },
+  achievements_turn_on: (a: Record<string, unknown>) => {
+    HANDLERS.repair_apply!({ gameId: a.id, source: 'gbe_fork' })
+    return null
   },
   repair_sources: () => [
     { id: 'gbe_fork', label: 'gbe_fork', online: false },

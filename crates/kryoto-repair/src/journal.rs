@@ -317,7 +317,13 @@ impl Journal {
         for directory in dirs {
             let p = safe_path(root, &directory)?;
             if p.is_dir() {
-                let _ = fs::remove_dir(p);
+                // Icons fetched into a list folder the repair made are only
+                // ever Kryoto's; anything else made inside a new folder stays.
+                if p.file_name().is_some_and(|n| n == crate::achievements::GBE_IMAGES) {
+                    let _ = fs::remove_dir_all(p);
+                } else {
+                    let _ = fs::remove_dir(p);
+                }
             }
         }
         self.state = "undone".into();
@@ -349,6 +355,32 @@ mod tests {
         assert!(lock(&dir).is_err());
         drop(held);
         assert!(check_idle(&dir).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Undo of gbe_fork on a game published DRM-free: Valve's dll back, and
+    /// nothing of the emulator's folder left, icons fetched later included.
+    #[test]
+    fn undo_leaves_no_emulator_folder_behind() {
+        let dir = std::env::temp_dir().join(format!("kryoto-repair-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("steam_api64.dll"), b"valve").unwrap();
+        fs::write(dir.join("game.sav"), b"keep").unwrap();
+        let settings = dir.join("steam_settings");
+        let images = settings.join("achievement_images");
+        let files = [dir.join("steam_api64.dll"), settings.join("achievements.json"), settings.join("configs.main.ini")];
+        let mut record = Journal::prepare(&dir, &files, &[settings.clone(), images.clone()], "gbe_fork", "test").unwrap();
+        fs::create_dir_all(&images).unwrap();
+        fs::write(dir.join("steam_api64.dll"), b"gbe").unwrap();
+        for f in &files[1..] {
+            fs::write(f, b"x").unwrap();
+        }
+        fs::write(images.join("a1b2.jpg"), b"icon").unwrap();
+        record.restore(&dir).unwrap();
+        assert_eq!(fs::read(dir.join("steam_api64.dll")).unwrap(), b"valve");
+        assert!(!settings.exists(), "the emulator's folder is gone");
+        assert_eq!(fs::read(dir.join("game.sav")).unwrap(), b"keep");
         let _ = fs::remove_dir_all(&dir);
     }
 }
