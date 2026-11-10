@@ -169,6 +169,7 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
     chat_history: async () => (await need()).historyState(),
     chat_history_answer: async (a) => (await need()).historyAnswer(String(a.transferId), !!a.send),
     chat_history_dismiss: async (a) => (await need()).historyDismiss(String(a.transferId)),
+    chat_history_ask_again: async () => (await need()).historyAskAgain(),
     chat_reset_identity: async () => (await need()).resetIdentity(),
     chat_groups: async () => (await need()).groupList(),
     chat_group_create: async (a) => (await need()).groupCreate(a.name, a.members),

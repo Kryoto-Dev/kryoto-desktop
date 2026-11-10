@@ -1248,6 +1248,8 @@ impl Chat {
             Some(Body::HistoryAck(a)) if from_me && target == Target::Dm(me) => self.on_history_ack(inbound.sender.device_id, a).await,
             Some(Body::Active(_)) if from_me => {
                 ACTIVE_ELSEWHERE_UNTIL.store(now_ms() + ACTIVE_FOR_MS, std::sync::atomic::Ordering::Relaxed);
+                // Someone is at another of this account's devices: a history request still waiting goes to it now.
+                self.history.nudge();
             }
             Some(Body::Call(c)) if !from_me => {
                 // Calls are one-to-one, from people who may talk to us.

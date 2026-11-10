@@ -37,6 +37,7 @@ import {
   chatConversations,
   chatGroups,
   chatHistoryAnswer,
+  chatHistoryAskAgain,
   chatHistoryDismiss,
   useChatHistory,
   chatMessageRequest,
@@ -825,15 +826,33 @@ function HistoryNotice({ history }: { history: HistoryState }) {
     <>
       {incoming ? (
         <div className={row} data-history="incoming">
-          {incoming.state === 'waiting' ? (
+          {incoming.state === 'waiting' && !incoming.quiet ? (
             <>
               {head('Your past messages are on your other devices.')}
               <p>They arrive here as soon as one of them is online with chat, after you say yes there. You can chat meanwhile.</p>
+            </>
+          ) : incoming.state === 'waiting' ? (
+            <>
+              {head(
+                incoming.expired ? 'None of your other devices sent your past messages.' : 'No device has sent your past messages yet.',
+                incoming.expired ? incoming.transferId : undefined,
+              )}
+              <p>
+                {incoming.expired
+                  ? "They are only on your own devices, never on Kryoto's servers. Open Kryoto chat on one that has them, then ask again."
+                  : "They are only on your own devices, never on Kryoto's servers. Open Kryoto chat on one that has them and choose Send there. Chose Not now there? Ask again."}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => void chatHistoryAskAgain()}>
+                  Ask again
+                </Button>
+              </div>
             </>
           ) : incoming.state === 'receiving' ? (
             <>
               {head(`Restoring your history from ${incoming.from ?? 'your other device'}`)}
               <AsciiBar fraction={incoming.total ? incoming.received / incoming.total : null} cells={22} className="text-foreground/80" />
+              {incoming.quiet ? <p>{incoming.from ?? 'Your other device'} stopped sending. The rest comes when it, or another of your devices, is online with chat.</p> : null}
             </>
           ) : (
             head(`History restored from ${incoming.from ?? 'your other device'}.`, incoming.transferId)
