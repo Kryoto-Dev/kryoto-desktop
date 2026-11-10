@@ -9,7 +9,8 @@
 //! page should be. Converting with the page's own ratio, to physical pixels,
 //! puts it exactly where the shell measured, whatever Windows reports.
 //!
-//! Linux keeps logical pixels: GTK allocates in them (see linux_overlay.rs).
+//! Linux keeps logical pixels: GTK allocates in them (see linux_overlay.rs),
+//! and a CSS pixel is as many of them as the text size's zoom (text_size.rs).
 
 use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size};
 
@@ -26,7 +27,10 @@ pub fn rect(x: f64, y: f64, width: f64, height: f64, scale: Option<f64>) -> (Pos
             PhysicalPosition::new((x * s).round() as i32, (y * s).round() as i32).into(),
             PhysicalSize::new((width * s).round().max(1.0) as u32, (height * s).round().max(1.0) as u32).into(),
         ),
-        _ => (LogicalPosition::new(x, y).into(), LogicalSize::new(width, height).into()),
+        _ => {
+            let z = crate::text_size::css_to_logical();
+            (LogicalPosition::new(x * z, y * z).into(), LogicalSize::new(width * z, height * z).into())
+        }
     }
 }
 

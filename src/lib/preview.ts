@@ -26,6 +26,14 @@ export const previewBus = {
   },
 }
 
+const TEXT_SIZE_STEPS = [90, 100, 110, 125, 150]
+let textSize = 100
+const setTextSize = (p: number) => {
+  textSize = TEXT_SIZE_STEPS.includes(p) ? p : 100
+  previewBus.emit('text-size', textSize)
+  return textSize
+}
+
 const phone: { lan: boolean; code: string | null; pairUri: string | null } = { lan: false, code: null, pairUri: null }
 const now = () => Math.floor(Date.now() / 1000)
 const steam = (appid: number, file: string) => `https://cdn.cloudflare.steamstatic.com/steam/apps/${appid}/${file}`
@@ -898,6 +906,14 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     return clone(g)
   },
   settings_save: (a) => ({ ...Object.assign(settings, a.settings) }),
+  // The app zooms every view (text_size.rs); here only the choice is kept.
+  text_size_get: () => textSize,
+  text_size_set: (a) => setTextSize(Number(a.percent)),
+  text_size_step: (a) => {
+    const i = TEXT_SIZE_STEPS.indexOf(textSize)
+    const step = Number(a.step)
+    return setTextSize(step === 0 ? 100 : TEXT_SIZE_STEPS[Math.min(TEXT_SIZE_STEPS.length - 1, Math.max(0, i + Math.sign(step)))]!)
+  },
   downloads_list: () => clone(downloadList),
   storage_overview: () => ({
     folders: [

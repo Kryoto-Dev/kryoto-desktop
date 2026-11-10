@@ -30,6 +30,9 @@ thread_local! {
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+    // The shell measured in its CSS pixels, which the text size zooms.
+    let z = crate::text_size::css_to_logical();
+    let (x, y, width, height) = (x * z, y * z, width * z, height * z);
     (
         x.round() as i32,
         y.round() as i32,
@@ -39,8 +42,8 @@ fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
 }
 
 /// Put `view` over the shell (first call) or move it (later calls).
-/// Coordinates are logical pixels in the main window, as the shell measures
-/// them, which is also what GTK allocates in.
+/// Coordinates are the shell's CSS pixels; GTK allocates in logical ones,
+/// the same at 100% text size.
 pub fn place(view: &tauri::Webview, x: f64, y: f64, width: f64, height: f64) {
     let r = rect(x, y, width, height);
     let name = view.label().to_string();

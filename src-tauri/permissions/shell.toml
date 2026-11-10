@@ -67,6 +67,7 @@ commands.allow = [
   "open_external",
   "settings_get",
   "settings_save",
+  "text_size_get", "text_size_set", "text_size_step",
   "settings_recover",
   "library_list",
   "collections_state",

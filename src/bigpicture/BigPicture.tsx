@@ -181,7 +181,7 @@ export function BigPicture({
   }, [open, tab, tabs.length])
 
   const hint = (c: PadControl, what: string) => (
-    <span className="flex items-center gap-2">
+    <span className="flex items-center gap-2 whitespace-nowrap">
       <PadBadge family={family} control={c} label={padLabel(family, c).long} className="h-7 min-w-7 text-[11px]" />
       {what}
     </span>
@@ -294,19 +294,20 @@ export function BigPicture({
         )}
       </main>
 
-      {/* What each button does here, named the way this pad prints it. */}
+      {/* What each button does here, named the way this pad prints it. Narrow (a small
+          window, or a large text size) it drops the shoulder buttons: the tabs above show them. */}
       <footer className="flex items-center gap-8 border-t border-border bg-card/60 px-12 py-4 text-sm text-muted-foreground">
         {hint(confirmOf(family), open ? (running.has(open.id) ? 'Stop' : 'Play') : 'Open')}
         {hint(backOf(family), open ? 'Back' : 'Leave Big Picture')}
         {open ? null : (
-          <span className="flex items-center gap-2">
+          <span className="hidden items-center gap-2 whitespace-nowrap lg:flex">
             <PadBadge family={family} control="leftshoulder" label={padLabel(family, 'leftshoulder').long} className="h-7 min-w-7 text-[11px]" />
             <PadBadge family={family} control="rightshoulder" label={padLabel(family, 'rightshoulder').long} className="h-7 min-w-7 text-[11px]" />
             Library or Recently played
           </span>
         )}
         <span className="grow" />
-        <button type="button" onClick={leave} className="flex items-center gap-2 hover:text-foreground">
+        <button type="button" onClick={leave} className="flex items-center gap-2 whitespace-nowrap hover:text-foreground">
           <PadBadge family={family} control="back" label={padLabel(family, 'back').long} className="h-7 min-w-7 text-[11px]" />
           <PadBadge family={family} control="start" label={padLabel(family, 'start').long} className="h-7 min-w-7 text-[11px]" />
           Hold to leave

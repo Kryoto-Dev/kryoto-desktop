@@ -32,6 +32,7 @@ import { GameUpdatesSection } from '@/settings/GameUpdatesSection'
 import { DefenderSection } from '@/settings/DefenderSection'
 import { anchorId, revealSetting } from '@/lib/settings-links'
 import { useSettled } from '@/hooks/useSettled'
+import { TEXT_SIZES, useTextSize, ZOOM_MODIFIER } from '@/lib/text-size'
 
 /**
  * Settings: one page for everything you can set.
@@ -416,6 +417,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
             <Section title="Desktop theme" hint="Applies to the library, downloads, settings and menus.">
               <Segmented label="Desktop theme" value={s.theme ?? 'account'} options={[{ value: 'account', label: 'Follow kryo.to' }, { value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]} onChange={(v) => set('theme', v)} />
             </Section>
+            <TextSizeSection />
             <Section title="Open on">
               <Segmented label="Open on" value={s.startPage} options={[{ value: 'library', label: 'Library' }, { value: 'store', label: 'Store' }]} onChange={(v) => set('startPage', v)} />
             </Section>
@@ -568,6 +570,20 @@ function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Setti
           <Caption>{account ? `Games call you ${account}.` : 'Sign in to kryo.to to use your username.'}</Caption>
         ) : null}
       </div>
+    </Section>
+  )
+}
+
+/**
+ * How large Kryoto draws everything, the Store included (lib/text-size.ts).
+ * Applies as it is picked; saved by its own command, not with the page.
+ */
+function TextSizeSection() {
+  const [size, pick] = useTextSize()
+  if (size === null) return null
+  return (
+    <Section title="Text size" anchor="text-size" hint={`Everything in Kryoto, the Store included. ${ZOOM_MODIFIER} + and ${ZOOM_MODIFIER} - change it anywhere, and ${ZOOM_MODIFIER} 0 goes back to 100%.`}>
+      <Segmented label="Text size" value={String(size)} options={TEXT_SIZES.map((v) => ({ value: String(v), label: `${v}%` }))} onChange={(v) => pick(Number(v))} />
     </Section>
   )
 }

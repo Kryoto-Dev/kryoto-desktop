@@ -93,7 +93,7 @@ pub fn set_store_origin(x: f64, y: f64) {
         *o = (x, y);
     }
     #[cfg(target_os = "linux")]
-    crate::system::set_fill_split(y);
+    crate::system::set_fill_split(y * crate::text_size::css_to_logical());
 }
 
 /// Draw a plain menu in the Store's own page (BROWSER_STATE_SCRIPT,
@@ -305,7 +305,16 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, s
         Some(s) => s,
         None => window.scale_factor().map_err(|e| e.to_string())?,
     };
-    let inner = window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+    // The window in the shell's CSS pixels. Linux places views in logical pixels, a
+    // CSS pixel being `z` of them at the text size (text_size.rs), whatever the
+    // page's ratio says: WebKitGTK 2.54 counts the zoom in it, older ones do not.
+    let z = crate::text_size::css_to_logical();
+    let inner = if cfg!(target_os = "linux") {
+        let l = window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(window.scale_factor().map_err(|e| e.to_string())?);
+        tauri::LogicalSize::new(l.width / z, l.height / z)
+    } else {
+        window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale)
+    };
     let (anchor, right) = *app.state::<Menus>().anchor.lock().map_err(|_| "menu lock")?;
     // The menu measured itself in its own CSS pixels. Where its ratio differs
     // from the shell's (a monitor with another scale it has not caught up
@@ -326,10 +335,10 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, s
         crate::linux_overlay::place(&view, x, y, width, height);
         // Rounded like the panel it draws, at the reader's corner style
         // (styles.css), cut by a shape so the view itself can stay opaque (KB-0006).
-        let (w, h) = (width.round() as i32, height.round() as i32);
+        let (w, h) = ((width * z).round() as i32, (height * z).round() as i32);
         let _ = view.with_webview(move |v| {
             use gtk::prelude::Cast;
-            crate::system::linux_shape::view(v.inner().upcast_ref::<gtk::Widget>(), w, h, crate::system::corner());
+            crate::system::linux_shape::view(v.inner().upcast_ref::<gtk::Widget>(), w, h, crate::system::corner_drawn());
         });
     }
     view.show().map_err(|e| e.to_string())?;

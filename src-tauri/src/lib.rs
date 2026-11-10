@@ -56,6 +56,7 @@ mod settings;
 mod shortcuts;
 mod storage;
 mod system;
+mod text_size;
 mod vr;
 
 use serde::{Deserialize, Serialize};
@@ -813,6 +814,36 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   const side = (e) => { if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); return true } return false };
   addEventListener('mousedown', side, true);
   addEventListener('mouseup', (e) => { if (side(e)) invoke('store_nav_button', { forward: e.button === 4 }) }, true);
+  // Text size (text_size.rs): Ctrl + / Ctrl - / Ctrl 0 and Ctrl+wheel, as in the
+  // shell (src/lib/text-size-keys.ts has the same rules, with tests). After the
+  // page's own handlers, so a field that uses the key for itself keeps it.
+  {
+    const mac = /Mac/i.test(navigator.platform);
+    let busy = false, turned = 0, last = -Infinity;
+    const step = (s) => { if (busy) return; busy = true; Promise.resolve(invoke('text_size_step', { step: s })).catch(() => {}).finally(() => { busy = false; }); };
+    addEventListener('keydown', (e) => {
+      if (e.defaultPrevented || e.isComposing || e.altKey) return;
+      if (mac ? (!e.metaKey || e.ctrlKey) : (!e.ctrlKey || e.metaKey)) return;
+      const s = e.key === '+' || e.key === '=' || e.code === 'NumpadAdd' ? 1
+        : e.shiftKey ? null
+        : e.key === '-' || e.code === 'NumpadSubtract' ? -1
+        : e.key === '0' || e.code === 'Numpad0' || e.code === 'Digit0' ? 0 : null;
+      if (s === null) return;
+      e.preventDefault();
+      step(s);
+    });
+    addEventListener('wheel', (e) => {
+      if (!(mac ? e.metaKey : e.ctrlKey) || e.altKey) return;
+      e.preventDefault();
+      const px = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1);
+      if (Math.sign(px) !== Math.sign(turned)) turned = 0;
+      turned += px;
+      if (Math.abs(turned) < 50 || e.timeStamp - last < 140) return;
+      const s = turned < 0 ? 1 : -1;
+      turned = 0; last = e.timeStamp;
+      step(s);
+    }, { passive: false });
+  }
   // Linux: WebKitGTK re-blurs whatever is behind a `backdrop-filter` on the CPU
   // on every frame. kryo.to's landing page has a wall of moving covers behind
   // seven of them, which kept the page's process near 90% and the page choppy.
@@ -1823,6 +1854,9 @@ pub fn run() {
                 if !to_tray {
                     let _ = main.show();
                 }
+                // After show: before it, Windows still counts a caption in a frameless
+                // window's size. The page has not loaded yet, so nothing is drawn first.
+                text_size::size_start_window(&main);
             }
             // The desktop pet, when it is on: it comes out even when Kryoto
             // starts in the tray.
@@ -1855,10 +1889,10 @@ pub fn run() {
             PluginBuilder::<tauri::Wry, ()>::new("app-context-menu")
                 .js_init_script("document.addEventListener('contextmenu', e => e.preventDefault());")
                 .on_webview_ready(|view| {
+                    // Drawn at the player's text size from its first frame.
+                    text_size::apply(&view);
                     #[cfg(windows)]
                     disable_browser_menu(&view);
-                    #[cfg(not(windows))]
-                    let _ = view;
                 })
                 .build(),
         )
@@ -2129,6 +2163,9 @@ pub fn run() {
             settings::settings_get,
             settings::settings_recover,
             settings::settings_save,
+            text_size::text_size_get,
+            text_size::text_size_set,
+            text_size::text_size_step,
             art::art_import,
             custom_sounds::sound_custom_list,
             custom_sounds::sound_custom_set,
