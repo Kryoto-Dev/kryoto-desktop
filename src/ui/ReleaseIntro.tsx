@@ -60,7 +60,7 @@ export function IntroVideo({ video, className }: { video: string; className?: st
     <div className={`kryo-radius aspect-video w-full overflow-hidden border border-border bg-black ${className ?? ''}`}>
       {inline === null ? null : !inline ? (
         <div className="grid size-full place-content-center justify-items-center gap-3 p-6 text-center">
-          <p className="max-w-sm text-xs text-muted-foreground">The AppImage plays this video in your browser.</p>
+          <p className="max-w-sm text-xs text-muted-foreground">On Linux, this video plays in your browser.</p>
           <Button variant="primary" onClick={() => openExternal(isFile(video) ? video : `https://www.youtube.com/watch?v=${video}`)}>
             <ExternalLink className="size-3" />
             Watch it in your browser
