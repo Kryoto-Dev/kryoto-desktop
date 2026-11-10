@@ -2145,6 +2145,7 @@ pub fn run() {
             library::library_remove,
             library::game_launch,
             achievements::game_achievements,
+            achievements::achievements_turn_on,
             library::game_launch_preview,
             library::game_running,
             library::game_stop,

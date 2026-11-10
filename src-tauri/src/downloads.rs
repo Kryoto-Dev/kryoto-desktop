@@ -3696,10 +3696,31 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .unwrap_or_else(|| Path::new(&settings.library_dir).join(plain_name(&title, item.slug.as_deref())));
     // An old repair backup must never restore files over a newer release.
     // Keep the same lock as the fixer through installation and library saving.
-    let _repair_lock = if dest.join(".kryoto-repair").exists() {
+    // The achievements switch is Kryoto's own, not a choice made in Repair:
+    // it comes out here, the release goes in, and it goes back on after.
+    let mut achievements_back = false;
+    let repair_lock = if dest.join(".kryoto-repair").exists() {
         let guard = kryoto_repair::journal::lock(&dest)?;
-        if kryoto_repair::journal::load(&dest)?.is_some_and(|r| r.state != "undone") {
-            return Err("Undo the game's repair under Properties > Repair before installing another release.".into());
+        if let Some(mut record) = kryoto_repair::journal::load(&dest)?.filter(|r| r.state != "undone") {
+            let switch = existing.as_ref().and_then(|g| g.repair.as_ref()).is_some_and(|r| r.achievements);
+            if !switch || record.state != "applied" {
+                return Err("Undo the game's repair under Properties > Repair before installing another release.".into());
+            }
+            record.restore(&dest)?;
+            achievements_back = true;
+            // As Undo leaves it, so a failed install still reads true.
+            if let Some(before) = existing.as_ref() {
+                let _ = library::update(app, |games| {
+                    if let Some(g) = games.iter_mut().find(|g| g.id == before.id) {
+                        if let Some(previous) = g.repair.take() {
+                            g.online = previous.previous_online;
+                            g.source = previous.previous_source;
+                            g.apply_overrides = previous.previous_overrides;
+                        }
+                    }
+                    Ok(())
+                });
+            }
         }
         Some(guard)
     } else {
@@ -3912,6 +3933,12 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         crate::antivirus::restored(slug);
     }
     let _ = app.emit("library-changed", ());
+    // Installed and saved: the folder is free for Repair again.
+    drop(repair_lock);
+    if achievements_back {
+        let (app, id) = (app.clone(), game.id.clone());
+        tauri::async_runtime::spawn(crate::achievements::turn_back_on(app, id));
+    }
     if settings.notify_downloads {
         let title = library::title_with_branch(&title, item.meta.steam_branch.as_deref());
         let _ = app.emit(

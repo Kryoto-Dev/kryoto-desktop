@@ -143,6 +143,60 @@ pub fn find_steam_api_dlls(game_dir: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// What Valve's own Steamworks dll calls itself. RUNE's dll borrows the name,
+/// so the name alone proves nothing; see [`untouched_steam_api`].
+const VALVE_STEAM_API: &str = "Steam Client API";
+
+/// What emulators and cracks leave beside the Steam dll or in the game's own
+/// folder. Any one of them means somebody already chose an emulator here.
+const EMULATOR_MARKS: &[&str] = &[
+    "steam_settings",
+    "steam_emu.ini",
+    "steak_emu.ini",
+    "rune.ini",
+    "steam_api.rne",
+    "steam_api64.rne",
+    "steam_api_o.dll",
+    "steam_api64_o.dll",
+    "steakclient.dll",
+    "steakclient64.dll",
+    "onlinefix.ini",
+    "onlinefix.dll",
+    "onlinefix64.dll",
+    "coldclientloader.ini",
+    "cream_api.ini",
+    "local_save.txt",
+    ONLINE_INI,
+];
+
+/// The game's Steam dlls when every one is Valve's own, untouched: a release
+/// that was published DRM-free, with no emulator applied. Such a game counts
+/// achievements only while the real Steam client runs, so on Kryoto it records
+/// none until an emulator goes in its place (Desktop's achievements switch,
+/// through Repair). None when the game has no Steam dll at all, or when
+/// anything beside them says an emulator or crack is already there.
+pub fn untouched_steam_api(game_dir: &Path) -> Option<Vec<PathBuf>> {
+    let dlls = find_steam_api_dlls(game_dir);
+    if dlls.is_empty() {
+        return None;
+    }
+    let marked = |dir: &Path| {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                EMULATOR_MARKS.contains(&name.as_str())
+            })
+        })
+    };
+    let valve = |dll: &Path| {
+        crate::peversion::product_name(dll).is_some_and(|p| p.trim().eq_ignore_ascii_case(VALVE_STEAM_API))
+    };
+    if marked(game_dir) || dlls.iter().any(|dll| !valve(dll) || dll.parent().is_some_and(marked)) {
+        return None;
+    }
+    Some(dlls)
+}
+
 /// What a scan of an existing tree found, before anything is changed.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct EmuMatch {
@@ -1678,6 +1732,63 @@ mod tests {
         // nothing and calling the build cracked.
         std::fs::remove_file(loaded.join("steam_api64.dll")).unwrap();
         assert_eq!(find_steam_api_dlls(&dir).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A PE whose version resource names `product`, the way `peversion` reads it.
+    fn pe_named(path: &Path, product: &str) {
+        let key: Vec<u8> = "ProductName\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let value: Vec<u8> = format!("{product}\0").encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let value_at = (6 + key.len() + 3) & !3;
+        let size = value_at + value.len();
+        let mut bytes = vec![0u8; 0x200 + size];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+        bytes[0x98..0x9d].copy_from_slice(b".rsrc");
+        bytes[0xa8..0xac].copy_from_slice(&(size as u32).to_le_bytes());
+        bytes[0xac..0xb0].copy_from_slice(&0x200u32.to_le_bytes());
+        bytes[0x200..0x202].copy_from_slice(&(size as u16).to_le_bytes());
+        bytes[0x202..0x204].copy_from_slice(&(value.len() as u16 / 2).to_le_bytes());
+        bytes[0x204..0x206].copy_from_slice(&1u16.to_le_bytes());
+        bytes[0x206..0x206 + key.len()].copy_from_slice(&key);
+        bytes[0x200 + value_at..].copy_from_slice(&value);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// A DRM-free release ships Valve's dll as it is; anything an emulator
+    /// leaves beside it, or a dll that is not Valve's, means it is not that.
+    #[test]
+    fn only_valves_own_dll_with_nothing_beside_it_is_untouched() {
+        let dir = std::env::temp_dir().join(format!("kryoto-untouched-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(untouched_steam_api(&dir), None, "no Steam dll at all");
+
+        let dll = dir.join("Game_Data/Plugins/x86_64/steam_api64.dll");
+        pe_named(&dll, "Steam Client API");
+        // A genuine game may ship its own steam_appid.txt; that is not a crack.
+        std::fs::write(dir.join("steam_appid.txt"), "620").unwrap();
+        assert_eq!(untouched_steam_api(&dir), Some(vec![dll.clone()]));
+
+        // RUNE keeps Valve's name on its own dll, and the original as .rne.
+        std::fs::write(dll.with_extension("rne"), b"original").unwrap();
+        assert_eq!(untouched_steam_api(&dir), None);
+        std::fs::remove_file(dll.with_extension("rne")).unwrap();
+        // A loader beside the exe.
+        std::fs::write(dir.join("steam_emu.ini"), "[Settings]\nAppId=620\n").unwrap();
+        assert_eq!(untouched_steam_api(&dir), None);
+        std::fs::remove_file(dir.join("steam_emu.ini")).unwrap();
+        // gbe_fork's own dll.
+        pe_named(&dll, "GSE Client API");
+        assert_eq!(untouched_steam_api(&dir), None);
+        // And gbe_fork's settings beside a Valve dll (a steamclient setup).
+        pe_named(&dll, "Steam Client API");
+        std::fs::create_dir_all(dll.parent().unwrap().join("steam_settings")).unwrap();
+        assert_eq!(untouched_steam_api(&dir), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
