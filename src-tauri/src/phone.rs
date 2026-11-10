@@ -732,6 +732,13 @@ impl Session {
 
 /// The Store's sign-in, or why there is none.
 pub fn session<R: Runtime>(app: &AppHandle<R>) -> Result<Session, String> {
+    session_over(app, None)
+}
+
+/// The same, connecting from `local` (`0.0.0.0` or `::`): a link minted over
+/// one address family is bound to that family's network, so the download
+/// that follows goes the same way (downloads.rs `family`, KB-0072).
+pub fn session_over<R: Runtime>(app: &AppHandle<R>, local: Option<std::net::IpAddr>) -> Result<Session, String> {
     let endpoint = settings::catalog_endpoint(&settings::load(app));
     let base = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
     let cookie = app
@@ -744,6 +751,7 @@ pub fn session<R: Runtime>(app: &AppHandle<R>) -> Result<Session, String> {
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
+        .local_address(local)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(Session { client, endpoint, cookie })
@@ -809,8 +817,12 @@ pub async fn mint_release<R: Runtime>(app: &AppHandle<R>, session: &Session, rel
 /// it mints for this PC, or a mirror when `mirrors` allows one. Links run
 /// out, so a queue asks for each one when its turn comes (downloads.rs).
 pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: Option<&str>, mirrors: bool) -> Result<Minted, MintError> {
-    let session = session(app)?;
-    let listing = listing(&session, slug).await?;
+    mint_with(app, &session(app)?, slug, turnstile_token, mirrors).await
+}
+
+/// `mint`, as `session` (over one address family, say).
+pub async fn mint_with<R: Runtime>(app: &AppHandle<R>, session: &Session, slug: &str, turnstile_token: Option<&str>, mirrors: bool) -> Result<Minted, MintError> {
+    let listing = listing(session, slug).await?;
     let title = listing["title"].as_str().unwrap_or(slug).to_string();
     // The release players get now.
     let release = listing["releases"]
@@ -828,7 +840,7 @@ pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: O
         return Ok(Minted::Mirror { page: page.to_string() });
     }
     let release_id = release["id"].as_str().unwrap_or_default();
-    let url = mint_release(app, &session, release_id, turnstile_token).await?;
+    let url = mint_release(app, session, release_id, turnstile_token).await?;
     Ok(Minted::Link { url, title })
 }
 
