@@ -880,7 +880,7 @@ export function ChatPane({
             </IconButton>
           </div>
         ) : null}
-        <div className="flex items-end gap-2">
+        <div className="flex flex-wrap items-end gap-2">
           <RichTextarea
             ref={box}
             value={text}
@@ -888,7 +888,7 @@ export function ChatPane({
             people={findPeople}
             effects={meSupporter}
             rank={meRank}
-            wrapperClassName="grow"
+            wrapperClassName="min-w-0 flex-[1_1_12rem]"
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
@@ -896,32 +896,34 @@ export function ChatPane({
               }
             }}
             rows={Math.min(6, Math.max(1, text.split('\n').length))}
-            placeholder={`Message ${peer.name}`}
-            aria-label={`Message ${peer.name}`}
-            className="kryo-radius block max-h-40 min-h-9 w-full resize-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-foreground"
+            placeholder="Write a message"
+            aria-label="Write a message"
+            className="kryo-radius block max-h-40 min-h-9 w-full resize-none overflow-y-auto border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-foreground"
           />
-          <EmojiButton rank={meRank} target={box} value={text} onValueChange={onType} onPick={(token) => void sendSticker(token)} />
-          <IconButton
-            label="Send a file (up to 25 MB)"
-            onClick={() =>
-              void chatSendFile(peer.id)
-                .then((m) => m && setMessages((list) => (list.some((x) => x.msgId === m.msgId) ? list : [...list, m])))
-                .catch((e) => setError(errorText(e)))
-            }
-          >
-            <Paperclip className="size-4" />
-          </IconButton>
-          <IconButton label="Invite to a game" onClick={() => setInviting(true)}>
-            <Gamepad2 className="size-4" />
-          </IconButton>
-          {meSupporter ? (
-            <IconButton label="Send a GIF" onClick={() => setGifOpen(true)}>
-              <ImagePlay className="size-4" />
+          <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-end justify-end gap-2">
+            <EmojiButton rank={meRank} target={box} value={text} onValueChange={onType} onPick={(token) => void sendSticker(token)} />
+            <IconButton
+              label="Send a file (up to 25 MB)"
+              onClick={() =>
+                void chatSendFile(peer.id)
+                  .then((m) => m && setMessages((list) => (list.some((x) => x.msgId === m.msgId) ? list : [...list, m])))
+                  .catch((e) => setError(errorText(e)))
+              }
+            >
+              <Paperclip className="size-4" />
             </IconButton>
-          ) : null}
-          <Button variant="primary" size="sm" disabled={!text.trim() || counter < 0} onClick={() => submit()} aria-label="Send">
-            <Send className="size-3" />
-          </Button>
+            <IconButton label="Invite to a game" onClick={() => setInviting(true)}>
+              <Gamepad2 className="size-4" />
+            </IconButton>
+            {meSupporter ? (
+              <IconButton label="Send a GIF" onClick={() => setGifOpen(true)}>
+                <ImagePlay className="size-4" />
+              </IconButton>
+            ) : null}
+            <Button variant="primary" size="sm" disabled={!text.trim() || counter < 0} onClick={() => submit()} aria-label="Send">
+              <Send className="size-3" />
+            </Button>
+          </div>
         </div>
         {counter < 200 ? (
           <Caption className={cn('text-right', counter < 0 && 'text-destructive')}>
