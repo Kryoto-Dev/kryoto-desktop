@@ -9,6 +9,7 @@
 
 mod auth;
 mod engine;
+mod history;
 mod identity;
 mod messaging;
 mod secrets;
@@ -158,6 +159,20 @@ fn emitter(app: AppHandle) -> types::Emit {
                 "chat-call",
                 serde_json::json!({ "userId": user_id, "callId": call_id, "kind": kind, "payload": payload }),
             );
+        }
+        ChatEvent::History(view) => {
+            let _ = app.emit_to("main", "chat-history", &view);
+        }
+        ChatEvent::HistoryMerged { conversations } => {
+            let _ = app.emit_to("main", "chat-history-merged", serde_json::json!({ "conversations": conversations }));
+            refresh_badge(&app);
+        }
+        ChatEvent::HistoryAsk { device_name } => {
+            // The question waits in Friends; say so when the window is not in front.
+            let focused = app.get_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
+            if !focused {
+                crate::system::os_notify(app.clone(), format!("Send your chat history to {device_name}?"), Some("Open Friends in Kryoto to answer.".into()));
+            }
         }
         ChatEvent::Notify { conversation_id, sender_user, preview, group_name } => {
             // Not while the window is in front: the message is on screen.
@@ -1041,6 +1056,24 @@ where
     // Connect again either way: after a failure the account is where it was.
     start(app, token, user_id)?;
     result
+}
+
+/// Past messages between this account's devices (KB-0254): where it stands.
+#[tauri::command]
+pub async fn chat_history(state: State<'_, ChatState>) -> Result<history::HistoryView, String> {
+    Ok(current(&state)?.history_view().await)
+}
+
+/// The answer to "Send your chat history to ...?"
+#[tauri::command]
+pub async fn chat_history_answer(state: State<'_, ChatState>, transfer_id: String, send: bool) -> Result<(), String> {
+    current(&state)?.history_answer(&transfer_id, send).await
+}
+
+#[tauri::command]
+pub async fn chat_history_dismiss(state: State<'_, ChatState>, transfer_id: String) -> Result<(), String> {
+    current(&state)?.history_dismiss(&transfer_id).await;
+    Ok(())
 }
 
 /// This account has chat on another device: take over its identity with the

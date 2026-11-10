@@ -123,6 +123,8 @@ commands.allow = [
   "compat_install",
   "compat_remove",
   "addon_undo",
+  "addons_list",
+  "addons_get",
   "online_check",
   "online_apply",
   "online_undo",

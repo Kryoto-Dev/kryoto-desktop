@@ -47,6 +47,7 @@ pub(crate) fn clean(cmd: &mut Command) {
     for key in OURS {
         cmd.env_remove(key);
     }
+    crate::display_env::remove_font_shim(cmd);
     // Forced for our own window (display_env.rs); a file manager on Wayland
     // should pick its own backend.
     if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var("GDK_BACKEND").is_ok_and(|v| v == "x11") {

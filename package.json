@@ -1,13 +1,14 @@
 {
   "name": "kryoto-desktop",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "check:styles": "node scripts/check-styles.mjs",
-    "check": "node scripts/check-styles.mjs && tsc --noEmit",
+    "check": "node scripts/check-styles.mjs && tsc --noEmit && node --test src/web/send-rules.test.ts src/lib/playtime-math.test.ts",
+    "test": "node --test src/web/send-rules.test.ts src/lib/playtime-math.test.ts",
     "build": "tsc --noEmit && vite build",
     "app:dev": "node scripts/dev.mjs",
     "app:dev:plain": "node scripts/dev.mjs -- --no-default-features --features dev-plain-chat-store",

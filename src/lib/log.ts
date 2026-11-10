@@ -30,7 +30,15 @@ export function logInfo(scope: string, message: string) {
 
 export function installErrorLogging(windowLabel: string) {
   const scope = `ui:${windowLabel}`
+  let resizeLoopSeen = false
   window.addEventListener('error', (e) => {
+    // The browser's notice that a resize was carried to the next frame: no
+    // script failed and nothing is lost, so it is noted once, not reported (KB-0251).
+    if (/^ResizeObserver loop/.test(e.message ?? '')) {
+      if (!resizeLoopSeen) logWarn(scope, e.message)
+      resizeLoopSeen = true
+      return
+    }
     const where = e.filename ? ` (${e.filename.split('/').pop()}:${e.lineno}:${e.colno})` : ''
     logError(scope, `${e.message}${where}`)
   })

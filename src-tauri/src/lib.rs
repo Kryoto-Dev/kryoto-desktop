@@ -436,11 +436,31 @@ fn disable_browser_menu(view: &tauri::Webview) {
 ///   games list, which can be long, only when the account changes, when asked
 ///   (`__kryoDesktopRefresh`) or every ten minutes.
 /// * Clicks, so an open menu closes like it would over any other page.
+///
+/// BROWSER_STATE_SCRIPT for a page, `kryo` when it is kryo.to's.
+fn store_script(kryo: bool) -> String {
+    BROWSER_STATE_SCRIPT
+        .replace("__KRYO__", if kryo { "true" } else { "false" })
+        .replace("__STILL_WALL__", if cfg!(target_os = "linux") { "true" } else { "false" })
+}
+
 const BROWSER_STATE_SCRIPT: &str = r#"
 (() => {
   if (window.__kryoDesktop) return;
   window.__kryoDesktop = true;
   const KRYO = __KRYO__;
+  // Linux: kryo.to's home page drifts a wall of covers behind the search
+  // (components/home/landing/backdrop.tsx). WebKitGTK repaints it on every
+  // frame: measured on Fedora 44's WebKitGTK 2.54, the page ran at 8 fps with
+  // it moving and 62 fps with it still, and players filmed 20 fps on real GPUs
+  // (KB-0012). Here it holds still, as it does under reduced motion.
+  if (KRYO && __STILL_WALL__) {
+    try {
+      const still = document.createElement('style');
+      still.textContent = '.kryo-landing-track{animation:none!important}';
+      (document.head || document.documentElement).appendChild(still);
+    } catch (_) {}
+  }
   const key = '__kryo_desktop_history__';
   const invoke = (command, payload) => {
     try {
@@ -1533,13 +1553,15 @@ fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, secon
         return Err("Open kryo.to first.".into());
     }
     view.eval(format!(
-        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',startedAt:{started_at},seconds:{seconds},sessionKey:'{key}'}})}}).then(r=>{{if(r.ok||(r.status>=400&&r.status<500&&r.status!==429))window.__TAURI_INTERNALS__.invoke('store_play_done',{{key:'{key}'}})}}).catch(()=>{{}})"
+        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',startedAt:{started_at},seconds:{seconds},sessionKey:'{key}'}})}}).then(r=>{{if(r.ok||(r.status>=400&&r.status<500&&r.status!==401&&r.status!==429))window.__TAURI_INTERNALS__.invoke('store_play_done',{{key:'{key}'}})}}).catch(()=>{{}})"
     ))
     .map_err(|e| e.to_string())
 }
 
-/// kryo.to's answer to `store_report_play`: taken, or refused for good. A guest
-/// has no account to count it on (401); too many (429) or a server error is tried again.
+/// kryo.to's answer to `store_report_play`: taken, or refused for good. Signed
+/// out on the page (401: an expired session), too many (429) or a server error
+/// is tried again, for up to 14 days (lib/play-reports.ts); until 0.3.1 a 401
+/// dropped the session. Guests' sessions are never queued (Shell).
 #[tauri::command]
 fn store_play_done(app: tauri::AppHandle, webview: tauri::Webview, key: String) -> Result<(), String> {
     from_kryoto_store(&app, &webview)?;
@@ -1924,13 +1946,13 @@ pub fn run() {
                         }
                         let Ok(url) = view.url() else { return };
                         let kryo = is_kryoto(&url, view.app_handle());
-                        let script = BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" });
+                        let script = store_script(kryo);
                         let _ = view.eval(format!("if (document.readyState !== 'loading' && !window.__kryoDesktop && location.href !== 'about:blank') {{ {script} }}"));
                     }
                 });
             } else {
                 let kryo = is_kryoto(payload.url(), webview.app_handle());
-                let _ = webview.eval(BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" }));
+                let _ = webview.eval(store_script(kryo));
                 if kryo {
                     presence::beat(webview.app_handle());
                     if sign_out_is_due() {
@@ -2052,6 +2074,9 @@ pub fn run() {
             chat::chat_account_devices,
             chat::chat_account_device_remove,
             chat::chat_restore,
+            chat::chat_history,
+            chat::chat_history_answer,
+            chat::chat_history_dismiss,
             chat::chat_reset_identity,
             chat::chat_unlock,
             chat::chat_send_invite,
@@ -2190,6 +2215,8 @@ pub fn run() {
             system::window_state_get,
             pet::pet_menu,
             pet::pet_drag,
+            addons::addons_list,
+            addons::addons_get,
             pet::pet_mascot,
             menus::menu_open,
             menus::menu_warm,

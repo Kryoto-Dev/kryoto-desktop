@@ -113,6 +113,19 @@ export class Store {
     await req(this.db.transaction('messages', 'readwrite').objectStore('messages').put({ msgId: row.msgId, conv: row.conversationId, sentAt: row.sentAt, data }))
   }
 
+  /** Write many rows at once, replacing any with the same id (history from another device). */
+  async putMany(rows: MessageRow[]): Promise<void> {
+    // Sealed first: an IndexedDB transaction closes while other promises run.
+    const sealed = await Promise.all(rows.map(async (row) => ({ msgId: row.msgId, conv: row.conversationId, sentAt: row.sentAt, data: await this.seal(row) })))
+    const tx = this.db.transaction('messages', 'readwrite')
+    const store = tx.objectStore('messages')
+    for (const s of sealed) store.put(s)
+    await new Promise<void>((res, rej) => {
+      tx.oncomplete = () => res()
+      tx.onerror = tx.onabort = () => rej(tx.error)
+    })
+  }
+
   async message(msgId: string): Promise<MessageRow | null> {
     const r = (await req(this.db.transaction('messages', 'readonly').objectStore('messages').get(msgId))) as { data: ArrayBuffer } | undefined
     return r ? this.open<MessageRow>(r.data) : null

@@ -256,6 +256,14 @@ fn parse_size(text: &str) -> Option<u64> {
     Some((number * scale).round() as u64)
 }
 
+/// HatchZip could not allocate what the archive needs: a block's LZMA
+/// dictionary ("dictionary allocation too large", KB-0264), or a memory
+/// limit. 7-Zip, one block at a time, takes over then.
+pub fn out_of_memory(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    ["dictionary allocation too large", "needed memory too big", "not enough memory", "memory allocation", "maxmemlimited"].iter().any(|m| text.contains(m))
+}
+
 /// The two files HatchZip keeps beside an archive while an unpack is
 /// unfinished (`game.7z.hatchzip`, `game.7z.hatchzip-tail`): the same
 /// command carries on from them, so a stopped unpack is never started over.
@@ -393,6 +401,15 @@ mod tests {
   required                     6.3 MB (+500.0 MB reserved)
   available after              30.6 GB
   note: there is also enough space to keep the archive (--keep-archive)";
+
+    /// KB-0264: these hand the unpack to 7-Zip; a damaged archive does not.
+    #[test]
+    fn running_out_of_memory_is_told_apart() {
+        assert!(out_of_memory("error: extracting Baldur's Gate 3\\Baldur's Gate 3\\Data\\Assets.pak: dictionary allocation too large"));
+        assert!(out_of_memory("needed memory too big for mem_limit_kb"));
+        assert!(!out_of_memory("error: extracting Game.pck: corrupted input data (LZMA2:3)"));
+        assert!(!out_of_memory(""));
+    }
 
     #[test]
     fn reads_the_space_plan_out_of_check() {

@@ -195,13 +195,15 @@ pub fn for_game(s: &DiscordPresence, g: &LibraryGame, started: u64, turn: u64, w
         let links = buttons(s, None, who, turn);
         return finish(line(NEUTRAL), None, logo_assets(), since, links);
     }
+    // A beta branch is another game to the people watching too (GoreBox27).
+    let title = crate::library::title_with_branch(&g.title, g.steam_branch.as_deref());
     let values = [
-        ("game", g.title.clone()),
+        ("game", title.clone()),
         ("playtime", if s.playtime { hours(g.playtime_seconds) } else { String::new() }),
         ("version", g.version.clone().unwrap_or_default()),
         ("developer", g.developer.clone().unwrap_or_default()),
     ];
-    let details = fill(&s.line1, &values).or_else(|| line(&g.title));
+    let details = fill(&s.line1, &values).or_else(|| line(&title));
     let state = fill(&s.line2, &values);
     let mut assets = Map::new();
     match s.picture.as_str() {
@@ -210,7 +212,7 @@ pub fn for_game(s: &DiscordPresence, g: &LibraryGame, started: u64, turn: u64, w
         _ => match cover(g) {
             Some(url) => {
                 assets.insert("large_image".into(), json!(url));
-                if let Some(text) = line(&g.title) {
+                if let Some(text) = line(&title) {
                     assets.insert("large_text".into(), json!(text));
                 }
                 assets.insert("small_image".into(), json!(LOGO));

@@ -63,16 +63,21 @@ export function ControllerPane() {
   useEffect(() => {
     if (!requested) return
     setChosen(requested.guid)
+    // Asked for before the list of pads has come in: wait for it, or a pad
+    // Kryoto does not know would open on this page without its setup.
+    const pad = pads.find((p) => p.guid === requested.guid)
+    if (!pad) return
     clearPadRequest()
     // A pad whose buttons Kryoto does not know goes straight to its setup.
-    if (pads.some((p) => p.guid === requested.guid && !p.mapped)) setSetup(true)
+    if (!pad.mapped) setSetup(true)
   }, [requested, pads])
 
   useEffect(() => {
     // Follow a new connection instead of leaving the test drawing on a
     // saved, disconnected profile after its instance/backend changes.
     // A pad asked for by its notification comes first.
-    if (!requested && pads.length && !pads.some(p => p.guid === chosen)) {
+    const waiting = requested && !pads.some((p) => p.guid === requested.guid)
+    if ((!requested || waiting) && pads.length && !pads.some(p => p.guid === chosen)) {
       setChosen(pads[0]!.guid)
       setSetup(false)
     }

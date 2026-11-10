@@ -11,7 +11,7 @@ import { cn } from '@/lib/utils'
 import { adultBlur, useHideAdult, useShowAdult } from '@/lib/adult'
 import { STATUSES, STATUS_LABEL, isPlayStatus, useAdultFlags, type SavedEntry, type SavedStatus } from '@/hooks/useSaved'
 import { gameContext } from '@/library/context'
-import { BranchTag } from '@/library/BranchTag'
+import { BranchTag, copyLabel } from '@/library/BranchTag'
 import { askInstall, collections, useCollections, type Collection, type CollectionGame } from '@/lib/collections'
 import { NewDot } from '@/ui/FeatureNotice'
 
@@ -216,7 +216,7 @@ export function Sidebar({
       >
         <Thumb cover={coverFor(g)} blur={!!adultBlur(g.nsfw, showAdult)} />
         <span className="min-w-0 grow truncate">{g.title}</span>
-        <BranchTag branch={g.steamBranch} />
+        <BranchTag branch={g.steamBranch} title={g.title} copy={copyLabel(g, games)} />
         {running.has(g.id) ? (
           <span className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-success">
             <span className="kryo-blink size-1.5 rounded-full bg-success" />

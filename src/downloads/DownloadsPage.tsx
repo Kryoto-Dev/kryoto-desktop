@@ -11,6 +11,7 @@ import { errorText } from '@/lib/bridge'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { openExternal, STORE_HOME } from '@/lib/window'
 import { EmptyState } from '@/ui/EmptyState'
+import { BranchTag } from '@/library/BranchTag'
 import { INBOX } from '@/ui/ascii/scenes'
 
 /**
@@ -319,7 +320,10 @@ function Current({ d }: { d: Dl }) {
               {d.mirror && d.status !== 'resolving' ? ` · from ${d.mirror.host}` : ''}
               {d.release ? ` · build ${d.release}` : ''}
             </Caption>
-            <h2 className="text-xl font-bold text-foreground">{d.meta.title}</h2>
+            <h2 className="flex min-w-0 items-center gap-2 text-xl font-bold text-foreground">
+              <span className="truncate">{d.meta.title}</span>
+              <BranchTag branch={d.meta.steamBranch} title={d.meta.title} />
+            </h2>
           </div>
           {!extracting ? (
             <div className="flex gap-2">
@@ -411,7 +415,10 @@ function Row({
     <div className="kryo-radius grid grid-cols-[150px_1fr_auto] items-center gap-4 border border-border bg-card p-3">
       <Art adult={d.meta.nsfw} src={capsulesFor(d.meta)[0]} fallback={capsulesFor(d.meta).slice(1)} title={d.meta.title} where="downloads" className="kryo-radius aspect-[460/215] w-full object-cover" />
       <div className="grid min-w-0 gap-1.5">
-        <b className="truncate text-sm text-foreground">{d.meta.title}</b>
+        <span className="flex min-w-0 items-center gap-2">
+          <b className="truncate text-sm text-foreground">{d.meta.title}</b>
+          <BranchTag branch={d.meta.steamBranch} title={d.meta.title} />
+        </span>
         <span className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
           <StatusGlyph d={d} className="size-2.5" />
           {status}

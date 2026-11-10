@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 pub const OP_HANDSHAKE: u32 = 0;
 pub const OP_FRAME: u32 = 1;
 pub const OP_CLOSE: u32 = 2;
+/// Discord answers a ping with a pong carrying the same body.
+pub const OP_PING: u32 = 3;
+pub const OP_PONG: u32 = 4;
 const MAX_FRAME: usize = 1 << 20;
 
 #[cfg(windows)]

@@ -53,13 +53,24 @@ export function PixelMotion({ scene, className, label }: { scene: Scene; classNa
     const start = performance.now()
     const tick = () => paint(still ? 0.99 : ((performance.now() - start) % scene.period) / scene.period)
     tick()
+    // The canvas sets the host's width, so refitting from inside the observer's
+    // callback resized what it watches ("ResizeObserver loop", KB-0251): only a
+    // new height refits, on the next frame.
+    let tall = host.clientHeight
+    let frame = 0
     const observer = new ResizeObserver(() => {
-      fit()
-      tick()
+      if (host.clientHeight === tall) return
+      tall = host.clientHeight
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        fit()
+        tick()
+      })
     })
     observer.observe(host)
     const id = still ? null : window.setInterval(tick, FRAME_MS)
     return () => {
+      cancelAnimationFrame(frame)
       observer.disconnect()
       if (id) window.clearInterval(id)
     }

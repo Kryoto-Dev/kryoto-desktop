@@ -11,7 +11,7 @@ import { useLivePlaytime } from '@/hooks/useLivePlaytime'
 import { Art } from '@/library/Art'
 import { coverFor, heroFor } from '@/lib/game-artwork'
 import { cn } from '@/lib/utils'
-import { BranchTag } from '@/library/BranchTag'
+import { BranchTag, copyLabel } from '@/library/BranchTag'
 import { VrTag } from '@/library/VrTag'
 
 /** A small Stop for a game that is running, where a card or row has no room for the big one. */
@@ -104,6 +104,9 @@ export function LibraryHome({
             <span className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
               {running.has(last.id) ? 'Playing now' : `Continue · ${formatLastPlayed(last.lastPlayed)}`}
             </span>
+            <span className="flex gap-1.5 empty:hidden">
+              <BranchTag branch={last.steamBranch} launcher={last.launcher} title={last.title} copy={copyLabel(last, games)} className="px-2 py-1 text-[10px]" />
+            </span>
             <button type="button" onClick={() => onOpen(last.id)} className="kryo-square w-fit text-left">
               <h1 className="max-w-xl text-3xl font-bold leading-tight text-foreground">{last.title}</h1>
             </button>
@@ -151,7 +154,7 @@ export function LibraryHome({
                 <span className="grid gap-0.5 px-3 py-2.5">
                   <span className="flex min-w-0 items-center gap-1.5">
                     <span className="truncate text-xs font-bold text-foreground">{g.title}</span>
-                    <BranchTag branch={g.steamBranch} launcher={g.launcher} />
+                    <BranchTag branch={g.steamBranch} launcher={g.launcher} title={g.title} copy={copyLabel(g, games)} />
                   </span>
                   <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
                     {running.has(g.id) ? <>Running now · <LivePlaytime game={g} running /></> : g.playtimeSeconds ? `${formatLastPlayed(g.lastPlayed)} · ${formatPlaytime(g.playtimeSeconds)}` : formatLastPlayed(g.lastPlayed)}
@@ -193,7 +196,7 @@ export function LibraryHome({
                 <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />
               </button>
               <span className="pointer-events-none absolute right-2 top-2 flex flex-col items-end gap-1">
-                <BranchTag branch={g.steamBranch} launcher={g.launcher} className="backdrop-blur" />
+                <BranchTag branch={g.steamBranch} launcher={g.launcher} title={g.title} copy={copyLabel(g, games)} className="backdrop-blur" />
                 <VrTag vr={g.vr} className="backdrop-blur" />
               </span>
               {sort === 'size' && sizes[g.id]?.bytes ? (

@@ -384,8 +384,13 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
         WindowEvent::Moved(p) if changed(&LAST_POS, (p.x, p.y)) => crate::menus::close(app),
         WindowEvent::Resized(s) if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) => {
             crate::menus::close(app);
-            report_window_state(window);
-            refresh_corners(window);
+            // Into or out of full screen or maximized: the corners and the
+            // border follow (KB-0266); otherwise only the Windows 10 region.
+            if report_window_state(window) {
+                apply_corners(window);
+            } else {
+                refresh_corners(window);
+            }
             // Minimizing is a resize too; so is coming back.
             rest_views(window, window.is_minimized().unwrap_or(false));
         }
@@ -414,12 +419,16 @@ fn window_state<R: Runtime>(window: &tauri::Window<R>) -> WindowState {
     }
 }
 
-fn report_window_state<R: Runtime>(window: &tauri::Window<R>) {
+/// Tell the shell when the window is maximized or full screen, or stops being.
+/// True when that changed.
+fn report_window_state<R: Runtime>(window: &tauri::Window<R>) -> bool {
     let now = window_state(window);
-    let Ok(mut last) = LAST_STATE.lock() else { return };
-    if last.replace(now) != Some(now) {
+    let Ok(mut last) = LAST_STATE.lock() else { return false };
+    let changed = last.replace(now) != Some(now);
+    if changed {
         let _ = window.app_handle().emit_to("main", "window-state", now);
     }
+    changed
 }
 
 /// Whether the main window is maximized or full screen right now.
@@ -517,15 +526,15 @@ pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
 fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE};
         if let Ok(hwnd) = window.hwnd() {
-            // DWMWCP_DONOTROUND = 1, DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3:
-            // Windows 11 offers these three, so the styles map onto them.
-            let pref: i32 = match corner() {
-                0 => 1,
-                1..=5 => 3,
-                _ => 2,
-            };
+            let fills = window.label() == "main" && (window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false));
+            let (pref, border) = dwm_frame(corner(), fills);
+            // SAFETY: a live window handle and a pointer to a 4-byte value.
+            // Refused before Windows 11, where there is no such border.
+            unsafe {
+                DwmSetWindowAttribute(hwnd.0 as _, DWMWA_BORDER_COLOR as u32, (&border as *const u32).cast(), std::mem::size_of::<u32>() as u32);
+            }
             // SAFETY: a live window handle and a pointer to a 4-byte value.
             let result = unsafe {
                 DwmSetWindowAttribute(
@@ -555,6 +564,26 @@ fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     let _ = window;
+}
+
+/// Windows 11's corner preference and border colour for a frameless window.
+///
+/// Rounded, Windows draws a one-pixel border in the accent colour around the
+/// window. Full screen or maximized it has to be gone and the corners square,
+/// or Big Picture showed a thin frame with a gap at the screen's edge
+/// (KB-0266). DWMWCP_DONOTROUND = 1, DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3;
+/// DWMWA_COLOR_NONE = 0xFFFFFFFE, DWMWA_COLOR_DEFAULT = 0xFFFFFFFF.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn dwm_frame(radius: i32, fills_screen: bool) -> (i32, u32) {
+    if fills_screen {
+        return (1, 0xFFFF_FFFE);
+    }
+    let pref = match radius {
+        0 => 1,
+        1..=5 => 3,
+        _ => 2,
+    };
+    (pref, 0xFFFF_FFFF)
 }
 
 /// Windows 10: the window's corners are a region, which follows the size.
@@ -754,5 +783,22 @@ pub fn os_dark() -> Option<bool> {
         "prefer-dark" => Some(true),
         "prefer-light" | "default" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::{dwm_frame, radius_for};
+
+    /// KB-0266: full screen (Big Picture) and maximized are square and
+    /// borderless whatever the corner style; otherwise the style decides.
+    #[test]
+    fn filling_the_screen_is_square_and_borderless() {
+        for style in ["sharp", "soft", "rounded", "round", "pill"] {
+            assert_eq!(dwm_frame(radius_for(style), true), (1, 0xFFFF_FFFE), "{style}");
+        }
+        assert_eq!(dwm_frame(radius_for("pill"), false), (2, 0xFFFF_FFFF));
+        assert_eq!(dwm_frame(radius_for("rounded"), false), (3, 0xFFFF_FFFF));
+        assert_eq!(dwm_frame(radius_for("sharp"), false).0, 1);
     }
 }

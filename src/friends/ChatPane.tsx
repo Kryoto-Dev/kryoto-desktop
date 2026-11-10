@@ -422,6 +422,11 @@ export function ChatPane({
         if (m.conversationId !== conversationId) return
         setMessages((list) => list.map((x) => (x.msgId === m.msgId ? m : x)))
       }),
+      // Past messages from another of this account's devices (KB-0254).
+      on<{ conversations: string[] }>('chat-history-merged', (h) => {
+        if (!h.conversations.includes(conversationId)) return
+        void chatMessages(peer.id).then((m) => alive && setMessages(m)).catch(() => {})
+      }),
       on<{ conversationId: string; active: boolean }>('chat-typing', (t) => {
         if (t.conversationId !== conversationId) return
         setTyping(t.active)
@@ -539,7 +544,7 @@ export function ChatPane({
   const counter = limit - text.length
 
   return (
-    <section className="grid min-h-0 grid-rows-[auto_1fr_auto]">
+    <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
       <header className={cn('flex items-center justify-between gap-3 border-b border-border py-3', onBack ? 'px-3' : 'px-5')}>
         <div className="flex min-w-0 items-center gap-3">
           {onBack ? (
@@ -708,19 +713,22 @@ export function ChatPane({
                   {m.outgoing && !(group && ['sent', 'delivered', 'read'].includes(m.status)) ? <StatusIcon status={m.status} /> : null}
                 </span>
                 {m.reactions.length > 0 ? (
-                  <span className="flex flex-wrap gap-1">
+                  <span className="flex flex-wrap gap-2">
                     {m.reactions.map((r) => (
                       <button
                         key={r.emoji}
                         type="button"
                         onClick={() => toggleReaction(m, r.emoji)}
                         className={cn(
-                          'kryo-pill border px-1.5 text-xs',
-                          r.userIds.includes(myId) ? 'border-primary' : 'border-border',
+                          'kryo-pill inline-flex h-8 items-center gap-1 border px-2 text-xs tabular-nums',
+                          r.userIds.includes(myId) ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground',
                         )}
                         aria-label={`${r.emoji} ${r.userIds.length}`}
                       >
-                        {r.emoji} {r.userIds.length > 1 ? r.userIds.length : ''}
+                        <span className="text-base leading-none">
+                          <span className="kryo-emoji-char">{r.emoji}</span>
+                        </span>
+                        {r.userIds.length > 1 ? r.userIds.length : null}
                       </button>
                     ))}
                   </span>
@@ -761,8 +769,8 @@ export function ChatPane({
                 {reactingTo === m.msgId ? (
                   <span className="kryo-pill flex gap-1 border border-border bg-card px-2 py-1">
                     {QUICK_REACTIONS.map((e) => (
-                      <button key={e} type="button" className="text-base" onClick={() => toggleReaction(m, e)} aria-label={`React ${e}`}>
-                        {e}
+                      <button key={e} type="button" className="kryo-radius inline-flex size-8 items-center justify-center text-lg hover:bg-secondary" onClick={() => toggleReaction(m, e)} aria-label={`React ${e}`}>
+                        <span className="kryo-emoji-char">{e}</span>
                       </button>
                     ))}
                   </span>

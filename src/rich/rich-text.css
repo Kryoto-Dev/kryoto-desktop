@@ -191,6 +191,9 @@ a.kryo-mention:focus-visible { outline: 2px solid var(--primary); outline-offset
   font-weight: 500;
 }
 
+/* An emoji in text is 1.375 times the text, as on Discord; one to three on
+   their own are "jumbo", 3 times. Ours are images, standard ones are the
+   reader's emoji font in the same box. */
 .kryo-emoji {
   display: inline-block;
   height: 1.375em;
@@ -199,7 +202,30 @@ a.kryo-mention:focus-visible { outline: 2px solid var(--primary); outline-offset
   vertical-align: -0.3em;
   margin: 0 0.05em;
 }
-.kryo-emoji-jumbo .kryo-emoji { height: 2.75em; width: 2.75em; vertical-align: middle; }
+/* The mascots fill about 70% of their frame (rich-catalog.ts isMascotEmoji):
+   drawn up to read as big as the rest, without moving the line. */
+.kryo-emoji-mascot { transform: scale(1.35); }
+
+.kryo-emoji-char {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 1.2em of the text, in a box of 1.15 of its own em: 1.375em of the text. */
+  font-size: 1.2em;
+  width: 1.15em;
+  height: 1.15em;
+  line-height: 1;
+  vertical-align: -0.25em;
+  margin: 0 0.04em;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla", "Segoe UI Symbol", emoji, sans-serif;
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-decoration: none;
+}
+
+.kryo-emoji-jumbo .kryo-emoji { height: 3em; width: 3em; vertical-align: middle; }
+.kryo-emoji-jumbo .kryo-emoji-char { font-size: 2.6em; vertical-align: middle; }
 
 .kryo-sticker {
   display: block;
@@ -233,6 +259,7 @@ button.kryo-media-cell:focus-visible { outline: 2px solid var(--primary); outlin
 /* The line over a reply: who it answers, and what they said. */
 .kryo-reply-quote { display: flex; align-items: center; gap: 0.375rem; min-width: 0; font-size: 0.75rem; line-height: 1.25rem; color: var(--muted-foreground); }
 .kryo-reply-quote .kryo-emoji { height: 1.1em; width: 1.1em; vertical-align: -0.2em; }
+.kryo-reply-quote .kryo-emoji-char { font-size: 0.96em; vertical-align: -0.2em; }
 
 @media (prefers-reduced-motion: reduce) {
   .kryo-fx-rainbow, .kryo-fx-neon, .kryo-fx-gold, .kryo-fx-frost, .kryo-fx-glitch-a,

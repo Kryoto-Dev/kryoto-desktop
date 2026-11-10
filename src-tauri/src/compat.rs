@@ -293,13 +293,13 @@ pub fn compat_status(app: AppHandle) -> CompatStatus {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Release {
     tag_name: String,
     assets: Vec<Asset>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Asset {
     name: String,
     browser_download_url: String,
@@ -329,17 +329,149 @@ fn progress<R: Runtime>(app: &AppHandle<R>, step: &str, fraction: Option<f64>) {
     let _ = app.emit("compat-progress", Progress { step: step.into(), fraction });
 }
 
-async fn latest(client: &reqwest::Client, repo: &str) -> Result<Release, String> {
-    client
-        .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
-        .header("Accept", "application/vnd.github+json")
+/// How long a looked-up release is used before GitHub is asked again.
+const RELEASE_FRESH_SECS: u64 = 6 * 60 * 60;
+
+#[derive(Serialize, Deserialize)]
+struct CachedRelease {
+    at: u64,
+    release: Release,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn release_cache(dir: &Path, repo: &str) -> PathBuf {
+    dir.join(format!(".release-{}.json", repo.replace('/', "--")))
+}
+
+/// The newest release of `repo` and its downloads.
+///
+/// GitHub's API allows 60 unauthenticated requests an hour per address, which
+/// players behind one shared address (CGNAT, a VPN) run out of (KB-0252). So
+/// an answer is kept for six hours in the `compat` folder, a failed request is
+/// tried once more, and when the API still says no, the same facts come from
+/// github.com's own pages (the `releases/latest` redirect names the tag, the
+/// release's asset list names the files), which that limit does not cover. A
+/// kept answer of any age beats failing.
+async fn latest(client: &reqwest::Client, repo: &str, dir: &Path) -> Result<Release, String> {
+    let cache = release_cache(dir, repo);
+    let kept = std::fs::read(&cache).ok().and_then(|b| serde_json::from_slice::<CachedRelease>(&b).ok());
+    if let Some(k) = &kept {
+        if now_secs().saturating_sub(k.at) < RELEASE_FRESH_SECS && !k.release.assets.is_empty() {
+            return Ok(k.release.clone());
+        }
+    }
+    let found = match from_api(client, repo).await {
+        Ok(r) => Ok(r),
+        Err(api) => {
+            crate::logging::warn("compat", &format!("{repo}: GitHub API: {}; reading the release page instead", api.message));
+            from_release_page(client, repo).await.map_err(|page| (api, page))
+        }
+    };
+    match found {
+        Ok(release) => {
+            if let Ok(bytes) = serde_json::to_vec(&CachedRelease { at: now_secs(), release: release.clone() }) {
+                let _ = std::fs::write(&cache, bytes);
+            }
+            Ok(release)
+        }
+        Err((api, page)) => {
+            if let Some(k) = kept.filter(|k| !k.release.assets.is_empty()) {
+                crate::logging::warn("compat", &format!("{repo}: using the release looked up earlier ({}): {page}", k.release.tag_name));
+                return Ok(k.release);
+            }
+            Err(if api.limited {
+                "GitHub is not answering this network right now: it allows 60 checks an hour without an account, shared by everyone on the same connection or VPN. Try again in an hour, or on another network.".into()
+            } else {
+                format!("Could not reach GitHub to get the newest version: {}", api.message)
+            })
+        }
+    }
+}
+
+struct ApiError {
+    /// GitHub's rate limit (403 or 429), as opposed to the network.
+    limited: bool,
+    message: String,
+}
+
+async fn from_api(client: &reqwest::Client, repo: &str) -> Result<Release, ApiError> {
+    let mut last = ApiError { limited: false, message: String::new() };
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        let res = client
+            .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await;
+        match res {
+            Ok(r) if r.status().is_success() => {
+                return r.json().await.map_err(|e| ApiError { limited: false, message: format!("GitHub answered oddly: {e}") });
+            }
+            Ok(r) => {
+                let status = r.status();
+                let limited = status.as_u16() == 403 || status.as_u16() == 429;
+                last = ApiError { limited, message: format!("HTTP {status}") };
+                // A limit does not lift in two seconds; a server hiccup might.
+                if status.is_client_error() {
+                    break;
+                }
+            }
+            Err(e) => last = ApiError { limited: false, message: e.to_string() },
+        }
+    }
+    Err(last)
+}
+
+/// The tag `github.com/<repo>/releases/latest` sends you on to.
+fn tag_from_latest_url(repo: &str, url: &str) -> Option<String> {
+    let prefix = format!("https://github.com/{repo}/releases/tag/");
+    let tag = url.strip_prefix(&prefix)?.split(['?', '#']).next()?;
+    (!tag.is_empty() && !tag.contains('/')).then(|| tag.to_string())
+}
+
+/// The downloads a release page lists, as `/<repo>/releases/download/<tag>/<file>` links.
+fn assets_from_page(repo: &str, tag: &str, html: &str) -> Vec<Asset> {
+    let prefix = format!("/{repo}/releases/download/{tag}/");
+    let mut out: Vec<Asset> = Vec::new();
+    for part in html.split("href=\"").skip(1) {
+        let Some(href) = part.split('"').next() else { continue };
+        let href = href.replace("&amp;", "&");
+        let Some(name) = href.strip_prefix(&prefix) else { continue };
+        if name.is_empty() || name.contains('/') || out.iter().any(|a| a.name == name) {
+            continue;
+        }
+        out.push(Asset { name: name.to_string(), browser_download_url: format!("https://github.com{href}") });
+    }
+    out
+}
+
+async fn from_release_page(client: &reqwest::Client, repo: &str) -> Result<Release, String> {
+    let res = client
+        .get(format!("https://github.com/{repo}/releases/latest"))
         .send()
         .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("Could not reach GitHub: {e}"))?
-        .json()
+        .map_err(|e| e.to_string())?;
+    let tag = tag_from_latest_url(repo, res.url().as_str()).ok_or_else(|| format!("no release tag at {}", res.url()))?;
+    let html = client
+        .get(format!("https://github.com/{repo}/releases/expanded_assets/{tag}"))
+        .send()
         .await
-        .map_err(|e| format!("GitHub answered oddly: {e}"))
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| e.to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    let assets = assets_from_page(repo, &tag, &html);
+    if assets.is_empty() {
+        return Err(format!("{tag} lists no downloads"));
+    }
+    Ok(Release { tag_name: tag, assets })
 }
 
 /// Stream a file to `to`, saying how far along it is.
@@ -412,7 +544,7 @@ pub async fn compat_install(app: AppHandle) -> Result<CompatTool, String> {
         .map_err(|e| e.to_string())?;
 
     progress(&app, "Looking for the newest Proton-GE", None);
-    let rel = latest(&client, "GloriousEggroll/proton-ge-custom").await?;
+    let rel = latest(&client, "GloriousEggroll/proton-ge-custom", &dir).await?;
     let tar = proton_asset(&rel, std::env::consts::ARCH)?;
     let folder = tar.name.trim_end_matches(".tar.gz");
     let mut proton = dir.join(folder).join("proton");
@@ -488,7 +620,7 @@ pub async fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
 async fn install_umu(app: &AppHandle, client: &reqwest::Client, dir: &Path) -> Result<(), String> {
     if !dir.join("umu").join("umu-run").is_file() {
         progress(app, "Looking for the Steam runtime launcher (umu)", None);
-        let umu = latest(client, "Open-Wine-Components/umu-launcher").await?;
+        let umu = latest(client, "Open-Wine-Components/umu-launcher", dir).await?;
         let tar = umu.assets.iter().find(|a| a.name.ends_with("zipapp.tar")).ok_or("That umu release has no download.")?;
         let archive = dir.join(format!(".{}", tar.name));
         fetch(app, client, &tar.browser_download_url, &archive, &format!("Downloading umu {}", umu.tag_name)).await?;
@@ -531,6 +663,36 @@ mod tests {
             tag_name: "GE-Proton11-7".into(),
             assets: names.iter().map(|name| Asset { name: (*name).into(), browser_download_url: String::new() }).collect(),
         }
+    }
+
+    #[test]
+    fn release_facts_come_from_github_pages_when_the_api_is_limited() {
+        let repo = "Open-Wine-Components/umu-launcher";
+        assert_eq!(tag_from_latest_url(repo, "https://github.com/Open-Wine-Components/umu-launcher/releases/tag/1.4.4").as_deref(), Some("1.4.4"));
+        assert_eq!(tag_from_latest_url(repo, "https://github.com/Open-Wine-Components/umu-launcher/releases"), None);
+        assert_eq!(tag_from_latest_url(repo, "https://github.com/someone/else/releases/tag/1.0"), None);
+        let html = r#"<a href="/Open-Wine-Components/umu-launcher/releases/download/1.4.4/umu-launcher-1.4.4-zipapp.tar" rel="nofollow">
+            <a href="/Open-Wine-Components/umu-launcher/releases/download/1.4.4/umu-launcher-1.4.4-zipapp.tar">
+            <a href="/Open-Wine-Components/umu-launcher/archive/refs/tags/1.4.4.zip">
+            <a href="/evil/repo/releases/download/1.4.4/umu-launcher-1.4.4-zipapp.tar">"#;
+        let assets = assets_from_page(repo, "1.4.4", html);
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].name, "umu-launcher-1.4.4-zipapp.tar");
+        assert_eq!(assets[0].browser_download_url, "https://github.com/Open-Wine-Components/umu-launcher/releases/download/1.4.4/umu-launcher-1.4.4-zipapp.tar");
+    }
+
+    /// Against the real github.com: `cargo test --lib compat::tests::release_pages_live -- --ignored`.
+    #[test]
+    #[ignore]
+    fn release_pages_live() {
+        let client = reqwest::Client::builder().user_agent("KryotoDesktop/test").build().unwrap();
+        tauri::async_runtime::block_on(async {
+            let proton = from_release_page(&client, "GloriousEggroll/proton-ge-custom").await.unwrap();
+            proton_asset(&proton, "x86_64").unwrap();
+            assert!(proton.assets.iter().any(|a| a.name.ends_with(".sha512sum")));
+            let umu = from_release_page(&client, "Open-Wine-Components/umu-launcher").await.unwrap();
+            assert!(umu.assets.iter().any(|a| a.name.ends_with("zipapp.tar")));
+        });
     }
 
     #[test]

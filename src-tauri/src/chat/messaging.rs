@@ -301,7 +301,13 @@ pub const INVITE_TTL_MS: u64 = 15 * 60 * 1000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError {
     Offline,
+    /// Only when the gateway lists no chat device for them at all.
     NoChat,
+    /// They have a device, but nothing could be encrypted for it yet: a device
+    /// still setting up (no one-time key uploaded), or a key claim that failed.
+    Starting,
+    /// Their device list did not pass the trust check (other than a changed key).
+    Unchecked,
     IdentityChanged,
     Forbidden,
     RateLimited,
@@ -309,11 +315,30 @@ pub enum SendError {
     Failed(String),
 }
 
+/// A send that could encrypt for no device at all, after its peers' devices
+/// were found (a peer with none at all is `NoChat` before this). None: try once
+/// more with fresh devices and keys.
+///
+/// Only ourselves with no other device, or a group nobody else in can be
+/// reached right now: nothing to send, and that is fine. A friend who has a
+/// device that cannot take a message yet is still starting, not off (KB-0256).
+fn empty_send(group: bool, only_me: bool, last_attempt: bool) -> Option<Result<(), SendError>> {
+    if group || only_me {
+        Some(Ok(()))
+    } else if last_attempt {
+        Some(Err(SendError::Starting))
+    } else {
+        None
+    }
+}
+
 impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             SendError::Offline => "You are offline. It will be sent when you are back.",
             SendError::NoChat => "They have not turned on chat yet.",
+            SendError::Starting => "Their chat is still starting. Try again in a moment.",
+            SendError::Unchecked => "Their devices could not be checked. Try again in a moment.",
             SendError::IdentityChanged => "Their security key changed. Check it before sending.",
             SendError::Forbidden => "You cannot message this person.",
             SendError::RateLimited => "Slow down a little.",
@@ -350,7 +375,7 @@ fn to_user_devices(u: &gw::UserDevicesInfo) -> Option<UserDevices> {
     })
 }
 
-fn prekey(p: &gw::Prekey) -> Option<SignedPrekey> {
+pub(super) fn prekey(p: &gw::Prekey) -> Option<SignedPrekey> {
     Some(SignedPrekey {
         key_id: p.key_id.clone(),
         key: p.key.as_slice().try_into().ok()?,
@@ -483,7 +508,12 @@ impl Chat {
                     (self.emit)(ChatEvent::IdentityChanged { user_id: user.to_string() });
                     return Err(SendError::IdentityChanged);
                 }
-                Err(_) => Vec::new(),
+                // Not "no devices": an empty list here would read as chat
+                // being off (KB-0256), and would be cached as such.
+                Err(e) => {
+                    logging::warn("chat", &format!("could not check {user}'s devices: {e}"));
+                    return Err(SendError::Unchecked);
+                }
             },
         };
         eng.devices.insert(user, devices.clone());
@@ -495,7 +525,7 @@ impl Chat {
     /// (`group`), members who cannot be reached right now (no chat devices,
     /// a block, a security key waiting to be accepted) are left out instead
     /// of stopping the message for everyone.
-    async fn deliver(&self, users: &[u64], content: &Content, ephemeral: bool, group: Option<u64>) -> Result<(), SendError> {
+    pub(super) async fn deliver(&self, users: &[u64], content: &Content, ephemeral: bool, group: Option<u64>) -> Result<(), SendError> {
         let client = self.client().ok_or(SendError::Offline)?;
         let me = self.my_id().await;
         for attempt in 0..2 {
@@ -504,7 +534,7 @@ impl Chat {
             for &user in users {
                 let devices = match self.devices_of(&client, user, refresh).await {
                     Ok(d) => d,
-                    Err(SendError::IdentityChanged) if group.is_some() => continue,
+                    Err(SendError::IdentityChanged | SendError::Unchecked) if group.is_some() => continue,
                     Err(e) => return Err(e),
                 };
                 if user != me && devices.is_empty() {
@@ -519,8 +549,10 @@ impl Chat {
                 };
                 let mut claimed: Vec<gw::ClaimedKey> = Vec::new();
                 if !missing.is_empty() {
-                    if let Ok(S::KeysBundle(b)) = client.request(C::KeysClaim(gw::KeysClaim { user_id: user })).await {
-                        claimed = b.keys;
+                    match client.request(C::KeysClaim(gw::KeysClaim { user_id: user })).await {
+                        Ok(S::KeysBundle(b)) => claimed = b.keys,
+                        Ok(_) => logging::warn("chat", "key claim: unexpected answer"),
+                        Err(e) => logging::warn("chat", &format!("key claim: {}", e.message)),
                     }
                 }
                 let mut eng = self.engine.lock().await;
@@ -539,9 +571,15 @@ impl Chat {
                 let _ = eng.save();
             }
             if items.is_empty() {
-                // Only ourselves, with no other devices (or a group nobody
-                // else in can be reached right now): nothing to send.
-                return if group.is_some() || users.iter().all(|u| *u == me) { Ok(()) } else { Err(SendError::NoChat) };
+                match empty_send(group.is_some(), users.iter().all(|u| *u == me), attempt > 0) {
+                    Some(done) => return done,
+                    // A device that has just turned chat on uploads its keys a
+                    // moment later: ask for its keys once more.
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        continue;
+                    }
+                }
             }
             // Only what shows as a new message is worth telling anyone about.
             let quiet = !matches!(content.body, Some(Body::Text(_) | Body::Gif(_) | Body::Invite(_) | Body::Attachment(_) | Body::CallLog(_)));
@@ -1204,6 +1242,10 @@ impl Chat {
                     }
                 }
             }
+            // Past messages between this account's devices (KB-0254), only ever in its own conversation.
+            Some(Body::HistoryRequest(r)) if from_me && target == Target::Dm(me) => self.on_history_request(inbound.sender.device_id, r).await,
+            Some(Body::HistoryChunk(c)) if from_me && target == Target::Dm(me) => self.on_history_chunk(inbound.sender.device_id, c).await,
+            Some(Body::HistoryAck(a)) if from_me && target == Target::Dm(me) => self.on_history_ack(inbound.sender.device_id, a).await,
             Some(Body::Active(_)) if from_me => {
                 ACTIVE_ELSEWHERE_UNTIL.store(now_ms() + ACTIVE_FOR_MS, std::sync::atomic::Ordering::Relaxed);
             }
@@ -1381,5 +1423,21 @@ impl Chat {
     pub async fn on_group_changed(&self, group: u64) {
         let _ = self.group_cache(group, true).await;
         (self.emit)(ChatEvent::GroupChanged { group_id: group.to_string() });
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::{empty_send, SendError};
+
+    #[test]
+    fn a_friend_with_a_device_is_never_told_chat_is_off() {
+        // KB-0256: their device exists but could not take a message yet.
+        assert_eq!(empty_send(false, false, false), None);
+        assert_eq!(empty_send(false, false, true), Some(Err(SendError::Starting)));
+        assert_ne!(SendError::Starting.to_string(), SendError::NoChat.to_string());
+        // Only ourselves, or a group nobody else in can be reached: fine.
+        assert_eq!(empty_send(false, true, false), Some(Ok(())));
+        assert_eq!(empty_send(true, false, true), Some(Ok(())));
     }
 }

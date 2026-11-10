@@ -10,3 +10,16 @@ Origin 1.75.0 by Raymond Hill and contributors, licensed under GPL-3.0.
 
 The extension runs in a separate WebView2 profile used only for mirror download
 pages. The launcher and Store do not load it. Linux keeps its manual browser fallback.
+
+# Noto Color Emoji
+
+The Linux AppImage carries Noto Color Emoji (the bitmap build), copyright Google
+LLC, licensed under the SIL Open Font License 1.1, taken unmodified from Ubuntu
+22.04's `fonts-noto-color-emoji` package at build time (`.github/workflows/release.yml`).
+
+- Source and license: https://github.com/googlefonts/noto-emoji
+- In the AppImage: `usr/share/kryoto/fonts/NotoColorEmoji.ttf`
+
+Its WebKit cannot draw the COLRv1 emoji font some distributions install, so it
+uses this one instead (`src-tauri/src/display_env.rs`). The .deb and .rpm do not
+carry it.

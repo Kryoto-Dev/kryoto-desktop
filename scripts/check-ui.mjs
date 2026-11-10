@@ -229,6 +229,28 @@ try {
     await expectText('[role="dialog"]', 'Nothing on kryo.to by that name')
     await page.keyboard.press('Escape')
   })
+  await check("What's new counts as seen when it opens, and stays until it is closed (KB-0259)", async () => {
+    // A window that went down while it was up (the Linux video crash) opened it again, in a loop.
+    const news = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    news.on('pageerror', e => failures.push(e.message))
+    // The boot's game-runtimes question comes first otherwise, as in the checks below.
+    await news.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await news.goto(`${base}/?whatsnew`)
+      const dialog = news.getByRole('dialog', { name: /^What's new in Kryoto Desktop/ })
+      await dialog.waitFor()
+      const seen = () => news.evaluate(async () => (await (await import('/src/lib/bridge.ts')).call('settings_get')).seenNotices)
+      let saved = []
+      for (let i = 0; i < 20 && !saved.includes('setup-0-3-0'); i++) {
+        await news.waitForTimeout(100)
+        saved = await seen()
+      }
+      assert.ok(saved.includes('setup-0-3-0'), `saved as seen while open: ${JSON.stringify(saved)}`)
+      assert.equal(await dialog.count(), 1)
+    } finally {
+      await news.close()
+    }
+  })
   await check('prompts that open by themselves take turns and never land on a dialog', async () => {
     const want = id => page.evaluate(i => document.getElementById(`want-${i}`).click(), id)
     const only = async title => {
