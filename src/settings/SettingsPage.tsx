@@ -4,7 +4,7 @@ import { artSrc } from '@/lib/art'
 import { Wand2, Bell, Cloud, Download, FolderInput, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, ChevronDown } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Check, Dropdown, Section, Segmented, inputCls } from '@/ui'
 import { errorText, on } from '@/lib/bridge'
-import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, type PetMascot, type Settings } from '@/lib/settings'
+import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, PET_SIZES, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, openBigPicture, openSetup, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -430,6 +430,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
             <Section title="Desktop pet" hint="Drag it anywhere; right-click it to switch or hide it. It steps aside while a game runs.">
               <Check checked={s.pet} onChange={(v) => set('pet', v)} label="Show the pet on my desktop" />
               {s.pet ? <Segmented label="Desktop pet" value={s.petMascot} options={PET_MASCOTS.map((m) => ({ value: m.id, label: m.label }))} onChange={(v) => set('petMascot', v)} /> : null}
+              {s.pet ? <Segmented label="Size" value={s.petSize ?? 'normal'} options={PET_SIZES.map((z) => ({ value: z.id, label: z.label }))} onChange={(v) => set('petSize', v)} /> : null}
             </Section>
             <PlayerNameSection s={s} patch={patch} />
             <Section title="Game language" hint="The language games start in, when they have it, in games built with gbe_fork or RUNE (most of the catalog). Set it per game under Properties. Game's own leaves each game's files as they are now.">

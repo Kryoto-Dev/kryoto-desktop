@@ -1,8 +1,8 @@
-import { Fragment, useMemo, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { artSrc, reportArt } from '@/lib/art'
 import { coverFor } from '@/lib/game-artwork'
 import { usePersisted } from '@/hooks/usePersisted'
-import { ChevronDown, ChevronRight, CircleCheck, Download as DownloadIcon, ExternalLink, EyeOff, Home, Search, Square, Trash2 } from '@/ui/pixel-icons'
+import { ChevronDown, ChevronRight, CircleCheck, Check, Download as DownloadIcon, ExternalLink, EyeOff, Home, ListChecks, Plus, Search, Square, Trash2, X } from '@/ui/pixel-icons'
 import { ContextMenu, asciiTrack, Dropdown, type MenuEntry } from '@/ui'
 import { isActive, progressOf, type Download } from '@/lib/downloads'
 import type { LibraryGame } from '@/lib/library'
@@ -21,6 +21,8 @@ const isShelf = (v: string): v is Shelf => v === 'installed' || v === 'saved' ||
 
 /** The search, kept while the client is open (the Library remounts on every visit). */
 let lastQuery = ''
+/** Letters and digits only, lower case: "S.T.A.L.K.E.R." reads as "stalker". */
+const bare = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '')
 
 /**
  * The Library's left rail: Home, search, every game - and under them the ones
@@ -62,7 +64,9 @@ export function Sidebar({
   selectedSlug,
   onCatalogGame,
   onWeb,
+  signedIn = false,
   onRemoveLauncher,
+  onBulk,
 }: {
   games: LibraryGame[]
   downloads: Download[]
@@ -85,8 +89,12 @@ export function Sidebar({
   onCatalogGame: (slug: string) => void
   /** A kryo.to page, in the Store. */
   onWeb: (path: string) => void
+  /** Signed in: My collections shows even when empty, with its New collection button. */
+  signedIn?: boolean
   /** Take every game this launcher keeps off the Library; it asks first. */
   onRemoveLauncher: (launcher: string) => void
+  /** Move many games on a kryo.to shelf at once, or take them out with `null` (suggestion #70). */
+  onBulk?: (slugs: string[], status: SavedStatus | null) => Promise<void>
 }) {
   const [query, setQueryState] = useState(lastQuery)
   const setQuery = (q: string) => {
@@ -96,6 +104,9 @@ export function Sidebar({
   const [picked, setShelf] = usePersisted<Shelf>('kryoto.library.shelf', 'installed', isShelf)
   const showAdult = useShowAdult()
   const q = query.trim().toLowerCase()
+  // Punctuation does not count, so "stalker" finds S.T.A.L.K.E.R. (suggestion #69).
+  const bareQ = bare(q)
+  const matches = (text: string) => text.toLowerCase().includes(q) || (bareQ.length >= 2 && bare(text).includes(bareQ))
   // The groups that differ from how they start, by id: what the player folded.
   const [flipped, setFlipped] = usePersisted<string>('kryoto.sidebar.folds', '', (v): v is string => typeof v === 'string')
   const folds = useMemo(() => new Set(flipped.split(',').filter(Boolean)), [flipped])
@@ -111,7 +122,7 @@ export function Sidebar({
   const list = useMemo(
     () =>
       games
-        .filter((g) => g.title.toLowerCase().includes(q))
+        .filter((g) => matches(g.title))
         .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })),
     [games, q],
   )
@@ -138,7 +149,7 @@ export function Sidebar({
   // The saved games the player hid are in the Hidden group too, not on the shelves.
   const secret = useMemo(() => new Set([...hiddenSlugs, ...games.filter((g) => g.hidden && g.slug).map((g) => g.slug!)]), [hiddenSlugs, games])
   const secretSaved = useMemo(
-    () => saved.filter((e) => secret.has(e.slug) && !bySlug.has(e.slug) && e.title.toLowerCase().includes(q)),
+    () => saved.filter((e) => secret.has(e.slug) && !bySlug.has(e.slug) && matches(e.title)),
     [saved, secret, bySlug, q],
   )
   const shelved = useMemo(() => saved.filter((e) => !secret.has(e.slug)), [saved, secret])
@@ -150,7 +161,7 @@ export function Sidebar({
       shelf === 'installed'
         ? []
         : shelved
-            .filter((e) => (shelf === 'saved' ? isPlayStatus(e.status) : e.status === shelf) && e.title.toLowerCase().includes(q))
+            .filter((e) => (shelf === 'saved' ? isPlayStatus(e.status) : e.status === shelf) && matches(e.title))
             .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })),
     [shelved, shelf, q],
   )
@@ -163,6 +174,38 @@ export function Sidebar({
     () => (hideAdult ? shelfEntries.filter((e) => bySlug.has(e.slug) || !isAdult(e.slug)) : shelfEntries),
     [hideAdult, shelfEntries, bySlug, isAdult],
   )
+  // Selecting games on a kryo.to shelf to move them all at once (suggestion #70).
+  const [picks, setPicks] = useState<Set<string> | null>(null)
+  const [bulkMenu, setBulkMenu] = useState<{ x: number; y: number } | null>(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const selecting = picks !== null && shelf !== 'installed'
+  useEffect(() => {
+    setPicks(null)
+  }, [shelf])
+  const togglePick = (slug: string) =>
+    setPicks((p) => {
+      if (!p) return p
+      const next = new Set(p)
+      if (!next.delete(slug)) next.add(slug)
+      return next
+    })
+  const allPicked = selecting && listed.length > 0 && listed.every((e) => picks!.has(e.slug))
+  const runBulk = async (status: SavedStatus | null) => {
+    if (!onBulk || !picks?.size || bulkBusy) return
+    setBulkBusy(true)
+    try {
+      await onBulk([...picks], status)
+      setPicks(new Set())
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+  const bulkItems: MenuEntry[] = [
+    { heading: `Move ${picks?.size ?? 0} to` },
+    ...STATUSES.filter((st) => st !== shelf).map((st) => ({ label: STATUS_LABEL[st], onSelect: () => void runBulk(st) })),
+    { separator: true },
+    { label: 'Remove from list', icon: <Trash2 />, onSelect: () => void runBulk(null) },
+  ]
   const count = (st: SavedStatus) => shelved.filter((e) => e.status === st).length
   // "Everything" is what they play; "Not interested" keeps its own shelf.
   const played = shelved.filter((e) => isPlayStatus(e.status))
@@ -171,7 +214,7 @@ export function Sidebar({
     ...(played.length ? [{ value: 'saved' as Shelf, label: 'Everything on kryo.to', hint: String(played.length) }] : []),
     ...STATUSES.filter((st) => count(st) > 0).map((st) => ({ value: st as Shelf, label: STATUS_LABEL[st], hint: String(count(st)) })),
   ]
-  const pending = downloads.filter((d) => (isActive(d) || d.status === 'paused') && d.meta.title.toLowerCase().includes(q))
+  const pending = downloads.filter((d) => (isActive(d) || d.status === 'paused') && matches(d.meta.title))
   const shownLists = useMemo(
     () =>
       lists.collections
@@ -180,8 +223,8 @@ export function Sidebar({
           // Hiding adult games on kryo.to hides the ones not on this PC here too.
           const games = hideAdult ? c.games.filter((g) => !g.nsfw || bySlug.has(g.slug)) : c.games
           const missing = games.filter((g) => !bySlug.has(g.slug)).length
-          const named = c.name.toLowerCase().includes(q)
-          return { collection: c, games: named ? games : games.filter((g) => g.title.toLowerCase().includes(q)), total: games.length, missing, named }
+          const named = matches(c.name)
+          return { collection: c, games: named ? games : games.filter((g) => matches(g.title)), total: games.length, missing, named }
         })
         .filter((l) => !q || l.named || l.games.length > 0),
     [lists, hideAdult, bySlug, q],
@@ -191,9 +234,31 @@ export function Sidebar({
     ...(missing ? [{ label: `Install ${missing} missing game${missing === 1 ? '' : 's'}`, icon: <DownloadIcon />, onSelect: () => askInstall(c.id) }] : []),
     ...(lists.installed.includes(c.id) ? [{ label: 'Stop watching for new games', onSelect: () => void collections.forget(c.id).catch(() => {}) }] : []),
   ]
-  const catalogRow = (slug: string, title: string, cover: string | null, adult: boolean, indent = false) => {
+  const catalogRow = (slug: string, title: string, cover: string | null, adult: boolean, indent = false, pickable = false) => {
     const game = bySlug.get(slug)
     const here = game ? game.id === selectedId : slug === selectedSlug
+    if (pickable && selecting) {
+      const on = picks!.has(slug)
+      return (
+        <button
+          key={slug}
+          type="button"
+          aria-pressed={on}
+          onClick={() => togglePick(slug)}
+          {...gameContext((x, y) => {
+            if (!on) togglePick(slug)
+            setBulkMenu({ x, y })
+          })}
+          className={cn('kryo-pill flex h-9 w-full items-center gap-2.5 px-2 text-left text-xs transition-colors', on ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground')}
+        >
+          <span aria-hidden className={cn('kryo-radius grid size-4 shrink-0 place-items-center border', on ? 'border-primary bg-primary text-primary-foreground' : 'border-border text-transparent')}>
+            <Check className="size-2.5" />
+          </span>
+          <Thumb cover={cover} blur={!!adultBlur(adult, showAdult)} />
+          <span className="min-w-0 grow truncate">{game?.title ?? title}</span>
+        </button>
+      )
+    }
     return (
       <button
         key={slug}
@@ -253,10 +318,10 @@ export function Sidebar({
       ) : null}
     </div>
   )
-  const listGroup = (id: string, label: string, entries: typeof shownLists) =>
-    entries.length ? (
+  const listGroup = (id: string, label: string, entries: typeof shownLists, action?: ReactNode) =>
+    entries.length || action ? (
       <>
-        <Group label={label} count={entries.length} open={isOpen(id, true)} onToggle={() => flip(id)} />
+        <Group label={label} count={entries.length} open={isOpen(id, true)} onToggle={() => flip(id)} action={action} />
         {isOpen(id, true)
           ? entries.map(({ collection: c, games: shown, total, missing }) => {
               const open = isOpen(`c${c.id}`, false)
@@ -343,11 +408,49 @@ export function Sidebar({
       <div className="min-h-0 grow overflow-auto px-2 pb-3">
         {shelf !== 'installed' ? (
           <>
-            <Group label={shelf === 'saved' ? 'On kryo.to' : STATUS_LABEL[shelf]} count={listed.length} open={isOpen('shelf', true)} onToggle={() => flip('shelf')} />
+            <Group
+              label={shelf === 'saved' ? 'On kryo.to' : STATUS_LABEL[shelf]}
+              count={listed.length}
+              open={isOpen('shelf', true)}
+              onToggle={() => flip('shelf')}
+              action={
+                onBulk && listed.length > 1 ? (
+                  <button
+                    type="button"
+                    aria-pressed={selecting}
+                    aria-label={selecting ? 'Stop selecting' : 'Select games'}
+                    title={selecting ? 'Stop selecting' : 'Select games to move them all at once'}
+                    onClick={() => setPicks((p) => (p ? null : new Set()))}
+                    className={cn('kryo-pill grid size-5 place-items-center transition-colors hover:bg-secondary hover:text-foreground', selecting ? 'text-foreground' : 'text-muted-foreground')}
+                  >
+                    {selecting ? <X className="size-3" aria-hidden /> : <ListChecks className="size-3" aria-hidden />}
+                  </button>
+                ) : undefined
+              }
+            />
+            {selecting && isOpen('shelf', true) ? (
+              <div className="mb-1 flex flex-wrap items-center gap-1 px-2 py-1 text-[11px] text-muted-foreground">
+                <span className="mr-auto tabular-nums text-foreground" aria-live="polite">{picks!.size} selected</span>
+                <button type="button" onClick={() => setPicks(allPicked ? new Set() : new Set(listed.map((e) => e.slug)))} className="kryo-pill px-1.5 py-0.5 hover:bg-secondary hover:text-foreground">
+                  {allPicked ? 'Clear' : 'All'}
+                </button>
+                <button
+                  type="button"
+                  disabled={!picks!.size || bulkBusy}
+                  onClick={(ev) => {
+                    const r = ev.currentTarget.getBoundingClientRect()
+                    setBulkMenu({ x: r.left, y: r.bottom + 4 })
+                  }}
+                  className="kryo-pill border border-border px-1.5 py-0.5 text-foreground hover:bg-secondary disabled:opacity-50"
+                >
+                  Move to…
+                </button>
+              </div>
+            ) : null}
             {isOpen('shelf', true)
               ? listed.map((e) => {
                   const game = bySlug.get(e.slug)
-                  return catalogRow(e.slug, e.title, game ? coverFor(game) : e.cover || null, game ? game.nsfw : isAdult(e.slug))
+                  return catalogRow(e.slug, e.title, game ? coverFor(game) : e.cover || null, game ? game.nsfw : isAdult(e.slug), false, true)
                 })
               : null}
             {listed.length === 0 ? <p className="px-2 py-3 text-xs text-muted-foreground">Nothing here.</p> : null}
@@ -412,7 +515,24 @@ export function Sidebar({
           </>
         ) : null}
 
-        {listGroup('mine', 'My collections', shownLists.filter((l) => l.collection.role === 'owner' || l.collection.role === 'collaborator'))}
+        {listGroup(
+          'mine',
+          'My collections',
+          shownLists.filter((l) => l.collection.role === 'owner' || l.collection.role === 'collaborator'),
+          // kryo.to's own New collection dialog, opened in the Store; it lands on
+          // the new collection with Add games open.
+          signedIn && !q ? (
+            <button
+              type="button"
+              aria-label="New collection"
+              title="New collection"
+              onClick={() => onWeb('/library?tab=collections&new=1')}
+              className="kryo-pill grid size-5 place-items-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            >
+              <Plus className="size-3" aria-hidden />
+            </button>
+          ) : undefined,
+        )}
         {listGroup('following', 'Following', shownLists.filter((l) => l.collection.role === 'following' || l.collection.role === 'visitor'))}
 
         {secretGames.length + secretSaved.length > 0 ? (
@@ -429,6 +549,7 @@ export function Sidebar({
         ) : null}
       </div>
       {menu ? <ContextMenu x={menu.x} y={menu.y} items={collectionMenu(menu.collection, menu.missing)} onClose={() => setMenu(null)} /> : null}
+      {bulkMenu && selecting && picks!.size ? <ContextMenu x={bulkMenu.x} y={bulkMenu.y} items={bulkItems} onClose={() => setBulkMenu(null)} /> : null}
     </aside>
   )
 }

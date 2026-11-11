@@ -9,7 +9,16 @@ import { fetchCatalogGame, type LibraryGame } from '@/lib/library'
  */
 
 export type SavedStatus = 'playing' | 'plan' | 'completed' | 'onhold' | 'dropped' | 'favorite' | 'notinterested'
-export type SavedEntry = { slug: string; status: SavedStatus; title: string; cover: string; updatedAt: string }
+export type SavedEntry = {
+  slug: string
+  status: SavedStatus
+  title: string
+  /** kryo.to's wide cover. */
+  cover: string
+  /** The tall library cover, when kryo.to has one: what a 2:3 card draws. */
+  coverVertical?: string | null
+  updatedAt: string
+}
 
 export const STATUS_LABEL: Record<SavedStatus, string> = {
   playing: 'Playing',
@@ -99,6 +108,23 @@ export function setSavedStatus(
     title: game?.title ?? '',
     cover: game?.cover ?? '',
   })
+}
+
+/**
+ * Move many games on kryo.to to one status, or take them all out with `null`
+ * (suggestion #70). Only games already on a shelf move.
+ */
+export function setSavedStatusMany(slugs: string[], status: SavedStatus | null) {
+  if (!slugs.length) return Promise.resolve()
+  if (!isTauri()) {
+    const chosen = new Set(slugs)
+    current = status
+      ? current.map((e) => (chosen.has(e.slug) ? { ...e, status } : e))
+      : current.filter((e) => !chosen.has(e.slug))
+    subs.forEach((fn) => fn(current))
+    return Promise.resolve()
+  }
+  return call<void>('store_set_status_many', { slugs, status })
 }
 
 /* Saved entries carry a cover but not whether the game is adult, so their

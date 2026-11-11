@@ -25,6 +25,7 @@ const FINISHED_ROWS = 5
 export function DownloadsPage({
   list,
   onOpenGame,
+  onOpenCatalog,
   onRepair,
   onStore,
   onDonate,
@@ -34,6 +35,8 @@ export function DownloadsPage({
 }: {
   list: Dl[]
   onOpenGame: (id: string) => void
+  /** A game's page from kryo.to, for one not installed yet. */
+  onOpenCatalog: (slug: string) => void
   /** Properties, Repair, for a game that unpacked with damage. */
   onRepair: (id: string) => void
   onStore: () => void
@@ -73,7 +76,7 @@ export function DownloadsPage({
       {error ? <div role="alert" className="flex items-center gap-3 text-xs text-destructive"><p>{error}</p><Button size="sm" onClick={onRetry}>Retry</Button></div> : null}
       {listError ? <p role="alert" className="text-xs text-destructive">{listError}</p> : null}
       {onDonate ? <Donate onDonate={onDonate} /> : null}
-      {current ? <Current d={current} /> : null}
+      {current ? <Current d={current} open={openFor(current, onOpenGame, onOpenCatalog)} /> : null}
       {waiting.length ? (
         <section className="grid gap-3">
           <div className="flex items-center justify-between gap-3">
@@ -94,7 +97,7 @@ export function DownloadsPage({
             ) : null}
           </div>
           {waiting.map((d, i) => (
-            <Row key={d.id} d={d} onOpenGame={onOpenGame} onRepair={onRepair} queue={{ first: i === 0, last: i === waiting.length - 1 }} />
+            <Row key={d.id} d={d} open={openFor(d, onOpenGame, onOpenCatalog)} onOpenGame={onOpenGame} onRepair={onRepair} queue={{ first: i === 0, last: i === waiting.length - 1 }} />
           ))}
         </section>
       ) : null}
@@ -116,7 +119,7 @@ export function DownloadsPage({
             </Button>
           </div>
           {(allDone ? done : done.slice(0, FINISHED_ROWS)).map((d) => (
-            <Row key={d.id} d={d} onOpenGame={onOpenGame} onRepair={onRepair} />
+            <Row key={d.id} d={d} open={openFor(d, onOpenGame, onOpenCatalog)} onOpenGame={onOpenGame} onRepair={onRepair} />
           ))}
           {done.length > FINISHED_ROWS ? (
             <Button size="sm" variant="ghost" className="w-fit" onClick={() => setAllDone(!allDone)} aria-expanded={allDone}>
@@ -298,7 +301,25 @@ function StatusGlyph({ d, className }: { d: Dl; className?: string }) {
   return <Matrix state={GLYPH[d.status] ?? 'busy'} className={`${tone} ${className ?? ''}`} />
 }
 
-function Current({ d }: { d: Dl }) {
+/** Where a download's banner leads: the installed game, else its page from kryo.to (suggestion #73). */
+function openFor(d: Dl, onOpenGame: (id: string) => void, onOpenCatalog: (slug: string) => void): (() => void) | null {
+  if (d.gameId) return () => onOpenGame(d.gameId!)
+  if (d.slug) return () => onOpenCatalog(d.slug!)
+  return null
+}
+
+/** The download's banner; a button to its game when there is one to open. */
+function Banner({ d, open }: { d: Dl; open: (() => void) | null }) {
+  const art = <Art adult={d.meta.nsfw} src={capsulesFor(d.meta)[0]} fallback={capsulesFor(d.meta).slice(1)} title={d.meta.title} where="downloads" className="kryo-radius aspect-[460/215] w-full object-cover" />
+  if (!open) return art
+  return (
+    <button type="button" onClick={open} aria-label={`Open ${d.meta.title}`} title={`Open ${d.meta.title}`} className="kryo-radius block w-full transition-opacity hover:opacity-85">
+      {art}
+    </button>
+  )
+}
+
+function Current({ d, open }: { d: Dl; open: (() => void) | null }) {
   const samples = useSpeedHistory(d)
   const { pending, failed, run } = usePending(d)
   // Past the download: checking the hash, then unpacking.
@@ -309,7 +330,7 @@ function Current({ d }: { d: Dl }) {
   const fraction = resolving || (extracting && !d.extractTotal) || (!extracting && !d.total) ? null : progressOf(d)
   return (
     <section className="kryo-radius kryo-in grid grid-cols-[260px_1fr] gap-6 border border-border bg-card p-5">
-      <Art adult={d.meta.nsfw} src={capsulesFor(d.meta)[0]} fallback={capsulesFor(d.meta).slice(1)} title={d.meta.title} where="downloads" className="kryo-radius aspect-[460/215] w-full object-cover" />
+      <Banner d={d} open={open} />
       <div className="grid content-start gap-4">
         <div className="flex items-start justify-between gap-4">
           <div className="grid gap-1">
@@ -387,11 +408,13 @@ function Current({ d }: { d: Dl }) {
 
 function Row({
   d,
+  open,
   onOpenGame,
   onRepair,
   queue,
 }: {
   d: Dl
+  open: (() => void) | null
   onOpenGame: (id: string) => void
   onRepair: (id: string) => void
   /** Set for rows in the queue: where it is, for the arrows. */
@@ -413,7 +436,7 @@ function Row({
               : 'Queued'
   return (
     <div className="kryo-radius grid grid-cols-[150px_1fr_auto] items-center gap-4 border border-border bg-card p-3">
-      <Art adult={d.meta.nsfw} src={capsulesFor(d.meta)[0]} fallback={capsulesFor(d.meta).slice(1)} title={d.meta.title} where="downloads" className="kryo-radius aspect-[460/215] w-full object-cover" />
+      <Banner d={d} open={open} />
       <div className="grid min-w-0 gap-1.5">
         <span className="flex min-w-0 items-center gap-2">
           <b className="truncate text-sm text-foreground">{d.meta.title}</b>

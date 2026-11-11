@@ -184,6 +184,7 @@ const settings: Record<string, unknown> = {
   cloudSavesKeepLocal: 5,
   pet: true,
   petMascot: 'telly',
+  petSize: 'normal',
   discord: {
     on: true,
     browsing: false,

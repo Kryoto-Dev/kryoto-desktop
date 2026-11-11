@@ -320,7 +320,8 @@ export function LibraryHome({
                   className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-dashed border-border bg-card transition-[transform,border-color] duration-200 hover:-translate-y-1 hover:border-foreground/60"
                 >
                   <button type="button" onClick={() => onCatalogGame?.(e.slug)} className="kryo-square absolute inset-0" aria-label={`Open ${e.title}`}>
-                    <Art adult={isAdult(e.slug)} src={e.cover || null} title={e.title} className="size-full object-cover opacity-70 transition-opacity group-hover:opacity-100" />
+                    {/* The tall cover, like the cards of games on this PC; the wide one only when kryo.to has no tall one. */}
+                    <Art adult={isAdult(e.slug)} src={e.coverVertical || e.cover || null} fallback={[e.cover]} title={e.title} className="size-full object-cover opacity-70 transition-opacity group-hover:opacity-100" />
                   </button>
                   {filter === 'all' ? (
                     <span className="kryo-pill pointer-events-none absolute left-2 top-2 bg-background/80 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-foreground backdrop-blur">

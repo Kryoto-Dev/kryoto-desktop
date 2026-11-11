@@ -1530,6 +1530,37 @@ fn store_set_status(
         .map_err(|e| e.to_string())
 }
 
+/// Move many games in the account's kryo.to library to one status at once, or
+/// take them all out with `None` (kryo.to `/api/account/library/bulk`, suggestion
+/// #70). Runs in the Store's page, like `store_set_status`.
+#[tauri::command]
+fn store_set_status_many(app: tauri::AppHandle, slugs: Vec<String>, status: Option<String>) -> Result<(), String> {
+    const STATUSES: [&str; 7] = ["playing", "plan", "completed", "onhold", "dropped", "favorite", "notinterested"];
+    if slugs.is_empty() || slugs.len() > 5000 {
+        return Err("Choose between 1 and 5,000 games.".into());
+    }
+    if slugs.iter().any(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+        return Err("Not a kryo.to game.".into());
+    }
+    if status.as_deref().is_some_and(|s| !STATUSES.contains(&s)) {
+        return Err("Not a library status.".into());
+    }
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to first.".into());
+    }
+    let body = match status {
+        Some(s) => serde_json::json!({ "slugs": slugs, "status": s }),
+        None => serde_json::json!({ "slugs": slugs, "remove": true }),
+    }
+    .to_string();
+    let body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    view.eval(format!(
+        "fetch('/api/account/library/bulk',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:{body}}}).finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())"
+    ))
+    .map_err(|e| e.to_string())
+}
+
 /// Hide games on the account, or show them again, through the Store's page.
 /// `refresh` reads the account back at once; never from an answer to reading it.
 pub(crate) fn store_send_hidden<R: Runtime>(app: &tauri::AppHandle<R>, slugs: &[String], hidden: bool, adult: bool, refresh: bool) -> Result<(), String> {
@@ -2150,6 +2181,7 @@ pub fn run() {
             store_friend_fetch,
             store_friend_done,
             store_set_status,
+            store_set_status_many,
             store_report_play,
             store_report_carry,
             store_report_playing,
@@ -2257,6 +2289,7 @@ pub fn run() {
             addons::addons_list,
             addons::addons_get,
             pet::pet_mascot,
+            pet::pet_size,
             menus::menu_open,
             menus::menu_warm,
             menus::menu_payload,

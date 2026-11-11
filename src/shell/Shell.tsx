@@ -80,7 +80,7 @@ import { usePadNavigation } from '@/lib/pad-nav'
 import { BigPicture } from '@/bigpicture/BigPicture'
 import { PadHints } from '@/controller/PadHints'
 import { familyOf, padGames } from '@/lib/pad'
-import { setSavedStatus, useHiddenSlugs, useSaved, STATUSES, STATUS_LABEL, type SavedEntry } from '@/hooks/useSaved'
+import { setSavedStatus, setSavedStatusMany, useHiddenSlugs, useSaved, STATUSES, STATUS_LABEL, type SavedEntry } from '@/hooks/useSaved'
 import type { useBrowserPage } from '@/hooks/useBrowserPage'
 import { downloads, useDownloads, type Download } from '@/lib/downloads'
 import { useAutoUpdates } from '@/library/useAutoUpdates'
@@ -1375,6 +1375,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
           onRetry={downloadState.retry}
           list={dl}
           onOpenGame={(id) => go({ kind: 'game', id })}
+          onOpenCatalog={(slug) => go({ kind: 'catalog', slug })}
           onRepair={(id) => setOverlay({ kind: 'props', id, tab: 'repair' })}
           onStore={() => openWeb('/')}
           onDonate={account.supporter ? null : () => openWeb('/donate')}
@@ -1403,6 +1404,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
           selectedSlug={catalogSlug}
           onCatalogGame={(slug) => go({ kind: 'catalog', slug })}
           onWeb={openWeb}
+          signedIn={!guest}
+          onBulk={guest ? undefined : (slugs, status) => setSavedStatusMany(slugs, status).catch(e => lib.setError(errorText(e)))}
           onRemoveLauncher={(launcher) => setOverlay({ kind: 'unlist', launcher })}
         />
         {catalogSlug ? (
