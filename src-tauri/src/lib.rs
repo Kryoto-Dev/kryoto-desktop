@@ -1530,6 +1530,33 @@ fn store_set_status(
         .map_err(|e| e.to_string())
 }
 
+/// Put a game in one of the account's kryo.to collections, or take it out
+/// (`add` false): a Library right-click files a game the way Steam's categories
+/// do (kryo.to suggestion #71). kryo.to's `/api/account/collections/<id>/items`,
+/// run in the Store's page like `store_set_status`; the page reports the
+/// collections back, so the Library's groups follow.
+#[tauri::command]
+fn store_collection_item(app: tauri::AppHandle, id: String, slug: String, add: bool) -> Result<(), String> {
+    if id.is_empty() || id.len() > 20 || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Not a kryo.to collection.".into());
+    }
+    if slug.is_empty() || slug.len() > 200 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Not a kryo.to game.".into());
+    }
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to first.".into());
+    }
+    let then = ".finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())";
+    let script = if add {
+        let body = serde_json::to_string(&serde_json::json!({ "slug": slug }).to_string()).map_err(|e| e.to_string())?;
+        format!("fetch('/api/account/collections/{id}/items',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:{body}}}){then}")
+    } else {
+        format!("fetch('/api/account/collections/{id}/items?slug={slug}',{{method:'DELETE',credentials:'include'}}){then}")
+    };
+    view.eval(script).map_err(|e| e.to_string())
+}
+
 /// Move many games in the account's kryo.to library to one status at once, or
 /// take them all out with `None` (kryo.to `/api/account/library/bulk`, suggestion
 /// #70). Runs in the Store's page, like `store_set_status`.
@@ -2182,6 +2209,7 @@ pub fn run() {
             store_friend_done,
             store_set_status,
             store_set_status_many,
+            store_collection_item,
             store_report_play,
             store_report_carry,
             store_report_playing,
@@ -2244,6 +2272,7 @@ pub fn run() {
             defender::defender_script,
             defender::defender_exclude,
             library::game_disk_size,
+            library::game_start_files,
             library::open_folder,
             downloads::downloads_list,
             downloads::download_pause,

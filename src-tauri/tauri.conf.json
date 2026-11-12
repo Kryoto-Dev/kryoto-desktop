@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kryoto Desktop",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "identifier": "to.kryo.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -62,7 +62,12 @@
     "category": "Game",
     "copyright": "Kryoto",
     "shortDescription": "The kryo.to desktop client",
-    "longDescription": "Kryoto Desktop: the kryo.to store, your game library, downloads that install themselves, and every way a game starts."
+    "longDescription": "Kryoto Desktop: the kryo.to store, your game library, downloads that install themselves, and every way a game starts.",
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   },
   "plugins": {
     "updater": {

@@ -837,6 +837,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     return `"${g.installDir}\\${exe}"${args ? ` ${args}` : ''}`
   },
   game_disk_size: () => 14_300_000_000,
+  game_start_files: () => ['Hollow Knight.exe', 'Launcher/Start.bat', 'Redist/vcredist_x64.exe'],
   open_folder: () => null,
   game_languages: () => ['english', 'french', 'german', 'spanish'],
   game_shortcut: () => 'desktop',
@@ -948,6 +949,15 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   ],
   library_restore_found: (a) => (a.dirs as string[]).length,
   collections_state: () => clone(collectionsPreview),
+  // Library right-click > Add to collection (lib.rs store_collection_item, suggestion #71).
+  store_collection_item: (a) => {
+    const c = collectionsPreview.collections.find((x) => x.id === a.id)
+    if (!c) return null
+    const slug = String(a.slug)
+    c.games = a.add ? (c.games.some((g) => g.slug === slug) ? c.games : [...c.games, collectionGame(slug, slug, 1)]) : c.games.filter((g) => g.slug !== slug)
+    previewBus.emit('collections-state', clone(collectionsPreview))
+    return null
+  },
   collection_install: (a) => {
     const c = collectionsPreview.collections.find((x) => x.id === a.id)
     if (!collectionsPreview.installed.includes(String(a.id))) collectionsPreview.installed.push(String(a.id))

@@ -33,6 +33,8 @@ export const collections = {
   later: (id: string) => call<void>('collection_later', { id }),
   /** Stop watching it. Its games stay. */
   forget: (id: string) => call<void>('collection_forget', { id }),
+  /** Put a game in one of the account's collections, or take it out (suggestion #71). */
+  setItem: (id: string, slug: string, add: boolean) => call<void>('store_collection_item', { id, slug, add }),
 }
 
 let current = EMPTY

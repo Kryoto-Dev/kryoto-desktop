@@ -1647,21 +1647,43 @@ fn already_had<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     true
 }
 
-/// Forge names a DLC's archive `<game> DLC - <name>`.
+/// A DLC's game and name, from its file's name or a row named after it. Two
+/// namings are out there: Forge's `<game> DLC - <name> - Kryoto.7z`, and since
+/// kryo.to 0.17.0 the name every download of a DLC is saved as,
+/// `<game> - DLC <name> - kryoto.7z` (kryo.to `lib/dlc-addons.ts`). Knowing only
+/// the first, Desktop 0.3.x took every newer DLC for its game: "Already
+/// downloading" while the game was going, "Already installed" once it was in
+/// (KB-0287).
+pub fn dlc_parts(name: &str) -> Option<(String, String)> {
+    let name = name.trim();
+    let lower = name.to_ascii_lowercase();
+    let (game, rest) = if let Some(at) = lower.find(" - dlc ") {
+        (&name[..at], &name[at + " - dlc ".len()..])
+    } else {
+        let at = lower.find(" dlc - ")?;
+        (&name[..at], &name[at + " dlc - ".len()..])
+    };
+    let rest = match rest.rsplit_once('.') {
+        Some((stem, ext)) if (1..=4).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) => stem,
+        _ => rest,
+    };
+    let rest = rest.trim();
+    let dlc = if rest.to_ascii_lowercase().ends_with("- kryoto") { rest[..rest.len() - "- kryoto".len()].trim() } else { rest };
+    let (game, dlc) = (game.trim(), dlc.trim());
+    (!game.is_empty() && !dlc.is_empty()).then(|| (game.to_string(), dlc.to_string()))
+}
+
 fn is_dlc_file(name: &str) -> bool {
-    name.to_ascii_lowercase().contains(" dlc - ")
+    dlc_parts(name).is_some()
 }
 
 fn is_dlc_link(url: &str) -> bool {
     file_name_in_link(url).is_some_and(|name| is_dlc_file(&name))
 }
 
-/// The label kryo.to gives a DLC, from Forge's name for its file.
+/// The label kryo.to gives a DLC, from its file's name.
 fn dlc_label(file: &str) -> Option<String> {
-    let at = file.to_ascii_lowercase().find(" dlc - ")? + " dlc - ".len();
-    let name = file[at..].rsplit_once('.').map_or(&file[at..], |(stem, _)| stem);
-    let name = name.strip_suffix(" - Kryoto").or(name.strip_suffix(" - kryoto")).unwrap_or(name);
-    Some(format!("DLC: {}", name.trim()))
+    dlc_parts(file).map(|(_, name)| format!("DLC: {name}"))
 }
 
 /// Whether a press for `new` asks for what the row `going` already fetches. A
@@ -4510,7 +4532,7 @@ pub fn locate(dest: &Path, wanted: &str) -> (PathBuf, String) {
 }
 
 /// Files Play can start.
-fn find_exes(dir: &Path, depth: usize) -> Vec<PathBuf> {
+pub(crate) fn find_exes(dir: &Path, depth: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(read) = std::fs::read_dir(dir) else { return out };
     for entry in read.flatten() {
@@ -5048,6 +5070,32 @@ mod tests {
     fn a_dlc_file_names_its_label() {
         assert_eq!(dlc_label("Forts DLC - Firebird - Kryoto.7z").as_deref(), Some("DLC: Firebird"));
         assert_eq!(dlc_label("Forts - Kryoto.7z"), None);
+        // kryo.to's name since 0.17.0, as A Hat in Time's DLC is saved (KB-0287).
+        assert_eq!(
+            dlc_label("A Hat in Time - DLC A Hat in Time - Vanessas Curse - kryoto.7z").as_deref(),
+            Some("DLC: A Hat in Time - Vanessas Curse")
+        );
+        assert_eq!(dlc_label("Rusted Moss - DLC Rusted Moss Artbook - kryoto.7z").as_deref(), Some("DLC: Rusted Moss Artbook"));
+        assert_eq!(dlc_parts("Rusted Moss - DLC Rusted Moss Artbook").map(|(game, _)| game).as_deref(), Some("Rusted Moss"));
+        // A game with DLC in its title, and an add-on that is not a DLC, are not DLC.
+        assert!(!is_dlc_file("DLC Quest - Kryoto.7z"));
+        assert!(!is_dlc_file("A Hat in Time (Online add-on) - Kryoto.7z"));
+    }
+
+    /// A DLC under kryo.to's newer name goes in beside its game, here and in Downloads (KB-0287).
+    #[test]
+    fn a_dlc_under_the_newer_name_is_not_its_game() {
+        let token = |name: &str| {
+            use base64::Engine;
+            let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::json!({ "k": "a/b", "exp": 1, "n": name }).to_string());
+            format!("https://dl.kryo.to/d/{body}.c2ln")
+        };
+        let dlc = token("Rusted Moss - DLC Rusted Moss Artbook - kryoto.7z");
+        let game = token("Rusted Moss - Kryoto.7z");
+        let row = |url: &str| Download { url: url.into(), ..Default::default() };
+        assert!(is_dlc_link(&dlc) && !is_dlc_link(&game));
+        assert!(!same_request(&row(&game), &dlc, false));
+        assert_eq!(row_kind(&row(&dlc), None), FileKind::Addon(String::new()));
     }
 
     /// Fetched from a mirror that renamed it, an add-on is still found by the page.

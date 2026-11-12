@@ -104,6 +104,22 @@ export function GameProperties({
     void library.languages(game.installDir).then(setLanguages).catch(() => {})
   }, [game.installDir])
 
+  // What else in the folder Play could start, offered under Executable, so
+  // changing it needs no file dialog (one that never opened left RDR2 stuck, KB-0288).
+  const [startFiles, setStartFiles] = useState<string[]>([])
+  useEffect(() => {
+    void library.startFiles(draft.installDir).then(setStartFiles).catch(() => setStartFiles([]))
+  }, [draft.installDir])
+  const exeOptions = (() => {
+    const current = draft.executable.replace(/\\/g, '/')
+    const list = startFiles.some((f) => f.toLowerCase() === current.toLowerCase()) || !current ? startFiles : [current, ...startFiles]
+    return list.map((f) => ({ value: f, label: f }))
+  })()
+  const pickStartFile = (rel: string) => {
+    const root = draft.installDir.replace(/[\\/]+$/, '')
+    setDraft((d) => withExecutable(d, `${root}/${rel}`))
+  }
+
   useEffect(() => {
     if (tab !== 'files' || size != null) return
     void library.diskSize(draft.installDir).then(setSize).catch(() => setSize(0))
@@ -277,8 +293,18 @@ export function GameProperties({
             ) : null}
             <Section title="Executable" hint="The file Play starts. Change it when the game only starts from a different .exe in its folder.">
               <div className="flex items-center gap-2">
-                <span className="kryo-ascii-art grow select-text break-all text-[11px] text-muted-foreground">{draft.executable || 'None set'}</span>
-                <Button onClick={() => browseExe()}>Change</Button>
+                {exeOptions.length > 1 ? (
+                  <Dropdown
+                    className="min-w-0 grow"
+                    label="File Play starts"
+                    value={draft.executable.replace(/\\/g, '/')}
+                    options={exeOptions}
+                    onChange={pickStartFile}
+                  />
+                ) : (
+                  <span className="kryo-ascii-art grow select-text break-all text-[11px] text-muted-foreground">{draft.executable || 'None set'}</span>
+                )}
+                <Button onClick={() => browseExe()}>{exeOptions.length > 1 ? 'Browse' : 'Change'}</Button>
               </div>
               {windows ? (
                 <Check

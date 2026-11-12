@@ -250,11 +250,17 @@ function TurnOn({ game, available, running }: { game: LibraryGame; available: nu
   )
 }
 
+/**
+ * A locked hidden achievement keeps its secret until it is clicked: the row is
+ * then a button, and a second click hides it again (kryo.to suggestion #78).
+ */
 function Row({ a }: { a: GameAchievement }) {
-  const secret = a.hidden && !a.unlocked
+  const [revealed, setRevealed] = useState(false)
+  const hiddenLocked = a.hidden && !a.unlocked
+  const secret = hiddenLocked && !revealed
   const picture = a.unlocked ? a.icon : (a.iconGray ?? a.icon)
-  return (
-    <li className={cn('grid grid-cols-[40px_1fr_auto] items-center gap-3', !a.unlocked && 'opacity-60')}>
+  const body = (
+    <>
       <span className="grid size-10 place-items-center overflow-hidden border border-border bg-background">
         {secret ? (
           <EyeOff className="size-4 text-muted-foreground" aria-hidden />
@@ -267,12 +273,27 @@ function Row({ a }: { a: GameAchievement }) {
       <span className="min-w-0">
         <span className="block truncate text-xs font-bold text-foreground">{secret ? 'Hidden achievement' : a.displayName || a.name}</span>
         <span className="block text-[11px] leading-snug text-muted-foreground">
-          {secret ? 'Keep playing to find out.' : a.description}
+          {secret ? 'Keep playing to find out, or click to see it.' : a.description}
         </span>
       </span>
       <span className="text-right text-[10px] tabular-nums text-muted-foreground">
         {a.unlocked && a.unlockedAt ? new Date(a.unlockedAt * 1000).toLocaleDateString() : a.percent != null ? `${a.percent.toFixed(1)}%` : null}
       </span>
+    </>
+  )
+  const grid = cn('grid grid-cols-[40px_1fr_auto] items-center gap-3', !a.unlocked && 'opacity-60')
+  if (!hiddenLocked) return <li className={grid}>{body}</li>
+  return (
+    <li>
+      <button
+        type="button"
+        aria-expanded={revealed}
+        title={revealed ? 'Hide it again' : 'Show this hidden achievement'}
+        onClick={() => setRevealed((r) => !r)}
+        className={cn(grid, 'w-full text-left outline-none hover:bg-secondary/50 focus-visible:ring-1 focus-visible:ring-foreground')}
+      >
+        {body}
+      </button>
     </li>
   )
 }
