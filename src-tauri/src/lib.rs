@@ -1454,16 +1454,25 @@ fn sign_out_is_due() -> bool {
     SIGN_OUT_NEXT.lock().unwrap_or_else(|e| e.into_inner()).take().is_some_and(|asked| asked.elapsed().as_secs() < 30)
 }
 
-/// Mark every kryo.to notification read, then have the page report again.
+/// Mark kryo.to notifications read, then have the page report again: every one,
+/// or with `ids` only those (one opened from the bell, KB-0291).
 #[tauri::command]
-fn store_mark_read(app: tauri::AppHandle) -> Result<(), String> {
+fn store_mark_read(app: tauri::AppHandle, ids: Option<Vec<String>>) -> Result<(), String> {
+    let ids: Vec<String> = ids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()))
+        .take(50)
+        .collect();
     let view = store(&app)?;
     if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
         return Err("Open kryo.to first.".into());
     }
-    view.eval(
-        "fetch('/api/notifications',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({all:true})}).finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())",
-    )
+    let body = if ids.is_empty() { serde_json::json!({ "all": true }) } else { serde_json::json!({ "ids": ids }) };
+    let body = serde_json::to_string(&body.to_string()).map_err(|e| e.to_string())?;
+    view.eval(format!(
+        "fetch('/api/notifications',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:{body}}}).finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())"
+    ))
     .map_err(|e| e.to_string())
 }
 

@@ -183,11 +183,11 @@ export async function openInbox(
   menu: string,
   anchor: DOMRect | Anchor,
   inbox: Inbox,
-  actions: { open: (url: string | null) => void; markRead: () => void; all: () => void },
+  actions: { open: (url: string | null, id?: string) => void; markRead: () => void; all: () => void },
 ) {
   wire()
   handlers = new Map()
-  inbox.notifications.forEach((n, i) => handlers.set(`${menu}:open:${i}`, () => actions.open(n.url)))
+  inbox.notifications.forEach((n, i) => handlers.set(`${menu}:open:${i}`, () => actions.open(n.url, n.id)))
   handlers.set(`${menu}:read`, actions.markRead)
   handlers.set(`${menu}:all`, actions.all)
   setCurrent(menu)

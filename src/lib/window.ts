@@ -145,8 +145,31 @@ export const toggleMaximize = () => (isTauri() ? getCurrentWindow().toggleMaximi
 export const closeWindow = () => (isTauri() ? getCurrentWindow().close() : Promise.resolve())
 export async function toggleFullscreen() {
   if (!isTauri()) return
+  await setFullscreen(!(await getCurrentWindow().isFullscreen()))
+}
+
+/** Whether full screen was entered from a maximized window, to maximize again on the way out. */
+let maximizedBeforeFullscreen = false
+
+/**
+ * Into or out of full screen, from the title bar or Big Picture. A maximized
+ * window that goes full screen stays flagged maximized, and Windows keeps a
+ * maximized window inside the work area: where the taskbar reserves space, the
+ * page stopped short of it and left a black strip there (KB-0302). So the window
+ * is restored first, and maximized again when it leaves full screen.
+ */
+export async function setFullscreen(on: boolean) {
+  if (!isTauri()) return
   const win = getCurrentWindow()
-  await win.setFullscreen(!(await win.isFullscreen()))
+  if (on) {
+    maximizedBeforeFullscreen = await win.isMaximized()
+    if (maximizedBeforeFullscreen) await win.toggleMaximize()
+    await win.setFullscreen(true)
+    return
+  }
+  await win.setFullscreen(false)
+  if (maximizedBeforeFullscreen && !(await win.isMaximized())) await win.toggleMaximize()
+  maximizedBeforeFullscreen = false
 }
 /** Quit for real (the close button may only hide to the tray). */
 export const exitApp = () => (isTauri() ? call<void>('app_exit') : Promise.resolve())

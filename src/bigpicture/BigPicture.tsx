@@ -10,7 +10,7 @@ import { usePadStore } from '@/hooks/usePads'
 import { backOf, confirmOf, familyOf, padLabel } from '@/lib/pad'
 import type { PadControl, PadFamily } from '@/lib/pad-art'
 import type { LibraryGame } from '@/lib/library'
-import { isTauri } from '@/lib/window'
+import { isTauri, setFullscreen } from '@/lib/window'
 import { cn } from '@/lib/utils'
 import { gameContext } from '@/library/context'
 import { play } from '@/lib/sound'
@@ -104,10 +104,10 @@ export function BigPicture({
     void win.isFullscreen().then((fs) => {
       if (fs) return
       entered = true
-      void win.setFullscreen(true)
+      void setFullscreen(true)
     })
     return () => {
-      if (entered) void win.setFullscreen(false)
+      if (entered) void setFullscreen(false)
     }
   }, [])
 

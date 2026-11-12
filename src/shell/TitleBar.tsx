@@ -100,7 +100,8 @@ export function TitleBar({
   /** How much has folded away (`useRowFold`). */
   fold?: number
   onNews: () => void
-  onOpenNotification: (url: string | null) => void
+  /** `id`: the notification opened, so it is marked read (KB-0291). */
+  onOpenNotification: (url: string | null, id?: string) => void
   onMarkRead: () => void
   onAllNotifications: () => void
   /** The coin beside the account: opens the Kryos wallet in the Store. */
@@ -195,7 +196,7 @@ export function TitleBar({
                   onDone={close}
                   items={[
                     { heading: 'Notifications' },
-                    ...inbox.notifications.map((n) => ({ label: n.title, onSelect: () => onOpenNotification(n.url) })),
+                    ...inbox.notifications.map((n) => ({ label: n.title, onSelect: () => onOpenNotification(n.url, n.id) })),
                     { separator: true },
                     ...(inbox.unreadCount ? [{ label: 'Mark all read', onSelect: onMarkRead }] : []),
                     { label: 'See all', onSelect: onAllNotifications },
