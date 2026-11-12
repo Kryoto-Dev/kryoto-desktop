@@ -107,8 +107,9 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
         .or_else(|| item.slug.as_ref().and_then(|slug| games.iter().find(|g| g.slug.as_deref() == Some(slug.as_str()))))
         .cloned()
         .ok_or_else(|| {
-            // A row named from its file reads "Forts DLC - Firebird": the game comes first.
-            let game = item.meta.title.split(" DLC - ").next().unwrap_or(&item.meta.title);
+            // A row named from its file reads "Forts DLC - Firebird" or
+            // "Forts - DLC Firebird": the game comes first.
+            let game = downloads::dlc_parts(&item.meta.title).map(|(game, _)| game).unwrap_or_else(|| item.meta.title.clone());
             format!("{label} is an add-on. Install {game} first, then download it again.")
         })?;
     // Its files are in use while it runs. The archive stays, so Retry is quick.

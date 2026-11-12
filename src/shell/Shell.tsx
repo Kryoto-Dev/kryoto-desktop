@@ -9,6 +9,7 @@ import {
   FlaskConical,
   FolderHeart,
   FolderInput,
+  FolderPlus,
   Eye,
   EyeOff,
   FolderOpen,
@@ -81,6 +82,7 @@ import { BigPicture } from '@/bigpicture/BigPicture'
 import { PadHints } from '@/controller/PadHints'
 import { familyOf, padGames } from '@/lib/pad'
 import { setSavedStatus, setSavedStatusMany, useHiddenSlugs, useSaved, STATUSES, STATUS_LABEL, type SavedEntry } from '@/hooks/useSaved'
+import { collections as collectionsApi, useCollections } from '@/lib/collections'
 import type { useBrowserPage } from '@/hooks/useBrowserPage'
 import { downloads, useDownloads, type Download } from '@/lib/downloads'
 import { useAutoUpdates } from '@/library/useAutoUpdates'
@@ -196,6 +198,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
   const dlRef = useRef(dl)
   dlRef.current = dl
   const saved = useSaved()
+  const ownLists = useCollections().collections.filter((c) => c.role === 'owner' || c.role === 'collaborator')
   const hiddenSlugs = useHiddenSlugs()
   const { state: page, actions: web } = browser
   const { toasts, push, dismiss } = useToasts()
@@ -295,7 +298,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
 
   /* ── Overlays over the native web view ── */
   const [overlay, setOverlay] = useState<Overlay | null>(null)
-  const [ctx, setCtx] = useState<({ game: LibraryGame } | { saved: Pick<SavedEntry, 'slug' | 'title' | 'cover'> } | { download: Download }) & { x: number; y: number; track?: boolean } | null>(null)
+  const [ctx, setCtx] = useState<({ game: LibraryGame } | { saved: Pick<SavedEntry, 'slug' | 'title' | 'cover'> } | { download: Download }) & { x: number; y: number; track?: boolean; collect?: boolean } | null>(null)
   // Big Picture: full screen, over everything, the Store hidden under it.
   const [bigPicture, setBigPicture] = useState(false)
   useEffect(() => holdPrompts(bigPicture), [bigPicture])
@@ -982,6 +985,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     const now = saved.find(e => e.slug === slug)?.status
     return [
       { label: 'Track', icon: <Bookmark />, hint: now ? STATUS_LABEL[now] : undefined, onSelect: () => setCtx(ctx && { ...ctx, track: true }) },
+      // Steam-style categories are kryo.to collections; they show as groups in the Library (suggestion #71).
+      { label: 'Add to collection', icon: <FolderPlus />, hint: ownLists.filter((c) => c.games.some((x) => x.slug === slug)).length ? String(ownLists.filter((c) => c.games.some((x) => x.slug === slug)).length) : undefined, onSelect: () => setCtx(ctx && { ...ctx, collect: true }) },
       { separator: true },
     ]
   }
@@ -994,8 +999,21 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     })),
     ...(saved.some(e => e.slug === slug) ? [{ separator: true } as MenuEntry, { label: 'Remove from list', onSelect: () => removeSaved(slug, game) }] : []),
   ]
+  const collectMenu = (slug: string): MenuEntry[] => [
+    { heading: 'Your collections' },
+    ...ownLists.map((c) => {
+      const has = c.games.some((x) => x.slug === slug)
+      return { label: c.name, checked: has, onSelect: () => void collectionsApi.setItem(c.id, slug, !has).catch((e) => lib.setError(errorText(e))) }
+    }),
+    ...(ownLists.length ? [{ separator: true } as MenuEntry] : []),
+    { label: 'New collection', icon: <FolderPlus />, onSelect: () => openWeb('/library?tab=collections&new=1') },
+  ]
   const contextItems = (): MenuEntry[] => {
     if (!ctx) return []
+    if (ctx.collect) {
+      const slug = 'game' in ctx ? ctx.game.slug : 'saved' in ctx ? ctx.saved.slug : null
+      if (slug) return collectMenu(slug)
+    }
     if (ctx.track) {
       const slug = 'game' in ctx ? ctx.game.slug : 'saved' in ctx ? ctx.saved.slug : null
       if (slug) return trackMenu(slug, 'game' in ctx ? ctx.game : 'saved' in ctx ? ctx.saved : undefined)

@@ -1193,6 +1193,32 @@ pub fn library_prefix_folder(app: AppHandle, id: String) -> Result<Option<String
     Ok(Some((if pfx.is_dir() { pfx } else { root }).to_string_lossy().into_owned()))
 }
 
+/// The files in a game's folder Play could start, relative to it, for
+/// Properties > Executable to offer: picking one there needs no file dialog,
+/// which on some Windows PCs never opens (KB-0288, KB-0020). The likely ones
+/// first (shallow, not an installer or a crash reporter), at most 60.
+#[tauri::command]
+pub async fn game_start_files(install_dir: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || start_files(Path::new(&install_dir)))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn start_files(root: &Path) -> Vec<String> {
+    const JUNK: [&str; 9] = ["unins", "crash", "redist", "vcredist", "dxsetup", "setup", "report", "helper", "dotnet"];
+    let mut found: Vec<(bool, usize, String)> = crate::downloads::find_exes(root, 4)
+        .into_iter()
+        .filter(|p| cfg!(not(windows)) || !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sh")))
+        .filter_map(|p| {
+            let rel = p.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+            let name = p.file_name()?.to_string_lossy().to_ascii_lowercase();
+            Some((JUNK.iter().any(|j| name.contains(j)), rel.matches('/').count(), rel))
+        })
+        .collect();
+    found.sort_by_key(|(junk, depth, rel)| (*junk, *depth, rel.to_ascii_lowercase()));
+    found.into_iter().take(60).map(|(_, _, rel)| rel).collect()
+}
+
 #[tauri::command]
 pub async fn game_disk_size(install_dir: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || dir_size(Path::new(&install_dir)))
@@ -1983,6 +2009,22 @@ pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
 mod tests {
     use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
     use crate::launch::LaunchEntry;
+
+    /// KB-0288: Properties offers the folder's start files, likeliest first,
+    /// an installer or redistributable last, paths with forward slashes.
+    #[test]
+    fn start_files_put_the_game_before_its_redistributables() {
+        let root = std::env::temp_dir().join(format!("kryoto-start-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for f in ["RDR2.exe", "PlayRDR2.exe", "Redist/vcredist_x64.exe", "x64/tools/helper.exe", "readme.txt"] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"").unwrap();
+        }
+        let files = super::start_files(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(files, ["PlayRDR2.exe", "RDR2.exe", "Redist/vcredist_x64.exe", "x64/tools/helper.exe"]);
+    }
 
     /// KB-0263: a library saved before the fix keeps the DLC page as an
     /// entry; it goes on load, and the picked entry follows its own.

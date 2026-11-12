@@ -431,6 +431,12 @@ fn apply_appimage_env(cmd: &mut std::process::Command, root: &Path, vars: impl I
                     | "PERL5LIB"
                     | "GST_PLUGIN_PATH"
                     | "GST_PLUGIN_SYSTEM_PATH"
+                    // The AppImage's own GStreamer plugins (bundleMediaFramework, KB-0292):
+                    // Wine and Proton play game videos through the system's.
+                    | "GST_PLUGIN_PATH_1_0"
+                    | "GST_PLUGIN_SYSTEM_PATH_1_0"
+                    | "GST_PLUGIN_SCANNER"
+                    | "GST_PLUGIN_SCANNER_1_0"
             )
         ) {
             continue;
@@ -680,10 +686,15 @@ mod tests {
             ("PATH".into(), std::env::join_paths([root.join("usr/bin"), host.clone()]).unwrap()),
             ("LD_LIBRARY_PATH".into(), std::env::join_paths([std::path::Path::new("/tmp/kryoto-ca-1000"), &root.join("usr/lib")]).unwrap()),
             ("DISPLAY".into(), ":0".into()),
+            // The AppImage's GStreamer plugins (KB-0292) stay with Kryoto, not the game.
+            ("GST_PLUGIN_SYSTEM_PATH_1_0".into(), root.join("usr/lib/gstreamer-1.0").into_os_string()),
+            ("GST_PLUGIN_SCANNER_1_0".into(), root.join("usr/lib/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner").into_os_string()),
         ];
         let mut cmd = std::process::Command::new("unused");
         apply_appimage_env(&mut cmd, &root, vars);
         let env: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(env[std::ffi::OsStr::new("GST_PLUGIN_SYSTEM_PATH_1_0")], None);
+        assert_eq!(env[std::ffi::OsStr::new("GST_PLUGIN_SCANNER_1_0")], None);
         assert_eq!(env[std::ffi::OsStr::new("PYTHONHOME")], None);
         assert_eq!(env[std::ffi::OsStr::new("LD_LIBRARY_PATH")], None);
         assert_eq!(env[std::ffi::OsStr::new("PYTHONPATH")], Some(host.as_os_str()));

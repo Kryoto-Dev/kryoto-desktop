@@ -360,6 +360,8 @@ export const library = {
   running: () => call<string[]>('game_running'),
   stop: (id: string) => call<void>('game_stop', { id }),
   diskSize: (installDir: string) => call<number>('game_disk_size', { installDir }),
+  /** The files in a game's folder Play could start, relative to it, likeliest first. */
+  startFiles: (installDir: string) => call<string[]>('game_start_files', { installDir }),
   /**
    * Show a folder. `create` for a library folder that may not exist yet; a
    * missing game folder shows the nearest one above it. Never rejects: a
