@@ -192,7 +192,7 @@ function slugOnPage(url: string, catalogEndpoint?: string): string | null {
 export function Shell({ startPage, account, browser, inbox: inboxState }: { startPage: 'store' | 'library'; account: Account; browser: Browser; inbox: ReturnType<typeof useInbox> }) {
   const lib = useLibrary()
   const shownGames = useMemo(() => lib.games.filter((g) => !g.hidden), [lib.games])
-  const { inbox, news, markAllRead } = inboxState
+  const { inbox, news, markAllRead, markRead } = inboxState
   const downloadState = useDownloads()
   const dl = downloadState.list
   const dlRef = useRef(dl)
@@ -1336,7 +1336,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     else if (t.gameId) go({ kind: 'game', id: t.gameId })
     else go({ kind: 'downloads' })
   }
-  const openNotification = (url: string | null) => {
+  const openNotification = (url: string | null, id?: string) => {
+    if (id) markRead(id)
     if (!url) return openWeb('/notifications')
     if (url.startsWith('/')) return openWeb(url)
     if (/^https:\/\/kryo\.to\//.test(url)) return openWeb(url.replace('https://kryo.to', ''))

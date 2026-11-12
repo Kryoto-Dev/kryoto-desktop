@@ -360,7 +360,7 @@ export function GamePage({
           ) : null}
         </dl>
 
-        <DiscordChip id={game.id} />
+        <DiscordChip id={game.id} stat />
 
         {onSetStatus && game.slug ? <ListStatusMenu status={savedStatus} onSet={onSetStatus} /> : null}
 

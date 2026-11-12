@@ -83,5 +83,15 @@ export function useInbox() {
     setInbox((i) => ({ unreadCount: 0, notifications: i.notifications.map((n) => (n.readAt ? n : { ...n, readAt: now })) }))
     void call('store_mark_read').catch((e) => (isExpectedReportError(e) ? undefined : logError('inbox', e)))
   }, [])
-  return { inbox, news, markAllRead }
+  // One notification opened from the bell is read too (KB-0291).
+  const markRead = useCallback((id: string) => {
+    const now = new Date().toISOString()
+    setInbox((i) => ({
+      unreadCount: i.notifications.some((n) => n.id === id && !n.readAt) ? Math.max(0, i.unreadCount - 1) : i.unreadCount,
+      notifications: i.notifications.map((n) => (n.id === id && !n.readAt ? { ...n, readAt: now } : n)),
+    }))
+    if (!isTauri()) return
+    void call('store_mark_read', { ids: [id] }).catch((e) => (isExpectedReportError(e) ? undefined : logError('inbox', e)))
+  }, [])
+  return { inbox, news, markAllRead, markRead }
 }

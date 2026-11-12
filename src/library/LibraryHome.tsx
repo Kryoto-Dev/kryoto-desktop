@@ -209,13 +209,13 @@ export function LibraryHome({
           {/* Capped: with one or two recent games a `1fr` card filled the whole width at 460:215 and dwarfed the page (KB-0021). */}
           <div className="grid auto-cols-[minmax(260px,360px)] grid-flow-col justify-start gap-3 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {recent.slice(1, 7).map((g) => (
-              <div key={g.id} className="relative">
+              <div key={g.id} className="group/lift relative">
               <button
                 type="button"
                 onClick={() => onOpen(g.id)}
                 onDoubleClick={() => onPlay(g)}
                 {...ctx(g)}
-                className="kryo-radius group grid w-full overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 hover:-translate-y-0.5 hover:border-foreground/50"
+                className="kryo-radius group grid w-full overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-0.5 group-hover/lift:border-foreground/50"
               >
                 <Art adult={g.nsfw} src={capsulesFor(g)[0]} fallback={capsulesFor(g).slice(1)} title={g.title} className="aspect-[460/215] w-full object-cover" />
                 <span className="grid gap-0.5 px-3 py-2.5">
@@ -256,10 +256,13 @@ export function LibraryHome({
         </div>
         <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">
           {sorted.map((g) => (
+            // The card lifts on hover; the hover is the cell's, which does not
+            // move, so a pointer just under a lifted card keeps it up instead of
+            // dropping and lifting it again and again (KB-0290).
+            <div key={g.id} className="group/lift">
             <div
-              key={g.id}
               {...ctx(g)}
-              className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 hover:-translate-y-1 hover:border-foreground/60"
+              className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60"
             >
               <button type="button" onClick={() => onOpen(g.id)} className="kryo-square absolute inset-0" aria-label={`Open ${g.title}`}>
                 <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />
@@ -293,11 +296,12 @@ export function LibraryHome({
                   type="button"
                   aria-label={`Play ${g.title}`}
                   onClick={() => onPlay(g)}
-                  className="kryo-pill absolute bottom-3 right-3 grid size-11 min-h-[44px] min-w-[44px] translate-y-2 place-items-center bg-primary text-primary-foreground opacity-0 shadow-lg shadow-black/50 transition-all duration-200 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100 focus-visible:translate-y-0 focus-visible:opacity-100 [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100"
+                  className="kryo-pill absolute bottom-3 right-3 grid size-11 min-h-[44px] min-w-[44px] translate-y-2 place-items-center bg-primary text-primary-foreground opacity-0 shadow-lg shadow-black/50 transition-all duration-200 group-hover/lift:translate-y-0 group-hover/lift:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100 focus-visible:translate-y-0 focus-visible:opacity-100 [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100"
                 >
                   <Play className="size-4 fill-current" />
                 </button>
               )}
+            </div>
             </div>
           ))}
         </div>
@@ -314,10 +318,10 @@ export function LibraryHome({
             {awayShown.map((e) => {
               const download = downloads.find((d) => d.slug === e.slug && (isActive(d) || d.status === 'paused'))
               return (
+                <div key={e.slug} className="group/lift">
                 <div
-                  key={e.slug}
                   {...gameContext(onSavedContext ? (x, y) => onSavedContext(e, x, y) : undefined)}
-                  className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-dashed border-border bg-card transition-[transform,border-color] duration-200 hover:-translate-y-1 hover:border-foreground/60"
+                  className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-dashed border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60"
                 >
                   <button type="button" onClick={() => onCatalogGame?.(e.slug)} className="kryo-square absolute inset-0" aria-label={`Open ${e.title}`}>
                     {/* The tall cover, like the cards of games on this PC; the wide one only when kryo.to has no tall one. */}
@@ -343,6 +347,7 @@ export function LibraryHome({
                       <DownloadIcon className="size-4" />
                     </button>
                   ) : null}
+                </div>
                 </div>
               )
             })}

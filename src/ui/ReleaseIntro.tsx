@@ -55,12 +55,12 @@ export async function fetchReleaseIntro(version: string = __APP_VERSION__): Prom
  * in its privacy-enhanced player (no cookies until it plays).
  */
 export function IntroVideo({ video, className }: { video: string; className?: string }) {
-  const inline = useInlineVideo()
+  const inline = useInlineVideo(video)
   return (
     <div className={`kryo-radius aspect-video w-full overflow-hidden border border-border bg-black ${className ?? ''}`}>
       {inline === null ? null : !inline ? (
         <div className="grid size-full place-content-center justify-items-center gap-3 p-6 text-center">
-          <p className="max-w-sm text-xs text-muted-foreground">On Linux, this video plays in your browser.</p>
+          <p className="max-w-sm text-xs text-muted-foreground">This PC cannot play this video here, so it plays in your browser.</p>
           <Button variant="primary" onClick={() => openExternal(isFile(video) ? video : `https://www.youtube.com/watch?v=${video}`)}>
             <ExternalLink className="size-3" />
             Watch it in your browser
@@ -83,25 +83,34 @@ export function IntroVideo({ video, className }: { video: string; className?: st
 }
 
 /**
- * Whether a video can play inside the app. Not on Linux: the AppImage carries
- * GStreamer's core from Ubuntu 22.04 but not its plugins, a newer
- * distribution's plugins do not load into it, and WebKit's player then ends
- * the page's process (KB-0259: on Fedora 44 What's new crashed the window
- * every time it opened, and came back with it). Null until decided.
+ * The formats a video may come in, as `canPlayType` takes them: a kryo.to file by
+ * its extension (MP4 is H.264 and AAC, WebM is VP9 and Opus), and YouTube, which
+ * picks whichever of the two the player can take.
  */
-let inlineVideo: Promise<boolean> | null = null
-function useInlineVideo(): boolean | null {
+export function videoTypes(video: string): string[] {
+  const mp4 = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'
+  const webm = 'video/webm; codecs="vp9, opus"'
+  if (!isFile(video)) return [webm, mp4]
+  const ext = video.split(/[?#]/)[0]!.split('.').pop()?.toLowerCase()
+  return ext === 'webm' ? [webm] : [mp4]
+}
+
+/**
+ * Whether a video can play inside the app: asked of the app's own WebKit, for
+ * this video's format. On Windows it always can. On Linux it depends on the
+ * package: the AppImage carries GStreamer and its plugins since 0.3.5, the .deb
+ * and .rpm use the system's, which may lack H.264 (Ubuntu without its extra
+ * codecs). A format WebKit cannot play opens in the browser instead. Before 0.3.5
+ * the AppImage had no plugins at all, and its player ended the page instead of
+ * saying so (KB-0259); `canPlayType` answers '' there, so this asks first.
+ * Null until decided.
+ */
+function useInlineVideo(video: string): boolean | null {
   const [inline, setInline] = useState<boolean | null>(null)
   useEffect(() => {
-    let alive = true
-    // Linux: in the browser instead, whichever package (the system WebKit's
-    // codecs vary too); Windows plays it here.
-    inlineVideo ??= Promise.resolve(!/Linux/.test(navigator.userAgent) || /Android/.test(navigator.userAgent))
-    void inlineVideo.then((v) => alive && setInline(v))
-    return () => {
-      alive = false
-    }
-  }, [])
+    const probe = document.createElement('video')
+    setInline(videoTypes(video).some((t) => probe.canPlayType(t) !== ''))
+  }, [video])
   return inline
 }
 
