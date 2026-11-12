@@ -1215,7 +1215,7 @@ fn start_files(root: &Path) -> Vec<String> {
             Some((JUNK.iter().any(|j| name.contains(j)), rel.matches('/').count(), rel))
         })
         .collect();
-    found.sort_by(|a, b| (a.0, a.1, a.2.to_ascii_lowercase()).cmp(&(b.0, b.1, b.2.to_ascii_lowercase())));
+    found.sort_by_key(|(junk, depth, rel)| (*junk, *depth, rel.to_ascii_lowercase()));
     found.into_iter().take(60).map(|(_, _, rel)| rel).collect()
 }
 
