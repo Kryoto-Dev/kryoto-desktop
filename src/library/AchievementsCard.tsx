@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, Cloud, EyeOff, Trophy, Wrench } from '@/ui/pixel-icons'
-import { AsciiBar, Button, Caption, Card, Label, Modal } from '@/ui'
+import { AsciiBar, Busy, Button, Caption, Card, Label, Modal } from '@/ui'
 import { call, errorText, on } from '@/lib/bridge'
 import type { LibraryGame } from '@/lib/library'
 import { cn } from '@/lib/utils'
@@ -25,8 +25,13 @@ type GameAchievements = {
   total: number
   unlocked: number
   list: GameAchievement[]
-  tracking: 'supported' | 'unsupported' | 'unknown'
+  /** `fixable`: published DRM-free, so nothing records until the switch puts
+   *  Kryoto's emulator in (achievements_turn_on). `absent`: no Steam API in
+   *  the game at all, so there is nothing to show. */
+  tracking: 'supported' | 'unsupported' | 'unknown' | 'fixable' | 'absent'
   emulator: string | null
+  /** What Steam lists for the game, tracked or not. */
+  available: number
 }
 
 const SHOWN = 8
@@ -54,7 +59,8 @@ function useCloudStatus() {
  * rest, rarest last. Read from the emulator's own save, so it fills in as you
  * play, here and in a notification. Hidden ones keep their secret until
  * they are unlocked. An incompatible emulator gets an explanation and a way
- * into Repair; a game with no achievements still needs no card.
+ * into Repair; a game published DRM-free gets one button that turns them on;
+ * a game with no achievements, or no Steam API to report any, needs no card.
  */
 export function AchievementsCard({ game, running = false }: { game: LibraryGame; running?: boolean }) {
   const [data, setData] = useState<GameAchievements | null>(null)
@@ -123,7 +129,9 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
 
   return (
     <>
-      {data?.tracking === 'unsupported' && ignored !== notice ? (
+      {data?.tracking === 'fixable' && data.available > 0 ? (
+        <TurnOn game={game} available={data.available} running={running} />
+      ) : data?.tracking === 'unsupported' && ignored !== notice ? (
         <Card className="grid gap-3">
           <Label>Achievements</Label>
           <p className="text-sm font-bold text-foreground">Achievement tracking is unavailable</p>
@@ -180,6 +188,65 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
       ) : null}
       {repairOpen ? <Modal title="Switch emulator for achievements" onClose={() => setRepairOpen(false)}><GameRepair gameId={game.id} purpose="achievements" /></Modal> : null}
     </>
+  )
+}
+
+/**
+ * A game published DRM-free: Valve's own Steam files, which count
+ * achievements only while Steam runs. One button puts Kryoto's emulator in
+ * their place through Repair (backed up, undone under Properties > Repair);
+ * the card then becomes the list, as for any other game.
+ */
+function TurnOn({ game, available, running }: { game: LibraryGame; available: number; running: boolean }) {
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!busy) return
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on<{ gameId: string; text: string }>('repair-progress', (p) => {
+      if (!cancelled && p.gameId === game.id) setStatus(p.text)
+    }).then((fn) => (cancelled ? fn() : (stop = fn))).catch(() => {})
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [busy, game.id])
+
+  async function turnOn() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setStatus(null)
+    // On success the library changes and the card reloads as the list.
+    try { await call('achievements_turn_on', { id: game.id }) }
+    catch (e) { setError(errorText(e)) }
+    finally { setBusy(false); setStatus(null) }
+  }
+
+  return (
+    <Card className="grid gap-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <Label>Achievements</Label>
+        <Caption>{available} on Steam</Caption>
+      </div>
+      <p className="text-sm font-bold text-foreground">This copy does not record achievements</p>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        It came without a Steam emulator, so its achievements only count while Steam runs. Kryoto can add one so they unlock and show here. You can undo it under Properties &gt; Repair.
+      </p>
+      {game.slug ? (
+        <Button size="sm" className="justify-self-start" disabled={busy || running} onClick={() => void turnOn()}>
+          {busy ? <Busy className="size-3" /> : <Trophy className="size-3" aria-hidden />} Turn on achievements
+        </Button>
+      ) : (
+        <p className="text-[11px] text-muted-foreground">Link this game to its Kryoto page under Properties &gt; kryo.to first.</p>
+      )}
+      {running ? <p className="text-[11px] text-muted-foreground">Close the game first.</p> : null}
+      {busy && status ? <p className="text-[11px] text-muted-foreground" role="status" aria-live="polite">{status}</p> : null}
+      {error ? <p className="break-words text-[11px] text-destructive" role="alert">{error}</p> : null}
+    </Card>
   )
 }
 

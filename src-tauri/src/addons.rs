@@ -1,10 +1,11 @@
 //! Add-ons: a game's extra files from kryo.to - a language pack, the Online
 //! add-on - put into the installed game, and taken out again.
 //!
-//! An add-on is downloaded like any release (from the game page's download
-//! window). When the finished file turns out to be one of the game's add-ons
-//! (`downloads::match_file`), it is unpacked into the game's own folder
-//! instead of a new one, and every file it wrote is recorded. A file it
+//! An add-on is added from its game's Add-ons & DLC card (`addons_get`: the
+//! link is minted for this PC and the row knows its game), or downloaded like
+//! any release from the Store's download window. When the finished file is one
+//! of the game's add-ons (`downloads::match_file`), it is unpacked into the
+//! game's own folder instead of a new one, and every file it wrote is recorded. A file it
 //! replaces is first moved aside, into a hidden folder beside the game's
 //! (`.<game>.kryoto-addons`: same drive, and outside the game, where nothing
 //! that looks through its files can take an original for the game's own).
@@ -97,10 +98,14 @@ fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
 pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::settings::Settings) -> Result<(), String> {
     let item = downloads::snapshot(app, id).ok_or("The download is gone.")?;
     let label = item.addon.clone().unwrap_or_else(|| "Add-on".into());
+    let games = library::load(app).unwrap_or_default();
+    // The game it was added to from its card; else the one with its page.
     let game = item
-        .slug
+        .game_id
         .as_ref()
-        .and_then(|slug| library::load(app).ok()?.into_iter().find(|g| g.slug.as_deref() == Some(slug.as_str())))
+        .and_then(|id| games.iter().find(|g| &g.id == id))
+        .or_else(|| item.slug.as_ref().and_then(|slug| games.iter().find(|g| g.slug.as_deref() == Some(slug.as_str()))))
+        .cloned()
         .ok_or_else(|| {
             // A row named from its file reads "Forts DLC - Firebird": the game comes first.
             let game = item.meta.title.split(" DLC - ").next().unwrap_or(&item.meta.title);
@@ -174,6 +179,133 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
         downloads::Notice::new(&format!("{label} applied"), &format!("Added to {}.", game.title), Some(game.id.clone())),
     );
     Ok(())
+}
+
+/// A game's add-ons on kryo.to (`addons` in `/api/games/<slug>/downloads`),
+/// asked as the signed-in app so the answer names their files, which is how
+/// an applied one is recognised. Signed out, kryo.to answers without them.
+#[tauri::command]
+pub async fn addons_list(app: AppHandle, slug: String) -> Result<serde_json::Value, String> {
+    if slug.is_empty() || !slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err("That is not a kryo.to game.".into());
+    }
+    let json = match crate::phone::session(&app) {
+        Ok(session) => crate::phone::listing(&session, &slug).await?,
+        Err(_) => {
+            let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(&app));
+            let client = reqwest::Client::builder()
+                .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| e.to_string())?;
+            client
+                .get(format!("{endpoint}/api/games/{slug}/downloads"))
+                .send()
+                .await
+                .map_err(|e| format!("Could not reach kryo.to: {e}"))?
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    };
+    Ok(json.get("addons").cloned().unwrap_or_else(|| serde_json::json!([])))
+}
+
+/// What pressing Add on a game's card did.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonsGot {
+    /// The download rows now carrying them, one per add-on queued.
+    pub queued: Vec<String>,
+    /// Some could not be fetched by the app itself (signed out, or only on a
+    /// host Kryoto cannot download from): the game's download window can.
+    pub store: bool,
+}
+
+/// "1.2 GB" as kryo.to writes a size, in bytes. Only for the progress bar
+/// until the file's own length is known.
+fn size_bytes(text: &str) -> Option<u64> {
+    let mut parts = text.split_whitespace();
+    let n: f64 = parts.next()?.replace(',', ".").parse().ok()?;
+    let unit = match parts.next()?.to_ascii_uppercase().as_str() {
+        "B" => 1.0,
+        "KB" => 1024.0,
+        "MB" => 1024.0 * 1024.0,
+        "GB" => 1024.0 * 1024.0 * 1024.0,
+        "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    (n.is_finite() && n > 0.0).then_some((n * unit) as u64)
+}
+
+/// The rows to queue for `ids` from kryo.to's `addons` list. Ours (kryo.to's
+/// own filehost) first; else a mirror Kryoto downloads from by itself; an
+/// add-on with neither is left to the download window (`true`). Pure, for the tests.
+fn requests_for(addons: &[serde_json::Value], ids: &[String]) -> (Vec<downloads::AddonRequest>, bool) {
+    let id_of = |a: &serde_json::Value| match &a["id"] {
+        serde_json::Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    let mut out = Vec::new();
+    let mut store = false;
+    for want in ids {
+        let Some(addon) = addons.iter().find(|a| &id_of(a) == want) else { continue };
+        let ours = addon["links"].as_array().is_some_and(|l| !l.is_empty());
+        let mirror = if ours {
+            None
+        } else {
+            let page = addon["pages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.as_str())
+                .find_map(|p| crate::resolvers::classify(p).map(|(_, host)| (p.to_string(), host.to_string())));
+            match page {
+                Some((page, host)) => Some(downloads::Mirror { page, host }),
+                None => {
+                    store = true;
+                    continue;
+                }
+            }
+        };
+        out.push(downloads::AddonRequest {
+            release: want.clone(),
+            label: addon["label"].as_str().filter(|l| !l.trim().is_empty()).unwrap_or("Add-on").to_string(),
+            repair: addon["kind"].as_str() == Some("repair"),
+            mirror,
+            total: addon["download_size"].as_str().and_then(size_bytes),
+        });
+    }
+    (out, store)
+}
+
+/// Add-ons pressed on an installed game's card (one, or "Add all DLC"): each
+/// is queued for this game and applies to its folder when it lands. Nothing
+/// opens; the card follows the rows. Signed out there is no link to mint, so
+/// the answer says to use the game's download window instead.
+#[tauri::command]
+pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>) -> Result<AddonsGot, String> {
+    let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
+    let slug = game.slug.clone().ok_or("This game is not from kryo.to, so it has no add-ons there.")?;
+    if library::is_running(&app, &game.id) {
+        return Err(format!("Close {} first: its files are in use.", game.title));
+    }
+    let Ok(session) = crate::phone::session(&app) else {
+        return Ok(AddonsGot { queued: Vec::new(), store: true });
+    };
+    let listing = crate::phone::listing(&session, &slug).await?;
+    let addons = listing["addons"].as_array().cloned().unwrap_or_default();
+    let (requests, store) = requests_for(&addons, &ids);
+    if requests.is_empty() && !store {
+        return Err("kryo.to no longer has that add-on. Reopen the game's page to see what it has now.".into());
+    }
+    let mut queued = Vec::new();
+    for req in requests {
+        let label = req.label.clone();
+        queued.push(downloads::enqueue_addon(&app, &game, req)?);
+        crate::logging::info("addons", &format!("{label} queued for {} from its card", game.title));
+    }
+    Ok(AddonsGot { queued, store })
 }
 
 /// A repair fix (kryo.to kind `repair`: Online-Fix's generic fix, packed by
@@ -302,6 +434,27 @@ fn remove(root: &Path, addon: &InstalledAddon) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_addon_is_queued_from_our_copy_else_a_mirror_else_left_to_the_window() {
+        let addons = vec![
+            serde_json::json!({ "id": 11, "label": "DLC: Firebird", "kind": "addon", "download_size": "1.5 GB", "links": [{ "name": "Forts DLC - Firebird - Kryoto.7z" }], "pages": ["https://pixeldrain.com/u/abc"] }),
+            serde_json::json!({ "id": "12", "label": "", "kind": "repair", "download_size": null, "links": [], "pages": ["https://pixeldrain.com/u/def"] }),
+            serde_json::json!({ "id": 13, "label": "DLC: Torrent only", "links": [], "pages": ["https://example.com/thing.torrent"] }),
+        ];
+        let ids = ["11", "12", "13", "99"].map(String::from);
+        let (reqs, store) = requests_for(&addons, &ids);
+        assert!(store, "the add-on Kryoto cannot fetch goes to the download window");
+        assert_eq!(reqs.len(), 2);
+        assert_eq!((reqs[0].release.as_str(), reqs[0].label.as_str()), ("11", "DLC: Firebird"));
+        assert!(reqs[0].mirror.is_none() && !reqs[0].repair);
+        assert_eq!(reqs[0].total, Some(1_610_612_736));
+        assert_eq!(reqs[1].label, "Add-on");
+        assert!(reqs[1].repair);
+        assert_eq!(reqs[1].mirror.as_ref().map(|m| m.page.as_str()), Some("https://pixeldrain.com/u/def"));
+        assert_eq!(size_bytes("300 MB"), Some(314_572_800));
+        assert_eq!(size_bytes("about"), None);
+    }
 
     #[test]
     fn undo_deletes_what_it_added_and_puts_back_what_it_replaced() {

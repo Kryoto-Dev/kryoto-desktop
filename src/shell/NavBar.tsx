@@ -74,10 +74,18 @@ export function NavBar({
   useLayoutEffect(measure)
   useEffect(() => {
     if (!track.current) return
-    const ro = new ResizeObserver(measure)
+    // On the next frame, as every observer here does (KB-0251).
+    let frame = 0
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(measure)
+    })
     ro.observe(track.current)
     slots.current.forEach((el) => ro.observe(el))
-    return () => ro.disconnect()
+    return () => {
+      cancelAnimationFrame(frame)
+      ro.disconnect()
+    }
   }, [measure, tabs.length])
   const shownTabs = fold >= FOLD.profile ? tabs.filter((t) => t.id !== 'profile') : tabs
 

@@ -158,11 +158,22 @@ export async function latestFor(game: Pick<LibraryGame, 'slug' | 'version' | 'bu
 /** A game kryo.to can say has an update: on a known build number, or a known file. */
 export const knowsBuild = (g: Pick<LibraryGame, 'version' | 'buildSha'>) => !!g.version || !!g.buildSha
 
+/**
+ * A game's add-ons on kryo.to, asked by the app as the signed-in account
+ * (addons.rs `addons_list`), so the answer names their files: how an applied
+ * one is recognised.
+ */
 export async function fetchAddons(slug: string): Promise<KryoAddon[]> {
-  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}/downloads`))
-  if (!res.ok) return []
-  const json = (await res.json()) as { addons?: KryoAddon[] }
-  return json.addons ?? []
+  const list = await call<KryoAddon[] | null>('addons_list', { slug })
+  return Array.isArray(list) ? list : []
+}
+
+/** What Add did on a game's Add-ons & DLC card (addons.rs `addons_get`). */
+export type AddonsGot = {
+  /** The download rows now carrying them. */
+  queued: string[]
+  /** Some need the game's download window: signed out, or only on a host Kryoto cannot fetch. */
+  store: boolean
 }
 
 /** Where a release can be downloaded from, as Kryoto Desktop sees it. */
@@ -363,6 +374,8 @@ export const library = {
   onState: (fn: (e: GameStateEvent) => void) => on<GameStateEvent>('game-state', fn),
   onChanged: (fn: () => void) => on<unknown>('library-changed', fn),
   addonUndo: (gameId: string, file: string) => call<LibraryGame>('addon_undo', { gameId, file }),
+  /** Queue add-ons (by kryo.to id) for this installed game: they apply to its folder as they land. */
+  addonsGet: (gameId: string, ids: string[]) => call<AddonsGot>('addons_get', { gameId, ids }),
   /** `null` when the game can use Kryoto Online, else why it cannot. */
   onlineCheck: (gameId: string) => call<string | null>('online_check', { gameId }),
   onlineApply: (gameId: string) => call<LibraryGame>('online_apply', { gameId }),

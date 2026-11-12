@@ -90,6 +90,8 @@ export type Settings = {
   /** The desktop pet (src/pet): out on the screen or put away. */
   pet: boolean
   petMascot: PetMascot
+  /** How big the pet is drawn (suggestion #72). */
+  petSize: PetSize
   /** Where it stands, in physical pixels; pet.rs keeps it. */
   petPos?: [number, number] | null
   discord: DiscordPresence
@@ -132,6 +134,12 @@ export type Settings = {
 }
 
 export type PetMascot = 'telly' | 'kubi' | 'yuki' | 'blip'
+export type PetSize = 'normal' | 'small' | 'tiny'
+export const PET_SIZES: { id: PetSize; label: string; scale: number }[] = [
+  { id: 'normal', label: 'Normal', scale: 1 },
+  { id: 'small', label: 'Small', scale: 0.75 },
+  { id: 'tiny', label: 'Tiny', scale: 0.5 },
+]
 export const PET_MASCOTS: { id: PetMascot; label: string }[] = [
   { id: 'telly', label: 'Telly' },
   { id: 'kubi', label: 'Kubi' },
@@ -295,7 +303,7 @@ function publish(s: Settings) {
 
 /** How the Linux build draws its window (src-tauri/src/display_env.rs). */
 export type DisplayMode = 'auto' | 'compatible' | 'full'
-export type DisplayState = { mode: DisplayMode; reason: string; healed: boolean }
+export type DisplayState = { mode: DisplayMode; reason: string; healed: boolean; appimage?: boolean }
 
 export const displayApi = {
   /** Null outside the Linux build. */

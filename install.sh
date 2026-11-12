@@ -155,10 +155,17 @@ case "$family" in
     mkdir -p "$APP_DIR" "$BIN_DIR" "$(dirname "$DESKTOP_FILE")" "$(dirname "$ICON_FILE")"
     install -m 755 "$tmp/Kryoto-Desktop.AppImage" "$APP_DIR/Kryoto-Desktop.AppImage"
     ln -sf "$APP_DIR/Kryoto-Desktop.AppImage" "$BIN_DIR/kryoto-desktop"
-    # The icon, out of the AppImage itself.
+    # The icon, out of the AppImage itself. The top-level kryoto-desktop.png is a
+    # symlink into usr/share/icons, so extract that tree too and take the first
+    # icon that is a real file (a dangling link stopped the whole install).
     ( cd "$tmp" && "$APP_DIR/Kryoto-Desktop.AppImage" --appimage-extract '*.png' >/dev/null 2>&1 ) || true
-    icon="$(ls "$tmp"/squashfs-root/*.png 2>/dev/null | head -1 || true)"
-    [ -n "$icon" ] && install -m 644 "$icon" "$ICON_FILE"
+    ( cd "$tmp" && "$APP_DIR/Kryoto-Desktop.AppImage" --appimage-extract 'usr/share/icons/*' >/dev/null 2>&1 ) || true
+    icon=""
+    for f in "$tmp"/squashfs-root/usr/share/icons/hicolor/256x256*/apps/*.png "$tmp"/squashfs-root/*.png \
+             "$tmp"/squashfs-root/usr/share/icons/hicolor/*/apps/*.png; do
+      if [ -f "$f" ]; then icon="$f"; break; fi
+    done
+    if [ -n "$icon" ]; then install -m 644 "$icon" "$ICON_FILE" || true; fi
     cat > "$DESKTOP_FILE" <<DESKTOP
 [Desktop Entry]
 Type=Application

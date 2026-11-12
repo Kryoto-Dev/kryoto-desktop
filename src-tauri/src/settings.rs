@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// Kryoto Desktop Preview talks to the Kryoto Preview (src/channel.rs).
 pub const DEFAULT_CATALOG_ENDPOINT: &str = if crate::channel::PREVIEW { "https://preview.kryo.to" } else { "https://kryo.to" };
@@ -37,6 +37,9 @@ pub struct Settings {
     pub radius: String,
     /// `teletext` (the house face) or `mono`.
     pub font: String,
+    /// How large everything is drawn, in percent (text_size.rs): 90, 100,
+    /// 110, 125 or 150. Its own commands change it; a page save keeps it.
+    pub text_size: u32,
     /// Show adult games' art unblurred. Off by default, as on kryo.to.
     pub show_adult: bool,
     /// Take palette, corners, typeface and the adult blur from the signed-in
@@ -104,6 +107,9 @@ pub struct Settings {
     pub pet: bool,
     /// Which mascot it is: telly, kubi, yuki or blip.
     pub pet_mascot: String,
+    /// How big it is drawn: normal, small or tiny (suggestion #72). Its
+    /// window stays the same size; a smaller pet stands at its bottom.
+    pub pet_size: String,
     /// Where it was put, in physical pixels; the screen's corner when unset.
     pub pet_pos: Option<[i32; 2]>,
     /// What Discord shows while a game runs (discord_rpc/).
@@ -250,6 +256,7 @@ impl Default for Settings {
             theme: "account".into(),
             radius: "pill".into(),
             font: "teletext".into(),
+            text_size: crate::text_size::DEFAULT,
             show_adult: false,
             follow_account: true,
             library_folders: Vec::new(),
@@ -278,6 +285,7 @@ impl Default for Settings {
             cloud_saves_keep_local: 5,
             pet: true,
             pet_mascot: "telly".into(),
+            pet_size: "normal".into(),
             pet_pos: None,
             discord: DiscordPresence::default(),
             saves_endpoint: String::new(),
@@ -572,6 +580,9 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     if !crate::pet::is_mascot(&settings.pet_mascot) {
         settings.pet_mascot = "telly".into();
     }
+    if !crate::pet::SIZES.contains(&settings.pet_size.as_str()) {
+        settings.pet_size = "normal".into();
+    }
     settings.seen_notices.retain(|n| !n.is_empty() && n.len() <= 40 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
     settings.seen_notices.dedup();
     settings.seen_notices.truncate(64);
@@ -588,12 +599,18 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     settings.phone_lan = before.phone_lan;
     // Where the pet stands is the pet's to remember (pet.rs), not the page's.
     settings.pet_pos = before.pet_pos;
+    // So is the text size (text_size.rs): a key can change it while this page's
+    // copy is a moment old.
+    settings.text_size = before.text_size;
     write(&app, &settings)?;
     if before.discord != settings.discord {
         crate::discord_rpc::refresh(&app);
     }
     if before.pet != settings.pet || before.pet_mascot != settings.pet_mascot {
         crate::pet::sync(&app);
+    }
+    if before.pet_size != settings.pet_size {
+        let _ = app.emit_to(crate::pet::LABEL, "pet-size", settings.pet_size.clone());
     }
     if before.block_ads != settings.block_ads {
         crate::adblock::set_enabled(&app, settings.block_ads);

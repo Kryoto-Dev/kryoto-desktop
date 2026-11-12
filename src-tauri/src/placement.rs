@@ -11,13 +11,31 @@
 //!
 //! Linux's native bounds calls are ineffective for these views. Its overlay
 //! converts CSS pixels to GTK logical pixels using DPR / GTK's widget scale
-//! (see linux_overlay.rs), including fractional X11 display scaling.
+//! (see linux_overlay.rs), including fractional X11 display scaling. Measure
+//! the shell's physical width per CSS viewport width on Linux: WebKit versions
+//! disagree on whether devicePixelRatio includes the text-size zoom.
 
 use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size};
 
 /// The shell's `devicePixelRatio`, when it sent a sane one.
 pub fn css_scale(scale: Option<f64>) -> Option<f64> {
     scale.filter(|s| s.is_finite() && (0.25..=8.0).contains(s))
+}
+
+/// Physical pixels per CSS pixel, including both display scaling and text zoom.
+pub fn viewport_scale(physical_width: u32, css_width: Option<f64>) -> Option<f64> {
+    let width = css_width.filter(|w| w.is_finite() && *w > 0.0)?;
+    css_scale(Some(f64::from(physical_width) / width))
+}
+
+/// Keep Windows' page DPR; on Linux measure the zoomed shell's actual scale.
+pub fn shell_scale(window: &tauri::Window, scale: Option<f64>, css_width: Option<f64>) -> Result<Option<f64>, String> {
+    if cfg!(target_os = "linux") {
+        let width = window.inner_size().map_err(|e| e.to_string())?.width;
+        Ok(viewport_scale(width, css_width))
+    } else {
+        Ok(css_scale(scale))
+    }
 }
 
 /// Where and how big, in the units this platform should use.
@@ -28,7 +46,10 @@ pub fn rect(x: f64, y: f64, width: f64, height: f64, scale: Option<f64>) -> (Pos
             PhysicalPosition::new((x * s).round() as i32, (y * s).round() as i32).into(),
             PhysicalSize::new((width * s).round().max(1.0) as u32, (height * s).round().max(1.0) as u32).into(),
         ),
-        _ => (LogicalPosition::new(x, y).into(), LogicalSize::new(width, height).into()),
+        _ => {
+            let z = crate::text_size::css_to_logical();
+            (LogicalPosition::new(x * z, y * z).into(), LogicalSize::new(width * z, height * z).into())
+        }
     }
 }
 
@@ -57,6 +78,17 @@ mod tests {
         assert_eq!(css_scale(Some(0.0)), None);
         assert_eq!(css_scale(Some(f64::NAN)), None);
         assert_eq!(css_scale(None), None);
+    }
+
+    #[test]
+    fn viewport_measurement_combines_fractional_display_scaling_and_text_zoom() {
+        assert_eq!(viewport_scale(1500, Some(1000.0)), Some(1.5));
+        assert_eq!(viewport_scale(1500, Some(800.0)), Some(1.875));
+        assert_eq!(viewport_scale(1800, Some(1000.0)), Some(1.8));
+        assert_eq!(viewport_scale(2000, Some(800.0)), Some(2.5));
+        for width in [None, Some(0.0), Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            assert_eq!(viewport_scale(1500, width), None);
+        }
     }
 
     #[cfg(not(target_os = "linux"))]

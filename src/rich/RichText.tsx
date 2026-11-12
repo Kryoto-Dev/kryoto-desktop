@@ -3,7 +3,7 @@ import { call } from '@/lib/bridge'
 import { openExternal, openStorePage } from '@/lib/window'
 import { cn } from '@/lib/utils'
 import { mentionHref, mentionLabel, type MentionIdentity } from './mentions'
-import { canUseRank, emojiFor, emojiPath, rankOfName, stickerFor, stickerPath, type RankId } from './rich-catalog'
+import { canUseRank, emojiFor, emojiPath, isMascotEmoji, rankOfName, stickerFor, stickerPath, type RankId } from './rich-catalog'
 import { isEmojiOnly, isPlainRich, parseRich, type RichBlock, type RichInline } from './rich-text'
 import type { TextEffectId } from './text-effects'
 import { useAssetBase } from './asset-base'
@@ -181,8 +181,21 @@ function inline(n: RichInline, ctx: Ctx): ReactNode {
       // End-to-end chat never reaches a server that could check a writer's rank:
       // rank art above the sender's rank is drawn as the original.
       const name = rankArtOk(emojiFor(n.name)?.rank, ctx) ? n.name : rankOfName(n.name)!.base
-      return <img src={`${ctx.base}${emojiPath(name)}`} alt={`:${name}:`} className="kryo-emoji" width={22} height={22} loading="lazy" decoding="async" draggable={false} />
+      return (
+        <img
+          src={`${ctx.base}${emojiPath(name)}`}
+          alt={`:${name}:`}
+          className={cn('kryo-emoji', isMascotEmoji(name) && 'kryo-emoji-mascot')}
+          width={22}
+          height={22}
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+        />
+      )
     }
+    case 'emojichar':
+      return <span className="kryo-emoji-char">{n.v}</span>
     case 'sticker': {
       const id = rankArtOk(stickerFor(n.id)?.rank, ctx) ? n.id : rankOfName(n.id)!.base
       const src = stickerPath(id)

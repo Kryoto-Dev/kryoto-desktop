@@ -27,10 +27,14 @@
 //! keeping the accelerated backing store available.
 //!
 //! And it heals itself: every start leaves a marker that the shell removes
-//! once it has drawn its first frame (`display_rendered`), and a web process
-//! that crashes leaves one too (`note_renderer_crash`). A start that finds it
-//! falls back to Compatible and stays there until the person picks another
-//! mode. Environment variables the user sets always win.
+//! once it has drawn its first frame (`display_rendered`). A start that finds
+//! it falls back to Compatible and stays there until the person picks another
+//! mode. A web process that crashes after the window drew (`note_renderer_crash`)
+//! only keeps DMA-BUF off: until 0.3.1 it counted as a failed start too, and
+//! one crash (KB-0116, an assertion inside the AppImage's WebKit that happens
+//! with or without the GPU) left the machine drawing every frame on the CPU for
+//! good, which is what made the Store's home page crawl at 20 fps (KB-0012).
+//! Environment variables the user sets always win.
 //!
 //! The decision is a pure function (`plan`) so it is tested on every
 //! platform; only reading the machine and setting the variables is Linux.
@@ -142,6 +146,99 @@ pub fn plan(chosen: Mode, env_mode: Option<&str>, is_set: impl Fn(&str) -> bool,
     Plan { mode, healed, set, reason }
 }
 
+/// What the markers the last session left mean: (`last_start_failed`, `dmabuf_failed`).
+///
+/// Only a start that never drew its window heals to Compatible. A renderer that
+/// crashed after drawing keeps DMA-BUF off (Automatic has it off already), but
+/// does not take the GPU away: on 0.3.0 the crashes went on in Compatible too,
+/// and drawing on the CPU only made every page slow.
+pub fn read_markers(never_drew: bool, renderer_crashed: bool, dmabuf_failed: bool) -> (bool, bool) {
+    (never_drew, dmabuf_failed || renderer_crashed)
+}
+
+// ---- Colour emoji fonts and the AppImage's WebKit (KB-0116) -------------
+//
+// The AppImage carries WebKitGTK 2.50.4 from Ubuntu 22.04, built with
+// libstdc++'s hardening assertions. Its Skia reads the colour stops of a COLRv1
+// font's gradients one past the end of a vector, and the assertion aborts the
+// web process. Fedora installs its colour emoji as a COLRv1 font
+// (`google-noto-color-emoji-fonts`, Noto-COLRv1.ttf), so on Fedora every page
+// that drew an emoji could take the view down: the Store "on Download", the
+// main view once 0.3.0 put emoji in chat, reactions and notes. Reproduced on
+// Fedora 44 with the 0.3.0 AppImage's own WebKit; the system WebKit (2.54, the
+// .rpm) draws the same page. So the AppImage alone hides COLRv1 fonts from its
+// WebKit through a fontconfig file of its own, and puts a bitmap (CBDT) Noto
+// Color Emoji in their place, which it carries (release.yml).
+
+/// The version of a font file's COLR table, if it has one. `bytes` is the start
+/// of the file (the table directory, and the table's first two bytes when they
+/// are in it); a collection is read by its first font.
+pub fn colr_version(bytes: &[u8]) -> Option<u16> {
+    let at = colr_offset(bytes)?;
+    bytes.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+}
+
+/// Where a font file's COLR table starts, from its table directory (`bytes`,
+/// the start of the file). The table itself is usually megabytes further on:
+/// Fedora's Noto-COLRv1.ttf has it at 3.8 MB of 5 MB.
+pub fn colr_offset(bytes: &[u8]) -> Option<usize> {
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    let font = if bytes.get(..4) == Some(b"ttcf") { u32_at(12)? } else { 0 };
+    let tables = u16_at(font + 4)? as usize;
+    (0..tables.min(512)).find_map(|i| {
+        let record = font + 12 + i * 16;
+        (bytes.get(record..record + 4)? == b"COLR").then_some(())?;
+        u32_at(record + 8)
+    })
+}
+
+/// A font file's COLR version, read where the table really is. Reading only the
+/// file's first 16 KB found no version for Fedora's emoji, so the 0.3.1
+/// candidate never hid it and the AppImage still crashed (KB-0116).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn colr_version_of_file(path: &std::path::Path) -> Option<u16> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 16 * 1024];
+    let n = file.read(&mut head).ok()?;
+    head.truncate(n);
+    if let Some(v) = colr_version(&head) {
+        return Some(v);
+    }
+    let at = colr_offset(&head)?;
+    file.seek(SeekFrom::Start(at as u64)).ok()?;
+    let mut v = [0u8; 2];
+    file.read_exact(&mut v).ok()?;
+    Some(u16::from_be_bytes(v))
+}
+
+/// A font file worth opening to look for COLRv1: colour emoji, by name.
+pub fn may_be_colour_emoji(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    (n.ends_with(".ttf") || n.ends_with(".otf") || n.ends_with(".ttc")) && (n.contains("emoji") || n.contains("colr"))
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// The fontconfig file: the system's own, plus `extra_dir` (the emoji the
+/// AppImage carries), minus the `rejected` font files.
+pub fn font_config(system: &str, extra_dir: Option<&str>, rejected: &[String]) -> String {
+    let mut out = String::from("<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<!-- Written by Kryoto Desktop's AppImage at every start (display_env.rs, KB-0116). -->\n<fontconfig>\n");
+    out += &format!("  <include ignore_missing=\"yes\">{}</include>\n", xml_escape(system));
+    if let Some(dir) = extra_dir {
+        out += &format!("  <dir>{}</dir>\n", xml_escape(dir));
+    }
+    out += "  <selectfont>\n    <rejectfont>\n";
+    for file in rejected {
+        out += &format!("      <glob>{}</glob>\n", xml_escape(file));
+    }
+    out += "    </rejectfont>\n  </selectfont>\n</fontconfig>\n";
+    out
+}
+
 /// `/proc/modules` text has NVIDIA's proprietary module (`nvidia`, not `nouveau`).
 pub fn modules_have_nvidia(modules: &str) -> bool {
     modules.lines().any(|l| l.split_whitespace().next() == Some("nvidia"))
@@ -157,6 +254,8 @@ pub struct DisplayState {
     /// What this run uses and why.
     pub reason: String,
     pub healed: bool,
+    /// The AppImage, with its own WebKit: it plays no video (ReleaseIntro.tsx, KB-0259).
+    pub appimage: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -201,6 +300,81 @@ mod linux {
         data_dir().map(|d| d.join("display-v2"))
     }
 
+    /// The fontconfig file the AppImage's WebKit reads, when one was needed.
+    pub static FONT_SHIM: OnceLock<PathBuf> = OnceLock::new();
+
+    /// COLRv1 font files fontconfig would hand to WebKit, from the usual font
+    /// folders. Only colour-emoji-looking names are opened, and only the first
+    /// few kilobytes of each, so a start pays next to nothing for it.
+    fn colrv1_fonts() -> Vec<String> {
+        let mut roots: Vec<PathBuf> = vec!["/usr/share/fonts".into(), "/usr/local/share/fonts".into()];
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+        if let Some(d) = data {
+            roots.push(d.join("fonts"));
+        }
+        if let Some(h) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(h).join(".fonts"));
+        }
+        let mut found = Vec::new();
+        let mut seen = 0usize;
+        let mut stack: Vec<(PathBuf, u8)> = roots.into_iter().map(|r| (r, 0)).collect();
+        while let Some((dir, depth)) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                seen += 1;
+                if seen > 20_000 {
+                    return found;
+                }
+                let path = e.path();
+                let Ok(kind) = e.file_type() else { continue };
+                if kind.is_dir() && depth < 5 {
+                    stack.push((path, depth + 1));
+                } else if may_be_colour_emoji(&e.file_name().to_string_lossy()) && super::colr_version_of_file(&path) == Some(1) {
+                    // Through a symlink fontconfig records the real file.
+                    let real = std::fs::canonicalize(&path).unwrap_or(path.clone());
+                    found.push(path.to_string_lossy().into_owned());
+                    if real != path {
+                        found.push(real.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// AppImage only, and not over a FONTCONFIG_FILE the person set.
+    fn shim_fonts(appimage: bool) {
+        if !appimage || std::env::var_os("FONTCONFIG_FILE").is_some_and(|v| !v.is_empty()) {
+            return;
+        }
+        let system = "/etc/fonts/fonts.conf";
+        if !std::path::Path::new(system).is_file() {
+            return;
+        }
+        let rejected = colrv1_fonts();
+        if rejected.is_empty() {
+            return;
+        }
+        let carried = std::env::var_os("APPDIR")
+            .map(|d| PathBuf::from(d).join("usr/share/kryoto/fonts"))
+            .filter(|d| d.is_dir())
+            .map(|d| d.to_string_lossy().into_owned());
+        let Some(file) = data_dir().map(|d| d.join("fontconfig").join("fonts.conf")) else { return };
+        let _ = std::fs::create_dir_all(file.parent().unwrap_or(&file));
+        if std::fs::write(&file, font_config(system, carried.as_deref(), &rejected)).is_ok() {
+            std::env::set_var("FONTCONFIG_FILE", &file);
+            let _ = FONT_SHIM.set(file);
+        }
+    }
+
+    /// Written once 0.3.1's reset of crash-made Compatible modes has run here.
+    fn v3_file() -> Option<PathBuf> {
+        data_dir().map(|d| d.join("display-v3"))
+    }
+
     pub fn saved_mode() -> Mode {
         mode_file()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -217,7 +391,32 @@ mod linux {
     /// with DMA-BUF buffer sharing bypassed, and if
     /// that fails to draw too, the next start is Compatible again.
     fn migrate() {
+        migrate_v3();
         let Some(marker) = v2_file() else { return };
+        if marker.exists() {
+            return;
+        }
+        if let Some(f) = mode_file() {
+            if std::fs::read_to_string(&f).is_ok_and(|s| Mode::parse(&s) == Some(Mode::Compatible)) {
+                let _ = std::fs::write(&f, "auto");
+                if let Some(d) = dmabuf_failed_file() {
+                    let _ = std::fs::write(d, "1");
+                }
+            }
+        }
+        let _ = std::fs::create_dir_all(marker.parent().unwrap_or(&marker));
+        let _ = std::fs::write(marker, "1");
+    }
+
+    /// Once per machine, in 0.3.1: a saved Compatible goes back to Automatic.
+    ///
+    /// Up to 0.3.0 one web-process crash after the window drew (KB-0116) saved
+    /// Compatible for good, and the Store drew on the CPU ever after (KB-0012).
+    /// That cannot be told apart from a Compatible somebody picked, so, as in
+    /// `migrate` above, it gets one more start on the GPU; a window that then
+    /// fails to draw heals back to Compatible on the next start.
+    fn migrate_v3() {
+        let Some(marker) = v3_file() else { return };
         if marker.exists() {
             return;
         }
@@ -240,8 +439,11 @@ mod linux {
             .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("renderD")))
             .unwrap_or(false);
         let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
-        let last_start_failed = probe_file().is_some_and(|p| p.exists()) || crashed_file().is_some_and(|p| p.exists());
-        let dmabuf_failed = dmabuf_failed_file().is_some_and(|p| p.exists());
+        let (last_start_failed, dmabuf_failed) = read_markers(
+            probe_file().is_some_and(|p| p.exists()),
+            crashed_file().is_some_and(|p| p.exists()),
+            dmabuf_failed_file().is_some_and(|p| p.exists()),
+        );
         let appimage = std::env::var_os("APPIMAGE").is_some_and(|v| !v.is_empty());
         Facts { nvidia, render_node, wayland, last_start_failed, dmabuf_failed, appimage }
     }
@@ -251,7 +453,9 @@ mod linux {
         let saved = saved_mode();
         let env_mode = std::env::var("KRYOTO_GPU").ok();
         let is_set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
-        let p = plan(saved, env_mode.as_deref(), is_set, facts());
+        let facts = facts();
+        let p = plan(saved, env_mode.as_deref(), is_set, facts);
+        shim_fonts(facts.appimage);
         for (k, v) in &p.set {
             std::env::set_var(k, v);
         }
@@ -269,8 +473,14 @@ mod linux {
                 let _ = std::fs::write(f, "compatible");
             }
         }
-        // Counted now; the crash belonged to the last session.
+        // Counted now; the crash belonged to the last session. DMA-BUF stays
+        // off from here on (`dmabuf_failed`), the GPU stays on.
         if let Some(f) = crashed_file() {
+            if f.exists() {
+                if let Some(d) = dmabuf_failed_file() {
+                    let _ = std::fs::write(d, "1");
+                }
+            }
             let _ = std::fs::remove_file(f);
         }
         // This start's marker; the shell removes it once it has drawn.
@@ -279,7 +489,7 @@ mod linux {
             let _ = std::fs::write(f, "starting");
         }
         let mode = if p.healed { Mode::Compatible } else { saved };
-        let _ = STATE.set(DisplayState { mode, reason: p.reason, healed: p.healed });
+        let _ = STATE.set(DisplayState { mode, reason: p.reason, healed: p.healed, appimage: facts.appimage });
     }
 }
 
@@ -292,7 +502,23 @@ pub fn apply() {
 /// For the log, once logging is up.
 #[cfg(target_os = "linux")]
 pub fn describe() -> Option<String> {
-    linux::STATE.get().map(|s| s.reason.clone())
+    linux::STATE.get().map(|s| match linux::FONT_SHIM.get() {
+        Some(_) => format!("{}; COLRv1 emoji fonts hidden from the AppImage's WebKit", s.reason),
+        None => s.reason.clone(),
+    })
+}
+
+/// A child process (a game, a file manager) should see the system's fonts as
+/// they are: the FONTCONFIG_FILE this process set for its own WebKit is not theirs.
+pub fn remove_font_shim(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "linux")]
+    if let Some(ours) = linux::FONT_SHIM.get() {
+        if std::env::var_os("FONTCONFIG_FILE").is_some_and(|v| std::path::Path::new(&v) == ours.as_path()) {
+            cmd.env_remove("FONTCONFIG_FILE");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cmd;
 }
 #[cfg(not(target_os = "linux"))]
 pub fn describe() -> Option<String> {
@@ -301,10 +527,9 @@ pub fn describe() -> Option<String> {
 
 /// A web view's renderer crashed (WebKit's `web-process-terminated`).
 ///
-/// Counted like a start that never drew, so the next start takes the next
-/// healing step. Kept in its own marker: the reloaded page draws again and
-/// clears the probe, which must not erase the crash. The view itself is
-/// reloaded by the caller; a crash mid-session should cost a reload, not the app.
+/// The next start keeps DMA-BUF off (`read_markers`); it no longer draws on the
+/// CPU for it. The view itself is reloaded by the caller; a crash mid-session
+/// should cost a reload, not the app.
 pub fn note_renderer_crash() {
     #[cfg(target_os = "linux")]
     if let Some(f) = linux::crashed_file() {
@@ -331,7 +556,7 @@ pub fn watch_crashes(view: &tauri::Webview) {
             note_renderer_crash();
             crate::logging::error(
                 "display",
-                &format!("the {label} view's web process ended ({reason:?}); reloading it, and the next start uses shared-memory buffers or Compatible mode"),
+                &format!("the {label} view's web process ended ({reason:?}); reloading it ({})", describe().unwrap_or_default()),
             );
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -429,6 +654,20 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_after_drawing_keeps_the_gpu() {
+        // KB-0012 / KB-0116: one crash used to mean the CPU for good.
+        let (failed, dmabuf) = read_markers(false, true, false);
+        assert!(!failed && dmabuf);
+        let p = plan(Mode::Auto, None, none, Facts { render_node: true, last_start_failed: failed, dmabuf_failed: dmabuf, ..Facts::default() });
+        assert!(!p.healed);
+        assert_eq!(p.mode, Mode::Auto);
+        assert_eq!(vars(&p), ["WEBKIT_DMABUF_RENDERER_FORCE_SHM"]);
+        // A window that never drew still heals.
+        let (failed, _) = read_markers(true, false, false);
+        assert!(plan(Mode::Auto, None, none, Facts { render_node: true, last_start_failed: failed, ..Facts::default() }).healed);
+    }
+
+    #[test]
     fn the_environment_wins() {
         let set = |k: &str| k == "WEBKIT_DISABLE_DMABUF_RENDERER" || k == "GDK_BACKEND";
         let p = plan(Mode::Auto, None, set, Facts { nvidia: true, wayland: true, ..Facts::default() });
@@ -469,6 +708,70 @@ mod tests {
     fn wayland_goes_through_xwayland() {
         let p = plan(Mode::Auto, None, none, Facts { wayland: true, render_node: true, ..Facts::default() });
         assert_eq!(p.set, [("GDK_BACKEND", "x11"), ("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1")]);
+    }
+
+    /// A font file's start: a table directory with `tables`, then their data.
+    fn font(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut head: Vec<u8> = vec![0, 1, 0, 0];
+        head.extend((tables.len() as u16).to_be_bytes());
+        head.extend([0u8; 6]);
+        let mut data: Vec<u8> = Vec::new();
+        let start = 12 + 16 * tables.len();
+        for (tag, body) in tables {
+            head.extend(tag.iter());
+            head.extend([0u8; 4]);
+            head.extend(((start + data.len()) as u32).to_be_bytes());
+            head.extend((body.len() as u32).to_be_bytes());
+            data.extend(body.iter());
+        }
+        head.extend(data);
+        head
+    }
+
+    #[test]
+    fn colrv1_fonts_are_told_from_bitmap_emoji() {
+        // Fedora's Noto-COLRv1.ttf: COLR version 1.
+        assert_eq!(colr_version(&font(&[(b"CPAL", &[0, 0]), (b"COLR", &[0, 1, 0, 0])])), Some(1));
+        // Ubuntu's NotoColorEmoji.ttf: bitmaps (CBDT), no COLR at all.
+        assert_eq!(colr_version(&font(&[(b"CBDT", &[0, 3]), (b"CBLC", &[0, 3])])), None);
+        // Twemoji's COLRv0 is drawn fine.
+        assert_eq!(colr_version(&font(&[(b"COLR", &[0, 0])])), Some(0));
+        // Truncated or not a font: nothing, and no panic.
+        assert_eq!(colr_version(b"\0\x01\0\0\0\x09"), None);
+        assert_eq!(colr_version(b""), None);
+        // A collection: its first font starts at 16, so that font's offsets move by 16.
+        let shifted = {
+            let mut f = font(&[(b"COLR", &[0, 1])]);
+            let off = u32::from_be_bytes([f[20], f[21], f[22], f[23]]) + 16;
+            f[20..24].copy_from_slice(&off.to_be_bytes());
+            let mut t = b"ttcf\0\x01\0\0\0\0\0\x01\0\0\0\x10".to_vec();
+            t.extend(f);
+            t
+        };
+        assert_eq!(colr_version(&shifted), Some(1));
+        assert!(may_be_colour_emoji("Noto-COLRv1.ttf") && may_be_colour_emoji("NotoColorEmoji.ttf"));
+        // The table far into the file, as in the real Noto-COLRv1.ttf (3.8 MB in):
+        // the start of the file does not hold the version, the file does (KB-0116).
+        let mut far = font(&[(b"CPAL", &[0, 0])]);
+        let start = far.len();
+        far[12..16].copy_from_slice(b"COLR");
+        far[20..24].copy_from_slice(&((start + 40_000) as u32).to_be_bytes());
+        far.resize(start + 40_000, 0);
+        far.extend([0, 1, 0, 0]);
+        assert_eq!(colr_version(&far[..16 * 1024]), None);
+        let path = std::env::temp_dir().join(format!("kryoto-colr-{}.ttf", std::process::id()));
+        std::fs::write(&path, &far).unwrap();
+        assert_eq!(colr_version_of_file(&path), Some(1));
+        let _ = std::fs::remove_file(&path);
+        assert!(!may_be_colour_emoji("DejaVuSans.ttf") && !may_be_colour_emoji("emoji.txt"));
+    }
+
+    #[test]
+    fn the_font_file_keeps_the_system_config_and_rejects_only_colrv1() {
+        let c = font_config("/etc/fonts/fonts.conf", Some("/tmp/.mount_x/usr/share/kryoto/fonts"), &["/usr/share/fonts/a&b/Noto-COLRv1.ttf".into()]);
+        assert!(c.contains("<include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>"));
+        assert!(c.contains("<dir>/tmp/.mount_x/usr/share/kryoto/fonts</dir>"));
+        assert!(c.contains("<glob>/usr/share/fonts/a&amp;b/Noto-COLRv1.ttf</glob>"));
     }
 
     #[test]

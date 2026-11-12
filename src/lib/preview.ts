@@ -26,6 +26,14 @@ export const previewBus = {
   },
 }
 
+const TEXT_SIZE_STEPS = [90, 100, 110, 125, 150]
+let textSize = 100
+const setTextSize = (p: number) => {
+  textSize = TEXT_SIZE_STEPS.includes(p) ? p : 100
+  previewBus.emit('text-size', textSize)
+  return textSize
+}
+
 const phone: { lan: boolean; code: string | null; pairUri: string | null } = { lan: false, code: null, pairUri: null }
 const now = () => Math.floor(Date.now() / 1000)
 const steam = (appid: number, file: string) => `https://cdn.cloudflare.steamstatic.com/steam/apps/${appid}/${file}`
@@ -80,13 +88,28 @@ const games = [
     nsfw: true,
     version: 'b20488383',
   }),
-  game(367520, 'Hollow Knight', { playtimeSeconds: 162000, lastPlayed: now() - 3600 * 3, source: 'Steam (DRM-free)' }),
+  game(367520, 'Hollow Knight', {
+    playtimeSeconds: 162000,
+    lastPlayed: now() - 3600 * 3,
+    source: 'Steam (DRM-free)',
+    // One of its DLC already in (the Add-ons & DLC card, previewAddons below).
+    addons: [{ label: 'DLC: Hidden Dreams', file: 'Hollow Knight DLC - Hidden Dreams - Kryoto.7z', files: ['DLC/hidden_dreams.pak'], replaced: [], installedAt: now() - 86400 * 5 }],
+  }),
   game(504230, 'Celeste', { playtimeSeconds: 30000, lastPlayed: now() - 86400 * 9 }),
   game(1145360, 'Hades', { playtimeSeconds: 72000, lastPlayed: now() - 86400 * 30, source: 'Steam + Kryoto Online', launcher: 'steam' }),
   game(413150, 'Stardew Valley', { playtimeSeconds: 0 }),
   // One Steam game, two listings: the public build and the gb27 beta.
   game(2027330, 'GoreBox', { steamBranch: 'public', playtimeSeconds: 7200, lastPlayed: now() - 86400 * 2 }),
   game(2027330, 'GoreBox27 (early access)', { steamBranch: 'gb27', playtimeSeconds: 3600, lastPlayed: now() - 86400 }),
+  // A beta listed under the very same name: only its tag tells them apart.
+  game(2027330, 'GoreBox', {
+    id: 'gorebox-public-beta',
+    slug: 'gorebox-public-beta',
+    steamBranch: 'public-beta',
+    installDir: 'C:\\Users\\you\\Kryoto Games\\GoreBox (public beta)',
+    playtimeSeconds: 1080,
+    lastPlayed: now() - 86400 * 3,
+  }),
   game(105600, 'Terraria', {
     launcher: 'steam',
     playtimeSeconds: 900,
@@ -138,7 +161,11 @@ const settings: Record<string, unknown> = {
   seenNotices:
     typeof location !== 'undefined' && location.search.includes('whatsnew')
       ? []
-      : ['setup', 'intro', 'found-games'].map((n) => `${n}-${__APP_VERSION__.replace(/\./g, '-')}`),
+      : [
+          ...['setup', 'intro', 'found-games'].map((n) => `${n}-${__APP_VERSION__.replace(/\./g, '-')}`),
+          // What's new is the 0.3.0 one until a version brings its own (FirstStart's SETUP_ID).
+          'setup-0-3-0',
+        ],
   // `?firststart` in the preview shows the first-start setup (setup/FirstStart.tsx).
   welcomed: typeof location === 'undefined' || !location.search.includes('firststart'),
   vrRuntime: '',
@@ -157,6 +184,7 @@ const settings: Record<string, unknown> = {
   cloudSavesKeepLocal: 5,
   pet: true,
   petMascot: 'telly',
+  petSize: 'normal',
   discord: {
     on: true,
     browsing: false,
@@ -267,6 +295,48 @@ const downloadList: Record<string, unknown>[] = [
   }),
 ]
 
+/**
+ * kryo.to's add-ons for the sample games (`addons` in /api/games/<slug>/downloads):
+ * Hollow Knight's DLC, more than the card shows unfolded and one with a long
+ * name, and Terraria's language pack and Online-Fix repair. `?addonchallenge`
+ * makes kryo.to want its own check for every add-on (a new account).
+ */
+const addonFixture = (id: number, label: string, size: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  label,
+  note: null,
+  source: 'DLC',
+  version: 'b1',
+  download_size: size,
+  kind: 'addon',
+  offered: true,
+  links: [{ name: `${label.replace(/^DLC: /, 'Hollow Knight DLC - ')} - Kryoto.7z` }],
+  pages: [],
+  hashes: [],
+  ...extra,
+})
+const previewAddons: Record<string, Record<string, unknown>[]> = {
+  'hollow-knight': [
+    addonFixture(9001, 'DLC: Hidden Dreams', '120 MB'),
+    addonFixture(9002, 'DLC: The Grimm Troupe', '340 MB'),
+    addonFixture(9003, 'DLC: Lifeblood', '210 MB'),
+    addonFixture(9004, 'DLC: Godmaster', '480 MB'),
+    addonFixture(9005, 'DLC: Official Soundtrack and Digital Art Book with Concept Sketches', '1.1 GB'),
+    addonFixture(9006, 'DLC: Silksong Preview Pack', '95 MB'),
+    addonFixture(9007, 'DLC: Gods and Glory Costume Set', '60 MB'),
+    addonFixture(9008, 'DLC: Voidheart Edition Extras', '150 MB'),
+  ],
+  terraria: [
+    addonFixture(9101, 'Japanese language pack', '45 MB', { source: 'Language', note: 'Menus and dialogue in Japanese.' }),
+    addonFixture(9102, 'Online-Fix', '12 MB', { source: 'OnlineFix', kind: 'repair', note: 'Online play through Steam.' }),
+  ],
+}
+const SIZE_UNIT: Record<string, number> = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }
+const sizeOf = (text: unknown) => {
+  const [n, unit] = String(text ?? '').split(' ')
+  return Math.round(Number(n) * (SIZE_UNIT[unit ?? ""] ?? 0)) || 200_000_000
+}
+
 // Initialized only by the browser-preview backend, never by native/web chat.
 let simulation: ReturnType<typeof setInterval> | undefined
 export function stopPreview() {
@@ -293,7 +363,16 @@ export function startPreview() {
       if (d.extracted === d.extractTotal) {
         d.status = 'installed'
         d.finishedAt = now()
-        previewBus.emit('notify', { title: `${(d.meta as { title: string }).title} is ready to play`, body: 'Installed. Press Play.', gameId: d.gameId ?? null })
+        const owner = d.addon ? games.find((g) => g.id === d.gameId) : undefined
+        if (owner) {
+          // An add-on goes into its game (addons.rs `install`).
+          const list = ((owner.addons as Record<string, unknown>[] | undefined) ?? []).filter((a) => a.file !== d.fileName)
+          if (!d.repair) owner.addons = [...list, { label: d.addon, file: d.fileName, files: [`DLC/${String(d.fileName)}.pak`], replaced: [], installedAt: now() }]
+          previewBus.emit('library-changed', null)
+          previewBus.emit('notify', { title: `${String(d.addon).replace(/^DLC: /, '')} applied`, body: `Added to ${String(owner.title)}.`, gameId: owner.id })
+        } else {
+          previewBus.emit('notify', { title: `${(d.meta as { title: string }).title} is ready to play`, body: 'Installed. Press Play.', gameId: d.gameId ?? null })
+        }
       }
       moved = true
     }
@@ -764,7 +843,78 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   settings_get: () => ({ ...settings }),
   // Every sample game can use Kryoto Online, so the add-ons card shows it.
   online_check: () => null,
+  addons_list: (a) => clone(previewAddons[String(a.slug)] ?? []),
+  // Add on a game's Add-ons & DLC card: a row per add-on, for that game, minted at its turn.
+  addons_get: (a) => {
+    const g = games.find((x) => x.id === a.gameId)
+    if (!g) throw new Error('That game is no longer in the library.')
+    if (running.has(String(g.id))) throw new Error(`Close ${String(g.title)} first: its files are in use.`)
+    const challenge = typeof location !== 'undefined' && location.search.includes('addonchallenge')
+    const queued: string[] = []
+    for (const want of a.ids as string[]) {
+      const addon = (previewAddons[String(g.slug)] ?? []).find((x) => String(x.id) === want)
+      if (!addon) continue
+      const same = downloadList.find((d) => d.addonRelease === want && d.slug === g.slug && d.status !== 'installed' && d.status !== 'canceled')
+      if (same) {
+        queued.push(String(same.id))
+        continue
+      }
+      const id = `dl-${Date.now()}-addon-${want}`
+      const total = sizeOf(addon.download_size)
+      const item = dl({
+        id,
+        slug: g.slug,
+        gameId: g.id,
+        url: '',
+        fileName: (addon.links as { name: string }[])[0]?.name ?? `${String(addon.label)} - Kryoto.7z`,
+        status: 'queued',
+        received: 0,
+        total,
+        speed: 0,
+        addedAt: now() + queued.length,
+        addon: addon.label,
+        addonRelease: want,
+        repair: addon.kind === 'repair',
+        meta: { ...dl({}).meta, title: /^DLC: /.test(String(addon.label)) ? `${String(g.title)} DLC - ${String(addon.label).slice(5)}` : `${String(g.title)} - ${String(addon.label)}`, cover: g.cover, hero: g.hero, version: g.version, sizeBytes: null },
+      })
+      downloadList.unshift(item)
+      queued.push(id)
+      // One at a time, as the native queue runs them: each starts when the one before is done.
+      const begin = () => {
+        if (downloadList.some((d) => d !== item && ['resolving', 'downloading', 'extracting'].includes(String(d.status)) && d.addon)) return setTimeout(begin, 700)
+        item.status = 'resolving'
+        previewBus.emit('downloads', clone(downloadList))
+        setTimeout(() => {
+          if (challenge) {
+            Object.assign(item, { status: 'failed', error: 'kryo.to wants a check only its download window can pass for this account. Open the download window to add it there.' })
+          } else {
+            Object.assign(item, { status: 'downloading', speed: 30_000_000 })
+          }
+          previewBus.emit('downloads', clone(downloadList))
+        }, 700)
+      }
+      setTimeout(begin, 400)
+    }
+    previewBus.emit('downloads', clone(downloadList))
+    return { queued, store: false }
+  },
+  addon_undo: (a) => {
+    const g = games.find((x) => x.id === a.gameId)
+    if (!g) throw new Error('That game is no longer in the library.')
+    if (running.has(String(g.id))) throw new Error('Close the game first.')
+    g.addons = ((g.addons as Record<string, unknown>[] | undefined) ?? []).filter((x) => x.file !== a.file)
+    previewBus.emit('library-changed', null)
+    return clone(g)
+  },
   settings_save: (a) => ({ ...Object.assign(settings, a.settings) }),
+  // The app zooms every view (text_size.rs); here only the choice is kept.
+  text_size_get: () => textSize,
+  text_size_set: (a) => setTextSize(Number(a.percent)),
+  text_size_step: (a) => {
+    const i = TEXT_SIZE_STEPS.indexOf(textSize)
+    const step = Number(a.step)
+    return setTextSize(step === 0 ? 100 : TEXT_SIZE_STEPS[Math.min(TEXT_SIZE_STEPS.length - 1, Math.max(0, i + Math.sign(step)))]!)
+  },
   downloads_list: () => clone(downloadList),
   storage_overview: () => ({
     folders: [
@@ -1117,12 +1267,22 @@ Object.assign(HANDLERS, {
   game_achievements: (a: Record<string, unknown>) => {
     const g = games.find((g) => g.id === a.id) as Record<string, unknown> | undefined
     if (!g) throw new Error('That game is no longer in the library.')
+    // The sample's two DRM-free releases: Captain Hardcore ships Valve's own
+    // Steam dll (one button turns achievements on), Hollow Knight no Steam API.
+    if (/\(DRM-free\)/i.test(String(g.source ?? ''))) {
+      const fixable = g.title !== 'Hollow Knight'
+      return { appid: null, total: 0, unlocked: 0, list: [], tracking: fixable ? 'fixable' : 'absent', emulator: null, available: fixable ? 2 : 0 }
+    }
     const unsupported = !!g.online || /kryoto[ _-]*online|kryotoo\b/i.test(String(g.source ?? ''))
     const list = unsupported ? [] : [
       { name: 'PREVIEW_FIRST', displayName: 'First steps', description: 'Complete the first chapter.', hidden: false, icon: null, iconGray: null, percent: 75, unlocked: true, unlockedAt: now() - 86400 },
       { name: 'PREVIEW_SECRET', displayName: 'A hidden discovery', description: 'Find a secret.', hidden: true, icon: null, iconGray: null, percent: 12, unlocked: false, unlockedAt: null },
     ]
-    return { appid: null, total: list.length, unlocked: list.filter((a) => a.unlocked).length, list, tracking: unsupported ? 'unsupported' : 'supported', emulator: unsupported ? 'Kryoto Online' : 'gbe_fork / Goldberg' }
+    return { appid: null, total: list.length, unlocked: list.filter((a) => a.unlocked).length, list, tracking: unsupported ? 'unsupported' : 'supported', emulator: unsupported ? 'Kryoto Online' : 'gbe_fork / Goldberg', available: list.length }
+  },
+  achievements_turn_on: (a: Record<string, unknown>) => {
+    HANDLERS.repair_apply!({ gameId: a.id, source: 'gbe_fork' })
+    return null
   },
   repair_sources: () => [
     { id: 'gbe_fork', label: 'gbe_fork', online: false },

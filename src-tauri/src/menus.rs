@@ -93,7 +93,7 @@ pub fn set_store_origin(x: f64, y: f64) {
         *o = (x, y);
     }
     #[cfg(target_os = "linux")]
-    crate::system::set_fill_split(y);
+    crate::system::set_fill_split(y * crate::text_size::css_to_logical());
 }
 
 /// Draw a plain menu in the Store's own page (BROWSER_STATE_SCRIPT,
@@ -248,7 +248,10 @@ pub async fn menu_open(
     right: bool,
     payload: serde_json::Value,
     scale: Option<f64>,
+    viewport_width: Option<f64>,
 ) -> Result<bool, String> {
+    let window = app.get_window("main").ok_or("The main window is gone.")?;
+    let scale = crate::placement::shell_scale(&window, scale, viewport_width)?;
     let state = app.state::<Menus>();
     let previous = open_id(&app);
     let asked = state.asked.fetch_add(1, Ordering::SeqCst) + 1;
@@ -305,12 +308,25 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, s
         Some(s) => s,
         None => window.scale_factor().map_err(|e| e.to_string())?,
     };
-    let inner = window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+    // The measured shell scale includes display scaling and text zoom on Linux.
+    // Older callers without a viewport measurement retain the text-size fallback.
+    let z = crate::text_size::css_to_logical();
+    let inner = if cfg!(target_os = "linux") && css.is_none() {
+        let l = window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(window.scale_factor().map_err(|e| e.to_string())?);
+        tauri::LogicalSize::new(l.width / z, l.height / z)
+    } else {
+        window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale)
+    };
     let (anchor, right) = *app.state::<Menus>().anchor.lock().map_err(|_| "menu lock")?;
     // The menu measured itself in its own CSS pixels. Where its ratio differs
     // from the shell's (a monitor with another scale it has not caught up
     // with), sized in the shell's units it came out narrow and cut its text.
-    let ratio = menu_scale.map_or(1.0, |menu| menu / scale);
+    let ratio = if cfg!(target_os = "linux") {
+        // Both views have the same text zoom. Their raw DPR may omit that zoom.
+        1.0
+    } else {
+        menu_scale.map_or(1.0, |menu| menu / scale)
+    };
     let (width, height) = ((width * ratio).ceil().max(40.0), (height * ratio).ceil().max(20.0));
     let tip = menu == "tip";
     let x = match (tip, right) {
@@ -329,7 +345,7 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, s
         let _ = view.with_webview(move |v| {
             use gtk::prelude::*;
             let (_, _, w, h) = crate::linux_overlay::rect(0.0, 0.0, width, height, css, v.inner().scale_factor());
-            crate::system::linux_shape::view(v.inner().upcast_ref::<gtk::Widget>(), w, h, crate::system::corner());
+            crate::system::linux_shape::view(v.inner().upcast_ref::<gtk::Widget>(), w, h, crate::system::corner_drawn());
         });
     }
     view.show().map_err(|e| e.to_string())?;

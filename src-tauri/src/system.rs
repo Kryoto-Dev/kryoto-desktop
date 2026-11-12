@@ -384,8 +384,13 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
         WindowEvent::Moved(p) if changed(&LAST_POS, (p.x, p.y)) => crate::menus::close(app),
         WindowEvent::Resized(s) if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) => {
             crate::menus::close(app);
-            report_window_state(window);
-            refresh_corners(window);
+            // Into or out of full screen or maximized: the corners and the
+            // border follow (KB-0266); otherwise only the Windows 10 region.
+            if report_window_state(window) {
+                apply_corners(window);
+            } else {
+                refresh_corners(window);
+            }
             // Minimizing is a resize too; so is coming back.
             rest_views(window, window.is_minimized().unwrap_or(false));
         }
@@ -414,12 +419,16 @@ fn window_state<R: Runtime>(window: &tauri::Window<R>) -> WindowState {
     }
 }
 
-fn report_window_state<R: Runtime>(window: &tauri::Window<R>) {
+/// Tell the shell when the window is maximized or full screen, or stops being.
+/// True when that changed.
+fn report_window_state<R: Runtime>(window: &tauri::Window<R>) -> bool {
     let now = window_state(window);
-    let Ok(mut last) = LAST_STATE.lock() else { return };
-    if last.replace(now) != Some(now) {
+    let Ok(mut last) = LAST_STATE.lock() else { return false };
+    let changed = last.replace(now) != Some(now);
+    if changed {
         let _ = window.app_handle().emit_to("main", "window-state", now);
     }
+    changed
 }
 
 /// Whether the main window is maximized or full screen right now.
@@ -448,6 +457,13 @@ static RADIUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(
 
 pub fn corner() -> i32 {
     RADIUS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The same corner as the page draws it, grown or shrunk with the text size
+/// (text_size.rs): what a shape or region cut around the page must follow.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn corner_drawn() -> i32 {
+    (f64::from(corner()) * crate::text_size::factor()).round() as i32
 }
 
 /// A corner style as pixels: the same `--kryo-radius` the pages use (styles.css).
@@ -513,19 +529,19 @@ pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
     apply_corners(window);
 }
 
-/// Draw the corners at the current style.
-fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
+/// Draw the corners at the current style (and text size, which sizes them).
+pub fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE};
         if let Ok(hwnd) = window.hwnd() {
-            // DWMWCP_DONOTROUND = 1, DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3:
-            // Windows 11 offers these three, so the styles map onto them.
-            let pref: i32 = match corner() {
-                0 => 1,
-                1..=5 => 3,
-                _ => 2,
-            };
+            let fills = window.label() == "main" && (window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false));
+            let (pref, border) = dwm_frame(corner(), fills);
+            // SAFETY: a live window handle and a pointer to a 4-byte value.
+            // Refused before Windows 11, where there is no such border.
+            unsafe {
+                DwmSetWindowAttribute(hwnd.0 as _, DWMWA_BORDER_COLOR as u32, (&border as *const u32).cast(), std::mem::size_of::<u32>() as u32);
+            }
             // SAFETY: a live window handle and a pointer to a 4-byte value.
             let result = unsafe {
                 DwmSetWindowAttribute(
@@ -557,6 +573,26 @@ fn apply_corners<R: Runtime>(window: &tauri::Window<R>) {
     let _ = window;
 }
 
+/// Windows 11's corner preference and border colour for a frameless window.
+///
+/// Rounded, Windows draws a one-pixel border in the accent colour around the
+/// window. Full screen or maximized it has to be gone and the corners square,
+/// or Big Picture showed a thin frame with a gap at the screen's edge
+/// (KB-0266). DWMWCP_DONOTROUND = 1, DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3;
+/// DWMWA_COLOR_NONE = 0xFFFFFFFE, DWMWA_COLOR_DEFAULT = 0xFFFFFFFF.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn dwm_frame(radius: i32, fills_screen: bool) -> (i32, u32) {
+    if fills_screen {
+        return (1, 0xFFFF_FFFE);
+    }
+    let pref = match radius {
+        0 => 1,
+        1..=5 => 3,
+        _ => 2,
+    };
+    (pref, 0xFFFF_FFFF)
+}
+
 /// Windows 10: the window's corners are a region, which follows the size.
 #[cfg(windows)]
 static WIN10_REGION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -573,7 +609,7 @@ pub fn refresh_corners<R: Runtime>(window: &tauri::Window<R>) {
         let square = corner() == 0 || window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false);
         let Ok(size) = window.outer_size() else { return };
         let scale = window.scale_factor().unwrap_or(1.0);
-        let d = (f64::from(corner() * 2) * scale).round() as i32;
+        let d = (f64::from(corner_drawn() * 2) * scale).round() as i32;
         // SAFETY: a live window handle; SetWindowRgn takes ownership of the region.
         unsafe {
             if square {
@@ -613,7 +649,7 @@ pub mod linux_shape {
     pub fn window(win: &impl IsA<gtk::Widget>) {
         const SQUARE: WindowState = WindowState::MAXIMIZED.union(WindowState::FULLSCREEN).union(WindowState::TILED);
         let widget = win.as_ref();
-        let radius = super::corner();
+        let radius = super::corner_drawn();
         let square = radius == 0 || widget.window().is_none_or(|g| g.state().intersects(SQUARE));
         let (w, h) = (widget.allocated_width(), widget.allocated_height());
         if square || w <= 2 * radius || h <= 2 * radius {
@@ -624,6 +660,13 @@ pub mod linux_shape {
     }
 
     /// A child view (the menu): rounded at `radius` at the size it was given.
+    ///
+    /// KB-0273: the view's GDK window is client-side, and WebKit's drawing does
+    /// not honour this shape, so it cuts nothing; the menu page fills its corners
+    /// with the window's background instead (styles.css). Making the window
+    /// native so X cuts it was tried: on WebKitGTK 2.50 and 2.52 nothing redrew
+    /// what it uncovered and the corners came out black. Kept for any system
+    /// that does honour it.
     pub fn view(widget: &gtk::Widget, w: i32, h: i32, radius: i32) {
         if radius > 0 && w > 2 * radius && h > 2 * radius {
             widget.shape_combine_region(Some(&rounded(w, h, radius)));
@@ -754,5 +797,22 @@ pub fn os_dark() -> Option<bool> {
         "prefer-dark" => Some(true),
         "prefer-light" | "default" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::{dwm_frame, radius_for};
+
+    /// KB-0266: full screen (Big Picture) and maximized are square and
+    /// borderless whatever the corner style; otherwise the style decides.
+    #[test]
+    fn filling_the_screen_is_square_and_borderless() {
+        for style in ["sharp", "soft", "rounded", "round", "pill"] {
+            assert_eq!(dwm_frame(radius_for(style), true), (1, 0xFFFF_FFFE), "{style}");
+        }
+        assert_eq!(dwm_frame(radius_for("pill"), false), (2, 0xFFFF_FFFF));
+        assert_eq!(dwm_frame(radius_for("rounded"), false), (3, 0xFFFF_FFFF));
+        assert_eq!(dwm_frame(radius_for("sharp"), false).0, 1);
     }
 }

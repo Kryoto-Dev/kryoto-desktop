@@ -13,7 +13,7 @@ import { formatBytes } from '@/lib/downloads'
 import { pickPath } from '@/lib/pick'
 import { isWindowsHost } from '@/lib/library'
 import { setSoundsOn, soundsOn, play } from '@/lib/sound'
-import { fetchReleaseIntro, introId, IntroVideo, type ReleaseIntroData } from '@/ui/ReleaseIntro'
+import { fetchReleaseIntro, introId, IntroVideo, markShown, type ReleaseIntroData } from '@/ui/ReleaseIntro'
 import { WHATS_NEW, type WhatsNewPlace } from '@/ui/FeatureNotice'
 import { usePromptTurn } from '@/lib/prompts'
 import { openStorePage } from '@/lib/window'
@@ -265,9 +265,11 @@ export function SetupDialog({
 export function SetupPrompt({ onPlace }: { onPlace: (place: WhatsNewPlace) => void }) {
   const settings = useSettings()
   const [closed, setClosed] = useState(false)
+  // Saved as seen once it opens (KB-0259); it stays up until it is closed.
+  const [shown, setShown] = useState(false)
   const [steps, setSteps] = useState<Step[] | null>(null)
   const due = !!settings && settings.welcomed && !settings.seenNotices.includes(SETUP_ID) && !closed
-  const turn = usePromptTurn('setup', due)
+  const turn = usePromptTurn('setup', (due || shown) && !closed)
   const inPlace = settings?.extractInPlace ?? false
   useEffect(() => {
     if (!due || steps) return
@@ -279,6 +281,12 @@ export function SetupPrompt({ onPlace }: { onPlace: (place: WhatsNewPlace) => vo
     // Decided once: ticking the box in a step must not take the step away.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [due])
+  useEffect(() => {
+    if (!turn || !steps || shown) return
+    setShown(true)
+    // What's new tells them about these: no dots and intros saying it again.
+    void markShown([introId(), SETUP_ID, ...(steps.includes('unpack') ? ['hatchzip'] : [])])
+  }, [turn, steps, shown])
   if (!turn || !steps) return null
   const close = () => {
     setClosed(true)

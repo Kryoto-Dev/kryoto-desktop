@@ -263,6 +263,15 @@ pub fn pet_mascot(app: AppHandle) -> String {
     crate::settings::load(&app).pet_mascot
 }
 
+/// The sizes the pet can be drawn at (Settings > Desktop pet).
+pub const SIZES: [&str; 3] = ["normal", "small", "tiny"];
+
+/// How big to draw the pet, for its page when it starts.
+#[tauri::command]
+pub fn pet_size(app: AppHandle) -> String {
+    crate::settings::load(&app).pet_size
+}
+
 #[cfg(test)]
 mod tests {
     use super::full_now;

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { emit } from '@tauri-apps/api/event'
 import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window'
 import { call, on } from '@/lib/bridge'
@@ -6,6 +6,7 @@ import type { Download, Notice } from '@/lib/downloads'
 import { isOnline, onOnlineChange } from '@/lib/online'
 import type { MascotId, ThemeId } from '@/pet/engine'
 import { Stage, petDetector } from '@/pet/stage'
+import { PET_SIZES, type PetSize } from '@/lib/settings'
 
 type Look = { palette: string; dark: boolean; reducedMotion: boolean }
 
@@ -28,6 +29,15 @@ const ACTIVE = new Set(['resolving', 'downloading', 'verifying', 'extracting'])
  */
 export function PetApp() {
   const ref = useRef<HTMLCanvasElement>(null)
+  // How big it is drawn (Settings > Desktop pet > Size). The window stays 144
+  // px; a smaller pet stands at its bottom, on the taskbar like the big one.
+  const [size, setSize] = useState<PetSize>('normal')
+  useEffect(() => {
+    void call<string>('pet_size').then((z) => setSize(z as PetSize)).catch(() => {})
+    const off = on<string>('pet-size', (z) => setSize(z as PetSize))
+    return () => void off.then((f) => f()).catch(() => {})
+  }, [])
+  const px = 144 * (PET_SIZES.find((z) => z.id === size)?.scale ?? 1)
 
   useEffect(() => {
     const canvas = ref.current
@@ -261,5 +271,9 @@ export function PetApp() {
     }
   }, [])
 
-  return <canvas ref={ref} aria-label="Kryoto's mascot" style={{ width: 144, height: 144, imageRendering: 'pixelated', display: 'block', cursor: 'grab' }} />
+  return (
+    <div style={{ width: 144, height: 144, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+      <canvas ref={ref} aria-label="Kryoto's mascot" style={{ width: px, height: px, imageRendering: 'pixelated', display: 'block', cursor: 'grab' }} />
+    </div>
+  )
 }

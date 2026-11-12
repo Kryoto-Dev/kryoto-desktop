@@ -15,7 +15,7 @@ mod ipc;
 
 use crate::library::LibraryGame;
 use activity::Who;
-use ipc::{frame, Frames, Pipe, OP_CLOSE, OP_FRAME, OP_HANDSHAKE};
+use ipc::{frame, Frames, Pipe, OP_CLOSE, OP_FRAME, OP_HANDSHAKE, OP_PING, OP_PONG};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
@@ -26,11 +26,66 @@ use tokio::sync::watch;
 
 /// The Kryoto application. Public: it is in every Discord client that shows it.
 const CLIENT_ID: &str = "1519811642521817258";
-/// How long between looks for a closed Discord.
-const RETRY: Duration = Duration::from_secs(15);
-const ANSWER: Duration = Duration::from_secs(5);
 /// Discord takes five updates in twenty seconds.
 const GAP: Duration = Duration::from_secs(4);
+
+/// How the connection is kept, as numbers (the tests use short ones).
+#[derive(Debug, Clone, Copy)]
+struct Timing {
+    /// The first wait before connecting again; it doubles up to `retry_max`.
+    retry_min: Duration,
+    /// The longest wait between looks for a closed Discord.
+    retry_max: Duration,
+    /// How long Discord has to answer.
+    answer: Duration,
+    /// How long a connection may stay quiet before Discord is asked whether
+    /// it is still there. Switching Discord account or restarting it ends
+    /// the connection; a ping finds one that ended without saying so.
+    heartbeat: Duration,
+}
+
+const TIMING: Timing = Timing {
+    retry_min: Duration::from_secs(1),
+    retry_max: Duration::from_secs(30),
+    answer: Duration::from_secs(5),
+    heartbeat: Duration::from_secs(60),
+};
+
+/// Waits between attempts to connect: from `retry_min`, doubling, never
+/// more than `retry_max`, and back to the start once connected.
+#[derive(Debug)]
+struct Backoff {
+    next: Duration,
+    min: Duration,
+    max: Duration,
+}
+
+impl Backoff {
+    fn new(t: &Timing) -> Self {
+        Backoff { next: t.retry_min, min: t.retry_min, max: t.retry_max }
+    }
+
+    fn wait(&mut self) -> Duration {
+        let wait = self.next;
+        self.next = (self.next * 2).min(self.max);
+        wait
+    }
+
+    fn reset(&mut self) {
+        self.next = self.min;
+    }
+}
+
+/// Why a connection ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// Nothing left to show: Kryoto cleared it and hung up.
+    Cleared,
+    /// Discord closed it: quit, restarted, or switched account.
+    Closed,
+    /// Discord stopped answering.
+    Quiet,
+}
 
 #[derive(Default)]
 struct State {
@@ -274,7 +329,17 @@ fn note_problem(what: String) {
     }
 }
 
-async fn run(tell: impl Fn() + Send + 'static, mut rx: watch::Receiver<Option<Value>>) {
+async fn run(tell: impl Fn() + Send + 'static, rx: watch::Receiver<Option<Value>>) {
+    run_with(tell, rx, TIMING).await
+}
+
+/// Keep Discord showing what is wanted, for as long as the app runs. When
+/// Discord goes (it quit, restarted, or switched account: every connection
+/// is closed then, and one made in the second after is refused with "User
+/// logged out"), it is looked for again after a second, then two, four, up
+/// to half a minute, and picked up as soon as it answers.
+async fn run_with(tell: impl Fn() + Send + 'static, mut rx: watch::Receiver<Option<Value>>, t: Timing) {
+    let mut backoff = Backoff::new(&t);
     loop {
         if rx.borrow_and_update().is_none() {
             if rx.changed().await.is_err() {
@@ -282,38 +347,47 @@ async fn run(tell: impl Fn() + Send + 'static, mut rx: watch::Receiver<Option<Va
             }
             continue;
         }
-        match connect().await {
+        let wait = match connect(&t).await {
             Some((pipe, frames)) => {
+                backoff.reset();
                 set_connected(true);
                 tell();
                 crate::logging::info("discord", "connected");
-                serve(pipe, frames, &mut rx).await;
+                let ended = serve(pipe, frames, &mut rx, &t).await;
                 set_connected(false);
                 tell();
+                if ended == Ended::Cleared {
+                    continue;
+                }
+                crate::logging::info("discord", &format!("connection ended ({ended:?}); connecting again"));
+                backoff.wait()
             }
-            None => {
-                tokio::select! {
-                    _ = rx.changed() => {}
-                    _ = tokio::time::sleep(RETRY) => {}
+            None => backoff.wait(),
+        };
+        tokio::select! {
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    return;
                 }
             }
+            _ = tokio::time::sleep(wait) => {}
         }
     }
 }
 
-async fn send(pipe: &mut Pipe, op: u32, body: &Value) -> bool {
-    matches!(tokio::time::timeout(ANSWER, pipe.write_all(&frame(op, body))).await, Ok(Ok(())))
+async fn send(pipe: &mut Pipe, op: u32, body: &Value, t: &Timing) -> bool {
+    matches!(tokio::time::timeout(t.answer, pipe.write_all(&frame(op, body))).await, Ok(Ok(())))
 }
 
 /// The socket, once Discord has said READY.
-async fn connect() -> Option<(Pipe, Frames)> {
+async fn connect(t: &Timing) -> Option<(Pipe, Frames)> {
     let mut pipe = ipc::open().await?;
-    if !send(&mut pipe, OP_HANDSHAKE, &json!({ "v": 1, "client_id": CLIENT_ID })).await {
+    if !send(&mut pipe, OP_HANDSHAKE, &json!({ "v": 1, "client_id": CLIENT_ID }), t).await {
         return None;
     }
     let mut frames = Frames::default();
     let mut bytes = [0u8; 4096];
-    let deadline = Instant::now() + ANSWER;
+    let deadline = Instant::now() + t.answer;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         let n = tokio::time::timeout(left, pipe.read(&mut bytes)).await.ok()?.ok()?;
@@ -344,46 +418,74 @@ fn payload(activity: Option<&Value>, extended: bool, nonce: u64) -> Value {
 }
 
 /// Keep Discord up to date until it goes, or there is nothing left to show.
-async fn serve(mut pipe: Pipe, mut frames: Frames, rx: &mut watch::Receiver<Option<Value>>) {
+async fn serve(mut pipe: Pipe, mut frames: Frames, rx: &mut watch::Receiver<Option<Value>>, t: &Timing) -> Ended {
     let mut bytes = [0u8; 4096];
     let mut nonce = 0u64;
     // An older client that does not know a field refuses the whole update.
     let mut extended = true;
     let mut sent_at: Option<Instant> = None;
+    // When Discord is next asked whether it is there, and whether it has
+    // been asked and not answered yet.
+    let mut due = tokio::time::Instant::now() + t.heartbeat;
+    let mut pinged = false;
     loop {
         if let Some(wait) = sent_at.map(|t| GAP.saturating_sub(t.elapsed())) {
             tokio::time::sleep(wait).await;
         }
         let wanted = rx.borrow_and_update().clone();
         nonce += 1;
-        if !send(&mut pipe, OP_FRAME, &payload(wanted.as_ref(), extended, nonce)).await {
-            return;
+        if !send(&mut pipe, OP_FRAME, &payload(wanted.as_ref(), extended, nonce), t).await {
+            return Ended::Closed;
         }
         sent_at = Some(Instant::now());
         // Closing clears it too; the update above just says so at once.
         if wanted.is_none() {
-            return;
+            return Ended::Cleared;
         }
         loop {
             tokio::select! {
                 changed = rx.changed() => {
                     if changed.is_err() {
-                        return;
+                        return Ended::Cleared;
                     }
                     break;
+                }
+                _ = tokio::time::sleep_until(due) => {
+                    if pinged {
+                        crate::logging::warn("discord", "Discord stopped answering; connecting again");
+                        return Ended::Quiet;
+                    }
+                    nonce += 1;
+                    if !send(&mut pipe, OP_PING, &json!({ "nonce": nonce.to_string() }), t).await {
+                        return Ended::Closed;
+                    }
+                    pinged = true;
+                    due = tokio::time::Instant::now() + t.answer;
                 }
                 read = pipe.read(&mut bytes) => {
                     let n = match read {
                         Ok(n) if n > 0 => n,
-                        _ => return,
+                        _ => return Ended::Closed,
                     };
+                    // Anything at all from Discord says it is still there.
+                    pinged = false;
+                    due = tokio::time::Instant::now() + t.heartbeat;
                     frames.push(&bytes[..n]);
                     let mut again = false;
                     loop {
                         match frames.next() {
-                            Err(()) => return,
+                            Err(()) => return Ended::Closed,
                             Ok(None) => break,
-                            Ok(Some((OP_CLOSE, _))) => return,
+                            Ok(Some((OP_CLOSE, body))) => {
+                                note_problem(format!("Discord closed the connection: {body}"));
+                                return Ended::Closed;
+                            }
+                            Ok(Some((OP_PONG, _))) => {}
+                            Ok(Some((OP_PING, body))) => {
+                                if !send(&mut pipe, OP_PONG, &body, t).await {
+                                    return Ended::Closed;
+                                }
+                            }
                             Ok(Some((_, body))) => {
                                 if body["evt"] == "ERROR" {
                                     if extended {
@@ -437,31 +539,47 @@ mod tests {
         assert!(standings(&s, &games, &playing, true)[0].now);
     }
 
+    /// The stand-in Discord's pipe; one test at a time has it.
+    #[cfg(windows)]
+    static PIPE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(windows)]
+    const PIPE_NAME: &str = r"\\.\pipe\kryoto-unit-ipc-0";
+
+    #[cfg(windows)]
+    async fn next(server: &mut tokio::net::windows::named_pipe::NamedPipeServer, frames: &mut Frames) -> (u32, Value) {
+        let mut bytes = [0u8; 4096];
+        loop {
+            if let Some(f) = frames.next().unwrap() {
+                return f;
+            }
+            let n = server.read(&mut bytes).await.unwrap();
+            assert!(n > 0, "the client hung up");
+            frames.push(&bytes[..n]);
+        }
+    }
+
+    /// A stand-in Discord taking the next connection, up to its hello.
+    #[cfg(windows)]
+    async fn accept(first: bool) -> (tokio::net::windows::named_pipe::NamedPipeServer, Frames) {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let mut server = ServerOptions::new().first_pipe_instance(first).create(PIPE_NAME).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), server.connect()).await.expect("the app never came back").unwrap();
+        let mut frames = Frames::default();
+        let (op, hello) = next(&mut server, &mut frames).await;
+        assert_eq!((op, hello["client_id"].as_str()), (OP_HANDSHAKE, Some(CLIENT_ID)));
+        (server, frames)
+    }
+
     /// The whole conversation, over a real pipe.
     #[cfg(windows)]
     #[test]
     fn says_hello_shows_the_game_and_clears_it_over_a_pipe() {
-        use tokio::net::windows::named_pipe::ServerOptions;
-        async fn next(server: &mut tokio::net::windows::named_pipe::NamedPipeServer, frames: &mut Frames) -> (u32, Value) {
-            let mut bytes = [0u8; 4096];
-            loop {
-                if let Some(f) = frames.next().unwrap() {
-                    return f;
-                }
-                let n = server.read(&mut bytes).await.unwrap();
-                assert!(n > 0, "the client hung up");
-                frames.push(&bytes[..n]);
-            }
-        }
+        let _one = PIPE.lock().unwrap_or_else(|e| e.into_inner());
         tauri::async_runtime::block_on(async {
             std::env::set_var("KRYOTO_DEV_DISCORD_PIPE", "kryoto-unit-ipc");
-            let mut server = ServerOptions::new().first_pipe_instance(true).create(r"\\.\pipe\kryoto-unit-ipc-0").unwrap();
             let (tx, rx) = watch::channel(Some(json!({ "details": "Hades" })));
             let task = tauri::async_runtime::spawn(run(|| {}, rx));
-            server.connect().await.unwrap();
-            let mut frames = Frames::default();
-            let (op, hello) = next(&mut server, &mut frames).await;
-            assert_eq!((op, hello["client_id"].as_str()), (OP_HANDSHAKE, Some(CLIENT_ID)));
+            let (mut server, mut frames) = accept(true).await;
             server.write_all(&frame(OP_FRAME, &json!({ "evt": "READY" }))).await.unwrap();
             let (_, set) = next(&mut server, &mut frames).await;
             assert_eq!((set["cmd"].as_str(), set["args"]["activity"]["details"].as_str()), (Some("SET_ACTIVITY"), Some("Hades")));
@@ -471,6 +589,70 @@ mod tests {
             assert_eq!(clear["args"]["activity"], Value::Null);
             task.abort();
         });
+    }
+
+    /// Switching Discord account closes every connection and refuses one
+    /// made in the moment after ("User logged out"); a restart closes it
+    /// too; and a Discord can stop answering without closing anything. The
+    /// game comes back on Discord after each, without restarting Kryoto.
+    #[cfg(windows)]
+    #[test]
+    fn comes_back_after_discord_switches_account_restarts_or_goes_quiet() {
+        let _one = PIPE.lock().unwrap_or_else(|e| e.into_inner());
+        let t = Timing {
+            retry_min: Duration::from_millis(50),
+            retry_max: Duration::from_millis(400),
+            answer: Duration::from_millis(500),
+            heartbeat: Duration::from_millis(300),
+        };
+        let logged_out = json!({ "code": 1000, "message": "User logged out" });
+        let shows = |set: &Value| set["args"]["activity"]["details"] == "Hades";
+        tauri::async_runtime::block_on(async {
+            std::env::set_var("KRYOTO_DEV_DISCORD_PIPE", "kryoto-unit-ipc");
+            let (_tx, rx) = watch::channel(Some(json!({ "details": "Hades" })));
+            let task = tauri::async_runtime::spawn(run_with(|| {}, rx, t));
+
+            // Connected and showing the game.
+            let (mut server, mut frames) = accept(true).await;
+            server.write_all(&frame(OP_FRAME, &json!({ "evt": "READY" }))).await.unwrap();
+            assert!(shows(&next(&mut server, &mut frames).await.1));
+
+            // The account switch: closed, then the next hello refused.
+            server.write_all(&frame(OP_CLOSE, &logged_out)).await.unwrap();
+            let (mut refused, _) = tokio::join!(accept(false), async move { drop(server) }).0;
+            refused.write_all(&frame(OP_CLOSE, &logged_out)).await.unwrap();
+            let (mut server, mut frames) = tokio::join!(accept(false), async move { drop(refused) }).0;
+
+            // Discord is back: the game shows again.
+            server.write_all(&frame(OP_FRAME, &json!({ "evt": "READY" }))).await.unwrap();
+            assert!(shows(&next(&mut server, &mut frames).await.1));
+
+            // Quiet: asked after the heartbeat, no answer, so it connects again.
+            let (op, _) = next(&mut server, &mut frames).await;
+            assert_eq!(op, OP_PING);
+            let (mut again, mut frames) = accept(false).await;
+            drop(server);
+            again.write_all(&frame(OP_FRAME, &json!({ "evt": "READY" }))).await.unwrap();
+            assert!(shows(&next(&mut again, &mut frames).await.1));
+
+            // Restarted: the pipe just goes, and the app looks again.
+            let (mut server, mut frames) = tokio::join!(accept(false), async move { drop(again) }).0;
+            server.write_all(&frame(OP_FRAME, &json!({ "evt": "READY" }))).await.unwrap();
+            assert!(shows(&next(&mut server, &mut frames).await.1));
+            task.abort();
+        });
+    }
+
+    #[test]
+    fn waits_between_looks_double_up_to_a_cap_and_start_over_once_connected() {
+        let t = Timing { retry_min: Duration::from_secs(1), retry_max: Duration::from_secs(8), ..TIMING };
+        let mut b = Backoff::new(&t);
+        let waits: Vec<u64> = (0..6).map(|_| b.wait().as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 8, 8]);
+        b.reset();
+        assert_eq!(b.wait(), Duration::from_secs(1));
+        // A closed Discord is looked for at most every half minute.
+        assert_eq!(TIMING.retry_max, Duration::from_secs(30));
     }
 
     #[test]

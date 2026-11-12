@@ -38,6 +38,8 @@ export type Download = {
   hashMismatch?: boolean
   /** Set when the file is one of the game's add-ons: its name. */
   addon: string | null
+  /** Added from a game's Add-ons & DLC card: the add-on's id on kryo.to. */
+  addonRelease?: string | null
   /** Installed, but the unpacker reported damaged files: what to tell the player. */
   warning?: string | null
   /** From a mirror rather than our own copy. */
@@ -66,6 +68,8 @@ export type Download = {
     version: string | null
     sizeBytes: number | null
     nsfw?: boolean
+    /** The Steam branch the listing builds from (`public`, or a beta such as `gb27`). */
+    steamBranch?: string | null
   }
 }
 

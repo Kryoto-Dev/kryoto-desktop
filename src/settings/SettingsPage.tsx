@@ -4,7 +4,7 @@ import { artSrc } from '@/lib/art'
 import { Wand2, Bell, Cloud, Download, FolderInput, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, ChevronDown } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Check, Dropdown, Section, Segmented, inputCls } from '@/ui'
 import { errorText, on } from '@/lib/bridge'
-import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, type PetMascot, type Settings } from '@/lib/settings'
+import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, PET_SIZES, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, openBigPicture, openSetup, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -32,6 +32,7 @@ import { GameUpdatesSection } from '@/settings/GameUpdatesSection'
 import { DefenderSection } from '@/settings/DefenderSection'
 import { anchorId, revealSetting } from '@/lib/settings-links'
 import { useSettled } from '@/hooks/useSettled'
+import { TEXT_SIZES, useTextSize, ZOOM_MODIFIER } from '@/lib/text-size'
 
 /**
  * Settings: one page for everything you can set.
@@ -416,6 +417,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
             <Section title="Desktop theme" hint="Applies to the library, downloads, settings and menus.">
               <Segmented label="Desktop theme" value={s.theme ?? 'account'} options={[{ value: 'account', label: 'Follow kryo.to' }, { value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]} onChange={(v) => set('theme', v)} />
             </Section>
+            <TextSizeSection />
             <Section title="Open on">
               <Segmented label="Open on" value={s.startPage} options={[{ value: 'library', label: 'Library' }, { value: 'store', label: 'Store' }]} onChange={(v) => set('startPage', v)} />
             </Section>
@@ -428,6 +430,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
             <Section title="Desktop pet" hint="Drag it anywhere; right-click it to switch or hide it. It steps aside while a game runs.">
               <Check checked={s.pet} onChange={(v) => set('pet', v)} label="Show the pet on my desktop" />
               {s.pet ? <Segmented label="Desktop pet" value={s.petMascot} options={PET_MASCOTS.map((m) => ({ value: m.id, label: m.label }))} onChange={(v) => set('petMascot', v)} /> : null}
+              {s.pet ? <Segmented label="Size" value={s.petSize ?? 'normal'} options={PET_SIZES.map((z) => ({ value: z.id, label: z.label }))} onChange={(v) => set('petSize', v)} /> : null}
             </Section>
             <PlayerNameSection s={s} patch={patch} />
             <Section title="Game language" hint="The language games start in, when they have it, in games built with gbe_fork or RUNE (most of the catalog). Set it per game under Properties. Game's own leaves each game's files as they are now.">
@@ -568,6 +571,20 @@ function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Setti
           <Caption>{account ? `Games call you ${account}.` : 'Sign in to kryo.to to use your username.'}</Caption>
         ) : null}
       </div>
+    </Section>
+  )
+}
+
+/**
+ * How large Kryoto draws everything, the Store included (lib/text-size.ts).
+ * Applies as it is picked; saved by its own command, not with the page.
+ */
+function TextSizeSection() {
+  const [size, pick] = useTextSize()
+  if (size === null) return null
+  return (
+    <Section title="Text size" anchor="text-size" hint={`Everything in Kryoto, the Store included. ${ZOOM_MODIFIER} + and ${ZOOM_MODIFIER} - change it anywhere, and ${ZOOM_MODIFIER} 0 goes back to 100%.`}>
+      <Segmented label="Text size" value={String(size)} options={TEXT_SIZES.map((v) => ({ value: String(v), label: `${v}%` }))} onChange={(v) => pick(Number(v))} />
     </Section>
   )
 }

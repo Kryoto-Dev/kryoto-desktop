@@ -412,11 +412,18 @@ export function Floating({
       el.style.left = `${Math.max(WINDOW_EDGE, Math.min(left, window.innerWidth - width - WINDOW_EDGE))}px`
     }
     place()
-    const watch = new ResizeObserver(place)
+    // `place` sets this box's own height: from inside the observer's callback that
+    // is a "ResizeObserver loop" error (KB-0251), so it runs on the next frame.
+    let frame = 0
+    const watch = new ResizeObserver(() => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(place)
+    })
     watch.observe(el)
     window.addEventListener('resize', place)
     window.addEventListener('scroll', place, true)
     return () => {
+      cancelAnimationFrame(frame)
       watch.disconnect()
       window.removeEventListener('resize', place)
       window.removeEventListener('scroll', place, true)

@@ -40,6 +40,13 @@ export function isExpectedReportError(e: unknown): boolean {
   return text.startsWith('Open kryo.to first') || text.startsWith('Not a kryo.to game')
 }
 
+/** Seconds of this game's sessions still on their way to kryo.to (`playtime-sync.ts`). */
+export function pendingPlaySeconds(slug: string): number {
+  return read()
+    .filter((p) => p.slug === slug)
+    .reduce((sum, p) => sum + (p.seconds || 0), 0)
+}
+
 function done(key: string) {
   write(read().filter((p) => p.key !== key))
 }

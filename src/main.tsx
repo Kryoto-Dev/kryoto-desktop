@@ -8,6 +8,7 @@ import { installErrorLogging } from './lib/log'
 import { installWindowDrag } from './lib/window-drag'
 import { call } from './lib/bridge'
 import { isTauri } from './lib/window'
+import { installTextSizeKeys } from './lib/text-size'
 import './styles.css'
 import { PixelIconMotion } from '@/ui/pixel-icons-motion'
 
@@ -31,6 +32,8 @@ installErrorLogging(label)
 installWindowDrag()
 // Keep custom app menus; never expose the browser's Back/Forward/Reload menu.
 document.addEventListener('contextmenu', e => e.preventDefault())
+// Ctrl + / Ctrl - / Ctrl 0 and Ctrl+wheel, wherever the keyboard is (the pet draws no words).
+if (label !== 'pet') installTextSizeKeys()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

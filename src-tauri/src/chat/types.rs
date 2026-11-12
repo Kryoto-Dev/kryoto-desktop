@@ -51,6 +51,12 @@ pub enum ChatEvent {
     GroupChanged { group_id: String },
     /// Voice call signalling from someone (offer, answer, ice, hangup, decline, busy).
     Call { user_id: String, call_id: String, kind: String, payload: String },
+    /// Past messages between this account's devices (KB-0254): where it stands.
+    History(super::history::HistoryView),
+    /// History from another device was stored in these conversations.
+    HistoryMerged { conversations: Vec<String> },
+    /// A new device of this account asks for this one's history.
+    HistoryAsk { device_name: String },
     /// Something worth a desktop notification (already filtered for mutes).
     Notify { conversation_id: String, sender_user: String, preview: Option<String>, group_name: Option<String> },
 }

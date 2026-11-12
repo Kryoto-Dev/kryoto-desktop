@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { LogicalSize } from '@tauri-apps/api/dpi'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { currentMonitor, getCurrentWindow } from '@tauri-apps/api/window'
 import { call, isTauri, on } from '@/lib/bridge'
 import { noteStore } from '@/lib/popup'
 import { SITE_ORIGIN } from '@/lib/endpoint'
+import { onTextSize, textSizeApi } from '@/lib/text-size'
 
 export { isTauri }
 
@@ -31,6 +32,12 @@ const SIZES: Record<WindowKind, { width: number; height: number }> = {
 
 let currentKind: WindowKind | null = null
 let placing: Promise<unknown> = Promise.resolve()
+/**
+ * The text size's zoom (lib/text-size.ts). The splash and sign-in boxes are
+ * laid out for their size at 100%, so they grow with it (up to the screen);
+ * the client keeps the size the player gave it.
+ */
+let zoom: number | null = null
 
 /**
  * One at a time. Each is a run of native calls: on a busy PC the splash's were
@@ -38,20 +45,28 @@ let placing: Promise<unknown> = Promise.resolve()
  * and the client opened in the splash's 340 by 380 with its maximum size stuck
  * there.
  */
-export function applyWindow(kind: WindowKind) {
+export function applyWindow(kind: WindowKind, again = false) {
   if (kind === 'main') delete document.documentElement.dataset.shape
   else document.documentElement.dataset.shape = 'box'
-  const done = placing.then(() => placeWindow(kind))
+  const done = placing.then(() => placeWindow(kind, again))
   placing = done.catch(() => undefined)
   return done
 }
 
-async function placeWindow(kind: WindowKind) {
-  if (!isTauri() || currentKind === kind) return
+async function placeWindow(kind: WindowKind, again: boolean) {
+  if (!isTauri() || (currentKind === kind && !again)) return
   const win = getCurrentWindow()
   const first = currentKind === null
   currentKind = kind
-  const size = SIZES[kind]
+  if (zoom === null) {
+    zoom = ((await textSizeApi.get().catch(() => 100)) || 100) / 100
+    // A key pressed on the splash or sign-in box: the box grows or shrinks with it.
+    void onTextSize((percent) => {
+      zoom = percent / 100
+      if (currentKind && currentKind !== 'main') void applyWindow(currentKind, true)
+    })
+  }
+  const size = kind === 'main' ? SIZES.main : await boxSize(SIZES[kind], zoom)
   const logical = new LogicalSize(size.width, size.height)
   if (kind === 'main' && !first) {
     // Keep a size the player chose last time they were in the client.
@@ -73,6 +88,24 @@ async function placeWindow(kind: WindowKind) {
   }
   await win.setSize(logical)
   await win.center()
+}
+
+/** A box's size at the text size, kept inside the screen it is on. */
+async function boxSize(size: { width: number; height: number }, z: number) {
+  let { width, height } = { width: size.width * z, height: size.height * z }
+  if (z > 1) {
+    try {
+      const screen = await currentMonitor()
+      if (screen) {
+        const area = screen.workArea.size.toLogical(screen.scaleFactor)
+        width = Math.min(width, area.width - 32)
+        height = Math.min(height, area.height - 32)
+      }
+    } catch {
+      /* no monitor information: the size as asked */
+    }
+  }
+  return { width: Math.round(width), height: Math.round(height) }
 }
 
 /* ── Window controls ───────────────────────────────────── */
@@ -141,7 +174,8 @@ export function mountStore(url: string, rect: { x: number; y: number; width: num
   noteStore(rect)
   // The page's own pixel ratio, so the view lands where it was measured even
   // when Windows reports another scale for the window (src-tauri placement.rs).
-  return call<void>('store_mount', { url, ...rect, visible: visible ?? null, userAgent: navigator.userAgent, scale: window.devicePixelRatio || null })
+  // Linux uses the viewport width to include zoom on older WebKit versions too.
+  return call<void>('store_mount', { url, ...rect, visible: visible ?? null, userAgent: navigator.userAgent, scale: window.devicePixelRatio || null, viewportWidth: window.innerWidth })
 }
 
 /*

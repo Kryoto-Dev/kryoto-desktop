@@ -138,7 +138,7 @@ export function CatalogGamePage({
         </Modal>
       ) : null}
 
-      <div className="grid grid-cols-[minmax(0,1fr)_320px] items-start gap-4 p-6">
+      <div className="grid items-start gap-4 p-6 lg:grid-cols-[minmax(0,1fr)_320px] [&>*]:min-w-0">
         <Card>
           <Label className="mb-3">About</Label>
           {error ? (

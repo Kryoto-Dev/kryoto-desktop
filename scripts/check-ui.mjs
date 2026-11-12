@@ -229,6 +229,28 @@ try {
     await expectText('[role="dialog"]', 'Nothing on kryo.to by that name')
     await page.keyboard.press('Escape')
   })
+  await check("What's new counts as seen when it opens, and stays until it is closed (KB-0259)", async () => {
+    // A window that went down while it was up (the Linux video crash) opened it again, in a loop.
+    const news = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    news.on('pageerror', e => failures.push(e.message))
+    // The boot's game-runtimes question comes first otherwise, as in the checks below.
+    await news.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await news.goto(`${base}/?whatsnew`)
+      const dialog = news.getByRole('dialog', { name: /^What's new in Kryoto Desktop/ })
+      await dialog.waitFor()
+      const seen = () => news.evaluate(async () => (await (await import('/src/lib/bridge.ts')).call('settings_get')).seenNotices)
+      let saved = []
+      for (let i = 0; i < 20 && !saved.includes('setup-0-3-0'); i++) {
+        await news.waitForTimeout(100)
+        saved = await seen()
+      }
+      assert.ok(saved.includes('setup-0-3-0'), `saved as seen while open: ${JSON.stringify(saved)}`)
+      assert.equal(await dialog.count(), 1)
+    } finally {
+      await news.close()
+    }
+  })
   await check('prompts that open by themselves take turns and never land on a dialog', async () => {
     const want = id => page.evaluate(i => document.getElementById(`want-${i}`).click(), id)
     const only = async title => {
@@ -460,6 +482,29 @@ try {
       await dialog.waitFor({ state: 'hidden' })
       assert.equal(await dialog.count(), 0)
     } finally { await achievements.close() }
+  })
+  await check('a DRM-free game turns achievements on with one button, and one with no Steam API shows no card', async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 860 } })
+    await page.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    page.on('pageerror', e => failures.push(e.message))
+    try {
+      await page.goto(base)
+      const sidebar = page.getByRole('complementary', { name: 'Your games' })
+      await sidebar.getByRole('button', { name: 'Hollow Knight', exact: true }).click()
+      await page.getByRole('region', { name: 'Hollow Knight', exact: true }).waitFor()
+      await page.waitForTimeout(300)
+      assert.equal(await page.getByText('This copy does not record achievements', { exact: true }).count(), 0)
+      assert.equal(await page.getByText('Achievement tracking is unavailable', { exact: true }).count(), 0)
+      await sidebar.getByRole('button', { name: 'Captain Hardcore', exact: true }).click()
+      const region = page.getByRole('region', { name: 'Captain Hardcore', exact: true })
+      await region.getByText('This copy does not record achievements', { exact: true }).waitFor()
+      await region.getByText('2 on Steam', { exact: true }).waitFor()
+      assert.equal(await region.getByRole('button', { name: 'Try another emulator', exact: true }).count(), 0)
+      await region.getByRole('button', { name: 'Turn on achievements', exact: true }).click()
+      await region.getByText('1 of 2', { exact: true }).waitFor()
+      await region.getByText('Steam + gbe_fork', { exact: true }).waitFor()
+      assert.equal(await region.getByText('This copy does not record achievements', { exact: true }).count(), 0)
+    } finally { await page.close() }
   })
   await check('a game shows its Linux compatibility and setup through the shared renderer, and an untested game shows none', async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' })

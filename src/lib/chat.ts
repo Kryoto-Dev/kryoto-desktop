@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { call, isWeb, on } from '@/lib/bridge'
+import { EMOJI } from '@/rich/rich-catalog'
 
 let device: string | null = null
 /** What this device calls itself in chat's words, when it is neither of the two below. */
@@ -174,6 +175,31 @@ export const textLimit = (supporter: boolean) => (supporter ? 8000 : 2000)
 
 export const QUICK_REACTIONS = ['👍', '😂', '🔥', '❤️', '😮', '😢']
 
+/**
+ * One of Kryoto's own emoji as a chat reaction. The messaging protocol keeps a
+ * reaction to 16 characters (kryoto-messaging REACTION_LIMIT) and most of our
+ * names are longer, so ours travel as a short code of the name, `:k<hash>:`
+ * (unique across the catalog, at most 10 characters); a standard emoji is
+ * itself. An app from before this shows the code as text.
+ */
+const reactionCode = (name: string) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(36)
+}
+export const chatReactionFor = (name: string) => `:k${reactionCode(name)}:`
+let byReactionCode: Map<string, string> | null = null
+/** Which of our emoji a stored reaction is, or null for a standard one. */
+export function chatReactionEmoji(stored: string): string | null {
+  const code = /^:k([0-9a-z]{1,7}):$/.exec(stored)?.[1]
+  if (!code) return null
+  byReactionCode ??= new Map(EMOJI.map((e) => [reactionCode(e.name), e.name]))
+  return byReactionCode.get(code) ?? null
+}
+
 /** A finished call in the conversation (`call` rows): who called, and how it went. */
 export type CallRecord = { callId: string; answered: boolean; seconds: number; caller: string }
 
@@ -290,6 +316,66 @@ export type AccountDevices = { devices: AccountDevice[]; limit: number; expireDa
 export const chatAccountDevices = () => call<AccountDevices>('chat_account_devices')
 export const chatAccountDeviceRemove = (id: string) => call<void>('chat_account_device_remove', { id })
 export const chatDeviceRevoke = (device: string) => call<void>('chat_device_revoke', { device })
+// ---- history from another of your devices (KB-0254) ----------------------------
+//
+// Nothing is kept on the server, so a new device starts empty. It asks the
+// account's other devices; one whose player says yes sends its history,
+// end-to-end encrypted to this device only (src/web/engine.ts and
+// src-tauri/src/chat/history.rs, km-core `history`).
+
+/** On the new device: the history it asked for. */
+export type HistoryIncoming = {
+  transferId: string
+  /** waiting: no other device has answered yet; receiving: one is sending. */
+  state: 'waiting' | 'receiving' | 'done'
+  /** The device it comes from, by name, once one sends. */
+  from: string | null
+  received: number
+  total: number
+  /** When it first asked. */
+  askedAtMs: number
+  /** Waiting and nobody answered for a while (or receiving, and it stalled): the line says what to do. */
+  quiet: boolean
+  /** Waited a week: it no longer asks by itself. */
+  expired: boolean
+}
+/** On an older device: a new device of yours asked for its history. */
+export type HistoryOutgoing = {
+  transferId: string
+  deviceId: string
+  deviceName: string
+  createdAtMs: number
+  /** Set up in the last 10 minutes: "Send" is the default answer. */
+  fresh: boolean
+  /** waiting: it went offline mid-way; the rest goes when it is back. */
+  state: 'asking' | 'sending' | 'waiting' | 'done'
+  sent: number
+  total: number
+}
+export type HistoryState = { incoming: HistoryIncoming | null; outgoing: HistoryOutgoing[] }
+
+export const chatHistory = () => call<HistoryState>('chat_history')
+export const chatHistoryAnswer = (transferId: string, send: boolean) => call<void>('chat_history_answer', { transferId, send })
+/** Put away a finished notice. */
+export const chatHistoryDismiss = (transferId: string) => call<void>('chat_history_dismiss', { transferId })
+/** On the new device, when nobody answered: a new request to every other device (one that said Not now asks again). */
+export const chatHistoryAskAgain = () => call<void>('chat_history_ask_again')
+
+export function useChatHistory(on_: boolean): HistoryState {
+  const [state, setState] = useState<HistoryState>({ incoming: null, outgoing: [] })
+  useEffect(() => {
+    if (!on_) return
+    let alive = true
+    void chatHistory().then((s) => alive && setState(s)).catch(() => {})
+    const off = on<HistoryState>('chat-history', (s) => alive && setState(s))
+    return () => {
+      alive = false
+      void off.then((f) => f())
+    }
+  }, [on_])
+  return state
+}
+
 /** Save all conversations on this PC to a file (plain text). Null when cancelled. */
 export const chatExportHistory = () => call<string | null>('chat_export_history')
 /** Send picked messages (by id; their text is read on the native side) to staff. */

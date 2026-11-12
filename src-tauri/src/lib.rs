@@ -56,6 +56,7 @@ mod settings;
 mod shortcuts;
 mod storage;
 mod system;
+mod text_size;
 mod vr;
 
 use serde::{Deserialize, Serialize};
@@ -436,11 +437,31 @@ fn disable_browser_menu(view: &tauri::Webview) {
 ///   games list, which can be long, only when the account changes, when asked
 ///   (`__kryoDesktopRefresh`) or every ten minutes.
 /// * Clicks, so an open menu closes like it would over any other page.
+///
+/// BROWSER_STATE_SCRIPT for a page, `kryo` when it is kryo.to's.
+fn store_script(kryo: bool) -> String {
+    BROWSER_STATE_SCRIPT
+        .replace("__KRYO__", if kryo { "true" } else { "false" })
+        .replace("__STILL_WALL__", if cfg!(target_os = "linux") { "true" } else { "false" })
+}
+
 const BROWSER_STATE_SCRIPT: &str = r#"
 (() => {
   if (window.__kryoDesktop) return;
   window.__kryoDesktop = true;
   const KRYO = __KRYO__;
+  // Linux: kryo.to's home page drifts a wall of covers behind the search
+  // (components/home/landing/backdrop.tsx). WebKitGTK repaints it on every
+  // frame: measured on Fedora 44's WebKitGTK 2.54, the page ran at 8 fps with
+  // it moving and 62 fps with it still, and players filmed 20 fps on real GPUs
+  // (KB-0012). Here it holds still, as it does under reduced motion.
+  if (KRYO && __STILL_WALL__) {
+    try {
+      const still = document.createElement('style');
+      still.textContent = '.kryo-landing-track{animation:none!important}';
+      (document.head || document.documentElement).appendChild(still);
+    } catch (_) {}
+  }
   const key = '__kryo_desktop_history__';
   const invoke = (command, payload) => {
     try {
@@ -793,6 +814,36 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   const side = (e) => { if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); return true } return false };
   addEventListener('mousedown', side, true);
   addEventListener('mouseup', (e) => { if (side(e)) invoke('store_nav_button', { forward: e.button === 4 }) }, true);
+  // Text size (text_size.rs): Ctrl + / Ctrl - / Ctrl 0 and Ctrl+wheel, as in the
+  // shell (src/lib/text-size-keys.ts has the same rules, with tests). After the
+  // page's own handlers, so a field that uses the key for itself keeps it.
+  {
+    const mac = /Mac/i.test(navigator.platform);
+    let busy = false, turned = 0, last = -Infinity;
+    const step = (s) => { if (busy) return; busy = true; Promise.resolve(invoke('text_size_step', { step: s })).catch(() => {}).finally(() => { busy = false; }); };
+    addEventListener('keydown', (e) => {
+      if (e.defaultPrevented || e.isComposing || e.altKey) return;
+      if (mac ? (!e.metaKey || e.ctrlKey) : (!e.ctrlKey || e.metaKey)) return;
+      const s = e.key === '+' || e.key === '=' || e.code === 'NumpadAdd' ? 1
+        : e.shiftKey ? null
+        : e.key === '-' || e.code === 'NumpadSubtract' ? -1
+        : e.key === '0' || e.code === 'Numpad0' || e.code === 'Digit0' ? 0 : null;
+      if (s === null) return;
+      e.preventDefault();
+      step(s);
+    });
+    addEventListener('wheel', (e) => {
+      if (!(mac ? e.metaKey : e.ctrlKey) || e.altKey) return;
+      e.preventDefault();
+      const px = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1);
+      if (Math.sign(px) !== Math.sign(turned)) turned = 0;
+      turned += px;
+      if (Math.abs(turned) < 50 || e.timeStamp - last < 140) return;
+      const s = turned < 0 ? 1 : -1;
+      turned = 0; last = e.timeStamp;
+      step(s);
+    }, { passive: false });
+  }
   // Linux: WebKitGTK re-blurs whatever is behind a `backdrop-filter` on the CPU
   // on every frame. kryo.to's landing page has a wall of moving covers behind
   // seven of them, which kept the page's process near 90% and the page choppy.
@@ -997,7 +1048,10 @@ async fn store_mount(
     user_agent: Option<String>,
     // The shell's devicePixelRatio; see placement.rs.
     scale: Option<f64>,
+    viewport_width: Option<f64>,
 ) -> Result<(), String> {
+    let window = app.get_window("main").ok_or("The main window is gone.")?;
+    let scale = placement::shell_scale(&window, scale, viewport_width)?;
     menus::set_store_origin(x, y);
     if let Some(view) = app.get_webview(STORE) {
         placement::place(&view, x, y, width, height, scale)?;
@@ -1484,6 +1538,37 @@ fn store_set_status(
         .map_err(|e| e.to_string())
 }
 
+/// Move many games in the account's kryo.to library to one status at once, or
+/// take them all out with `None` (kryo.to `/api/account/library/bulk`, suggestion
+/// #70). Runs in the Store's page, like `store_set_status`.
+#[tauri::command]
+fn store_set_status_many(app: tauri::AppHandle, slugs: Vec<String>, status: Option<String>) -> Result<(), String> {
+    const STATUSES: [&str; 7] = ["playing", "plan", "completed", "onhold", "dropped", "favorite", "notinterested"];
+    if slugs.is_empty() || slugs.len() > 5000 {
+        return Err("Choose between 1 and 5,000 games.".into());
+    }
+    if slugs.iter().any(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+        return Err("Not a kryo.to game.".into());
+    }
+    if status.as_deref().is_some_and(|s| !STATUSES.contains(&s)) {
+        return Err("Not a library status.".into());
+    }
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to first.".into());
+    }
+    let body = match status {
+        Some(s) => serde_json::json!({ "slugs": slugs, "status": s }),
+        None => serde_json::json!({ "slugs": slugs, "remove": true }),
+    }
+    .to_string();
+    let body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    view.eval(format!(
+        "fetch('/api/account/library/bulk',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:{body}}}).finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())"
+    ))
+    .map_err(|e| e.to_string())
+}
+
 /// Hide games on the account, or show them again, through the Store's page.
 /// `refresh` reads the account back at once; never from an answer to reading it.
 pub(crate) fn store_send_hidden<R: Runtime>(app: &tauri::AppHandle<R>, slugs: &[String], hidden: bool, adult: bool, refresh: bool) -> Result<(), String> {
@@ -1538,13 +1623,15 @@ fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, secon
         return Err("Open kryo.to first.".into());
     }
     view.eval(format!(
-        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',startedAt:{started_at},seconds:{seconds},sessionKey:'{key}'}})}}).then(r=>{{if(r.ok||(r.status>=400&&r.status<500&&r.status!==429))window.__TAURI_INTERNALS__.invoke('store_play_done',{{key:'{key}'}})}}).catch(()=>{{}})"
+        "fetch('/api/desktop/playtime',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',startedAt:{started_at},seconds:{seconds},sessionKey:'{key}'}})}}).then(r=>{{if(r.ok||(r.status>=400&&r.status<500&&r.status!==401&&r.status!==429))window.__TAURI_INTERNALS__.invoke('store_play_done',{{key:'{key}'}})}}).catch(()=>{{}})"
     ))
     .map_err(|e| e.to_string())
 }
 
-/// kryo.to's answer to `store_report_play`: taken, or refused for good. A guest
-/// has no account to count it on (401); too many (429) or a server error is tried again.
+/// kryo.to's answer to `store_report_play`: taken, or refused for good. Signed
+/// out on the page (401: an expired session), too many (429) or a server error
+/// is tried again, for up to 14 days (lib/play-reports.ts); until 0.3.1 a 401
+/// dropped the session. Guests' sessions are never queued (Shell).
 #[tauri::command]
 fn store_play_done(app: tauri::AppHandle, webview: tauri::Webview, key: String) -> Result<(), String> {
     from_kryoto_store(&app, &webview)?;
@@ -1809,6 +1896,9 @@ pub fn run() {
                 if !to_tray {
                     let _ = main.show();
                 }
+                // After show: before it, Windows still counts a caption in a frameless
+                // window's size. The page has not loaded yet, so nothing is drawn first.
+                text_size::size_start_window(&main);
             }
             // The desktop pet, when it is on: it comes out even when Kryoto
             // starts in the tray.
@@ -1841,10 +1931,10 @@ pub fn run() {
             PluginBuilder::<tauri::Wry, ()>::new("app-context-menu")
                 .js_init_script("document.addEventListener('contextmenu', e => e.preventDefault());")
                 .on_webview_ready(|view| {
+                    // Drawn at the player's text size from its first frame.
+                    text_size::apply(&view);
                     #[cfg(windows)]
                     disable_browser_menu(&view);
-                    #[cfg(not(windows))]
-                    let _ = view;
                 })
                 .build(),
         )
@@ -1932,13 +2022,13 @@ pub fn run() {
                         }
                         let Ok(url) = view.url() else { return };
                         let kryo = is_kryoto(&url, view.app_handle());
-                        let script = BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" });
+                        let script = store_script(kryo);
                         let _ = view.eval(format!("if (document.readyState !== 'loading' && !window.__kryoDesktop && location.href !== 'about:blank') {{ {script} }}"));
                     }
                 });
             } else {
                 let kryo = is_kryoto(payload.url(), webview.app_handle());
-                let _ = webview.eval(BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" }));
+                let _ = webview.eval(store_script(kryo));
                 if kryo {
                     presence::beat(webview.app_handle());
                     if sign_out_is_due() {
@@ -2060,6 +2150,10 @@ pub fn run() {
             chat::chat_account_devices,
             chat::chat_account_device_remove,
             chat::chat_restore,
+            chat::chat_history,
+            chat::chat_history_answer,
+            chat::chat_history_dismiss,
+            chat::chat_history_ask_again,
             chat::chat_reset_identity,
             chat::chat_unlock,
             chat::chat_send_invite,
@@ -2098,6 +2192,7 @@ pub fn run() {
             store_friend_fetch,
             store_friend_done,
             store_set_status,
+            store_set_status_many,
             store_report_play,
             store_report_carry,
             store_report_playing,
@@ -2112,6 +2207,9 @@ pub fn run() {
             settings::settings_get,
             settings::settings_recover,
             settings::settings_save,
+            text_size::text_size_get,
+            text_size::text_size_set,
+            text_size::text_size_step,
             art::art_import,
             custom_sounds::sound_custom_list,
             custom_sounds::sound_custom_set,
@@ -2128,6 +2226,7 @@ pub fn run() {
             library::library_remove,
             library::game_launch,
             achievements::game_achievements,
+            achievements::achievements_turn_on,
             library::game_launch_preview,
             library::game_running,
             library::game_stop,
@@ -2198,7 +2297,10 @@ pub fn run() {
             system::window_state_get,
             pet::pet_menu,
             pet::pet_drag,
+            addons::addons_list,
+            addons::addons_get,
             pet::pet_mascot,
+            pet::pet_size,
             menus::menu_open,
             menus::menu_warm,
             menus::menu_payload,

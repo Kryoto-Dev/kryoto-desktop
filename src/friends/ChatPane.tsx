@@ -52,6 +52,8 @@ import {
   chatFilePreview,
   type FileInfo,
   QUICK_REACTIONS,
+  chatReactionEmoji,
+  chatReactionFor,
   textLimit,
   type ChatMessage,
   type ChatSettings,
@@ -71,6 +73,7 @@ import { cn } from '@/lib/utils'
 import { artSrc } from '@/lib/art'
 import { call } from '@/lib/bridge'
 import { RichText } from '@/rich/RichText'
+import { EmojiGlyph } from '@/rich/EmojiGlyph'
 import { EmojiButton, RichTextarea, editableMentions, storedMentions, withShortcodes, type MentionCandidate } from '@/rich/RichEditor'
 import { plainRich } from '@/rich/rich-text'
 import { mediaRatio, singleMediaWidth } from '@/rich/attachment-layout'
@@ -422,6 +425,11 @@ export function ChatPane({
         if (m.conversationId !== conversationId) return
         setMessages((list) => list.map((x) => (x.msgId === m.msgId ? m : x)))
       }),
+      // Past messages from another of this account's devices (KB-0254).
+      on<{ conversations: string[] }>('chat-history-merged', (h) => {
+        if (!h.conversations.includes(conversationId)) return
+        void chatMessages(peer.id).then((m) => alive && setMessages(m)).catch(() => {})
+      }),
       on<{ conversationId: string; active: boolean }>('chat-typing', (t) => {
         if (t.conversationId !== conversationId) return
         setTyping(t.active)
@@ -539,7 +547,7 @@ export function ChatPane({
   const counter = limit - text.length
 
   return (
-    <section className="grid min-h-0 grid-rows-[auto_1fr_auto]">
+    <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
       <header className={cn('flex items-center justify-between gap-3 border-b border-border py-3', onBack ? 'px-3' : 'px-5')}>
         <div className="flex min-w-0 items-center gap-3">
           {onBack ? (
@@ -708,19 +716,20 @@ export function ChatPane({
                   {m.outgoing && !(group && ['sent', 'delivered', 'read'].includes(m.status)) ? <StatusIcon status={m.status} /> : null}
                 </span>
                 {m.reactions.length > 0 ? (
-                  <span className="flex flex-wrap gap-1">
+                  <span className="flex flex-wrap gap-2">
                     {m.reactions.map((r) => (
                       <button
                         key={r.emoji}
                         type="button"
                         onClick={() => toggleReaction(m, r.emoji)}
                         className={cn(
-                          'kryo-pill border px-1.5 text-xs',
-                          r.userIds.includes(myId) ? 'border-primary' : 'border-border',
+                          'kryo-pill inline-flex h-8 items-center gap-1 border px-2 text-xs tabular-nums',
+                          r.userIds.includes(myId) ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground',
                         )}
-                        aria-label={`${r.emoji} ${r.userIds.length}`}
+                        aria-label={`${chatReactionEmoji(r.emoji) ? `:${chatReactionEmoji(r.emoji)}:` : r.emoji} ${r.userIds.length}`}
                       >
-                        {r.emoji} {r.userIds.length > 1 ? r.userIds.length : ''}
+                        <EmojiGlyph emoji={chatReactionEmoji(r.emoji) ?? r.emoji} size={20} />
+                        {r.userIds.length > 1 ? r.userIds.length : null}
                       </button>
                     ))}
                   </span>
@@ -761,10 +770,12 @@ export function ChatPane({
                 {reactingTo === m.msgId ? (
                   <span className="kryo-pill flex gap-1 border border-border bg-card px-2 py-1">
                     {QUICK_REACTIONS.map((e) => (
-                      <button key={e} type="button" className="text-base" onClick={() => toggleReaction(m, e)} aria-label={`React ${e}`}>
-                        {e}
+                      <button key={e} type="button" className="kryo-radius inline-flex size-8 items-center justify-center text-lg hover:bg-secondary" onClick={() => toggleReaction(m, e)} aria-label={`React ${e}`}>
+                        <span className="kryo-emoji-char">{e}</span>
                       </button>
                     ))}
+                    {/* Everything else, from the same picker as the message box: ours travel as a short code (lib/chat.ts). */}
+                    <EmojiButton standard stickers={false} rank={meRank} align="left" onPick={(token, kind) => toggleReaction(m, kind === 'char' ? token : chatReactionFor(token.slice(1, -1)))} />
                   </span>
                 ) : null}
               </div>
@@ -872,7 +883,7 @@ export function ChatPane({
             </IconButton>
           </div>
         ) : null}
-        <div className="flex items-end gap-2">
+        <div className="flex flex-wrap items-end gap-2">
           <RichTextarea
             ref={box}
             value={text}
@@ -880,7 +891,7 @@ export function ChatPane({
             people={findPeople}
             effects={meSupporter}
             rank={meRank}
-            wrapperClassName="grow"
+            wrapperClassName="min-w-0 flex-[1_1_12rem]"
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
@@ -888,32 +899,34 @@ export function ChatPane({
               }
             }}
             rows={Math.min(6, Math.max(1, text.split('\n').length))}
-            placeholder={`Message ${peer.name}`}
-            aria-label={`Message ${peer.name}`}
-            className="kryo-radius block max-h-40 min-h-9 w-full resize-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-foreground"
+            placeholder="Write a message"
+            aria-label="Write a message"
+            className="kryo-radius block max-h-40 min-h-9 w-full resize-none overflow-y-auto border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-foreground"
           />
-          <EmojiButton rank={meRank} target={box} value={text} onValueChange={onType} onPick={(token) => void sendSticker(token)} />
-          <IconButton
-            label="Send a file (up to 25 MB)"
-            onClick={() =>
-              void chatSendFile(peer.id)
-                .then((m) => m && setMessages((list) => (list.some((x) => x.msgId === m.msgId) ? list : [...list, m])))
-                .catch((e) => setError(errorText(e)))
-            }
-          >
-            <Paperclip className="size-4" />
-          </IconButton>
-          <IconButton label="Invite to a game" onClick={() => setInviting(true)}>
-            <Gamepad2 className="size-4" />
-          </IconButton>
-          {meSupporter ? (
-            <IconButton label="Send a GIF" onClick={() => setGifOpen(true)}>
-              <ImagePlay className="size-4" />
+          <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-end justify-end gap-2">
+            <EmojiButton rank={meRank} target={box} value={text} onValueChange={onType} onPick={(token) => void sendSticker(token)} />
+            <IconButton
+              label="Send a file (up to 25 MB)"
+              onClick={() =>
+                void chatSendFile(peer.id)
+                  .then((m) => m && setMessages((list) => (list.some((x) => x.msgId === m.msgId) ? list : [...list, m])))
+                  .catch((e) => setError(errorText(e)))
+              }
+            >
+              <Paperclip className="size-4" />
             </IconButton>
-          ) : null}
-          <Button variant="primary" size="sm" disabled={!text.trim() || counter < 0} onClick={() => submit()} aria-label="Send">
-            <Send className="size-3" />
-          </Button>
+            <IconButton label="Invite to a game" onClick={() => setInviting(true)}>
+              <Gamepad2 className="size-4" />
+            </IconButton>
+            {meSupporter ? (
+              <IconButton label="Send a GIF" onClick={() => setGifOpen(true)}>
+                <ImagePlay className="size-4" />
+              </IconButton>
+            ) : null}
+            <Button variant="primary" size="sm" disabled={!text.trim() || counter < 0} onClick={() => submit()} aria-label="Send">
+              <Send className="size-3" />
+            </Button>
+          </div>
         </div>
         {counter < 200 ? (
           <Caption className={cn('text-right', counter < 0 && 'text-destructive')}>

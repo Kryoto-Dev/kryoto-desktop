@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { BookOpen, ScrollText } from '@/ui/pixel-icons'
+import { BookOpen, ExternalLink, ScrollText } from '@/ui/pixel-icons'
 import { Button, Modal } from '@/ui'
 import { catalogApiUrl } from '@/lib/endpoint'
-import { useSettings } from '@/lib/settings'
+import { settingsApi, useSettings } from '@/lib/settings'
+import { openExternal } from '@/lib/window'
 import { logWarn } from '@/lib/log'
 import { usePromptTurn } from '@/lib/prompts'
 import { markSeen } from '@/ui/FeatureNotice'
@@ -25,7 +26,7 @@ export type ReleaseIntroData = {
 }
 
 /** Is it a file on kryo.to (played here) rather than a YouTube id? */
-const isFile = (video: string) => video.startsWith('/') || video.startsWith('https://')
+const isFile = (video: string) => video.startsWith('/') || /^https?:\/\//.test(video)
 
 /** Its id in `settings.seenNotices`, which only takes letters, digits and hyphens. */
 export const introId = (version: string = __APP_VERSION__) => `intro-${version.replace(/\./g, '-')}`
@@ -54,9 +55,18 @@ export async function fetchReleaseIntro(version: string = __APP_VERSION__): Prom
  * in its privacy-enhanced player (no cookies until it plays).
  */
 export function IntroVideo({ video, className }: { video: string; className?: string }) {
+  const inline = useInlineVideo()
   return (
     <div className={`kryo-radius aspect-video w-full overflow-hidden border border-border bg-black ${className ?? ''}`}>
-      {isFile(video) ? (
+      {inline === null ? null : !inline ? (
+        <div className="grid size-full place-content-center justify-items-center gap-3 p-6 text-center">
+          <p className="max-w-sm text-xs text-muted-foreground">On Linux, this video plays in your browser.</p>
+          <Button variant="primary" onClick={() => openExternal(isFile(video) ? video : `https://www.youtube.com/watch?v=${video}`)}>
+            <ExternalLink className="size-3" />
+            Watch it in your browser
+          </Button>
+        </div>
+      ) : isFile(video) ? (
         <video src={video} controls autoPlay playsInline preload="metadata" className="size-full" aria-label="Kryoto Desktop introduction video" />
       ) : (
         <iframe
@@ -72,10 +82,48 @@ export function IntroVideo({ video, className }: { video: string; className?: st
   )
 }
 
+/**
+ * Whether a video can play inside the app. Not on Linux: the AppImage carries
+ * GStreamer's core from Ubuntu 22.04 but not its plugins, a newer
+ * distribution's plugins do not load into it, and WebKit's player then ends
+ * the page's process (KB-0259: on Fedora 44 What's new crashed the window
+ * every time it opened, and came back with it). Null until decided.
+ */
+let inlineVideo: Promise<boolean> | null = null
+function useInlineVideo(): boolean | null {
+  const [inline, setInline] = useState<boolean | null>(null)
+  useEffect(() => {
+    let alive = true
+    // Linux: in the browser instead, whichever package (the system WebKit's
+    // codecs vary too); Windows plays it here.
+    inlineVideo ??= Promise.resolve(!/Linux/.test(navigator.userAgent) || /Android/.test(navigator.userAgent))
+    void inlineVideo.then((v) => alive && setInline(v))
+    return () => {
+      alive = false
+    }
+  }, [])
+  return inline
+}
+
+/**
+ * Notices count as seen the moment they show, saved before anything plays: a
+ * window that goes down while one is up (KB-0259) must not open it again.
+ */
+export function markShown(ids: string[]): Promise<void> {
+  return settingsApi
+    .change((latest) => (ids.every((id) => latest.seenNotices.includes(id)) ? latest : { ...latest, seenNotices: [...new Set([...latest.seenNotices, ...ids])] }))
+    .then(
+      () => undefined,
+      (e: unknown) => logWarn('notice', `could not mark ${ids.join(', ')} seen: ${String(e)}`),
+    )
+}
+
 export function ReleaseIntro({ onWeb }: { onWeb: (path: string) => void }) {
   const settings = useSettings()
   const [intro, setIntro] = useState<ReleaseIntroData | null>(null)
   const [closed, setClosed] = useState(false)
+  // Saved as seen once it opens; it stays up until it is closed.
+  const [shown, setShown] = useState(false)
   const id = introId()
   const due = !!settings && settings.welcomed && !settings.seenNotices.includes(id)
 
@@ -90,7 +138,12 @@ export function ReleaseIntro({ onWeb }: { onWeb: (path: string) => void }) {
     }
   }, [due])
 
-  const turn = usePromptTurn('intro', due && !!intro && !closed)
+  const turn = usePromptTurn('intro', (due || shown) && !!intro && !closed)
+  useEffect(() => {
+    if (!turn || shown) return
+    setShown(true)
+    void markShown([id])
+  }, [turn, shown, id])
   if (!intro || !turn) return null
   const close = () => {
     setClosed(true)

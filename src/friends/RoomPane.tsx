@@ -111,7 +111,7 @@ export function RoomPane({
       .catch((e) => setError(errorText(e)))
 
   return (
-    <section className="grid min-h-0 grid-rows-[auto_1fr_auto]">
+    <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
       <header className={cn('flex items-center gap-3 border-b border-border py-3', onBack ? 'px-3' : 'px-5')}>
         {onBack ? (
           <IconButton label="Back to the list" onClick={onBack}>

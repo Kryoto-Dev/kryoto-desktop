@@ -33,7 +33,7 @@ pub fn rect(x: f64, y: f64, width: f64, height: f64, scale: Option<f64>, gtk_sca
     // WebKit's CSS scale can include fractional text/display scaling that
     // GTK's integer widget scale does not. On X11, for example, DPR=1.5
     // with GTK scale=1: using CSS pixels directly shrinks the Store to 2/3.
-    let ratio = crate::placement::css_scale(scale).map_or(1.0, |s| s / f64::from(gtk_scale.max(1)));
+    let ratio = crate::placement::css_scale(scale).map_or_else(crate::text_size::css_to_logical, |s| s / f64::from(gtk_scale.max(1)));
     (
         (x * ratio).round() as i32,
         (y * ratio).round() as i32,
@@ -77,6 +77,14 @@ mod tests {
     fn integer_gtk_scale_is_not_applied_twice() {
         assert_eq!(rect(10.0, 60.0, 800.0, 400.0, Some(2.0), 2), (10, 60, 800, 400));
         assert_eq!(rect(10.0, 60.0, 800.0, 400.0, Some(2.5), 2), (13, 75, 1000, 500));
+    }
+
+    #[test]
+    fn text_zoom_and_fractional_display_scaling_fill_the_same_viewport() {
+        let scale = crate::placement::viewport_scale(1500, Some(800.0));
+        assert_eq!(rect(0.0, 0.0, 800.0, 400.0, scale, 1), (0, 0, 1500, 750));
+        let scale = crate::placement::viewport_scale(2000, Some(800.0));
+        assert_eq!(rect(0.0, 0.0, 800.0, 400.0, scale, 2), (0, 0, 1000, 500));
     }
 
     #[test]

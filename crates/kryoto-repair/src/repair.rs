@@ -207,11 +207,17 @@ fn plan(root: &Path, evidence: &Evidence) -> (Vec<PathBuf>, Vec<PathBuf>) {
         }
         directories.insert(dir.join("plugins"));
         directories.insert(dir.join("steam_settings"));
+        // The achievement list and its icons (`crack_tree`, and `before_launch`
+        // later) and the stats setting: without them Undo left gbe_fork's
+        // folder behind, and the game still read as emulated.
+        directories.insert(dir.join("steam_settings").join(crate::achievements::GBE_IMAGES));
         for name in [
             "steam_appid.txt",
             "steam_interfaces.txt",
             "configs.app.ini",
             "configs.user.ini",
+            "configs.main.ini",
+            crate::achievements::GBE_FILE,
             "account_avatar.png",
             "account_avatar_default.png",
         ] {
@@ -262,10 +268,14 @@ pub async fn apply<F: Fn(&str, Option<u8>) + Send + Sync>(
     let (game, evidence) = identify(&client, &root, trusted_slug).await?;
     progress(&format!("Checking {} compatibility", source.label()), None);
     let dlc = dlcs(&evidence);
+    // A release published DRM-free still has Valve's own dll in place, which
+    // is exactly the original every source reads its interfaces from.
+    let untouched = crack::untouched_steam_api(&root).is_some();
     let mut originals = vec![];
     for dll in &evidence.dlls {
         let original = original(dll, &root)?;
         if original.is_none()
+            && !untouched
             && (source.is_rune()
                 || source == Emulator::GbeFork
                     && !dll

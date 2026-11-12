@@ -190,8 +190,20 @@ pub fn warn(scope: &str, message: &str) {
     write_line("warn", scope, message);
 }
 
+/// The browser's notice that a resize was carried to the next frame
+/// ("ResizeObserver loop completed with undelivered notifications"): no
+/// script failed and nothing was lost. It drowned out real crash reports
+/// (KB-0251: 318 from 143 PCs in half a day), so it stays on this PC.
+fn benign(message: &str) -> bool {
+    message.trim_start().starts_with("ResizeObserver loop")
+}
+
 /// Written to the log, and queued for kryo.to.
 pub fn error(scope: &str, message: &str) {
+    if benign(message) {
+        write_line("warn", scope, message);
+        return;
+    }
     write_line("error", scope, message);
     queue(Entry { at: now(), level: "error".into(), scope: scope.into(), message: message.into() });
 }
@@ -316,6 +328,15 @@ pub async fn logs_send(app: AppHandle) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    /// KB-0251: from any window, however the page words its report.
+    #[test]
+    fn a_resize_carried_to_the_next_frame_is_not_reported() {
+        assert!(super::benign("ResizeObserver loop completed with undelivered notifications. (:0:0)"));
+        assert!(super::benign("ResizeObserver loop limit exceeded"));
+        assert!(!super::benign("TypeError: x is undefined (index.js:1:2)"));
+        assert!(!super::benign("unhandled: ResizeObserver loop in a promise is still a failure of ours"));
+    }
+
     #[test]
     fn reports_never_name_the_players_own_games() {
         super::keep_private(vec![r"D:\Games\Lantern Rite".into(), "Lantern Rite".into(), "ab".into()]);

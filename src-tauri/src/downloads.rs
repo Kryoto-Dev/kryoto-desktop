@@ -119,6 +119,18 @@ pub struct Download {
     /// The release picked under a game's Versions, when it is not the
     /// current one: its version string, recorded on the installed game.
     pub release: Option<String>,
+    /// Added from a game's Add-ons & DLC card (addons.rs `addons_get`): the
+    /// add-on's release id on kryo.to. Its link is minted for that release at
+    /// its turn, and it is an add-on of `game_id` whatever its file is called.
+    pub addon_release: Option<String>,
+    /// `4` or `6`: the address family the link was last minted over, by this
+    /// app or found to pass dl.kryo.to's network check. The download connects
+    /// over the same one, so the two never disagree (KB-0072).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<u8>,
+    /// HatchZip ran out of memory on this archive after eating part of it
+    /// (KB-0264): the next copy is unpacked with 7-Zip.
+    pub unpack_whole: bool,
     /// Place in the queue: the lowest waiting one goes next. Changed by
     /// moving it up or down, or "Download now" (`download_move`).
     pub queue_order: u64,
@@ -743,19 +755,65 @@ pub fn file_name_in_link(url: &str) -> Option<String> {
 /// link was then refused as "made for another network" (88 reports in 0.2.3).
 /// Connecting over the same family as the binding makes the two agree.
 pub fn link_family(url: &str) -> Option<std::net::IpAddr> {
+    let ip = link_claims(url)?["ip"].as_str()?.to_string();
+    Some(if ip.contains(':') {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    } else {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    })
+}
+
+/// The readable part of a `/d/<token>` link. `None` for any other address.
+fn link_claims(url: &str) -> Option<serde_json::Value> {
     let url: url::Url = url.parse().ok()?;
     let mut parts = url.path_segments()?;
     if parts.next()? != "d" {
         return None;
     }
     let body = parts.next()?.split('.').next()?;
-    let json: serde_json::Value = serde_json::from_slice(&base64url(body)?).ok()?;
-    let ip = json["ip"].as_str()?;
-    Some(if ip.contains(':') {
-        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    serde_json::from_slice(&base64url(body)?).ok()
+}
+
+/// Whether a `/d/` link is bound to a network at all. Since 2026-10-27
+/// (KB-0034) the binding is a keyed hash (`ih`) that says nothing about the
+/// family, so `link_family` finds none in it and the family is found by
+/// asking dl.kryo.to (KB-0072).
+fn link_bound(url: &str) -> bool {
+    link_claims(url).is_some_and(|c| c.get("ih").is_some_and(|v| !v.is_null()) || c.get("ip").is_some_and(|v| !v.is_null()))
+}
+
+/// The file a `/d/` link is for (`k`): two links for the same file can
+/// replace each other in a row, two for different files never.
+fn link_file(url: &str) -> Option<String> {
+    link_claims(url)?["k"].as_str().map(String::from)
+}
+
+/// `4` or `6` as the local address to connect from.
+fn family_addr(family: u8) -> std::net::IpAddr {
+    if family == 6 {
+        std::net::Ipv6Addr::UNSPECIFIED.into()
     } else {
-        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-    })
+        std::net::Ipv4Addr::UNSPECIFIED.into()
+    }
+}
+
+/// The families this PC can reach the internet over, IPv6 first: a /64 stays
+/// the same for a whole line, where a carrier's IPv4 can change between two
+/// connections and land in another /24. Nothing is sent: a UDP socket
+/// "connected" to a public address only asks the system for a route.
+pub(crate) fn route_families() -> Vec<u8> {
+    let routes = |bind: &str, to: &str| std::net::UdpSocket::bind(bind).and_then(|s| s.connect(to)).is_ok();
+    let mut out = Vec::new();
+    if routes("[::]:0", "[2606:4700:4700::1111]:53") {
+        out.push(6);
+    }
+    if routes("0.0.0.0:0", "1.1.1.1:53") {
+        out.push(4);
+    }
+    if out.is_empty() {
+        out.push(4);
+    }
+    out
 }
 
 /// Decode unpadded base64url. `None` for anything that is not.
@@ -864,6 +922,8 @@ fn enqueue_item<R: Runtime>(
         if let Some(found) = unfinished_copy(&state, &url, slug.as_deref()) {
             edit(app, &found, |d| {
                 d.url = url.clone();
+                // Minted by the Store, over whichever family it took.
+                d.family = None;
                 d.error = None;
                 take_request(d, release.clone());
             });
@@ -881,6 +941,8 @@ fn enqueue_item<R: Runtime>(
         if let Some(found) = failed_copy(&state, slug.as_deref()).filter(|_| !is_dlc_link(&url)) {
             edit(app, &found, |d| {
                 d.url = url.clone();
+                // Minted by the Store, over whichever family it took.
+                d.family = None;
                 d.error = None;
                 d.sha256 = None;
                 d.verified = false;
@@ -993,6 +1055,90 @@ pub fn enqueue_collection<R: Runtime>(app: &AppHandle<R>, games: &[crate::collec
         start(app.clone(), id.clone());
     }
     Ok(added.len())
+}
+
+/// What a row added from a game's Add-ons & DLC card says when kryo.to wants
+/// the check only its page can pass (a new account, say). The card offers the
+/// game's download window for it.
+pub const ADDON_CHALLENGE: &str = "kryo.to wants a check only its download window can pass for this account. Open the download window to add it there.";
+
+/// One of a game's add-ons, as its Add-ons & DLC card asks for it.
+pub struct AddonRequest {
+    /// The add-on's release id on kryo.to.
+    pub release: String,
+    /// Its label there ("DLC: Firebird", "Japanese language pack").
+    pub label: String,
+    /// kind `repair`: applied under the repair journal (`addons::install_fix`).
+    pub repair: bool,
+    /// Only on mirrors: the page Kryoto downloads it from.
+    pub mirror: Option<Mirror>,
+    pub total: Option<u64>,
+}
+
+/// Queue an add-on for an installed game, straight from its card: no page,
+/// no game to pick. Its link is minted at its turn, like a collection's games,
+/// and it applies to `game` when it lands. Asked again while it is still
+/// going (or after it failed), the same row carries on. Its download id.
+pub fn enqueue_addon<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, req: AddonRequest) -> Result<String, String> {
+    let state = app.state::<Downloads>();
+    let slug = game.slug.clone().ok_or("This game is not from kryo.to.")?;
+    let found = {
+        let list = state.list.lock().map_err(|_| "download list lock poisoned")?;
+        list.iter()
+            .find(|d| d.slug.as_deref() == Some(slug.as_str()) && d.addon_release.as_deref() == Some(req.release.as_str()) && !matches!(d.status, Status::Installed | Status::Canceled))
+            .map(|d| (d.id.clone(), d.status))
+    };
+    if let Some((id, status)) = found {
+        if matches!(status, Status::Failed | Status::Paused) {
+            requeue(app, &id)?;
+        }
+        return Ok(id);
+    }
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let id = format!("dl-{stamp}-addon-{}", req.release);
+    let queue_order = state.list.lock().map(|l| l.iter().map(|d| d.queue_order).max().unwrap_or(0) + 1).unwrap_or(1);
+    // Named as a DLC fetched from the Store is ("Forts DLC - Firebird"), so a
+    // row in Downloads and the side rail says which add-on it is, not only
+    // whose: seven DLC queued at once read as seven rows of the game itself.
+    let title = match req.label.strip_prefix("DLC:").or_else(|| req.label.strip_prefix("dlc:")) {
+        Some(name) => format!("{} DLC - {}", game.title, name.trim()),
+        None => format!("{} - {}", game.title, req.label),
+    };
+    let item = Download {
+        id: id.clone(),
+        queue_order,
+        slug: Some(slug),
+        game_id: Some(game.id.clone()),
+        added_at: now(),
+        total: req.total,
+        addon: Some(req.label),
+        repair: req.repair,
+        addon_release: Some(req.release),
+        mint_at_turn: req.mirror.is_none(),
+        url: req.mirror.as_ref().map(|m| m.page.clone()).unwrap_or_default(),
+        mirror: req.mirror,
+        // The game's own details: a version here means kryo.to is not asked
+        // for the game's page (fill_meta), whose size is not this file's.
+        meta: CatalogMeta {
+            title,
+            cover: game.cover.clone(),
+            hero: game.hero.clone(),
+            version: Some(game.version.clone().unwrap_or_default()),
+            nsfw: game.nsfw,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    state.list.lock().map_err(|_| "download list lock poisoned")?.insert(0, item);
+    if let Err(e) = persist_checked(app) {
+        if let Ok(mut list) = state.list.lock() {
+            list.retain(|d| d.id != id);
+        }
+        return Err(format!("Could not save the download queue: {e}"));
+    }
+    emit(app, true);
+    start(app.clone(), id.clone());
+    Ok(id)
 }
 
 /// Whether a new download asks where to install. Pure, for the tests.
@@ -1587,7 +1733,7 @@ pub fn replaced(json: &serde_json::Value, installed: Option<&str>, release: Opti
 }
 
 fn row_kind(d: &Download, json: Option<&serde_json::Value>) -> FileKind {
-    if is_dlc_link(&d.url) {
+    if d.addon_release.is_some() || is_dlc_link(&d.url) {
         return FileKind::Addon(String::new());
     }
     let file = file_name_in_link(&d.url);
@@ -1600,30 +1746,84 @@ fn row_kind(d: &Download, json: Option<&serde_json::Value>) -> FileKind {
 
 /// A collection's row has reached its turn: its link now, minted for this
 /// PC, or the mirror page when the game is only on mirrors.
+///
+/// Minted over one address family at a time, and the row remembers which
+/// (`family`): the link is bound to that family's network, and the download
+/// then connects over the same one. Left to the system, the mint and the
+/// download could each take a different family, and dl.kryo.to refused the
+/// link as made for another network (KB-0072).
 async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     if d.mirror.is_some() {
         return Ok(());
     }
-    let slug = d.slug.ok_or("This download has no game to ask kryo.to about.")?;
-    match crate::phone::mint(app, &slug, None, true).await {
-        Ok(crate::phone::Minted::Link { url, .. }) => {
-            edit(app, id, |d| d.url = url);
+    let mut unreachable = None;
+    for family in route_families() {
+        let session = crate::phone::session_over(app, Some(family_addr(family)))?;
+        // An add-on from a game's Add-ons & DLC card: that release's own link.
+        let minted = if let Some(release) = &d.addon_release {
+            crate::phone::mint_release(app, &session, release, None).await.map(|url| crate::phone::Minted::Link { url, title: String::new() })
+        } else if let Some(slug) = &d.slug {
+            crate::phone::mint_with(app, &session, slug, None, true).await
+        } else {
+            return Err("This download has no game to ask kryo.to about.".into());
+        };
+        match minted {
+            Ok(crate::phone::Minted::Link { url, .. }) => {
+                edit(app, id, |d| {
+                    d.url = url;
+                    d.family = Some(family);
+                });
+            }
+            Ok(crate::phone::Minted::Mirror { page, .. }) => {
+                let host = crate::resolvers::classify(&page).map(|(_, h)| h.to_string()).unwrap_or_default();
+                edit(app, id, |d| {
+                    d.url = page.clone();
+                    d.mirror = Some(Mirror { page, host });
+                    d.family = None;
+                });
+            }
+            // This family does not reach kryo.to from here: the next one.
+            Err(crate::phone::MintError::Other(e)) if e.starts_with("Could not reach kryo.to") => {
+                unreachable = Some(e);
+                continue;
+            }
+            Err(crate::phone::MintError::Other(e)) => return Err(e),
+            Err(crate::phone::MintError::Challenge) if d.addon_release.is_some() => return Err(ADDON_CHALLENGE.into()),
+            Err(crate::phone::MintError::Challenge) => {
+                return Err(format!("kryo.to wants a check only its page can pass. Press Download on {}'s page, or Retry later.", d.meta.title));
+            }
         }
-        Ok(crate::phone::Minted::Mirror { page, .. }) => {
-            let host = crate::resolvers::classify(&page).map(|(_, h)| h.to_string()).unwrap_or_default();
-            edit(app, id, |d| {
-                d.url = page.clone();
-                d.mirror = Some(Mirror { page, host });
-            });
-        }
-        Err(crate::phone::MintError::Other(e)) => return Err(e),
-        Err(crate::phone::MintError::Challenge) => {
-            return Err(format!("kryo.to wants a check only its page can pass. Press Download on {}'s page, or Retry later.", d.meta.title));
-        }
+        persist(app);
+        return Ok(());
     }
+    Err(unreachable.unwrap_or_else(|| "Could not reach kryo.to.".into()))
+}
+
+/// Our own link refused as made for another network, and neither family
+/// passes: this app mints the same file again for this PC, so the download
+/// carries on without the player. Only a link for the very same file is
+/// taken (a game's newer build is a new download); `false` when there is
+/// none, or kryo.to wants the check only its page can pass.
+async fn remint_same_file<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
+    let Some(before) = edit(app, id, |_| {}) else { return false };
+    let Some(file) = link_file(&before.url) else { return false };
+    if let Err(e) = mint_link(app, id).await {
+        crate::logging::warn("download", &format!("{id}: could not mint the link again: {e}"));
+        return false;
+    }
+    let after = edit(app, id, |_| {});
+    if after.as_ref().and_then(|d| link_file(&d.url)).as_deref() == Some(file.as_str()) {
+        return true;
+    }
+    // Something else came back (a newer build, a mirror): the row stays as it was.
+    edit(app, id, |d| {
+        d.url = before.url.clone();
+        d.mirror = before.mirror.clone();
+        d.family = before.family;
+    });
     persist(app);
-    Ok(())
+    false
 }
 
 async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<(), String> {
@@ -1678,7 +1878,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
     // the resume pass dl.kryo.to hands out with the first range, so a range
     // retried from another network after a drop is not refused.
     if !is_mirror {
-        let family = edit(app, id, |_| {}).and_then(|d| link_family(&d.url));
+        let family = edit(app, id, |_| {}).and_then(|d| d.family.map(family_addr).or_else(|| link_family(&d.url)));
         let mut builder = client_builder().cookie_store(true);
         if let Some(local) = family {
             builder = builder.local_address(local);
@@ -2113,8 +2313,9 @@ async fn fetch_all<R: Runtime>(
                 set_status(app, id, Status::Downloading, None);
             }
             // Our own link refused as made for another network: once, the
-            // other address family is tried (see `foreign_ip_retry`); the
-            // second refusal opens the game's page so one press re-mints it.
+            // family that passes is found, or the link minted again for this
+            // PC (see `foreign_ip_retry`); only when neither works does the
+            // game's page open so one press re-mints it.
             Err(Transfer::Refused(403)) if !is_mirror && !asked_again => {
                 asked_again = true;
                 match foreign_ip_retry(app, id, client).await {
@@ -2232,8 +2433,12 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
         // kryo.to's answer now, whatever an earlier try was told: a hash that
         // was wrong for this file (another build's) must not outlive a Retry.
         d.sha256 = found.sha;
-        d.addon = found.addon;
-        d.repair = found.repair;
+        // Added from its game's card, it is that add-on even when kryo.to's
+        // answer does not name the file (links left out, renamed by a host).
+        if found.addon.is_some() || d.addon_release.is_none() {
+            d.addon = found.addon;
+            d.repair = found.repair;
+        }
         // A build other than the current one, whichever way it was picked:
         // it installs as that build.
         if let Some(v) = found.release {
@@ -2650,28 +2855,60 @@ async fn refusal_reason(client: &reqwest::Client, url: &str) -> Option<String> {
     body["error"].as_str().map(str::to_string)
 }
 
-/// The IP-family mismatch behind "made for another network": kryo.to's page
-/// asked for the link over one family (the token says which), and this
-/// downloader fetches over whichever the system picks. `link_family` already
-/// binds to the token's; when that is still refused (a carrier-grade NAT
-/// handing out a different IPv4 per connection, say), the other family is
-/// tried once - a dual-stack line often agrees on IPv6 where IPv4 wandered.
-/// `None` when the refusal is not that, or there is no other family to try.
+/// The network mismatch behind "made for another network" (KB-0072): the
+/// link is bound to the network that asked for it (a /24 or a /64), and this
+/// downloader connects over whichever address family the system picks, which
+/// need not be the one the Store or the mint used. Links say nothing about
+/// their family any more (`link_bound`), so each family is asked in turn with
+/// a one-byte request, and the one dl.kryo.to lets through is kept for the
+/// row. When neither passes (a carrier that hands out a new IPv4 per
+/// connection, say), the app mints the same file again for this PC and asks
+/// once more. `None` when the refusal is not about the network, or nothing
+/// gets through.
 async fn foreign_ip_retry<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client) -> Option<reqwest::Client> {
     let d = edit(app, id, |_| {})?;
-    let reason = refusal_reason(client, &d.url).await;
-    if reason.as_deref() != Some("foreign_ip") {
+    if refusal_reason(client, &d.url).await.as_deref() != Some("foreign_ip") || !link_bound(&d.url) {
         return None;
     }
-    let bound = link_family(&d.url);
-    let other: std::net::IpAddr = match bound {
-        Some(std::net::IpAddr::V6(_)) => std::net::Ipv4Addr::UNSPECIFIED.into(),
-        Some(std::net::IpAddr::V4(_)) => std::net::Ipv6Addr::UNSPECIFIED.into(),
-        // An unbound link that is still refused: the family was not the reason.
-        None => return None,
-    };
-    crate::logging::warn("download", &format!("{id}: refused as foreign_ip over {bound:?}; trying once over {other}"));
-    client_builder().cookie_store(true).local_address(other).build().ok()
+    if let Some(passing) = passing_family(app, id).await {
+        return Some(passing);
+    }
+    crate::logging::warn("download", &format!("{id}: no address family passes the link's network check; minting it again"));
+    if remint_same_file(app, id).await {
+        return passing_family(app, id).await;
+    }
+    None
+}
+
+/// The order families are asked in: the one on record first, then the
+/// others this PC has a route for.
+fn families_to_probe(recorded: Option<u8>, routes: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = recorded.into_iter().collect();
+    for f in routes.iter().copied().chain([4, 6]) {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// A client over the first family dl.kryo.to accepts the row's link from,
+/// recorded on the row.
+async fn passing_family<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<reqwest::Client> {
+    let d = edit(app, id, |_| {})?;
+    let recorded = d.family.or_else(|| link_family(&d.url).map(|a| if a.is_ipv6() { 6 } else { 4 }));
+    for family in families_to_probe(recorded, &route_families()) {
+        let Ok(client) = client_builder().cookie_store(true).local_address(family_addr(family)).build() else { continue };
+        let probe = client.get(&d.url).header(reqwest::header::RANGE, "bytes=0-0").send();
+        let passes = matches!(tokio::time::timeout(ANSWER_TIMEOUT, probe).await, Ok(Ok(res)) if res.status().is_success());
+        if passes {
+            crate::logging::info("download", &format!("{id}: the link passes over IPv{family}"));
+            edit(app, id, |d| d.family = Some(family));
+            persist(app);
+            return Some(client);
+        }
+    }
+    None
 }
 
 /// Our own link refused for good: the player's words, and - for a link bound
@@ -3459,10 +3696,31 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .unwrap_or_else(|| Path::new(&settings.library_dir).join(plain_name(&title, item.slug.as_deref())));
     // An old repair backup must never restore files over a newer release.
     // Keep the same lock as the fixer through installation and library saving.
-    let _repair_lock = if dest.join(".kryoto-repair").exists() {
+    // The achievements switch is Kryoto's own, not a choice made in Repair:
+    // it comes out here, the release goes in, and it goes back on after.
+    let mut achievements_back = false;
+    let repair_lock = if dest.join(".kryoto-repair").exists() {
         let guard = kryoto_repair::journal::lock(&dest)?;
-        if kryoto_repair::journal::load(&dest)?.is_some_and(|r| r.state != "undone") {
-            return Err("Undo the game's repair under Properties > Repair before installing another release.".into());
+        if let Some(mut record) = kryoto_repair::journal::load(&dest)?.filter(|r| r.state != "undone") {
+            let switch = existing.as_ref().and_then(|g| g.repair.as_ref()).is_some_and(|r| r.achievements);
+            if !switch || record.state != "applied" {
+                return Err("Undo the game's repair under Properties > Repair before installing another release.".into());
+            }
+            record.restore(&dest)?;
+            achievements_back = true;
+            // As Undo leaves it, so a failed install still reads true.
+            if let Some(before) = existing.as_ref() {
+                let _ = library::update(app, |games| {
+                    if let Some(g) = games.iter_mut().find(|g| g.id == before.id) {
+                        if let Some(previous) = g.repair.take() {
+                            g.online = previous.previous_online;
+                            g.source = previous.previous_source;
+                            g.apply_overrides = previous.previous_overrides;
+                        }
+                    }
+                    Ok(())
+                });
+            }
         }
         Some(guard)
     } else {
@@ -3491,7 +3749,8 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     // and eating it would free none: that drive never unpacks in place.
     let same_drive = crate::storage::same_drive(&path_dir(&archive), &parent);
     let short = same_drive && program.is_none() && unpacked.is_some_and(|size| crate::storage::check_room(&parent, size + archive_len, &title).is_err());
-    let in_place = same_drive && program.is_none() && (settings.extract_in_place || short) && (settings.delete_archives || short);
+    let unpack_whole = edit(app, id, |_| {}).is_some_and(|d| d.unpack_whole);
+    let in_place = same_drive && program.is_none() && !unpack_whole && (settings.extract_in_place || short) && (settings.delete_archives || short);
     let hatchzip = if in_place || crate::hatchzip::resumes(&archive) { crate::hatchzip::ensure(app).await } else { None };
     if hatchzip.is_none() {
         if let Some(size) = unpacked {
@@ -3560,6 +3819,9 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             // Half a game is no use to anyone; it goes, without holding up the
             // Pause or Cancel that asked for it. A failed unpack starts over too.
             throw_away(staging_clone.clone());
+        }
+        if unpacked.as_ref().is_err_and(|e| e == HATCHZIP_MEMORY) {
+            edit(&progress_app, &progress_id, |d| d.unpack_whole = true);
         }
         if unpacked.as_ref().is_err_and(|e| e == STOPPED) {
             return Err(STOPPED.into());
@@ -3671,7 +3933,14 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         crate::antivirus::restored(slug);
     }
     let _ = app.emit("library-changed", ());
+    // Installed and saved: the folder is free for Repair again.
+    drop(repair_lock);
+    if achievements_back {
+        let (app, id) = (app.clone(), game.id.clone());
+        tauri::async_runtime::spawn(crate::achievements::turn_back_on(app, id));
+    }
     if settings.notify_downloads {
+        let title = library::title_with_branch(&title, item.meta.steam_branch.as_deref());
         let _ = app.emit(
             "notify",
             match &warning {
@@ -3733,9 +4002,31 @@ fn extract_in_place(
         crate::logging::info("hatchzip", &format!("{title}: unpacking in place, {} needed instead of {}", crate::storage::human_size(plan.required), crate::storage::human_size(plan.standard)));
     }
     std::fs::create_dir_all(staging).map_err(|e| format!("Cannot create {}: {e}", staging.display()))?;
-    hatchzip::extract(tool, archive, staging, hatchzip::KEEP_FREE, unpacked, progress, stop).map_err(explain)?;
-    Ok(Some(()))
+    let whole = std::fs::metadata(archive).map(|m| m.len()).ok();
+    match hatchzip::extract(tool, archive, staging, hatchzip::KEEP_FREE, unpacked, progress, stop) {
+        Ok(()) => Ok(Some(())),
+        // HatchZip could not get the memory a block's dictionary needs
+        // (KB-0264, Baldur's Gate 3). 7-Zip unpacks one block at a time and
+        // can: it takes over while the archive is still whole.
+        Err(Failure::Other(text)) if hatchzip::out_of_memory(&text) => {
+            hatchzip::forget(archive);
+            let untouched = !resuming && whole.is_some() && std::fs::metadata(archive).map(|m| m.len()).ok() == whole;
+            crate::logging::warn("hatchzip", &format!("{title}: {}; 7-Zip instead (archive whole: {untouched})", first_line(&text)));
+            if untouched {
+                let _ = std::fs::remove_dir_all(staging);
+                return Ok(None);
+            }
+            // Partly eaten already: only a fresh copy can be unpacked now.
+            let _ = std::fs::remove_file(archive);
+            Err(HATCHZIP_MEMORY.into())
+        }
+        Err(f) => Err(explain(f)),
+    }
 }
+
+/// An unpack in place that ran out of memory after it had eaten part of the
+/// archive. The row then never unpacks in place again (`unpack_whole`).
+const HATCHZIP_MEMORY: &str = "Unpacking in place needed more memory than this PC could give, so this game is unpacked with 7-Zip instead. Retry downloads it again.";
 
 fn first_line(text: &str) -> String {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no details");
@@ -4794,6 +5085,33 @@ mod tests {
         // No binding (a mirror or preview link): nothing to match.
         let none = "https://dl.kryo.to/d/eyJrIjoiYS9iIiwiZXhwIjoxLCJuIjoiSGFkZXMgSUkgLSBLcnlvdG8uN3oifQ.c2ln";
         assert_eq!(link_family(none), None);
+    }
+
+    /// KB-0072: links minted since 2026-10-27 carry a hashed binding (`ih`)
+    /// with no family in it. They still read as bound, so a refusal finds the
+    /// family that passes instead of giving up; and a link minted again is
+    /// only taken for the same file.
+    #[test]
+    fn a_hashed_network_binding_is_still_a_binding() {
+        let hashed = "https://dl.kryo.to/d/eyJrIjoiZ2FtZXMvYmczLzEvYmczLjd6IiwiZXhwIjoxNzkwODE3NDk3LCJuIjoiQmFsZHVyJ3MgR2F0ZSAzLjd6IiwiaWgiOiJxMXcyZTNyNHQ1eTZ1N2k4bzlwMGFhIn0.sig";
+        assert!(link_bound(hashed));
+        assert_eq!(link_family(hashed), None, "the hash says nothing about the family");
+        assert_eq!(link_file(hashed).as_deref(), Some("games/bg3/1/bg3.7z"));
+        let legacy = "https://dl.kryo.to/d/eyJrIjoiMnQvMnRWNFJOM2FmNkxNME43eS43eiIsImV4cCI6MTc5MDgxNzQ5NywibiI6IkJhbGR1cidzIEdhdGUgMy43eiIsImlwIjoiMTEzLjIwMy40OS4wLzI0In0.sig";
+        assert!(link_bound(legacy));
+        let mirror = "https://dl.kryo.to/d/eyJrIjoiYS9iIiwiZXhwIjoxLCJuIjoiSGFkZXMgSUkgLSBLcnlvdG8uN3oifQ.c2ln";
+        assert!(!link_bound(mirror));
+        assert!(!link_bound("https://example.com/file.7z"));
+    }
+
+    #[test]
+    fn the_family_on_record_is_asked_first_then_every_other() {
+        assert_eq!(families_to_probe(None, &[6, 4]), [6, 4]);
+        assert_eq!(families_to_probe(Some(4), &[6, 4]), [4, 6]);
+        // No IPv6 route: still asked, last (a route check can be wrong).
+        assert_eq!(families_to_probe(None, &[4]), [4, 6]);
+        assert_eq!(family_addr(6), std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
+        assert_eq!(family_addr(4), std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     }
 
     #[test]

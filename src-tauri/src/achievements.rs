@@ -200,17 +200,37 @@ pub struct GameAchievements {
     pub list: Vec<GameAchievement>,
     pub tracking: Tracking,
     pub emulator: Option<String>,
+    /// How many achievements Steam lists for the game. The same as `total`
+    /// while they are tracked; for a `Fixable` game, what turning them on gives.
+    pub available: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Tracking { Supported, Unsupported, Unknown }
+pub enum Tracking {
+    Supported,
+    Unsupported,
+    Unknown,
+    /// Published DRM-free: Valve's own Steam dll, no emulator. It records
+    /// nothing until the achievements switch puts gbe_fork in its place.
+    Fixable,
+    /// No Steam dll at all, so nothing in the game can report one.
+    Absent,
+}
+
+impl Tracking {
+    /// Whether this game's own saves can hold unlocks to read.
+    pub fn records(self) -> bool {
+        matches!(self, Tracking::Supported | Tracking::Unknown)
+    }
+}
 
 fn named_tracking(source: &str) -> (Tracking, Option<String>) {
     let name: String = source.chars().filter(|c| c.is_ascii_alphanumeric()).flat_map(char::to_lowercase).collect();
     let emulator = if name.contains("kryotoonline") || name.ends_with("kryotoo") {
         return (Tracking::Unsupported, Some("Kryoto Online".into()));
-    } else if name.contains("gbefork") || name.contains("goldberg") {
+    // gbe_fork's own dll calls itself "GSE Client API".
+    } else if name.contains("gbefork") || name.contains("goldberg") || name.starts_with("gseclient") {
         "gbe_fork / Goldberg"
     } else if name.contains("empress") {
         "EMPRESS"
@@ -271,7 +291,20 @@ pub(crate) fn tracking_of(game: &LibraryGame) -> (Tracking, Option<String>) {
             if known.0 == Tracking::Supported { supported = Some(known); }
         }
     }
-    supported.unwrap_or_else(|| metadata_tracking(game))
+    let found = supported.unwrap_or_else(|| metadata_tracking(game));
+    if found.0 == Tracking::Supported || found.1.as_deref() == Some("Kryoto Online") || game.launcher.is_some() {
+        return found;
+    }
+    // A release published DRM-free names no emulator, so the label alone
+    // cannot say whether anything can be done; the files can.
+    let dir = Path::new(&game.install_dir);
+    if game.slug.is_some() && kryoto_repair::crack::untouched_steam_api(dir).is_some() {
+        return (Tracking::Fixable, None);
+    }
+    if found.0 == Tracking::Unsupported && kryoto_repair::crack::find_steam_api_dlls(dir).is_empty() {
+        return (Tracking::Absent, None);
+    }
+    found
 }
 
 /// The list with what is unlocked. Unlocks the list does not name (a game
@@ -291,7 +324,62 @@ pub fn merge(list: Vec<Achievement>, unlocks: &[Unlock]) -> GameAchievements {
         })
     });
     let unlocked = out.iter().filter(|a| a.unlocked).count();
-    GameAchievements { appid: None, total: out.len(), unlocked, list: out, tracking: Tracking::Unknown, emulator: None }
+    GameAchievements { appid: None, total: out.len(), unlocked, list: out, tracking: Tracking::Unknown, emulator: None, available: 0 }
+        .counted()
+}
+
+impl GameAchievements {
+    fn counted(mut self) -> Self {
+        self.available = self.total;
+        self
+    }
+
+    /// Nothing to list: the game records none, or none this app can read.
+    fn none(appid: Option<String>, tracking: Tracking, emulator: Option<String>, available: usize) -> Self {
+        GameAchievements { appid, total: 0, unlocked: 0, list: Vec::new(), tracking, emulator, available }
+    }
+}
+
+/// The game's Steam AppID: what its files say, else what kryo.to lists for it.
+/// A release published DRM-free has no emulator file to say it.
+async fn appid_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<String> {
+    if let Some(id) = appid_of(Path::new(&game.install_dir)) {
+        return Some(id);
+    }
+    let slug = game.slug.as_deref()?;
+    let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(app));
+    let res = client().get(format!("{endpoint}/api/games/{slug}")).timeout(Duration::from_secs(15)).send().await.ok()?;
+    let json: serde_json::Value = res.error_for_status().ok()?.json().await.ok()?;
+    let id: String = json["game"]["steam_appid"].as_str()?.chars().take_while(char::is_ascii_digit).collect();
+    (!id.is_empty() && id != "480").then_some(id)
+}
+
+/// The achievements switch: a game published DRM-free gets Kryoto's Steam
+/// emulator in place of Valve's dll, through Repair (backed up, undone under
+/// Properties > Repair), so its achievements unlock and show like any other
+/// game's. The list goes in before the first start (`crack_tree`, and
+/// `before_launch` after it), so gbe_fork keeps every unlock.
+#[tauri::command]
+pub async fn achievements_turn_on(app: AppHandle, id: String) -> Result<(), String> {
+    let game = crate::library::load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
+    if tracking_of(&game).0 != Tracking::Fixable {
+        return Err("This game's files changed. Reopen its page and try again.".into());
+    }
+    crate::repair::apply(&app, &id, kryoto_repair::settings::Emulator::GbeFork, true).await.map(|_| ())
+}
+
+/// After an update replaced a game whose achievements were switched on: put
+/// the switch back on the new files, when they still need it. A newer release
+/// that ships its own emulator needs nothing; a failure leaves the button.
+pub async fn turn_back_on<R: Runtime>(app: AppHandle<R>, id: String) {
+    let Some(game) = crate::library::load(&app).ok().and_then(|all| all.into_iter().find(|g| g.id == id)) else { return };
+    if tracking_of(&game).0 != Tracking::Fixable {
+        return;
+    }
+    match crate::repair::apply(&app, &id, kryoto_repair::settings::Emulator::GbeFork, true).await {
+        Ok(_) => crate::logging::info("achievements", &format!("{}: achievements switched back on after the update", game.title)),
+        Err(e) => crate::logging::warn("achievements", &format!("{}: achievements could not be switched back on: {e}", game.title)),
+    }
 }
 
 #[tauri::command]
@@ -304,9 +392,21 @@ pub async fn game_achievements(app: AppHandle, id: String) -> Result<GameAchieve
         return Ok(out);
     }
     let (tracking, emulator) = tracking_of(&game);
+    if tracking == Tracking::Absent {
+        return Ok(GameAchievements::none(None, tracking, emulator, 0));
+    }
+    if tracking == Tracking::Fixable {
+        // Only worth a word when Steam lists some.
+        let appid = appid_for(&app, &game).await;
+        let available = match &appid {
+            Some(id) => schema(&app, id).await.len(),
+            None => 0,
+        };
+        return Ok(GameAchievements::none(appid, tracking, emulator, available));
+    }
     let appid = appid_of(Path::new(&game.install_dir));
     if tracking == Tracking::Unsupported || appid.is_none() {
-        return Ok(GameAchievements { appid, total: 0, unlocked: 0, list: Vec::new(), tracking, emulator });
+        return Ok(GameAchievements::none(appid, tracking, emulator, 0));
     }
     let appid = appid.unwrap();
     let list = schema(&app, &appid).await;
@@ -395,7 +495,7 @@ mod tests {
 
     #[test]
     fn rune_profiles_and_gbe_are_supported_but_kryoto_online_is_not() {
-        for source in ["Steam + gbe_fork", "GBE-Fork", "Goldberg", "Steam + RUNE", "RUNE (Steakclient)", "RUNE (Steamclient)", "CODEX", "Online-Fix", "OFME"] {
+        for source in ["Steam + gbe_fork", "GBE-Fork", "Goldberg", "GSE Client API", "Steam + RUNE", "RUNE (Steakclient)", "RUNE (Steamclient)", "CODEX", "Online-Fix", "OFME"] {
             assert_eq!(named_tracking(source).0, Tracking::Supported, "{source}");
         }
         for source in ["Steam + Kryoto Online", "kryoto-online", "KryotoO"] {
@@ -458,29 +558,68 @@ mod tests {
         assert_eq!(metadata_tracking(&game).0, Tracking::Unsupported);
     }
 
+    /// A PE whose version resource names `product`, the way `peversion` reads it.
+    fn write_dll(path: &Path, product: &str) {
+        let key: Vec<u8> = "ProductName\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let value: Vec<u8> = format!("{product}\0").encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let value_at = (6 + key.len() + 3) & !3;
+        let size = value_at + value.len();
+        let mut bytes = vec![0u8; 0x200 + size];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+        bytes[0x98..0x9d].copy_from_slice(b".rsrc");
+        bytes[0xa8..0xac].copy_from_slice(&(size as u32).to_le_bytes());
+        bytes[0xac..0xb0].copy_from_slice(&0x200u32.to_le_bytes());
+        bytes[0x200..0x202].copy_from_slice(&(size as u16).to_le_bytes());
+        bytes[0x202..0x204].copy_from_slice(&(value.len() as u16 / 2).to_le_bytes());
+        bytes[0x204..0x206].copy_from_slice(&1u16.to_le_bytes());
+        bytes[0x206..0x206 + key.len()].copy_from_slice(&key);
+        bytes[0x200 + value_at..].copy_from_slice(&value);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// GTA San Andreas is published "Steam (DRM-free)" with no Steam dll: no
+    /// card. One that ships Valve's dll gets the switch; after it, the label
+    /// Repair leaves says gbe_fork and the list shows as for any game.
+    #[test]
+    fn a_drm_free_release_is_read_by_its_files() {
+        let dir = std::env::temp_dir().join(format!("kry-ach-drmfree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut game = LibraryGame {
+            install_dir: dir.to_string_lossy().into(),
+            slug: Some("grand-theft-auto-san-andreas".into()),
+            source: Some("Steam (DRM-free)".into()),
+            ..Default::default()
+        };
+        assert_eq!(tracking_of(&game), (Tracking::Absent, None));
+        assert!(!Tracking::Absent.records());
+
+        write_dll(&dir.join("bin/steam_api64.dll"), "Steam Client API");
+        assert_eq!(tracking_of(&game), (Tracking::Fixable, None));
+        assert!(!Tracking::Fixable.records());
+        // Without a Kryoto page Repair cannot check the game: no button.
+        game.slug = None;
+        assert_eq!(tracking_of(&game).0, Tracking::Unsupported);
+        game.slug = Some("x".into());
+        // Steam's own install, only listed here, is Steam's to keep.
+        game.launcher = Some("steam".into());
+        assert_ne!(tracking_of(&game).0, Tracking::Fixable);
+        game.launcher = None;
+
+        // What the switch leaves: gbe_fork's dll and Repair's record.
+        write_dll(&dir.join("bin/steam_api64.dll"), "GSE Client API");
+        game.repair = Some(crate::repair::LocalRepair { source: "gbe_fork".into(), achievements: true, ..Default::default() });
+        game.source = Some("Steam + gbe_fork".into());
+        assert_eq!(tracking_of(&game).0, Tracking::Supported);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn active_dll_identity_overrides_stale_labels_and_ignores_repair_backups() {
-        fn write_dll(path: &Path, product: &str) {
-            let key: Vec<u8> = "ProductName\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
-            let value: Vec<u8> = format!("{product}\0").encode_utf16().flat_map(u16::to_le_bytes).collect();
-            let value_at = (6 + key.len() + 3) & !3;
-            let size = value_at + value.len();
-            let mut bytes = vec![0u8; 0x200 + size];
-            bytes[..2].copy_from_slice(b"MZ");
-            bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-            bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
-            bytes[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
-            bytes[0x98..0x9d].copy_from_slice(b".rsrc");
-            bytes[0xa8..0xac].copy_from_slice(&(size as u32).to_le_bytes());
-            bytes[0xac..0xb0].copy_from_slice(&0x200u32.to_le_bytes());
-            bytes[0x200..0x202].copy_from_slice(&(size as u16).to_le_bytes());
-            bytes[0x202..0x204].copy_from_slice(&(value.len() as u16 / 2).to_le_bytes());
-            bytes[0x204..0x206].copy_from_slice(&1u16.to_le_bytes());
-            bytes[0x206..0x206 + key.len()].copy_from_slice(&key);
-            bytes[0x200 + value_at..].copy_from_slice(&value);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, bytes).unwrap();
-        }
         let dir = std::env::temp_dir().join(format!("kry-ach-tracking-{}", std::process::id()));
         let game = LibraryGame { install_dir: dir.to_string_lossy().into(), source: Some("Steam + RUNE".into()), ..Default::default() };
         let dll = dir.join("bin/steam_api64.dll");

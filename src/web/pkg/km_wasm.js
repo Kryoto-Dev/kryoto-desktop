@@ -213,6 +213,67 @@ export class Kryo {
         return v2;
     }
     /**
+     * This device's history (stored rows, JSON) cut into the bodies of the
+     * chunks that carry it to another device: `[{type:"historyChunk",...}]`.
+     * @param {string} transfer_id
+     * @param {string} rows
+     * @param {string} groups
+     * @returns {string}
+     */
+    historyChunks(transfer_id, rows, groups) {
+        let deferred5_0;
+        let deferred5_1;
+        try {
+            const ptr0 = passStringToWasm0(transfer_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(rows, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(groups, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ret = wasm.kryo_historyChunks(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            var ptr4 = ret[0];
+            var len4 = ret[1];
+            if (ret[3]) {
+                ptr4 = 0; len4 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred5_0 = ptr4;
+            deferred5_1 = len4;
+            return getStringFromWasm0(ptr4, len4);
+        } finally {
+            wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+        }
+    }
+    /**
+     * Received history rows against the stored ones with the same ids:
+     * the rows to write (new or completed), each once, oldest first.
+     * @param {string} incoming
+     * @param {string} stored
+     * @returns {string}
+     */
+    historyMerge(incoming, stored) {
+        let deferred4_0;
+        let deferred4_1;
+        try {
+            const ptr0 = passStringToWasm0(incoming, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(stored, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.kryo_historyMerge(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var ptr3 = ret[0];
+            var len3 = ret[1];
+            if (ret[3]) {
+                ptr3 = 0; len3 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred4_0 = ptr3;
+            deferred4_1 = len3;
+            return getStringFromWasm0(ptr3, len3);
+        } finally {
+            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+        }
+    }
+    /**
      * @param {string} user_id
      * @returns {number}
      */
@@ -221,6 +282,17 @@ export class Kryo {
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.kryo_knownDevices(this.__wbg_ptr, ptr0, len0);
         return ret;
+    }
+    /**
+     * Whether one of this account's own devices is known (checked) here.
+     * @param {string} device_id
+     * @returns {boolean}
+     */
+    knowsOwnDevice(device_id) {
+        const ptr0 = passStringToWasm0(device_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.kryo_knowsOwnDevice(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
     }
     /**
      * @param {string} peer
@@ -424,6 +496,32 @@ export class Kryo {
         var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v2;
+    }
+    /**
+     * Like `sendFrame`, but to one device of one user only (history goes to
+     * the one device that asked for it). Throws "nothing to send" if that
+     * device is not known or cannot be reached.
+     * @param {number} request_id
+     * @param {string} content
+     * @param {string} user_id
+     * @param {string} device_id
+     * @param {boolean} ephemeral
+     * @returns {Uint8Array}
+     */
+    sendFrameTo(request_id, content, user_id, device_id, ephemeral) {
+        const ptr0 = passStringToWasm0(content, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(user_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(device_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.kryo_sendFrameTo(this.__wbg_ptr, request_id, ptr0, len0, ptr1, len1, ptr2, len2, ephemeral);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v4;
     }
     /**
      * Encrypt `content` (JSON) for every known device of `users` (JSON array
