@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FolderOpen, HardDrive, HeartHandshake, Pause, Play, RotateCw, ShieldAlert, X } from '@/ui/pixel-icons'
+import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FolderOpen, HardDrive, HeartHandshake, Moon, Pause, Play, Power, RotateCw, ShieldAlert, X } from '@/ui/pixel-icons'
 import { settingsApi, useSettings } from '@/lib/settings'
 import { HatchZipExplainer } from '@/ui/FeatureNotice'
-import { AsciiBar, AsciiSpark, Busy, Button, Caption, IconButton, Label, Matrix, Stat, type MatrixState } from '@/ui'
-import { downloads as api, formatBytes, formatEta, formatLeft, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
+import { AsciiBar, AsciiSpark, Busy, Button, Caption, Dropdown, IconButton, Label, Matrix, Stat, type MatrixState } from '@/ui'
+import { downloads as api, formatBytes, formatClock, formatEta, formatLeft, formatTook, isActive, isWorking, phaseOf, progressOf, useWhenDone, type Download as Dl, type WhenDone } from '@/lib/downloads'
 import { Art } from '@/library/Art'
 import { capsulesFor, library } from '@/lib/library'
 import { getRelease, useReleases } from '@/library/Versions'
@@ -55,6 +55,9 @@ export function DownloadsPage({
   const done = list.filter((d) => d.status === 'installed' || d.status === 'canceled')
   const stopped = waiting.filter((d) => d.status === 'paused' || d.status === 'failed')
   const [allDone, setAllDone] = useState(false)
+  const whenDone = useWhenDone()
+  // Only offered while there is something to wait for, or once it is picked.
+  const queueGoing = Boolean(current) || waiting.some((d) => d.status === 'queued')
 
   if (!list.length && (loading || error)) {
     return <EmptyState art={INBOX} title={error ? 'Downloads unavailable' : 'Loading downloads'} body={error ?? 'Getting your download list.'}>
@@ -76,7 +79,9 @@ export function DownloadsPage({
       {error ? <div role="alert" className="flex items-center gap-3 text-xs text-destructive"><p>{error}</p><Button size="sm" onClick={onRetry}>Retry</Button></div> : null}
       {listError ? <p role="alert" className="text-xs text-destructive">{listError}</p> : null}
       {onDonate ? <Donate onDonate={onDonate} /> : null}
+      {whenDone.at ? <Countdown state={whenDone} onError={setListError} /> : null}
       {current ? <Current d={current} open={openFor(current, onOpenGame, onOpenCatalog)} /> : null}
+      {(queueGoing || whenDone.action) && !whenDone.at ? <WhenFinished state={whenDone} onError={setListError} /> : null}
       {waiting.length ? (
         <section className="grid gap-3">
           <div className="flex items-center justify-between gap-3">
@@ -129,6 +134,63 @@ export function DownloadsPage({
         </section>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * "When downloads finish": nothing, sleep or shut down (suggestion #81). For
+ * this queue only: it applies once everything is done, and is never saved.
+ */
+function WhenFinished({ state, onError }: { state: WhenDone; onError: (e: string | null) => void }) {
+  return (
+    <div className="flex items-center justify-end gap-3">
+      <Caption>When downloads finish</Caption>
+      <Dropdown
+        size="sm"
+        className="w-40"
+        label="When downloads finish"
+        emphasis={Boolean(state.action)}
+        value={state.action ?? 'nothing'}
+        options={[
+          { value: 'nothing', label: 'Do nothing' },
+          { value: 'sleep', label: 'Sleep' },
+          { value: 'shutdown', label: 'Shut down' },
+        ]}
+        onChange={(v) => {
+          onError(null)
+          void api.whenDone(v === 'nothing' ? null : v).catch((e: unknown) => onError(errorText(e)))
+        }}
+      />
+    </div>
+  )
+}
+
+/** The minute between the last download finishing and the PC going: Cancel is right here. */
+function Countdown({ state, onError }: { state: WhenDone; onError: (e: string | null) => void }) {
+  const [now, setNow] = useState(() => Date.now() / 1000)
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now() / 1000), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const left = Math.max(0, Math.ceil((state.at ?? 0) - now))
+  const Icon = state.action === 'sleep' ? Moon : Power
+  return (
+    <section role="alert" className="kryo-radius flex items-center gap-4 border border-warning/50 bg-warning/10 px-4 py-3">
+      <Icon className="size-5 shrink-0 text-warning" aria-hidden />
+      <p className="grow text-xs leading-relaxed text-foreground">
+        Downloads finished. {state.action === 'sleep' ? 'Going to sleep' : 'Shutting down'} in {left} s.
+      </p>
+      <Button
+        size="sm"
+        variant="primary"
+        onClick={() => {
+          onError(null)
+          void api.whenDone(null).catch((e: unknown) => onError(errorText(e)))
+        }}
+      >
+        Cancel
+      </Button>
+    </section>
   )
 }
 
@@ -340,6 +402,9 @@ function Current({ d, open }: { d: Dl; open: (() => void) | null }) {
               {d.addon ? ` · ${d.addon}` : ''}
               {d.mirror && d.status !== 'resolving' ? ` · from ${d.mirror.host}` : ''}
               {d.release ? ` · build ${d.release}` : ''}
+              {/* When each part began, for looking into a slow one (KB-0306). */}
+              {d.startedAt ? ` · started ${formatClock(d.startedAt)}` : ''}
+              {d.status === 'extracting' && d.unpackStartedAt ? ` · unpacking since ${formatClock(d.unpackStartedAt)}` : ''}
             </Caption>
             <h2 className="flex min-w-0 items-center gap-2 text-xl font-bold text-foreground">
               <span className="truncate">{d.meta.title}</span>
@@ -424,7 +489,9 @@ function Row({
   const { pending, failed, run, attempt } = usePending(d)
   const status =
     d.status === 'installed'
-      ? `Installed${d.finishedAt ? ` ${new Date(d.finishedAt * 1000).toLocaleDateString()}` : ''}`
+      ? `Installed${d.finishedAt ? ` ${new Date(d.finishedAt * 1000).toLocaleDateString()}` : ''}${
+          d.finishedAt && d.startedAt && d.finishedAt >= d.startedAt ? ` · took ${formatTook(d.finishedAt - d.startedAt)}` : ''
+        }`
       : d.status === 'canceled'
         ? 'Cancelled'
         : d.status === 'failed'

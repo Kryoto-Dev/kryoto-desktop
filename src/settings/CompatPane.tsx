@@ -90,9 +90,16 @@ export function ProtonSection({
 
   useEffect(refresh, [refresh])
   useEffect(() => {
+    // Gone before the listener is set up: it is taken down as it arrives.
     let off: (() => void) | undefined
-    void on<Progress>('compat-progress', (p) => setBusy(p)).then((fn) => (off = fn))
-    return () => off?.()
+    let cancelled = false
+    void on<Progress>('compat-progress', (p) => !cancelled && setBusy(p))
+      .then((fn) => (cancelled ? fn() : (off = fn)))
+      .catch(() => {})
+    return () => {
+      cancelled = true
+      off?.()
+    }
   }, [])
 
   const install = async () => {

@@ -9,6 +9,7 @@
  */
 
 import { PREVIEW_FRIENDS, type FriendsState } from '@/hooks/useFriends'
+import type { WhenDone } from '@/lib/downloads'
 
 type Handler = (p: unknown) => void
 const listeners = new Map<string, Set<Handler>>()
@@ -1045,7 +1046,16 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     previewBus.emit('downloads', clone(downloadList))
     return null
   },
+  // The preview never sleeps or shuts anything down: it only remembers the choice.
+  downloads_when_done: (a) => {
+    whenDone = { action: (a.action as WhenDone['action']) ?? null, at: null }
+    previewBus.emit('downloads-when-done', whenDone)
+    return whenDone
+  },
+  downloads_when_done_get: () => whenDone,
 }
+
+let whenDone: WhenDone = { action: null, at: null }
 
 /**
  * Controllers: a DualSense SDL knows, and a SteelSeries pad it does not (as

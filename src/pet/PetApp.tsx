@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { emit } from '@tauri-apps/api/event'
 import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window'
 import { call, on } from '@/lib/bridge'
-import type { Download, Notice } from '@/lib/downloads'
+import { progressOf, type Download, type Notice } from '@/lib/downloads'
 import { isOnline, onOnlineChange } from '@/lib/online'
 import type { MascotId, ThemeId } from '@/pet/engine'
 import { Stage, petDetector } from '@/pet/stage'
+import { workingPose } from '@/pet/working-pose'
 import { PET_SIZES, type PetSize } from '@/lib/settings'
 
 type Look = { palette: string; dark: boolean; reducedMotion: boolean }
@@ -99,15 +100,18 @@ export function PetApp() {
         }
         const active = list.find((d) => ACTIVE.has(d.status))
         if (active) {
-          progress =
-            active.status === 'extracting' && active.extractTotal
-              ? active.extracted / active.extractTotal
-              : active.total
-                ? active.received / active.total
-                : 0
+          // The Downloads page's own split (fetching, checking, unpacking).
+          // Checking and unpacking used to read the fetched bytes, 100%, so
+          // a big game held the "arrived" pose for minutes (KB-0307).
+          progress = progressOf(active)
           if (!downloading) {
             downloading = true
-            task = () => stage.play('download', { loop: true, progress: () => progress })
+            task = () =>
+              stage.play('download', {
+                loop: true,
+                progress: () => workingPose(progress).progress,
+                pose: () => workingPose(progress).pose,
+              })
             stage.busy = true
             if (!held) task()
           }

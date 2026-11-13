@@ -1,6 +1,6 @@
 [package]
 name = "kryoto-desktop"
-version = "0.3.6"
+version = "0.3.7"
 description = "Kryoto's native desktop launcher shell."
 authors = ["Kryoto"]
 license = "MIT"
@@ -29,7 +29,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 url = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "cookies", "http2"] }
 tokio = { version = "1", features = ["sync", "fs", "io-util", "time", "net", "macros"] }
 futures-util = "0.3"
 sevenz-rust = "0.6"
@@ -88,7 +88,7 @@ dev-plain-chat-store = ["km-store-sqlcipher/plain-sqlite-dev"]
 vigem-client = { version = "0.1", features = ["unstable_xtarget_notification"] }
 webview2-com = "0.39"
 windows = { version = "0.62", default-features = false }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_Etw", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_Com", "Win32_System_Diagnostics_Etw", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Two pads at once, tested with virtual DualShock 4s (pad_games.rs).

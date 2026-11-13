@@ -36,6 +36,22 @@
 //! good, which is what made the Store's home page crawl at 20 fps (KB-0012).
 //! Environment variables the user sets always win.
 //!
+//! Only a start that is going to show the window arms the marker (KB-0311).
+//! Up to 0.3.6 every start wrote it before asking whether Kryoto was already
+//! running, so a second launch (the app icon again, a `kryoto://` link, an
+//! update's relaunch) left it behind for a window it never had. The next start
+//! took that for a failed one and saved Compatible, which draws every frame on
+//! the CPU, for good, and Settings called it "as chosen": the Store lagged and
+//! the fans spun on any machine that had ever been started twice, while a fresh
+//! install, a tester's machine or a clean WSL run never showed it. 0.3.7 arms
+//! the marker after the instance check and not for a start to the tray, and
+//! gives every saved Compatible one more start on the GPU (`migrate_v4`).
+//!
+//! A view whose renderer keeps crashing before its page ever loads (KB-0310)
+//! is a start that cannot draw: after the third crash in a row the app saves
+//! Compatible and restarts itself in it; if it was already drawing on the CPU
+//! it stops reloading and says what is wrong instead of animating forever.
+//!
 //! The decision is a pure function (`plan`) so it is tested on every
 //! platform; only reading the machine and setting the variables is Linux.
 
@@ -153,6 +169,50 @@ pub fn read_markers(never_drew: bool, renderer_crashed: bool, dmabuf_failed: boo
     (never_drew, dmabuf_failed || renderer_crashed)
 }
 
+/// Set in the environment of a copy that the app started to replace itself
+/// (`watch_crashes`): its instance check waits for the old copy's port
+/// (system.rs), and it never restarts itself a second time.
+pub const RELAUNCHED: &str = "KRYOTO_RELAUNCHED";
+
+/// Whether this start should leave the "did it draw?" marker. Only a start
+/// that shows its window can remove it: a copy that hands over to the one
+/// already running, or a start to the tray, never draws (KB-0311).
+pub fn arms_probe(first_copy: bool, to_tray: bool) -> bool {
+    first_copy && !to_tray
+}
+
+/// What a view's renderer crash leads to (`watch_crashes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashStep {
+    /// Load the page again.
+    Reload,
+    /// A crash soon after the last reload, of a page that had loaded: leave
+    /// it (as before 0.3.7), so a page that crashes on something it plays
+    /// does not spin.
+    Leave,
+    /// The page cannot load at all: start again drawing on the CPU.
+    RestartCompatible,
+    /// It cannot load even on the CPU: stop and say so.
+    GiveUp,
+}
+
+/// `in_a_row`: crashes since the view last finished loading a page, this one
+/// included. `since_reload`: seconds since this view was last reloaded after a
+/// crash. `on_cpu`: compositing is already off. `relaunched`: this copy was
+/// started by the app to replace itself.
+pub fn crash_step(in_a_row: u32, since_reload: u64, on_cpu: bool, relaunched: bool) -> CrashStep {
+    if in_a_row >= 3 {
+        return if on_cpu || relaunched { CrashStep::GiveUp } else { CrashStep::RestartCompatible };
+    }
+    // A second crash before the page loaded must be reloaded too, or the
+    // view stays dead and nobody learns that it cannot load.
+    if in_a_row >= 2 || since_reload >= 20 {
+        CrashStep::Reload
+    } else {
+        CrashStep::Leave
+    }
+}
+
 // ---- Colour emoji fonts and the AppImage's WebKit (KB-0116) -------------
 //
 // The AppImage carries WebKitGTK 2.50.4 from Ubuntu 22.04, built with
@@ -263,6 +323,9 @@ mod linux {
 
     pub static STATE: OnceLock<DisplayState> = OnceLock::new();
 
+    /// Names of the variables this process set itself, for a copy it starts.
+    const SET_BY_US: &str = "KRYOTO_DISPLAY_SET";
+
     /// The app's data folder, worked out before Tauri exists (the same place
     /// Tauri's `app_data_dir` gives later: `$XDG_DATA_HOME/<identifier>`).
     pub fn data_dir() -> Option<PathBuf> {
@@ -372,6 +435,29 @@ mod linux {
         data_dir().map(|d| d.join("display-v3"))
     }
 
+    /// Written once 0.3.7's reset of second-launch-made Compatible modes has run here.
+    fn v4_file() -> Option<PathBuf> {
+        data_dir().map(|d| d.join("display-v4"))
+    }
+
+    /// The saved Compatible was chosen by the app (a start that did not draw,
+    /// a view that could not load), not by the person. Picking a mode in
+    /// Settings removes it.
+    pub fn healed_file() -> Option<PathBuf> {
+        data_dir().map(|d| d.join("display-healed"))
+    }
+
+    /// Save Compatible for the next start, as the app's own choice.
+    pub fn save_healed_compatible() {
+        if let Some(f) = mode_file() {
+            let _ = std::fs::create_dir_all(f.parent().unwrap_or(&f));
+            let _ = std::fs::write(f, "compatible");
+        }
+        if let Some(f) = healed_file() {
+            let _ = std::fs::write(f, "1");
+        }
+    }
+
     pub fn saved_mode() -> Mode {
         mode_file()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -389,6 +475,7 @@ mod linux {
     /// that fails to draw too, the next start is Compatible again.
     fn migrate() {
         migrate_v3();
+        migrate_v4();
         let Some(marker) = v2_file() else { return };
         if marker.exists() {
             return;
@@ -429,6 +516,31 @@ mod linux {
         let _ = std::fs::write(marker, "1");
     }
 
+    /// Once per machine, in 0.3.7: a saved Compatible goes back to Automatic.
+    ///
+    /// Up to 0.3.6 a second launch while Kryoto ran left the start marker
+    /// behind, and the next start saved Compatible (KB-0311). That cannot be
+    /// told apart from a Compatible somebody picked, so, as in `migrate_v3`,
+    /// it gets one more start on the GPU; a window that then fails to draw
+    /// heals back to Compatible on the next start. A probe left by such a
+    /// second launch is cleared too: it says nothing about this machine.
+    fn migrate_v4() {
+        let Some(marker) = v4_file() else { return };
+        if marker.exists() {
+            return;
+        }
+        if let Some(f) = mode_file() {
+            if std::fs::read_to_string(&f).is_ok_and(|s| Mode::parse(&s) == Some(Mode::Compatible)) {
+                let _ = std::fs::write(&f, "auto");
+            }
+        }
+        if let Some(p) = probe_file() {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::create_dir_all(marker.parent().unwrap_or(&marker));
+        let _ = std::fs::write(marker, "1");
+    }
+
     fn facts() -> Facts {
         let nvidia = std::path::Path::new("/sys/module/nvidia").exists()
             || std::fs::read_to_string("/proc/modules").map(|m| modules_have_nvidia(&m)).unwrap_or(false);
@@ -445,16 +557,31 @@ mod linux {
         Facts { nvidia, render_node, wayland, last_start_failed, dmabuf_failed, appimage }
     }
 
-    pub fn apply() {
+    pub fn apply(arm_probe: bool) {
+        // Variables an earlier copy of Kryoto set, inherited through a restart
+        // (an update's relaunch, `watch_crashes`): ours, not the person's, so
+        // this start decides them again instead of taking them as an override.
+        if let Some(ours) = std::env::var_os(SET_BY_US) {
+            for name in ours.to_string_lossy().split(',').filter(|n| n.starts_with("WEBKIT_") || *n == "GDK_BACKEND") {
+                std::env::remove_var(name);
+            }
+            std::env::remove_var(SET_BY_US);
+        }
         migrate();
         let saved = saved_mode();
         let env_mode = std::env::var("KRYOTO_GPU").ok();
         let is_set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
         let facts = facts();
-        let p = plan(saved, env_mode.as_deref(), is_set, facts);
+        let mut p = plan(saved, env_mode.as_deref(), is_set, facts);
+        if !p.healed && p.mode == Mode::Compatible && healed_file().is_some_and(|f| f.exists()) {
+            p.reason = p.reason.replace("as chosen", "chosen by Kryoto after a start that could not draw (pick Automatic in Settings to try the GPU again)");
+        }
         shim_fonts(facts.appimage);
         for (k, v) in &p.set {
             std::env::set_var(k, v);
+        }
+        if !p.set.is_empty() {
+            std::env::set_var(SET_BY_US, p.set.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(","));
         }
         // Not part of the desktop's saved session: KDE (and any XSMP session
         // manager) restored Kryoto at login after a logout with it open, even
@@ -465,10 +592,7 @@ mod linux {
         if p.healed {
             // Sticky: a machine that failed twice keeps the mode that works,
             // until the person picks another one in Settings.
-            if let Some(f) = mode_file() {
-                let _ = std::fs::create_dir_all(f.parent().unwrap_or(&f));
-                let _ = std::fs::write(f, "compatible");
-            }
+            save_healed_compatible();
         }
         // Counted now; the crash belonged to the last session. DMA-BUF stays
         // off from here on (`dmabuf_failed`), the GPU stays on.
@@ -480,8 +604,9 @@ mod linux {
             }
             let _ = std::fs::remove_file(f);
         }
-        // This start's marker; the shell removes it once it has drawn.
-        if let Some(f) = probe_file() {
+        // This start's marker; the shell removes it once it has drawn. Only a
+        // start that will show its window can do that (KB-0311).
+        if let Some(f) = probe_file().filter(|_| arm_probe) {
             let _ = std::fs::create_dir_all(f.parent().unwrap_or(&f));
             let _ = std::fs::write(f, "starting");
         }
@@ -490,10 +615,13 @@ mod linux {
     }
 }
 
-/// Before GTK starts: pick the renderer and set the variables (Linux only).
-pub fn apply() {
+/// Before GTK starts, and after the instance check: pick the renderer and set
+/// the variables (Linux only). `arm_probe`: see `arms_probe`.
+pub fn apply(arm_probe: bool) {
     #[cfg(target_os = "linux")]
-    linux::apply();
+    linux::apply(arm_probe);
+    #[cfg(not(target_os = "linux"))]
+    let _ = arm_probe;
 }
 
 /// For the log, once logging is up.
@@ -536,34 +664,113 @@ pub fn note_renderer_crash() {
 }
 
 /// Watch one web view for a crashed renderer: note it for the next start and
-/// reload the page, at most a few times a minute so a page that crashes at
-/// once does not spin.
+/// reload the page (`crash_step`). A view that crashes three times without
+/// ever loading its page restarts the app drawing on the CPU, and if that
+/// was already the case, stops and says what is wrong (KB-0310): before,
+/// the start screen kept animating over a Store that would never come.
 #[cfg(target_os = "linux")]
 pub fn watch_crashes(view: &tauri::Webview) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use webkit2gtk::{WebProcessTerminationReason, WebViewExt};
-    static LAST: AtomicU64 = AtomicU64::new(0);
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tauri::Manager;
+    use webkit2gtk::{LoadEvent, WebProcessTerminationReason, WebViewExt};
+    /// Per view: crashes since its last finished load, and its last reload.
+    static VIEWS: Mutex<Option<HashMap<String, (u32, u64)>>> = Mutex::new(None);
+    fn with<T>(label: &str, f: impl FnOnce(&mut (u32, u64)) -> T) -> T {
+        let mut all = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        f(all.get_or_insert_with(HashMap::new).entry(label.to_string()).or_insert((0, 0)))
+    }
     let label = view.label().to_string();
+    let app = view.app_handle().clone();
     let _ = view.with_webview(move |w| {
         let wv = w.inner();
+        let loaded = label.clone();
+        wv.connect_load_changed(move |_, event| {
+            if event == LoadEvent::Finished {
+                with(&loaded, |v| v.0 = 0);
+            }
+        });
         wv.connect_web_process_terminated(move |wv, reason| {
             if reason == WebProcessTerminationReason::TerminatedByApi {
                 return;
             }
             note_renderer_crash();
-            crate::logging::error(
-                "display",
-                &format!("the {label} view's web process ended ({reason:?}); reloading it ({})", describe().unwrap_or_default()),
-            );
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            if now.saturating_sub(LAST.swap(now, Ordering::Relaxed)) >= 20 {
-                wv.reload();
+            let (in_a_row, last_reload) = with(&label, |v| {
+                v.0 += 1;
+                *v
+            });
+            let on_cpu = std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some_and(|v| !v.is_empty() && v != "0");
+            let relaunched = std::env::var_os(RELAUNCHED).is_some();
+            let step = crash_step(in_a_row, now.saturating_sub(last_reload), on_cpu, relaunched);
+            crate::logging::error(
+                "display",
+                &format!(
+                    "the {label} view's web process ended ({reason:?}), {in_a_row} in a row: {step:?} ({})",
+                    describe().unwrap_or_default()
+                ),
+            );
+            match step {
+                CrashStep::Reload => {
+                    with(&label, |v| v.1 = now);
+                    wv.reload();
+                }
+                CrashStep::Leave => {}
+                CrashStep::RestartCompatible => {
+                    linux::save_healed_compatible();
+                    crate::logging::error("display", "the page cannot load with hardware rendering: restarting with it off (Compatible)");
+                    std::env::set_var(RELAUNCHED, "display");
+                    app.restart();
+                }
+                CrashStep::GiveUp => {
+                    if label != "main" {
+                        use tauri::Emitter;
+                        let url = wv.uri().map(|u| u.to_string()).unwrap_or_default();
+                        let _ = app.emit_to(
+                            "main",
+                            "browser-error",
+                            serde_json::json!({ "url": url, "reason": "The page's renderer keeps crashing on this system." }),
+                        );
+                    }
+                    tell_it_cannot_draw(&app, wv, label == "main");
+                }
             }
         });
     });
+}
+
+/// The last resort, drawn by GTK itself because the page cannot draw: what
+/// happened and what to do. Without the main view there is nothing left to
+/// use, so closing it quits.
+#[cfg(target_os = "linux")]
+fn tell_it_cannot_draw(app: &tauri::AppHandle, wv: &webkit2gtk::WebView, quit: bool) {
+    use gtk::prelude::*;
+    let parent = wv.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok());
+    let dialog = gtk::MessageDialog::new(
+        parent.as_ref(),
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        gtk::MessageType::Error,
+        gtk::ButtonsType::Close,
+        "Kryoto Desktop cannot draw its window on this system",
+    );
+    dialog.set_title("Kryoto Desktop");
+    let logs = linux::data_dir().map(|d| d.join("logs").display().to_string()).unwrap_or_default();
+    dialog.set_secondary_text(Some(&format!(
+        "Its web view (WebKitGTK) crashed three times before it could show anything, with hardware rendering on and off.\n\n\
+         Update your system (graphics drivers and webkit2gtk), then start Kryoto Desktop again. \
+         If it still happens, ask in #support on Discord and attach the log from {logs}."
+    )));
+    let app = app.clone();
+    dialog.connect_response(move |d, _| {
+        d.close();
+        if quit {
+            app.exit(1);
+        }
+    });
+    dialog.show_all();
 }
 #[cfg(not(target_os = "linux"))]
 pub fn watch_crashes(_view: &tauri::Webview) {}
@@ -598,6 +805,10 @@ pub fn display_state() -> Option<DisplayState> {
 pub fn display_set_mode(mode: Mode) -> Result<(), String> {
     let f = linux::mode_file().ok_or("No data folder")?;
     std::fs::create_dir_all(f.parent().unwrap_or(&f)).map_err(|e| e.to_string())?;
+    // The person's choice from here on, not the app's.
+    if let Some(h) = linux::healed_file() {
+        let _ = std::fs::remove_file(h);
+    }
     let text = match mode {
         Mode::Auto => "auto",
         Mode::Compatible => "compatible",
@@ -663,6 +874,29 @@ mod tests {
         // A window that never drew still heals.
         let (failed, _) = read_markers(true, false, false);
         assert!(plan(Mode::Auto, None, none, Facts { render_node: true, last_start_failed: failed, ..Facts::default() }).healed);
+    }
+
+    #[test]
+    fn only_a_start_that_shows_its_window_arms_the_probe() {
+        // KB-0311: a second launch (icon, kryoto:// link, an update's relaunch)
+        // left the marker, and the next start saved Compatible for good.
+        assert!(arms_probe(true, false));
+        assert!(!arms_probe(false, false));
+        assert!(!arms_probe(true, true));
+    }
+
+    #[test]
+    fn a_view_that_cannot_load_restarts_on_the_cpu_then_gives_up() {
+        // The first crash reloads; a page that loaded and crashes again soon is left.
+        assert_eq!(crash_step(1, u64::MAX, false, false), CrashStep::Reload);
+        assert_eq!(crash_step(1, 5, false, false), CrashStep::Leave);
+        assert_eq!(crash_step(1, 25, false, false), CrashStep::Reload);
+        // Crashing again before it ever loaded: reload, then the CPU (KB-0310).
+        assert_eq!(crash_step(2, 1, false, false), CrashStep::Reload);
+        assert_eq!(crash_step(3, 1, false, false), CrashStep::RestartCompatible);
+        // Already on the CPU, or already restarted once: say so, no loop.
+        assert_eq!(crash_step(3, 1, true, false), CrashStep::GiveUp);
+        assert_eq!(crash_step(3, 1, false, true), CrashStep::GiveUp);
     }
 
     #[test]

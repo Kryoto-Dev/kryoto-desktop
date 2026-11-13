@@ -35,7 +35,7 @@ import {
   Wrench,
   Wine,
 } from '@/ui/pixel-icons'
-import { ACTION_FAILED_EVENT, Button, Check, ContextMenu, Modal, type MenuEntry } from '@/ui'
+import { ACTION_FAILED_EVENT, Button, ContextMenu, Modal, type MenuEntry } from '@/ui'
 import { KryoAscii } from '@/ui/ascii/KryoAscii'
 import { EmptyState } from '@/ui/EmptyState'
 import { SHELF } from '@/ui/ascii/scenes'
@@ -66,6 +66,7 @@ import { GamePage } from '@/library/GamePage'
 import { CatalogGamePage } from '@/library/CatalogGamePage'
 import { LaunchChooser } from '@/library/LaunchChooser'
 import { GameProperties } from '@/library/GameProperties'
+import { UninstallDialog } from '@/library/UninstallDialog'
 import { AddGameDialog } from '@/library/AddGameDialog'
 import { Bridge } from '@/library/Bridge'
 import { carry, launcherName, merges } from '@/lib/launchers'
@@ -1660,7 +1661,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
       {overlay?.kind === 'uninstall' && overlayGame ? (
         <UninstallDialog
           key={overlayGame.id}
-          game={overlayGame}
+          games={[overlayGame]}
           onClose={() => setOverlay(null)}
           onDone={(deleted) => {
             lib.drop(overlayGame.id)
@@ -1817,75 +1818,6 @@ function UnlistDialog({ launcher, games, onClose, onRemoved }: { launcher: strin
       }
     >
       <p className="text-xs leading-relaxed text-muted-foreground">They leave your Kryoto Library only. Nothing changes in {name}: the games stay installed and start from there as before. Bridge can bring them back.</p>
-      {error ? <p className="text-xs text-destructive">{error}</p> : null}
-    </Modal>
-  )
-}
-
-function UninstallDialog({ game, onClose, onDone }: { game: LibraryGame; onClose: () => void; onDone: (deleted: boolean) => void }) {
-  const keeper = launcherName(game.launcher)
-  const [deleteFiles, setDeleteFiles] = useState(!keeper)
-  const [deletePrefix, setDeletePrefix] = useState(false)
-  const [hasPrefix, setHasPrefix] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  useEffect(() => {
-    let off = false
-    gameLogs.prefix(game.id).then((p) => !off && setHasPrefix(!!p)).catch(() => {})
-    return () => {
-      off = true
-    }
-  }, [game.id])
-  return (
-    <Modal
-      title={keeper ? `Remove ${game.title}` : `Uninstall ${game.title}`}
-      onClose={onClose}
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            variant="danger"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true)
-              library
-                .remove(game.id, deleteFiles, hasPrefix && deletePrefix)
-                .then(onDone)
-                .catch((e) => {
-                  setError(errorText(e))
-                  setBusy(false)
-                })
-            }}
-          >
-            <Trash2 className="size-3.5" />
-            {keeper ? 'Remove' : busy ? 'Uninstalling' : 'Uninstall'}
-          </Button>
-        </>
-      }
-    >
-      {keeper ? (
-        <p className="text-xs text-muted-foreground">{`It stays installed in ${keeper}. Only its place in your Kryoto Library goes.`}</p>
-      ) : (
-        <>
-          <Check checked={deleteFiles} onChange={setDeleteFiles} label="Delete the game's files" />
-          <p className="kryo-ascii-art select-text break-all text-[11px] text-muted-foreground">{game.installDir}</p>
-        </>
-      )}
-      {hasPrefix ? (
-        <Check
-          checked={deletePrefix}
-          onChange={setDeletePrefix}
-          label="Also delete its Wine prefix (its settings, and any saves it keeps there)"
-        />
-      ) : null}
-      {keeper ? null : (
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Files are only deleted for games installed into your library folder. A game you added from somewhere else is only taken
-          off the list. Play time is forgotten either way.
-        </p>
-      )}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </Modal>
   )

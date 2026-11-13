@@ -10,6 +10,7 @@ import { launcherName } from '@/lib/launchers'
 import { settingsApi } from '@/lib/settings'
 import { openLibrary } from '@/lib/window'
 import { useDiskSizes } from '@/hooks/useDiskSizes'
+import { UninstallDialog } from '@/library/UninstallDialog'
 import { cn } from '@/lib/utils'
 
 type StoredGame = {
@@ -89,6 +90,8 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [moving, setMoving] = useState<MoveProgress | null>(null)
+  /** The games the uninstall dialog is asking about. */
+  const [uninstalling, setUninstalling] = useState<StoredGame[] | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -105,13 +108,23 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load])
   useEffect(() => {
+    // Unsubscribed even when the page closes before the listener is in place
+    // (KB-0309): it used to stay subscribed for the rest of the session.
+    let cancelled = false
     let stop: (() => void) | undefined
     void on<MoveProgress>('storage-move', (p) => {
+      if (cancelled) return
       setMoving(p.done ? null : p)
       // A finished move can still carry a note: the old folder was left behind.
       if (p.done && p.error) setError(p.error)
-    }).then((fn) => (stop = fn))
-    return () => stop?.()
+    }).then((fn) => {
+      if (cancelled) fn()
+      else stop = fn
+    })
+    return () => {
+      cancelled = true
+      stop?.()
+    }
   }, [])
 
   const folder = data?.folders[at] ?? null
@@ -282,17 +295,9 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
                 ) : (
                   <span className="text-[11px] text-muted-foreground">Add another folder to move games between drives.</span>
                 )}
-                <Button
-                  size="sm"
-                  variant="danger"
-                  disabled={!pickedGames.length || !!busy}
-                  onClick={() =>
-                    void run('uninstall', async () => {
-                      for (const g of pickedGames) await library.remove(g.id, true)
-                      setPicked(new Set())
-                    })
-                  }
-                >
+                {/* The same dialog as everywhere else: asks first, keep or delete
+                    the files, and shows them going (KB-0304, KB-0305). */}
+                <Button size="sm" variant="danger" disabled={!pickedGames.length || !!busy} onClick={() => setUninstalling(pickedGames)}>
                   <Trash2 className="size-3" />
                   Uninstall
                 </Button>
@@ -312,6 +317,21 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
 
       {data.elsewhere.length ? <Elsewhere games={data.elsewhere} sizes={sizes} settled={!measuring} folders={data.folders} busy={!!busy} moving={moving} run={run} /> : null}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {uninstalling ? (
+        <UninstallDialog
+          games={uninstalling.map((g) => ({ id: g.id, title: g.title, installDir: g.folder, launcher: g.launcher ?? null }))}
+          // Closed after a failure, some may have gone already: the page reads the folders again either way.
+          onClose={() => {
+            setUninstalling(null)
+            void load().then(onChanged)
+          }}
+          onDone={() => {
+            setUninstalling(null)
+            setPicked(new Set())
+            void load().then(onChanged)
+          }}
+        />
+      ) : null}
     </div>
   )
 }

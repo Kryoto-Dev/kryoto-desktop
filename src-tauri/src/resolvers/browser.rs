@@ -237,6 +237,15 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str, mode:
             tauri::webview::NewWindowResponse::Deny
         })
         .on_navigation(move |nav| {
+            // A host's "Log in with Discord": Discord's password box never
+            // shows in a window titled Kryoto (KB-0312).
+            if crate::discord_web::is_discord_page(nav) {
+                let target = nav.to_string();
+                std::thread::spawn(move || {
+                    let _ = crate::open_external(target);
+                });
+                return false;
+            }
             if nav.as_str().trim_end_matches('/') != start_page.as_str().trim_end_matches('/') && looks_like_file(nav) {
                 if let Ok(mut c) = on_nav.captured.lock() {
                     *c = Some((nav.to_string(), file_name_of(nav)));

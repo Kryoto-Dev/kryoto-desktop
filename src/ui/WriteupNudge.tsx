@@ -68,11 +68,16 @@ export function WriteupNudge({
   // Bumped when an answer settles a game, so the next one is looked at.
   const [answers, setAnswers] = useState(0)
   const mounted = useRef(true)
+  // The minute's waits before asking again: cleared when the card goes (KB-0309).
+  const retries = useRef(new Set<number>())
   useEffect(() => {
     // Set here too: a dev build mounts twice, and the first cleanup would leave it false.
     mounted.current = true
+    const waits = retries.current
     return () => {
       mounted.current = false
+      waits.forEach((t) => window.clearTimeout(t))
+      waits.clear()
     }
   }, [])
 
@@ -120,11 +125,14 @@ export function WriteupNudge({
       .catch((e: unknown) => {
         logWarn('writeup', `could not ask about ${slug}: ${String(e)}`)
         // kryo.to could not be asked (the Store was loading, or offline): try again in a minute.
-        window.setTimeout(() => {
+        if (!mounted.current) return
+        const wait = window.setTimeout(() => {
+          retries.current.delete(wait)
           if (!mounted.current) return
           asked.current.delete(slug)
           setAnswers((n) => n + 1)
         }, 60_000)
+        retries.current.add(wait)
       })
   }, [candidate, shown, quiet])
 

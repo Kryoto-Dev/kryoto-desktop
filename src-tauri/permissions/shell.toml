@@ -121,6 +121,8 @@ commands.allow = [
   "game_update_backup",
   "game_update_undo",
   "download_remove",
+  "downloads_when_done",
+  "downloads_when_done_get",
   "download_mirror",
   "mirror_hosts",
   "compat_tools",

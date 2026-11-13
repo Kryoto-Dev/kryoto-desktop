@@ -1386,14 +1386,19 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
         let folders = crate::settings::all_folders(&crate::settings::load(&app));
         if let Some(dir) = crate::storage::game_folder(&folders, &game.install_dir) {
             crate::logging::info("library", &format!("uninstalling {} from {}", game.title, dir.display()));
-            tauri::async_runtime::spawn_blocking(move || {
+            let (progress_app, pid) = (app.clone(), id.clone());
+            let result = tauri::async_runtime::spawn_blocking(move || {
                 // The originals its add-ons replaced go with it.
                 let _ = std::fs::remove_dir_all(crate::addons::backups_of(&dir));
-                std::fs::remove_dir_all(dir)
+                delete_counting(&dir, &mut |removed, total| {
+                    let _ = progress_app.emit("library-uninstall", DeleteProgress { id: pid.clone(), removed, total, done: false });
+                })
             })
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| format!("Could not delete the game's files: {e}"))?;
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| format!("Could not delete the game's files: {e}")));
+            let _ = app.emit("library-uninstall", DeleteProgress { id: id.clone(), removed: 0, total: 0, done: true });
+            result?;
             deleted = true;
             if let Some(slug) = game.slug.clone() {
                 let data = crate::game_update::data_dir(&app);
@@ -1410,7 +1415,60 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
     if let Some(game) = &game {
         crate::shortcuts::remove(&app, game);
     }
+    // Every screen showing the library follows, wherever it was uninstalled
+    // from (Settings > Storage left the sidebar listing it).
+    let _ = app.emit("library-changed", ());
     Ok(deleted)
+}
+
+/// How far deleting a game's files has got (KB-0305), in the shape and at the
+/// pace moving one reports (`storage-move`): bytes removed of the total, and
+/// `done` once it is over, whether it worked or not.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteProgress {
+    pub id: String,
+    pub removed: u64,
+    pub total: u64,
+    pub done: bool,
+}
+
+/// Delete a folder, saying how far it has got: its files are counted first,
+/// so the bar has an end, then removed one by one, then whatever is left
+/// (the folders, links, and a file that would not go on its own, read-only
+/// say) goes with `remove_dir_all`, as the whole folder always did. Links are
+/// never followed, so nothing outside `dir` is touched.
+pub(crate) fn delete_counting(dir: &Path, report: &mut dyn FnMut(u64, u64)) -> std::io::Result<()> {
+    report(0, 0);
+    let files: Vec<(PathBuf, u64)> = walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(|e| {
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            (e.into_path(), size)
+        })
+        .collect();
+    let total: u64 = files.iter().map(|(_, size)| size).sum();
+    report(0, total);
+    let mut removed = 0u64;
+    let mut last = std::time::Instant::now();
+    for (path, size) in files {
+        if std::fs::remove_file(&path).is_ok() {
+            removed += size;
+        }
+        if last.elapsed().as_millis() > 200 {
+            last = std::time::Instant::now();
+            report(removed, total);
+        }
+    }
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    report(total, total);
+    Ok(())
 }
 
 /// The entry a plain Play starts, for a start with nobody to ask (kryo.to's
@@ -2350,5 +2408,41 @@ mod tests {
     fn ids_are_readable() {
         assert_eq!(slugify("Captain Hardcore"), "captain-hardcore");
         assert_eq!(slugify("  ?? "), "game");
+    }
+
+    /// Uninstalling says how far it has got, ends with the whole size, leaves
+    /// nothing behind - a read-only file included - and never follows a link
+    /// out of the game's folder (KB-0305).
+    #[test]
+    fn uninstalling_counts_what_goes_and_stays_inside_the_folder() {
+        let root = std::env::temp_dir().join(format!("kryoto-uninstall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let game = root.join("Game");
+        let outside = root.join("Outside");
+        std::fs::create_dir_all(game.join("data/deep")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(game.join("game.exe"), vec![1u8; 1000]).unwrap();
+        std::fs::write(game.join("data/a.pak"), vec![2u8; 3000]).unwrap();
+        std::fs::write(game.join("data/deep/b.pak"), vec![3u8; 6000]).unwrap();
+        let locked = game.join("data/readonly.ini");
+        std::fs::write(&locked, b"x").unwrap();
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&locked, perms).unwrap();
+        std::fs::write(outside.join("keep.txt"), b"keep").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, game.join("link")).unwrap();
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_dir(&outside, game.join("link"));
+
+        let mut reports = Vec::new();
+        super::delete_counting(&game, &mut |removed, total| reports.push((removed, total))).unwrap();
+        assert!(!game.exists(), "the folder is gone");
+        assert_eq!(reports.last(), Some(&(10_001, 10_001)), "ends at the whole size");
+        assert!(reports.windows(2).all(|w| w[0].0 <= w[1].0), "only ever goes forward");
+        assert!(outside.join("keep.txt").is_file(), "a link out of the folder is not followed");
+        // Already gone: nothing to do, and no error.
+        super::delete_counting(&game, &mut |_, _| {}).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

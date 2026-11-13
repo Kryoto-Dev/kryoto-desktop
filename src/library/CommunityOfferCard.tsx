@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Camera, Check as CheckIcon, CloudUpload, Download, ImagePlus } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Card, Check, Label } from '@/ui'
 import { call, errorText, on } from '@/lib/bridge'
@@ -59,13 +59,39 @@ export function CommunityOfferCard({ game, running = false }: { game: LibraryGam
   const [progress, setProgress] = useState<Progress | null>(null)
   const [check, setCheck] = useState<UpdateCheck | null>(null)
 
+  // The page keeps this card when it switches games, so every answer is for
+  // the game it was asked for: a late one about the last game is dropped
+  // rather than drawn over this one (KB-0309). `request` counts the loads,
+  // `shown` is the game on screen now, for the buttons' answers.
+  const request = useRef(0)
+  const shown = useRef(game.id)
+  useEffect(() => {
+    shown.current = game.id
+    setState(null)
+    setCheck(null)
+    setWorks(false)
+    setVersion(false)
+    setBusy(false)
+    setError(null)
+    setProgress(null)
+    return () => {
+      request.current++
+    }
+  }, [game.id])
   const load = useCallback(() => {
+    const revision = ++request.current
+    const current = () => revision === request.current
     call<OfferState>('community_offer_state', { id: game.id }).then(
       (s) => {
+        if (!current()) return
         setState(s)
-        if (!s.shown) call<UpdateCheck>('community_update_check', { id: game.id }).then(setCheck, () => setCheck(null))
+        if (!s.shown)
+          call<UpdateCheck>('community_update_check', { id: game.id }).then(
+            (c) => current() && setCheck(c),
+            () => current() && setCheck(null),
+          )
       },
-      () => setState(null),
+      () => current() && setState(null),
     )
   }, [game.id])
   // Again after each session: the playtest and the screenshots change then.
@@ -82,16 +108,22 @@ export function CommunityOfferCard({ game, running = false }: { game: LibraryGam
   }, [game.id])
 
   async function tryUpdate() {
+    const id = game.id
+    const here = () => shown.current === id
     setBusy(true)
     setError(null)
     try {
-      setState(await call<OfferState>('community_update_try', { id: game.id }))
+      const next = await call<OfferState>('community_update_try', { id })
+      if (!here()) return
+      setState(next)
       setCheck(null)
     } catch (e) {
-      setError(errorText(e))
+      if (here()) setError(errorText(e))
     } finally {
-      setBusy(false)
-      setProgress(null)
+      if (here()) {
+        setBusy(false)
+        setProgress(null)
+      }
     }
   }
 
@@ -128,37 +160,50 @@ export function CommunityOfferCard({ game, running = false }: { game: LibraryGam
   const sent = state.offerId != null
 
   async function addShot() {
+    const id = game.id
+    const here = () => shown.current === id
     setError(null)
     try {
       const path = await pickPath({ title: 'Choose a screenshot of the game running', extensions: ['png', 'jpg', 'jpeg'] })
-      if (typeof path === 'string' && path) setState(await call<OfferState>('community_offer_add_shot', { id: game.id, path }))
+      if (typeof path !== 'string' || !path) return
+      const next = await call<OfferState>('community_offer_add_shot', { id, path })
+      if (here()) setState(next)
     } catch (e) {
-      setError(errorText(e))
+      if (here()) setError(errorText(e))
     }
   }
 
   async function send() {
+    const id = game.id
+    const here = () => shown.current === id
     setBusy(true)
     setError(null)
     try {
-      setState(await call<OfferState>('community_offer_send', { id: game.id, confirmedWorks: works, confirmedVersion: version }))
+      const next = await call<OfferState>('community_offer_send', { id, confirmedWorks: works, confirmedVersion: version })
+      if (here()) setState(next)
     } catch (e) {
+      if (!here()) return
       setError(errorText(e))
       // The offer may exist by now: show it, with the way to send it again.
       load()
     } finally {
-      setBusy(false)
-      setProgress(null)
+      if (here()) {
+        setBusy(false)
+        setProgress(null)
+      }
     }
   }
 
   // Stops a send under way, or takes back an offer that is waiting.
   async function cancel() {
+    const id = game.id
+    const here = () => shown.current === id
     setError(null)
     try {
-      setState(await call<OfferState>('community_offer_cancel', { id: game.id }))
+      const next = await call<OfferState>('community_offer_cancel', { id })
+      if (here()) setState(next)
     } catch (e) {
-      setError(errorText(e))
+      if (here()) setError(errorText(e))
     }
   }
 

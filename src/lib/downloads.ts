@@ -31,6 +31,9 @@ export type Download = {
   gameId: string | null
   addedAt: number
   finishedAt: number | null
+  /** When its turn last began, and when its unpack began (seconds): how long each part took. */
+  startedAt?: number | null
+  unpackStartedAt?: number | null
   /** kryo.to's SHA-256 for this file, when it lists one. */
   sha256: string | null
   verified: boolean
@@ -81,8 +84,13 @@ export type Notice = {
   sound?: 'ready' | 'achievement' | 'error' | 'downloadFailed'
 }
 
+/** What the PC does once every download is done (suggestion #81); `at` while counting down to it. */
+export type WhenDone = { action: 'sleep' | 'shutdown' | null; at: number | null }
+
 export const downloads = {
   list: () => call<Download[]>('downloads_list'),
+  /** Sleep or shut down when the queue finishes; `null` is do nothing, and cancels a countdown. */
+  whenDone: (action: WhenDone['action']) => call<WhenDone>('downloads_when_done', { action }),
   pause: (id: string) => call<void>('download_pause', { id }),
   resume: (id: string) => call<void>('download_resume', { id }),
   /** Install an archive that failed its checksum, at the player's word. */
@@ -120,6 +128,25 @@ export function phaseOf(d: Download): string {
   if (d.status === 'verifying') return 'Checking'
   if (d.status === 'extracting') return d.addon ? 'Applying' : 'Installing'
   return 'Downloading'
+}
+
+/** The "When downloads finish" choice, kept current by its event. */
+export function useWhenDone() {
+  const [state, setState] = useState<WhenDone>({ action: null, at: null })
+  useEffect(() => {
+    let cancelled = false
+    let stop: (() => void) | undefined
+    void call<WhenDone>('downloads_when_done_get').then((w) => !cancelled && setState(w)).catch(() => {})
+    void on<WhenDone>('downloads-when-done', (w) => !cancelled && setState(w)).then((fn) => {
+      if (cancelled) fn()
+      else stop = fn
+    })
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [])
+  return state
 }
 
 /** The live list, kept current by the `downloads` event. */
@@ -170,6 +197,22 @@ export function formatBytes(n: number | null | undefined): string {
 export function formatEta(d: Download): string | null {
   if (d.status !== 'downloading' || !d.speed || !d.total) return null
   return formatLeft((d.total - d.received) / d.speed)
+}
+
+/** A moment (seconds since 1970) as a clock time, with the day when it was not today. */
+export function formatClock(seconds: number): string {
+  const at = new Date(seconds * 1000)
+  const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString()} ${time}`
+}
+
+/** How long something took, in seconds, said briefly ("2 h 5 min"). */
+export function formatTook(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds))
+  if (s < 60) return `${s} s`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m} min`
+  return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`
 }
 
 /** Seconds still to go, said the way the Downloads page says it. */

@@ -44,6 +44,17 @@ pub enum Instance {
 }
 
 pub fn claim_instance() -> Instance {
+    // A copy started by the one before it to replace it (display_env.rs restarts
+    // with hardware rendering off): that one is quitting, so wait for its port
+    // rather than hand over to it and end with no window at all.
+    if std::env::var_os(crate::display_env::RELAUNCHED).is_some() {
+        for _ in 0..50 {
+            if let Ok(l) = TcpListener::bind(("127.0.0.1", instance_port())) {
+                return Instance::First(l);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     match TcpListener::bind(("127.0.0.1", instance_port())) {
         Ok(l) => Instance::First(l),
         Err(_) => {

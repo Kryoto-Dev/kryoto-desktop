@@ -26,6 +26,7 @@ mod hatchzip;
 mod bridge;
 mod channel;
 mod discord_rpc;
+mod discord_web;
 mod steam_art;
 mod launch;
 mod proton_script;
@@ -1830,14 +1831,17 @@ pub fn run() {
     if let Some(code) = saves::precise::helper_from_args() {
         std::process::exit(code);
     }
-    display_env::apply();
-    appimage_tls::apply();
     let instance = system::claim_instance();
     if matches!(instance, system::Instance::AlreadyRunning) {
-        // The copy already running has been asked to come to the front.
+        // The copy already running has been asked to come to the front. Before
+        // the display setup on purpose: a copy that never shows a window must
+        // not leave the "did it draw?" marker behind (KB-0311).
         return;
     }
     let to_tray = std::env::args().any(|a| a == "--tray");
+    // Still before GTK starts (the Builder below), which reads these variables.
+    display_env::apply(display_env::arms_probe(true, to_tray));
+    appimage_tls::apply();
     // Started by a `kryoto://` link: the shell takes it once it is ready.
     if let Some(link) = links::from_args() {
         links::set_pending(&link);
@@ -1971,6 +1975,24 @@ pub fn run() {
                     }
                     if is_internal_frame_document(url) {
                         return true;
+                    }
+                    // Discord's sign-in, and any Discord page, opens in the
+                    // browser: never a password box inside Kryoto (KB-0312).
+                    let from = webview.url().ok();
+                    if let discord_web::Outside::Browser(target) = discord_web::route(url, is_kryoto(url, webview.app_handle()), from.as_ref()) {
+                        let signing_in = target.path().trim_end_matches('/') == "/api/auth/discord";
+                        let body = if signing_in {
+                            "Kryoto never shows Discord's sign-in itself. Signed in there? Choose Sign in with your phone here, and approve it in the browser."
+                        } else {
+                            "Kryoto never shows Discord's sign-in itself, so Discord's pages open in your browser."
+                        };
+                        let _ = webview.app_handle().emit("notify", downloads::Notice::new("Opened in your browser", body, None));
+                        let target = target.to_string();
+                        // Off the UI thread: on Linux the opener waits to see it work.
+                        std::thread::spawn(move || {
+                            let _ = open_external_url(&target);
+                        });
+                        return false;
                     }
                     if allowed_browser_url(url) {
                         let settings = settings::load(webview.app_handle());
@@ -2296,6 +2318,8 @@ pub fn run() {
             game_update::game_update_backup,
             game_update::game_update_undo,
             downloads::download_remove,
+            downloads::downloads_when_done,
+            downloads::downloads_when_done_get,
             download_mirror,
             mirror_hosts,
             compat::compat_tools,

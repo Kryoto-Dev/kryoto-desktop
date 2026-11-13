@@ -63,16 +63,23 @@ pub fn umu_run(managed: Option<&Path>) -> Option<PathBuf> {
 #[cfg_attr(not(unix), allow(dead_code))]
 fn protons_in(dirs: &[PathBuf]) -> Vec<CompatTool> {
     let mut out = Vec::new();
+    // `~/.steam/steam`, `~/.steam/root` and `~/.local/share/Steam` are usually
+    // links to one folder, so the same Proton was listed two or three times
+    // (KB-0315): one entry per real file, under the first path that found it.
+    let mut seen: Vec<PathBuf> = Vec::new();
     for dir in dirs {
         let Ok(read) = std::fs::read_dir(dir) else { continue };
         for entry in read.flatten() {
             let script = entry.path().join("proton");
             if script.is_file() && proton_matches_arch(&script, std::env::consts::ARCH) {
+                let real = std::fs::canonicalize(&script).unwrap_or_else(|_| script.clone());
+                if seen.contains(&real) {
+                    continue;
+                }
+                seen.push(real);
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let path = script.to_string_lossy().into_owned();
-                if !out.iter().any(|t: &CompatTool| t.path == path) {
-                    out.push(CompatTool { name, path, kind: "proton".into(), managed: false });
-                }
+                out.push(CompatTool { name, path, kind: "proton".into(), managed: false });
             }
         }
     }
@@ -228,8 +235,9 @@ pub fn detect_in(managed: Option<&Path>) -> Vec<CompatTool> {
         out.extend(protons_in(&[m.to_path_buf()]).into_iter().map(|t| CompatTool { managed: true, ..t }));
     }
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let real = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
         for t in protons_in(&proton_dirs(&home)) {
-            if !out.iter().any(|o| o.path == t.path) {
+            if !out.iter().any(|o| o.path == t.path || real(&o.path) == real(&t.path)) {
                 out.push(t);
             }
         }
@@ -732,6 +740,25 @@ mod tests {
             std::fs::write(&proton, "#!/bin/sh\n").unwrap();
         }
         assert_eq!(protons_in(&proton_dirs(&home)).len(), 2);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_steam_folder_reached_through_its_links_lists_each_proton_once() {
+        // KB-0315: ~/.steam/steam and ~/.steam/root link to ~/.local/share/Steam.
+        let home = std::env::temp_dir().join(format!("kryoto-steam-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let real = home.join(".local/share/Steam");
+        let proton = real.join("compatibilitytools.d/GE-Proton10-3/proton");
+        std::fs::create_dir_all(proton.parent().unwrap()).unwrap();
+        std::fs::write(&proton, "#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(home.join(".steam")).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".steam/steam")).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".steam/root")).unwrap();
+        let found = protons_in(&proton_dirs(&home));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].name, "GE-Proton10-3");
         std::fs::remove_dir_all(home).unwrap();
     }
 

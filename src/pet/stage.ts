@@ -78,6 +78,8 @@ type PlayOptions = {
   /** What comes after: an animation id, or a function. Idle when absent. */
   then?: string | (() => void)
   progress?: number | (() => number)
+  /** Pose fields laid over every frame of this animation, read as it draws. */
+  pose?: () => Pose
 }
 
 export class Stage {
@@ -210,7 +212,7 @@ export class Stage {
     this.lastFrame = frame
     const raw = this.opts.progress
     const progress = typeof raw === 'function' ? raw() : raw
-    const override: Pose = { ...this.pin?.hold, ...this.override }
+    const override: Pose = { ...this.pin?.hold, ...this.opts.pose?.(), ...this.override }
     if (this.look && LOOKABLE.has(this.anim) && !override.look) override.look = this.look
     const at = still ? (a.still ?? 0) : a.once ? Math.min(t, a.dur) : t
     const theme = this.theme ?? pageTheme()

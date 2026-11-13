@@ -92,6 +92,11 @@ pub struct Download {
     pub game_id: Option<String>,
     pub added_at: u64,
     pub finished_at: Option<u64>,
+    /// When its turn last began (a resume starts it again), and when the
+    /// unpack began, for the Downloads page: how long each part took is what
+    /// a slow install is looked into by (KB-0306).
+    pub started_at: Option<u64>,
+    pub unpack_started_at: Option<u64>,
     pub meta: CatalogMeta,
     /// The byte ranges being fetched in parallel, and how far each has got.
     pub segments: Vec<Segment>,
@@ -333,6 +338,18 @@ fn backoff(n: u32) -> u64 {
 }
 
 /// The HTTP client every download of ours starts from.
+///
+/// HTTP/2 where the server offers it, as dl.kryo.to does (KB-0289): the ranges
+/// go as parallel streams on one connection - one handshake instead of one per
+/// connection, the shape a browser's download has - and still come in as fast
+/// as separate connections did (measured 2026-11-13 from Europe on a real
+/// link: 16 streams on one HTTP/2 connection 110 MB/s, 16 HTTP/1.1
+/// connections 112 MB/s, one stream 28-36 MB/s). The flow-control window
+/// follows the line (`http2_adaptive_window`), so a fast or far line is not
+/// held to the 64 KB default. Pings find a connection that died quietly
+/// within 20 s, before the 30 s stall check, so every range on it is not left
+/// waiting on it. Servers without HTTP/2 keep HTTP/1.1, with each connection
+/// kept for the next range.
 fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
@@ -340,6 +357,25 @@ fn client_builder() -> reqwest::ClientBuilder {
         .tcp_keepalive(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(15))
         .pool_max_idle_per_host(64)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .http2_adaptive_window(true)
+        .http2_keep_alive_interval(std::time::Duration::from_secs(10))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+        .http2_keep_alive_while_idle(true)
+}
+
+/// The client for our own link: over the address family the link was bound
+/// to, keeping the resume pass dl.kryo.to hands out with the first range in
+/// `jar`, so a range retried from another network after a drop is not
+/// refused. Built again for new connections (a crawl, a dropped line): over
+/// HTTP/2 every range shares one, which the old client would hand out again.
+fn own_client<R: Runtime>(app: &AppHandle<R>, id: &str, jar: &Arc<reqwest::cookie::Jar>) -> Option<reqwest::Client> {
+    let family = edit(app, id, |_| {}).and_then(|d| d.family.map(family_addr).or_else(|| link_family(&d.url)));
+    let mut builder = client_builder().cookie_provider(jar.clone());
+    if let Some(local) = family {
+        builder = builder.local_address(local);
+    }
+    builder.build().ok()
 }
 
 /// Wait for `work`, or for the download to be paused or cancelled, whichever is
@@ -1278,7 +1314,204 @@ fn start<R: Runtime>(app: AppHandle<R>, id: String) {
                 set_status(&app, &id, Status::Failed, Some(e))
             }
         }
+        queue_ended(&app, &id);
     });
+}
+
+/* ── when the downloads finish (suggestion #81) ────────────── */
+
+/// What the PC does once the queue is done: picked on the Downloads page for
+/// this queue only (never saved, so it cannot surprise anyone next time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AfterAll {
+    Sleep,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhenDone {
+    pub action: Option<AfterAll>,
+    /// While counting down: when it happens (seconds since 1970).
+    pub at: Option<u64>,
+    /// Bumped on every change, so a countdown that was cancelled never acts.
+    #[serde(skip)]
+    round: u64,
+}
+
+static WHEN_DONE: Mutex<WhenDone> = Mutex::new(WhenDone { action: None, at: None, round: 0 });
+
+/// Seconds between the last download finishing and the PC going to sleep or
+/// shutting down: time to see it and press Cancel.
+const WHEN_DONE_WAIT: u64 = 60;
+
+fn when_done_now() -> WhenDone {
+    *WHEN_DONE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn set_when_done<R: Runtime>(app: &AppHandle<R>, f: impl FnOnce(&mut WhenDone)) -> WhenDone {
+    let state = {
+        let mut w = WHEN_DONE.lock().unwrap_or_else(|p| p.into_inner());
+        f(&mut w);
+        w.round += 1;
+        *w
+    };
+    let _ = app.emit("downloads-when-done", state);
+    state
+}
+
+/// Whether anything in the list is still to do: running, or queued with a task.
+fn work_left<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let state = app.state::<Downloads>();
+    let alive: Vec<String> = state.controls.lock().map(|c| c.keys().cloned().collect()).unwrap_or_default();
+    let Ok(list) = state.list.lock() else { return true };
+    list.iter().any(|d| {
+        matches!(d.status, Status::Resolving | Status::Downloading | Status::Verifying | Status::Extracting)
+            || (d.status == Status::Queued && alive.contains(&d.id))
+    })
+}
+
+/// A download's task ended. When it finished (installed, or failed for good),
+/// nothing else is left to do and the player asked for it, the countdown to
+/// sleep or shut down starts. A pause or a cancel never starts it.
+fn queue_ended<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    let Some(action) = when_done_now().action else { return };
+    if when_done_now().at.is_some() || work_left(app) {
+        return;
+    }
+    let finished = edit(app, id, |_| {}).is_some_and(|d| matches!(d.status, Status::Installed | Status::Failed));
+    if !finished {
+        return;
+    }
+    let what = match action {
+        AfterAll::Sleep => "going to sleep",
+        AfterAll::Shutdown => "shutting down",
+    };
+    // A game being played is never cut off: the choice is dropped instead.
+    let playing = app.try_state::<library::Running>().is_some_and(|r| r.0.lock().map(|m| !m.is_empty()).unwrap_or(false));
+    if playing {
+        set_when_done(app, |w| *w = WhenDone::default());
+        let _ = app.emit("notify", Notice::new("Downloads finished", &format!("Not {what}: a game is running."), None));
+        return;
+    }
+    let state = set_when_done(app, |w| w.at = Some(now() + WHEN_DONE_WAIT));
+    crate::logging::info("download", &format!("queue finished; {what} in {WHEN_DONE_WAIT} s unless cancelled"));
+    let _ = app.emit(
+        "notify",
+        Notice::new(&format!("Downloads finished: {what} in {WHEN_DONE_WAIT} s"), "Cancel it on the Downloads page.", None),
+    );
+    // In front, on the Downloads page, where Cancel is.
+    crate::system::show_main(app);
+    let _ = app.emit_to("main", "tray-go", "downloads");
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(WHEN_DONE_WAIT)).await;
+        let now_state = when_done_now();
+        if now_state.round != state.round || now_state.action != Some(action) {
+            return;
+        }
+        // Something new started meanwhile: it waits for that one instead.
+        if work_left(&app) {
+            set_when_done(&app, |w| w.at = None);
+            return;
+        }
+        set_when_done(&app, |w| *w = WhenDone::default());
+        crate::logging::info("download", &format!("queue finished: {what}"));
+        if let Err(e) = power_off(action) {
+            crate::logging::error("download", &format!("{what} failed: {e}"));
+            let _ = app.emit("notify", Notice::new(&format!("Could not finish {what}"), &e, None));
+        }
+    });
+}
+
+/// Sleep or shut the PC down, the way the system's own menu does: programs
+/// get to close themselves, nothing is forced.
+fn power_off(action: AfterAll) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        match action {
+            AfterAll::Shutdown => {
+                use std::os::windows::process::CommandExt;
+                let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+                let status = std::process::Command::new(PathBuf::from(system).join(r"System32\shutdown.exe"))
+                    .args(["/s", "/t", "0"])
+                    .creation_flags(0x0800_0000)
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                if status.success() { Ok(()) } else { Err(format!("shutdown.exe answered {status}")) }
+            }
+            AfterAll::Sleep => {
+                // Every account holds the right to sleep the PC, switched off
+                // until a program switches it on.
+                enable_shutdown_privilege();
+                // SAFETY: plain flags; sleep (not hibernate), wake events left as they are.
+                let ok = unsafe { windows_sys::Win32::System::Power::SetSuspendState(0, 0, 0) };
+                if ok != 0 { Ok(()) } else { Err(std::io::Error::last_os_error().to_string()) }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // logind, through systemd or elogind: what a desktop's own menu asks.
+        let verb = match action {
+            AfterAll::Sleep => "suspend",
+            AfterAll::Shutdown => "poweroff",
+        };
+        let mut last = String::from("no systemctl or loginctl");
+        for tool in ["systemctl", "loginctl"] {
+            let mut cmd = std::process::Command::new(tool);
+            cmd.arg(verb);
+            #[cfg(target_os = "linux")]
+            crate::linux_open::clean(&mut cmd);
+            match cmd.output() {
+                Ok(out) if out.status.success() => return Ok(()),
+                Ok(out) => last = format!("{tool} {verb}: {}", String::from_utf8_lossy(&out.stderr).trim()),
+                Err(e) => last = format!("{tool}: {e}"),
+            }
+        }
+        Err(last)
+    }
+}
+
+/// Switch on this process's SeShutdownPrivilege, which `SetSuspendState` needs.
+#[cfg(windows)]
+fn enable_shutdown_privilege() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+        TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    // SAFETY: the token is opened, used and closed here; every pointer is to a local.
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut luid = LUID { LowPart: 0, HighPart: 0 };
+        let ok = LookupPrivilegeValueW(std::ptr::null(), SE_SHUTDOWN_NAME, &mut luid) != 0 && {
+            let wanted = TOKEN_PRIVILEGES { PrivilegeCount: 1, Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }] };
+            AdjustTokenPrivileges(token, 0, &wanted, 0, std::ptr::null_mut(), std::ptr::null_mut()) != 0
+        };
+        CloseHandle(token);
+        ok
+    }
+}
+
+/// The Downloads page's "When downloads finish" choice: `None` is do nothing,
+/// and also cancels a countdown that has started.
+#[tauri::command]
+pub fn downloads_when_done(app: AppHandle, action: Option<AfterAll>) -> WhenDone {
+    set_when_done(&app, |w| {
+        w.action = action;
+        w.at = None;
+    })
+}
+
+#[tauri::command]
+pub fn downloads_when_done_get() -> WhenDone {
+    when_done_now()
 }
 
 #[derive(Clone, Serialize)]
@@ -1896,16 +2129,10 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
 
     let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
     let (mut client, mut connections) = (client.clone(), settings.connections);
-    // Our own link: connect over the address family it was bound to, and keep
-    // the resume pass dl.kryo.to hands out with the first range, so a range
-    // retried from another network after a drop is not refused.
+    // Our own link: see `own_client`.
+    let jar = Arc::new(reqwest::cookie::Jar::default());
     if !is_mirror {
-        let family = edit(app, id, |_| {}).and_then(|d| d.family.map(family_addr).or_else(|| link_family(&d.url)));
-        let mut builder = client_builder().cookie_store(true);
-        if let Some(local) = family {
-            builder = builder.local_address(local);
-        }
-        if let Ok(ours) = builder.build() {
+        if let Some(ours) = own_client(app, id, &jar) {
             client = ours;
         }
     }
@@ -1938,7 +2165,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
         let filez = if is_mirror { edit(app, id, |_| {}).and_then(|d| crate::resolvers::filez::file_for(&d.url)) } else { None };
         let done = match filez {
             Some(file) => fetch_filez(app, id, flag, &mut client, &settings, &limiter, file).await?,
-            None => fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror).await?,
+            None => fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror, &jar).await?,
         };
         if !done {
             return settle_stopped(app, id, flag);
@@ -2167,7 +2394,7 @@ async fn filez_pass<R: Runtime>(
         });
         emit(app, false);
         if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
-            checkpoint(app, id, &path, &progress).await;
+            let _ = checkpoint(app, id, &path, &progress).await;
             last_checkpoint = Instant::now();
         }
         if tasks.iter().all(|t| t.is_finished()) {
@@ -2196,7 +2423,7 @@ async fn filez_pass<R: Runtime>(
     if flag.load(Ordering::SeqCst) == CANCEL {
         return Ok(false);
     }
-    checkpoint(app, id, &path, &progress).await;
+    let saved = checkpoint(app, id, &path, &progress).await;
     let sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
     edit(app, id, |d| d.received = sum);
     outcome?;
@@ -2205,6 +2432,9 @@ async fn filez_pass<R: Runtime>(
     }
     if progress.iter().zip(segments.iter()).any(|(p, s)| p.load(Ordering::SeqCst) < s.len()) {
         return Err(Transfer::Retry("a range was left unfinished".into()));
+    }
+    if let Err(e) = saved {
+        return Err(Transfer::Fatal(disk_failed(&path, &e)));
     }
     Ok(true)
 }
@@ -2294,6 +2524,7 @@ async fn fetch_all<R: Runtime>(
     settings: &crate::settings::Settings,
     limiter: &Arc<Limiter>,
     is_mirror: bool,
+    jar: &Arc<reqwest::cookie::Jar>,
 ) -> Result<bool, String> {
     let mut failures = 0u32;
     let mut restarts = 0u32;
@@ -2378,6 +2609,9 @@ async fn fetch_all<R: Runtime>(
                         Err(e) => crate::logging::warn("download", &format!("{id}: no fresh link ({e}); same link, new connections")),
                     }
                     set_status(app, id, Status::Downloading, None);
+                } else if let Some(fresh) = own_client(app, id, jar) {
+                    // The old client would hand the same HTTP/2 connection out again.
+                    *client = fresh;
                 }
             }
             Err(Transfer::Retry(e)) => {
@@ -2402,6 +2636,12 @@ async fn fetch_all<R: Runtime>(
                 }
                 edit(app, id, |d| d.notice = Some("Reconnecting.".into()));
                 emit(app, true);
+                // Reconnecting means new connections, as it did over HTTP/1.1.
+                if !is_mirror {
+                    if let Some(fresh) = own_client(app, id, jar) {
+                        *client = fresh;
+                    }
+                }
             }
         }
     }
@@ -2669,11 +2909,93 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
     Ok(())
 }
 
+/* ── full speed behind other windows (KB-0306) ─────────────── */
+
+/// Windows 11 runs the work of an app whose window is not in front on
+/// efficiency footing (EcoQoS): on a CPU with efficiency cores it moves there
+/// and slows right down. An unpack left running behind a game or a minimised
+/// Kryoto took hours instead of minutes, and sped up again as soon as the
+/// window came back to the front. While anything here holds this (a download's
+/// turn, an uninstall), Kryoto tells Windows it is work the player is waiting
+/// on; once nothing does, Windows decides again. The unpackers it starts are
+/// told the same (`full_speed_child`). Nothing changes on other systems.
+pub(crate) struct FullSpeed(());
+
+static FULL_SPEED_HOLDERS: Mutex<usize> = Mutex::new(0);
+
+pub(crate) fn full_speed() -> FullSpeed {
+    let mut holders = FULL_SPEED_HOLDERS.lock().unwrap_or_else(|p| p.into_inner());
+    if *holders == 0 {
+        own_process_full_speed(true);
+    }
+    *holders += 1;
+    FullSpeed(())
+}
+
+impl Drop for FullSpeed {
+    fn drop(&mut self) {
+        let mut holders = FULL_SPEED_HOLDERS.lock().unwrap_or_else(|p| p.into_inner());
+        *holders = holders.saturating_sub(1);
+        if *holders == 0 {
+            own_process_full_speed(false);
+        }
+    }
+}
+
+fn own_process_full_speed(on: bool) {
+    #[cfg(windows)]
+    {
+        // SAFETY: the pseudo handle for this process needs no closing.
+        let ok = power_throttling(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() }, on);
+        if !ok {
+            crate::logging::warn("download", "Windows would not take the full-speed request; work behind other windows may run slower");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = on;
+}
+
+/// An unpacker this app started: full speed too, whichever window is in front.
+pub(crate) fn full_speed_child(child: &std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        power_throttling(child.as_raw_handle(), true);
+    }
+    #[cfg(not(windows))]
+    let _ = child;
+}
+
+/// `on`: never throttled (high QoS). Off: Windows' own choice again.
+#[cfg(windows)]
+fn power_throttling(process: windows_sys::Win32::Foundation::HANDLE, on: bool) -> bool {
+    use windows_sys::Win32::System::Threading::{
+        ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        StateMask: 0,
+    };
+    // SAFETY: a valid process handle and a state of the size given.
+    unsafe {
+        SetProcessInformation(
+            process,
+            ProcessPowerThrottling,
+            &state as *const PROCESS_POWER_THROTTLING_STATE as *const core::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        ) != 0
+    }
+}
+
 /* ── the queue ─────────────────────────────────────────────── */
 
-/// Holding the turn; giving it back wakes whoever is next.
+/// Holding the turn; giving it back wakes whoever is next. While it is held
+/// the work runs at full speed behind other windows (`FullSpeed`).
 struct Turn<R: Runtime> {
     app: AppHandle<R>,
+    _speed: FullSpeed,
 }
 
 impl<R: Runtime> Drop for Turn<R> {
@@ -2720,7 +3042,8 @@ async fn wait_for_turn<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8
             Err(_) => return None,
         };
         if mine {
-            return Some(Turn { app: app.clone() });
+            edit(app, id, |d| d.started_at = Some(now()));
+            return Some(Turn { app: app.clone(), _speed: full_speed() });
         }
         // Woken on every change; the timeout is only a safety net.
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), state.turn.notified()).await;
@@ -3017,7 +3340,11 @@ async fn mirror_client<R: Runtime>(
             headers.insert(k, v);
         }
     }
+    // HTTP/1.1, as before HTTP/2 came in for our own link: a host's limit on
+    // connections is counted in connections, and how each host's HTTP/2 copes
+    // with many streams at once is not known.
     let client = client_builder()
+        .http1_only()
         .user_agent(crate::resolvers::UA)
         .default_headers(headers)
         .build()
@@ -3224,10 +3551,13 @@ async fn transfer<R: Runtime>(
     file.flush().await.map_err(|e| Transfer::Fatal(format!("Writing the download failed: {e}")))?;
     // Paused: the file's length already says how far it got, so the sync only
     // matters for a power cut. It may not hold Pause up for minutes on a hard disk.
-    let synced = if flag.load(Ordering::SeqCst) == RUN {
-        file.get_ref().sync_data().await.is_ok()
+    let (synced, sync_error) = if flag.load(Ordering::SeqCst) == RUN {
+        match file.get_ref().sync_data().await {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e)),
+        }
     } else {
-        matches!(tokio::time::timeout(STOP_SAVE_WAIT, file.get_ref().sync_data()).await, Ok(Ok(())))
+        (matches!(tokio::time::timeout(STOP_SAVE_WAIT, file.get_ref().sync_data()).await, Ok(Ok(()))), None)
     };
     // Not all on the disk yet: the last mark that was stands.
     let earlier = match syncing.take() {
@@ -3253,7 +3583,39 @@ async fn transfer<R: Runtime>(
     if total.is_some_and(|t| received < t) {
         return Err(Transfer::Retry("the connection closed early".into()));
     }
+    // Everything arrived, but the disk would not confirm it holds it: unpacking
+    // what may not be there is how a damaged game gets installed (KB-0308).
+    if let Some(e) = sync_error {
+        return Err(Transfer::Fatal(disk_failed(&path, &e.to_string())));
+    }
     Ok(true)
+}
+
+/// The words for a disk that would not confirm the download is on it.
+fn disk_failed(path: &Path, e: &str) -> String {
+    format!("Saving the download to the disk failed ({e}). Check the drive {} is on, then press Retry.", path_dir(path).display())
+}
+
+/// What a 416 (Range Not Satisfiable) means for a range that starts at `from`.
+#[derive(Debug, PartialEq, Eq)]
+enum Unsatisfiable {
+    /// Nothing is left past `from` in the file this download expects: the range is done.
+    Done,
+    /// The server's file is another size (`Content-Range: bytes */N`): another
+    /// file, so the download starts over rather than mixing the two.
+    Restart(String),
+    /// The same file, and still refused: a passing fault, asked again.
+    Retry(String),
+}
+
+/// Read a 416 by the size the server says it has (`bytes */N`, KB-0308).
+fn range_not_satisfiable(from: u64, expected: Option<u64>, server: Option<u64>) -> Unsatisfiable {
+    match (expected, server) {
+        (Some(e), Some(n)) if e != n => Unsatisfiable::Restart(format!("the file on the server is {n} bytes now, not {e}")),
+        (_, Some(n)) if from >= n => Unsatisfiable::Done,
+        (_, Some(n)) => Unsatisfiable::Retry(format!("the server refused bytes from {from} of a {n}-byte file")),
+        (_, None) => Unsatisfiable::Retry(format!("the server refused bytes from {from} without saying the file's size")),
+    }
 }
 
 /// What a status code means for a download.
@@ -3448,7 +3810,10 @@ async fn transfer_parallel<R: Runtime>(
         // now costs at most this much downloading again.
         if last_checkpoint.elapsed() >= CHECKPOINT_EVERY && saving.as_ref().is_none_or(|t| t.is_finished()) {
             let (app, id, path, progress) = (app.clone(), id.to_string(), path.clone(), progress.clone());
-            saving = Some(tokio::spawn(async move { checkpoint(&app, &id, &path, &progress).await }));
+            // A failed one only means the next save covers this stretch too.
+            saving = Some(tokio::spawn(async move {
+                let _ = checkpoint(&app, &id, &path, &progress).await;
+            }));
             last_checkpoint = Instant::now();
         }
         if tasks.iter().all(|t| t.is_finished()) {
@@ -3494,7 +3859,7 @@ async fn transfer_parallel<R: Runtime>(
             if let Some(t) = saving {
                 let _ = t.await;
             }
-            checkpoint(&app, &id, &path, &progress).await;
+            let _ = checkpoint(&app, &id, &path, &progress).await;
         });
         let _ = tokio::time::timeout(STOP_SAVE_WAIT, &mut last_save).await;
         return Ok(false);
@@ -3502,7 +3867,7 @@ async fn transfer_parallel<R: Runtime>(
     if let Some(t) = saving {
         let _ = t.await;
     }
-    checkpoint(app, id, &path, &progress).await;
+    let saved = checkpoint(app, id, &path, &progress).await;
     if let Some(e) = fatal {
         return Err(Transfer::Fatal(e));
     }
@@ -3526,6 +3891,11 @@ async fn transfer_parallel<R: Runtime>(
     }
     if progress.iter().zip(segments.iter()).any(|(p, s)| p.load(Ordering::SeqCst) < s.len()) {
         return Err(Transfer::Retry("a range was left unfinished".into()));
+    }
+    // Every range arrived, but the disk would not confirm it holds them: the
+    // archive is not unpacked on trust (KB-0308).
+    if let Err(e) = saved {
+        return Err(Transfer::Fatal(disk_failed(&path, &e)));
     }
     Ok(true)
 }
@@ -3562,22 +3932,29 @@ struct Expected {
 /// were still in the system's write cache: a crash or power cut lost them,
 /// the resume skipped them, and the archive came out with stretches of zeros
 /// that only 7-Zip's checksum noticed.
-async fn checkpoint<R: Runtime>(app: &AppHandle<R>, id: &str, path: &Path, progress: &[AtomicU64]) {
+///
+/// Err when the disk would not confirm it: nothing is recorded then, so a
+/// resume fetches again what it could not vouch for. The last one before
+/// unpacking failing fails the download (KB-0308); it used to be ignored.
+async fn checkpoint<R: Runtime>(app: &AppHandle<R>, id: &str, path: &Path, progress: &[AtomicU64]) -> Result<(), String> {
     let counts: Vec<u64> = progress.iter().map(|p| p.load(Ordering::SeqCst)).collect();
     let file = path.to_path_buf();
-    let synced = tokio::task::spawn_blocking(move || std::fs::OpenOptions::new().write(true).open(file).and_then(|f| f.sync_data()))
+    tokio::task::spawn_blocking(move || sync_to_disk(&file))
         .await
-        .map(|r| r.is_ok())
-        .unwrap_or(false);
-    if !synced {
-        return;
-    }
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     edit(app, id, |d| {
         for (s, n) in d.segments.iter_mut().zip(&counts) {
             s.done = (*n).min(s.len());
         }
     });
     persist(app);
+    Ok(())
+}
+
+/// Have the system put what it holds of the archive on the disk itself.
+fn sync_to_disk(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new().write(true).open(path)?.sync_data()
 }
 
 /// One range, on one connection, written at its own offset. Progress is only
@@ -3603,6 +3980,19 @@ async fn fetch_range(
     }
     let from = seg.start + done;
     let res = send(client.get(url).header(reqwest::header::RANGE, format!("bytes={from}-{}", seg.end))).await?;
+    // Before `check_status`, which took every 416 as the end of the download
+    // (KB-0308): the file on the server is another size now, so start over.
+    if res.status().as_u16() == 416 {
+        return match range_not_satisfiable(from, expect.total, content_range_of(&res).and_then(|r| r.total)) {
+            Unsatisfiable::Done => {
+                progress[index].store(seg.len(), Ordering::SeqCst);
+                arrived[index].store(seg.len(), Ordering::SeqCst);
+                Ok(())
+            }
+            Unsatisfiable::Restart(why) => Err(Transfer::Restart(why)),
+            Unsatisfiable::Retry(why) => Err(Transfer::Retry(why)),
+        };
+    }
     check_status(res.status().as_u16())?;
     if res.status().as_u16() != 206 {
         return Err(Transfer::NoRanges);
@@ -3664,6 +4054,11 @@ async fn fetch_range(
             progress[index].store(written, Ordering::SeqCst);
         }
     }
+    if written >= seg.len() && failure.is_none() {
+        // The answer read to its end, so its connection goes back to the pool
+        // and the next range is sent on it rather than on a new one (KB-0289).
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await;
+    }
     file.flush().await.map_err(|e| Transfer::Fatal(e.to_string()))?;
     progress[index].store(written, Ordering::SeqCst);
     if let Some(e) = failure {
@@ -3680,6 +4075,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     if flag.load(Ordering::SeqCst) != RUN {
         return Err(STOPPED.into());
     }
+    edit(app, id, |d| d.unpack_started_at = Some(now()));
     set_status(app, id, Status::Extracting, None);
     let item = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let archive = PathBuf::from(&item.archive_path);
@@ -4181,6 +4577,10 @@ pub fn extract_until(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<
         match extract_7z(archive, dest, progress, stop) {
             Ok(()) => return Ok(Vec::new()),
             Err(_) if stop.load(Ordering::SeqCst) != RUN => return Err(STOPPED.into()),
+            // A filter the built-in unpacker predates (7-Zip 23's ARM64 one,
+            // KB-0296), and no 7-Zip to hand it to: tar cannot read a 7z
+            // either, so say what gets it unpacked instead of tar's noise.
+            Err(e) if e.contains("UnsupportedCompressionMethod") => return Err(needs_newer_7zip(&errors)),
             Err(e) => errors.push(e),
         }
     }
@@ -4189,6 +4589,17 @@ pub fn extract_until(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<
         errors.push(t);
         errors.join("; ")
     })
+}
+
+/// The words for a .7z only a recent 7-Zip reads, when none was at hand:
+/// `tried` is what each 7-Zip that ran said (an older one refuses the filter too).
+fn needs_newer_7zip(tried: &[String]) -> String {
+    #[cfg(windows)]
+    let how = "Kryoto could not fetch its own 7-Zip from 7-zip.org. Install 7-Zip (7-zip.org), then press Retry: the download is kept.";
+    #[cfg(not(windows))]
+    let how = "Install 7-Zip 23 or newer (the `7zip` package, command `7zz`; the old `p7zip` cannot read it), then press Retry: the download is kept.";
+    let tried = if tried.is_empty() { String::new() } else { format!(" ({})", tried.join("; ")) };
+    format!("This archive needs a newer 7-Zip than the one built in.{tried} {how}")
 }
 
 /// Where 7-Zip's console might be: an installed 7-Zip, then the standalone
@@ -4242,6 +4653,8 @@ fn extract_with_7zip(tool: &Path, archive: &Path, dest: &Path, progress: &dyn Fn
     // -bso0: no listing. -bsp1: progress on stdout. -bse2: errors on stderr.
     cmd.arg("x").arg("-y").arg("-bso0").arg("-bsp1").arg("-bse2").arg(format!("-o{}", dest.display())).arg(archive);
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    // Inside the AppImage, never hand 7-Zip the AppImage's own library paths (KB-0311).
+    crate::launch::clean_appimage_env(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -4252,6 +4665,7 @@ fn extract_with_7zip(tool: &Path, archive: &Path, dest: &Path, progress: &dyn Fn
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => return Some(Err(format!("{}: {e}", tool.display()))),
     };
+    full_speed_child(&child);
     let mut stderr = child.stderr.take()?;
     let errors = std::thread::spawn(move || {
         let mut text = String::new();
@@ -4452,6 +4866,8 @@ fn extract_with_tar(archive: &Path, dest: &Path) -> Result<Vec<String>, String> 
     for tool in candidates {
         let mut cmd = std::process::Command::new(&tool);
         cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
+        // bsdtar from inside the AppImage would load its older compression libraries (KB-0311).
+        crate::launch::clean_appimage_env(&mut cmd);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -5646,6 +6062,167 @@ mod tests {
                 let got: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
                 assert_eq!(got, TOTAL);
                 println!("{conns} connections: {:.0} MB/s", TOTAL as f64 / 1048576.0 / secs);
+            }
+        });
+    }
+
+    #[test]
+    fn a_refused_range_is_read_by_the_size_the_server_has() {
+        // Another size: another file, start over (KB-0308).
+        assert!(matches!(range_not_satisfiable(300, Some(1000), Some(2000)), Unsatisfiable::Restart(_)));
+        assert!(matches!(range_not_satisfiable(300, Some(1000), Some(500)), Unsatisfiable::Restart(_)));
+        // The same size, and nothing past where the range starts: done.
+        assert_eq!(range_not_satisfiable(1000, Some(1000), Some(1000)), Unsatisfiable::Done);
+        // The same size, and the bytes are there: a passing fault, never "done",
+        // which is how a file full of zeros was once installed.
+        assert!(matches!(range_not_satisfiable(300, Some(1000), Some(1000)), Unsatisfiable::Retry(_)));
+        // Nothing said about the size: asked again.
+        assert!(matches!(range_not_satisfiable(300, Some(1000), None), Unsatisfiable::Retry(_)));
+    }
+
+    #[test]
+    fn a_416_restarts_a_file_that_changed_size_instead_of_failing() {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let grown = serve(&rt, |_, _| ("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */2000".into(), Vec::new()));
+        let (res, file) = fetch_one(&rt, &grown, "range-416-grown", Segment { start: 300, end: 599, done: 0 }, 1000);
+        assert!(matches!(res, Err(Transfer::Restart(_))), "a 416 used to be Fatal here");
+        assert!(file.iter().all(|b| *b == 0), "nothing written");
+
+        let same = serve(&rt, |_, _| ("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */1000".into(), Vec::new()));
+        let (res, _) = fetch_one(&rt, &same, "range-416-same", Segment { start: 300, end: 599, done: 0 }, 1000);
+        assert!(matches!(res, Err(Transfer::Retry(_))));
+    }
+
+    #[test]
+    fn a_disk_that_cannot_confirm_a_save_is_an_error() {
+        let dir = scratch("sync");
+        assert!(sync_to_disk(&dir.join("missing.bin")).is_err());
+        let file = dir.join("there.bin");
+        std::fs::write(&file, b"kryoto").unwrap();
+        assert!(sync_to_disk(&file).is_ok());
+        assert!(disk_failed(&file, "I/O error").contains("Retry"));
+    }
+
+    /// Ranges one after another on the same client go on the connection the
+    /// last one used, not on a new one each (KB-0289).
+    #[test]
+    fn ranges_one_after_another_reuse_their_connection() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let url = rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let count = connections.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else { return };
+                    count.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let mut req = Vec::new();
+                        let mut b = [0u8; 1024];
+                        loop {
+                            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                                let Ok(n) = sock.read(&mut b).await else { return };
+                                if n == 0 {
+                                    return;
+                                }
+                                req.extend_from_slice(&b[..n]);
+                            }
+                            let end = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                            let text = String::from_utf8_lossy(&req[..end]).to_string();
+                            req.drain(..end);
+                            let range = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(String::from)).unwrap();
+                            let (a, z) = range.trim().split_once('-').unwrap();
+                            let (a, z): (u64, u64) = (a.parse().unwrap(), z.parse().unwrap());
+                            let body: Vec<u8> = (a..=z).map(byte_at).collect();
+                            let head = format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{z}/3000\r\nContent-Length: {}\r\n\r\n", body.len());
+                            if sock.write_all(head.as_bytes()).await.is_err() || sock.write_all(&body).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            format!("http://{addr}/file")
+        });
+        let path = scratch("reuse").join("file.bin");
+        std::fs::File::create(&path).unwrap().set_len(3000).unwrap();
+        let segs = [Segment { start: 0, end: 999, done: 0 }, Segment { start: 1000, end: 1999, done: 0 }, Segment { start: 2000, end: 2999, done: 0 }];
+        let progress: Vec<AtomicU64> = segs.iter().map(|_| AtomicU64::new(0)).collect();
+        let arrived: Vec<AtomicU64> = segs.iter().map(|_| AtomicU64::new(0)).collect();
+        let (stop, limiter) = (AtomicU8::new(RUN), Limiter::new(0));
+        let expect = Expected { etag: None, total: Some(3000) };
+        let client = client_builder().build().unwrap();
+        for (i, seg) in segs.iter().enumerate() {
+            assert!(rt.block_on(fetch_range(&client, &url, &path, i, seg.clone(), &progress, &arrived, &stop, &limiter, &expect)).is_ok());
+        }
+        let file = std::fs::read(&path).unwrap();
+        assert!((0..3000).all(|i| file[i] == byte_at(i as u64)));
+        assert_eq!(connections.load(Ordering::SeqCst), 1, "each range opened a connection of its own");
+    }
+
+    #[test]
+    fn full_speed_is_asked_for_while_held_and_given_back_after() {
+        let first = full_speed();
+        let second = full_speed();
+        assert_eq!(*FULL_SPEED_HOLDERS.lock().unwrap(), 2);
+        drop(first);
+        assert_eq!(*FULL_SPEED_HOLDERS.lock().unwrap(), 1);
+        drop(second);
+        assert_eq!(*FULL_SPEED_HOLDERS.lock().unwrap(), 0);
+        #[cfg(windows)]
+        {
+            // SAFETY: the pseudo handle for this process.
+            let me = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() };
+            assert!(power_throttling(me, true), "Windows refused the full-speed request");
+            assert!(power_throttling(me, false));
+        }
+    }
+
+    /// The real filehost, both ways: `KRYOTO_SPEED_URL=<a dl.kryo.to link>
+    /// cargo test --release -- --ignored live_link_speed --nocapture`. 16
+    /// ranges for 20 s over HTTP/1.1 connections, then as HTTP/2 streams on
+    /// one connection, with the client every download uses (KB-0289).
+    #[test]
+    #[ignore]
+    fn live_link_speed() {
+        let Ok(url) = std::env::var("KRYOTO_SPEED_URL") else { return };
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let clients = [("HTTP/1.1, 16 connections", client_builder().http1_only().build().unwrap()), ("HTTP/2, 16 streams", client_builder().build().unwrap())];
+            for (name, client) in clients {
+                let probe = client.get(&url).header(reqwest::header::RANGE, "bytes=0-0").send().await.unwrap();
+                let version = probe.version();
+                let total = content_range_of(&probe).and_then(|r| r.total).unwrap();
+                drop(probe);
+                let got = Arc::new(AtomicU64::new(0));
+                let next = Arc::new(AtomicU64::new(0));
+                let until = Instant::now() + std::time::Duration::from_secs(20);
+                let mut tasks = Vec::new();
+                for _ in 0..16 {
+                    let (client, url, got, next) = (client.clone(), url.clone(), got.clone(), next.clone());
+                    tasks.push(tokio::spawn(async move {
+                        while Instant::now() < until {
+                            let from = next.fetch_add(1, Ordering::SeqCst) * 64 * 1024 * 1024 % total;
+                            let to = (from + 64 * 1024 * 1024).min(total) - 1;
+                            let Ok(res) = client.get(&url).header(reqwest::header::RANGE, format!("bytes={from}-{to}")).send().await else { continue };
+                            let mut stream = res.bytes_stream();
+                            while let Some(Ok(chunk)) = stream.next().await {
+                                got.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+                                if Instant::now() >= until {
+                                    break;
+                                }
+                            }
+                        }
+                    }));
+                }
+                let t = Instant::now();
+                for task in tasks {
+                    let _ = task.await;
+                }
+                println!("{name} ({version:?}): {:.1} MB/s", got.load(Ordering::SeqCst) as f64 / 1e6 / t.elapsed().as_secs_f64());
             }
         });
     }

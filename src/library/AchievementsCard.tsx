@@ -276,8 +276,10 @@ function Row({ a }: { a: GameAchievement }) {
           {secret ? 'Keep playing to find out, or click to see it.' : a.description}
         </span>
       </span>
-      <span className="text-right text-[10px] tabular-nums text-muted-foreground">
-        {a.unlocked && a.unlockedAt ? new Date(a.unlockedAt * 1000).toLocaleDateString() : a.percent != null ? `${a.percent.toFixed(1)}%` : null}
+      {/* When it was unlocked and how rare it is, both (kryo.to suggestion #85). */}
+      <span className="grid justify-items-end text-[10px] leading-snug tabular-nums text-muted-foreground">
+        {a.unlocked && a.unlockedAt ? <span>{new Date(a.unlockedAt * 1000).toLocaleDateString()}</span> : null}
+        {a.percent != null ? <span>{`${a.percent.toFixed(1)}%`}</span> : null}
       </span>
     </>
   )

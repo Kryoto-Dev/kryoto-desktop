@@ -331,12 +331,21 @@ function App() {
   }, [])
   useEffect(() => {
     if (!token) return
+    // A new token can be another account: the last one's answer, or its
+    // account, never stands for it (KB-0309).
+    let current = true
+    setMe(undefined)
+    setError(null)
     void loadMe(token)
       .then((m) => {
+        if (!current) return
         if (!m) setToken(null)
         else setMe(m)
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => current && setError(e instanceof Error ? e.message : String(e)))
+    return () => {
+      current = false
+    }
   }, [token])
   const ready = !!(token && me && !me.anonymous && me.web && me.chat && me.friends && !(EXPECTED_USER && me.id !== EXPECTED_USER))
   useEffect(() => {

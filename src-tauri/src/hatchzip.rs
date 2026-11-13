@@ -171,6 +171,7 @@ fn unpack_tool(archive: &Path, dir: &Path, inner: &str) -> Result<PathBuf, Strin
     let tar = PathBuf::from("tar");
     let mut cmd = std::process::Command::new(tar);
     cmd.arg("-xf").arg(archive).arg("-C").arg(dir).arg(inner);
+    crate::launch::clean_appimage_env(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -192,6 +193,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn command(tool: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new(tool);
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    // Never the AppImage's own library paths for HatchZip (KB-0311).
+    crate::launch::clean_appimage_env(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -304,6 +307,8 @@ pub fn extract(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total:
         .arg(archive)
         .spawn()
         .map_err(|e| Failure::Other(e.to_string()))?;
+    // Full speed whichever window is in front (KB-0306).
+    crate::downloads::full_speed_child(&child);
     let mut stderr = child.stderr.take();
     let mut stdout = child.stdout.take();
     let errors = std::thread::spawn(move || {
