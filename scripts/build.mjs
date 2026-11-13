@@ -71,7 +71,9 @@ const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\\|\//
 {
   const buf = readFileSync(exe)
   const text = buf.toString('latin1')
-  const pattern = /([A-Za-z]:[\\/]|\/)[^\0"]*?target[\\/][^\\/"\0]+[\\/]build[\\/]openssl-sys-[^\\/"\0]+[\\/]out[\\/]openssl-build[\\/]install/g
+  // Cargo names the build folder `openssl-sys-<hash>` or, with its newer build-dir
+  // layout (on CI since 2026-11-13), `openssl-sys/<hash>`: both are matched.
+  const pattern = /([A-Za-z]:[\\/]|\/)[^\0"]*?target[\\/][^\\/"\0]+[\\/]build[\\/]openssl-sys(?:-|[\\/])[^\\/"\0]+[\\/]out[\\/]openssl-build[\\/]install/g
   let patched = 0
   const clean = text.replace(pattern, (match) => {
     patched++
