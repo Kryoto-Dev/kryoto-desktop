@@ -268,7 +268,9 @@ export function LibraryHome({
                 <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />
               </button>
               <span className="pointer-events-none absolute right-2 top-2 flex flex-col items-end gap-1">
-                <BranchTag branch={g.steamBranch} launcher={g.launcher} title={g.title} copy={copyLabel(g, games)} className="backdrop-blur" />
+                {/* No title: the cover shows no name, so a branch the title names
+                    ("GoreBox (public-beta)") still needs its pill here. */}
+                <BranchTag branch={g.steamBranch} launcher={g.launcher} copy={copyLabel(g, games)} className="backdrop-blur" />
                 <VrTag vr={g.vr} className="backdrop-blur" />
               </span>
               {sort === 'size' && sizes[g.id]?.bytes ? (
