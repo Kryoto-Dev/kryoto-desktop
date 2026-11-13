@@ -29,26 +29,26 @@ thread_local! {
     static OVERLAY: RefCell<Option<gtk::Overlay>> = const { RefCell::new(None) };
 }
 
-fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
-    // The shell measured in its CSS pixels, which the text size zooms.
-    let z = crate::text_size::css_to_logical();
-    let (x, y, width, height) = (x * z, y * z, width * z, height * z);
+pub fn rect(x: f64, y: f64, width: f64, height: f64, scale: Option<f64>, gtk_scale: i32) -> Rect {
+    // WebKit's CSS scale can include fractional text/display scaling that
+    // GTK's integer widget scale does not. On X11, for example, DPR=1.5
+    // with GTK scale=1: using CSS pixels directly shrinks the Store to 2/3.
+    let ratio = crate::placement::css_scale(scale).map_or_else(crate::text_size::css_to_logical, |s| s / f64::from(gtk_scale.max(1)));
     (
-        x.round() as i32,
-        y.round() as i32,
-        width.round().max(1.0) as i32,
-        height.round().max(1.0) as i32,
+        (x * ratio).round() as i32,
+        (y * ratio).round() as i32,
+        (width * ratio).round().max(1.0) as i32,
+        (height * ratio).round().max(1.0) as i32,
     )
 }
 
 /// Put `view` over the shell (first call) or move it (later calls).
-/// Coordinates are the shell's CSS pixels; GTK allocates in logical ones,
-/// the same at 100% text size.
-pub fn place(view: &tauri::Webview, x: f64, y: f64, width: f64, height: f64) {
-    let r = rect(x, y, width, height);
+/// Convert the shell's CSS pixels into GTK logical pixels on the UI thread.
+pub fn place(view: &tauri::Webview, x: f64, y: f64, width: f64, height: f64, scale: Option<f64>) {
     let name = view.label().to_string();
     let _ = view.with_webview(move |w| {
         let widget: gtk::Widget = w.inner().upcast();
+        let r = rect(x, y, width, height, scale, widget.scale_factor());
         widget.set_widget_name(&name);
         RECTS.with(|m| m.borrow_mut().insert(name, r));
         let overlay = OVERLAY.with(|o| o.borrow().clone()).or_else(|| {
@@ -62,6 +62,37 @@ pub fn place(view: &tauri::Webview, x: f64, y: f64, width: f64, height: f64) {
         }
         overlay.queue_resize();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rect;
+
+    #[test]
+    fn fractional_x11_scale_fills_the_slot() {
+        assert_eq!(rect(0.0, 60.0, 800.0, 400.0, Some(1.5), 1), (0, 90, 1200, 600));
+    }
+
+    #[test]
+    fn integer_gtk_scale_is_not_applied_twice() {
+        assert_eq!(rect(10.0, 60.0, 800.0, 400.0, Some(2.0), 2), (10, 60, 800, 400));
+        assert_eq!(rect(10.0, 60.0, 800.0, 400.0, Some(2.5), 2), (13, 75, 1000, 500));
+    }
+
+    #[test]
+    fn text_zoom_and_fractional_display_scaling_fill_the_same_viewport() {
+        let scale = crate::placement::viewport_scale(1500, Some(800.0));
+        assert_eq!(rect(0.0, 0.0, 800.0, 400.0, scale, 1), (0, 0, 1500, 750));
+        let scale = crate::placement::viewport_scale(2000, Some(800.0));
+        assert_eq!(rect(0.0, 0.0, 800.0, 400.0, scale, 2), (0, 0, 1000, 500));
+    }
+
+    #[test]
+    fn missing_or_invalid_css_scale_keeps_gtk_units() {
+        for scale in [None, Some(0.0), Some(f64::NAN)] {
+            assert_eq!(rect(10.0, 60.0, 800.0, 400.0, scale, 2), (10, 60, 800, 400));
+        }
+    }
 }
 
 /// Move the shell out of Tauri's box into a new overlay that takes its place.

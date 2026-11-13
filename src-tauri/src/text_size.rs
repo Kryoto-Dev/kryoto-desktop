@@ -14,10 +14,10 @@
 //!
 //! The shell measures where the Store and menus go in its own CSS pixels.
 //! WebView2 counts the zoom in `devicePixelRatio`, so the conversion to
-//! physical pixels in placement.rs stays right on Windows. Linux places views
-//! in logical pixels and never uses that ratio (WebKitGTK 2.54 counts the zoom
-//! in it, older versions do not): there a CSS pixel is `factor()` logical ones
-//! (`css_to_logical`).
+//! physical pixels in placement.rs stays right on Windows. Linux measures the
+//! shell's physical width per CSS viewport width because WebKitGTK versions
+//! disagree on whether DPR includes zoom. Without that measurement, Linux
+//! falls back to `factor()` logical pixels per CSS pixel (`css_to_logical`).
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use tauri::{AppHandle, Emitter, Manager, Runtime, Webview};
