@@ -895,15 +895,23 @@ pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: O
 
 /// `mint`, as `session` (over one address family, say).
 pub async fn mint_with<R: Runtime>(app: &AppHandle<R>, session: &Session, slug: &str, turnstile_token: Option<&str>, mirrors: bool) -> Result<Minted, MintError> {
+    mint_version(app, session, slug, None, turnstile_token, mirrors).await
+}
+
+/// `mint_with` for one build of the game (`version`, as kryo.to names it),
+/// or the current one when `None`: a download of an older build picked on the
+/// page gets a fresh link for that build, not for the newest.
+pub async fn mint_version<R: Runtime>(
+    app: &AppHandle<R>,
+    session: &Session,
+    slug: &str,
+    version: Option<&str>,
+    turnstile_token: Option<&str>,
+    mirrors: bool,
+) -> Result<Minted, MintError> {
     let listing = listing(session, slug).await?;
     let title = listing["title"].as_str().unwrap_or(slug).to_string();
-    // The release players get now.
-    let release = listing["releases"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|r| r["primary"].as_bool() == Some(true) && r["archived"].as_bool() != Some(true))
-        .ok_or("This game has no release to download right now.".to_string())?;
+    let release = pick_release(&listing, version).ok_or("This game has no release to download right now.".to_string())?;
     let links: Vec<&str> = release["links"].as_array().into_iter().flatten().filter_map(|l| l["url"].as_str()).collect();
     if !links.iter().any(|u| u.starts_with("/api/download/v/")) {
         if !mirrors {
@@ -915,6 +923,15 @@ pub async fn mint_with<R: Runtime>(app: &AppHandle<R>, session: &Session, slug: 
     let release_id = release["id"].as_str().unwrap_or_default();
     let url = mint_release(app, session, release_id, turnstile_token).await?;
     Ok(Minted::Link { url, title })
+}
+
+/// The release `version` in a `/api/games/<slug>/downloads` answer, else the
+/// one players get now; never an archived one.
+fn pick_release<'a>(listing: &'a serde_json::Value, version: Option<&str>) -> Option<&'a serde_json::Value> {
+    let live = || listing["releases"].as_array().into_iter().flatten().filter(|r| r["archived"].as_bool() != Some(true));
+    version
+        .and_then(|v| live().find(|r| r["version"].as_str() == Some(v)))
+        .or_else(|| live().find(|r| r["primary"].as_bool() == Some(true)))
 }
 
 /// What the phone's Download does: exactly what Download does in Kryoto
@@ -1181,6 +1198,22 @@ mod tests {
         assert_eq!(nonce, "payload.sig");
         assert!(counter.bytes().all(|b| b.is_ascii_digit()));
         assert!(leading_zero_bits(&Sha256::digest(proof.as_bytes())) >= 12);
+    }
+
+    /// A fresh link for a download of an older build is for that build.
+    #[test]
+    fn a_picked_build_is_minted_again_as_itself() {
+        let listing = serde_json::json!({ "releases": [
+            { "id": "3", "version": "1.2", "primary": true },
+            { "id": "2", "version": "1.1", "primary": false },
+            { "id": "1", "version": "1.0", "primary": false, "archived": true },
+        ] });
+        let id = |v: Option<&str>| pick_release(&listing, v).and_then(|r| r["id"].as_str());
+        assert_eq!(id(None), Some("3"));
+        assert_eq!(id(Some("1.1")), Some("2"));
+        // Archived (mirrors only) or gone: the current build.
+        assert_eq!(id(Some("1.0")), Some("3"));
+        assert_eq!(id(Some("0.9")), Some("3"));
     }
 
     /// Only Cloudflare's check is the one the window must pass; a proof of

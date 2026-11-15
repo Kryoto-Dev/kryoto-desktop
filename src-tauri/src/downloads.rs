@@ -2063,7 +2063,9 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
         let minted = if let Some(release) = &d.addon_release {
             crate::phone::mint_release(app, &session, release, None).await.map(|url| crate::phone::Minted::Link { url, title: String::new() })
         } else if let Some(slug) = &d.slug {
-            crate::phone::mint_with(app, &session, slug, None, true).await
+            // The build this row fetches: an older one picked on the page
+            // gets its own link again, not the newest build's.
+            crate::phone::mint_version(app, &session, slug, d.release.as_deref(), None, true).await
         } else {
             return Err("This download has no game to ask kryo.to about.".into());
         };
@@ -2107,16 +2109,18 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
     Err(unreachable.unwrap_or_else(|| "Could not reach kryo.to.".into()))
 }
 
-/// Our own link refused as made for another network, and neither family
-/// passes: this app mints the same file again for this PC, so the download
-/// carries on without the player. Only a link for the very same file is
-/// taken (a game's newer build is a new download); `false` when there is
-/// none, or kryo.to wants the check only its page can pass.
+/// Our own link refused (made for another network, or run out), and no
+/// family passes: this app mints the same file again for this PC, so the
+/// download carries on without the player. Only a link for the very same
+/// file is taken (a game's newer build is a new download); `false` when
+/// there is none, or kryo.to wants the check only its page can pass.
 async fn remint_same_file<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     let Some(before) = edit(app, id, |_| {}) else { return false };
     let Some(file) = link_file(&before.url) else { return false };
     if let Err(e) = mint_link(app, id).await {
-        crate::logging::warn("download", &format!("{id}: could not mint the link again: {e}"));
+        // An error, so it reaches the reports: until 0.3.9 nothing said why
+        // a refused link was never replaced (KB-0072).
+        crate::logging::error("download", &format!("{id}: could not mint the link again: {e}"));
         return false;
     }
     let after = edit(app, id, |_| {});
@@ -2617,18 +2621,18 @@ async fn fetch_all<R: Runtime>(
                 }
                 set_status(app, id, Status::Downloading, None);
             }
-            // Our own link refused as made for another network: once, the
-            // family that passes is found, or the link minted again for this
-            // PC (see `foreign_ip_retry`); only when neither works does the
-            // game's page open so one press re-mints it.
-            Err(Transfer::Refused(403)) if !is_mirror && !asked_again => {
+            // Our own link refused as made for another network, or run
+            // out: once a run, the family that passes is found, or the link
+            // minted again for this PC (see `fresh_link`); only when that
+            // fails does the game's page open so one press re-mints it.
+            Err(Transfer::Refused(code @ (403 | 410))) if !is_mirror && !asked_again => {
                 asked_again = true;
-                match foreign_ip_retry(app, id, client).await {
+                match fresh_link(app, id, client, code).await {
                     Some(other) => {
                         *client = other;
                         set_status(app, id, Status::Downloading, None);
                     }
-                    None => return Err(refused_ours(app, id, 403)),
+                    None => return Err(refused_ours(app, id, code)),
                 }
             }
             Err(Transfer::Refused(code)) if !is_mirror => return Err(refused_ours(app, id, code)),
@@ -3260,22 +3264,36 @@ async fn refusal_reason(client: &reqwest::Client, url: &str) -> Option<String> {
 /// a one-byte request, and the one dl.kryo.to lets through is kept for the
 /// row. When neither passes (a carrier that hands out a new IPv4 per
 /// connection, say), the app mints the same file again for this PC and asks
-/// once more. `None` when the refusal is not about the network, or nothing
-/// gets through.
-async fn foreign_ip_retry<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client) -> Option<reqwest::Client> {
+/// once more, a few times: a carrier that hands out addresses from a pool
+/// can land the mint and the download in two /24s, and the next pair in
+/// one. A link that ran out (410) is minted again straight away. `None`
+/// when nothing gets through.
+async fn fresh_link<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client, code: u16) -> Option<reqwest::Client> {
     let d = edit(app, id, |_| {})?;
-    if refusal_reason(client, &d.url).await.as_deref() != Some("foreign_ip") || !link_bound(&d.url) {
-        return None;
+    let reason = refusal_reason(client, &d.url).await;
+    if code != 410 && reason.as_deref() == Some("foreign_ip") && link_bound(&d.url) {
+        if let Some(passing) = passing_family(app, id).await {
+            return Some(passing);
+        }
     }
-    if let Some(passing) = passing_family(app, id).await {
-        return Some(passing);
+    crate::logging::warn("download", &format!("{id}: our link was refused ({code}, {}); minting it again", reason.as_deref().unwrap_or("no reason given")));
+    for attempt in 0..REMINTS {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+        if !remint_same_file(app, id).await {
+            return None;
+        }
+        if let Some(passing) = passing_family(app, id).await {
+            return Some(passing);
+        }
     }
-    crate::logging::warn("download", &format!("{id}: no address family passes the link's network check; minting it again"));
-    if remint_same_file(app, id).await {
-        return passing_family(app, id).await;
-    }
+    crate::logging::error("download", &format!("{id}: a fresh link was refused {REMINTS} times over every address family"));
     None
 }
+
+/// How many fresh links a refused download asks for before the game's page opens.
+const REMINTS: usize = 3;
 
 /// The order families are asked in: the one on record first, then the
 /// others this PC has a route for.
