@@ -89,6 +89,7 @@ export function FriendsPage({
   onJoinInvite,
   list = 'friends',
   onConversation,
+  onScanCode,
 }: {
   account: Account
   onProfile: () => void
@@ -107,6 +108,8 @@ export function FriendsPage({
   list?: 'friends' | 'chats'
   /** A conversation filled a narrow page, or left it: `close` goes back to the list (Kryoto Mobile's Back and tab bar). */
   onConversation?: (close: (() => void) | null) => void
+  /** Read a QR code from a device that has the chat identity (a phone's camera); null when cancelled. */
+  onScanCode?: () => Promise<string | null>
 }) {
   const state = useFriends()
   const [search, setSearch] = useState('')
@@ -480,7 +483,7 @@ export function FriendsPage({
             {chatOn ? <HistoryNotice history={history} /> : null}
             {narrow && live && !chatReady && account.chat ? (
               <div className="border-b border-border p-3">
-                <ChatSetup available />
+                <ChatSetup available onScan={onScanCode} />
               </div>
             ) : null}
           </div>
@@ -748,7 +751,7 @@ export function FriendsPage({
               <p className="text-2xl font-bold text-foreground">{chatOn ? 'Pick someone to talk to' : 'Your friends, in one place'}</p>
             </div>
           )}
-          {account.friends ? <ChatSetup available={!!account.chat} /> : null}
+          {account.friends ? <ChatSetup available={!!account.chat} onScan={onScanCode} /> : null}
         </section>
       )}
 
