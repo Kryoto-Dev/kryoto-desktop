@@ -47,13 +47,14 @@ fn line(text: &str) -> Option<String> {
 }
 
 /// "12 hours", "1 hour 30 minutes", "45 minutes"; nothing under a minute.
-/// The minutes past an hour count too: 1h59m is not "1 hour" (KB-0324).
+/// Under 10 hours the minutes past the hour count too: 1h59m is not "1 hour"
+/// (KB-0324). Past that they are noise in a status line.
 pub fn hours(seconds: u64) -> String {
     let plural = |n: u64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     match (seconds / 3600, seconds % 3600 / 60) {
         (0, 0) => String::new(),
         (0, m) => plural(m, "minute"),
-        (h, 0) => plural(h, "hour"),
+        (h, m) if m == 0 || h >= 10 => plural(h, "hour"),
         (h, m) => format!("{} {}", plural(h, "hour"), plural(m, "minute")),
     }
 }
@@ -390,6 +391,7 @@ mod tests {
         assert_eq!(line("   "), None);
         assert_eq!((hours(59).as_str(), hours(60).as_str(), hours(3600).as_str(), hours(7200).as_str()), ("", "1 minute", "1 hour", "2 hours"));
         assert_eq!((hours(4200).as_str(), hours(7140).as_str(), hours(7300).as_str()), ("1 hour 10 minutes", "1 hour 59 minutes", "2 hours 1 minute"));
+        assert_eq!(hours(45_000), "12 hours");
     }
 
     #[test]
