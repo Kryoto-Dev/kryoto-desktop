@@ -4,6 +4,7 @@ import { errorText, isWeb } from '@/lib/bridge'
 import {
   chatAccountDeviceRemove,
   chatAccountDevices,
+  chatBackupStatus,
   chatEnable,
   chatPushDisable,
   chatPushEnable,
@@ -127,6 +128,20 @@ export function ChatSetup({ available, onScan }: { available: boolean; onScan?: 
   const [passphrase, setPassphrase] = useState('')
   const [repeat, setRepeat] = useState('')
   const [code, setCode] = useState('')
+  // null: not known (offline, or not asked yet). False: a second device has nothing to link from.
+  const [hasBackup, setHasBackup] = useState<boolean | null>(null)
+  const online = status?.state === 'online'
+
+  const refreshBackup = () => {
+    if (!online) {
+      setHasBackup(null)
+      return
+    }
+    void chatBackupStatus()
+      .then((b) => setHasBackup(b.exists))
+      .catch(() => {})
+  }
+  useEffect(refreshBackup, [online])
 
   if (!status) return null
   // Ships dark: shown only to accounts chat is rolled out to, or where chat
@@ -134,7 +149,6 @@ export function ChatSetup({ available, onScan }: { available: boolean; onScan?: 
   if (!available && status.state === 'off') return null
   const on = status.state !== 'off'
   const canEnable = ['off', 'signInNeeded', 'unavailable', 'disabled', 'anonymousMode'].includes(status.state)
-  const online = status.state === 'online'
 
   const run = async (work: () => Promise<unknown>) => {
     setAsking(null)
@@ -267,6 +281,18 @@ export function ChatSetup({ available, onScan }: { available: boolean; onScan?: 
       {/* Browser pushes: a phone has its own, under Profile > Notifications. */}
       {online && isWeb() && here() !== 'this phone' ? <BrowserNotifications /> : null}
 
+      {online && hasBackup === false ? (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+          <p className="min-w-0 grow text-[11px] text-muted-foreground">
+            No recovery code here yet: make one so you can add your phone or PC later without starting over.
+          </p>
+          <Button size="sm" disabled={busy} onClick={() => setSecurity(true)}>
+            <KeyRound className="size-3" aria-hidden />
+            Make a code
+          </Button>
+        </div>
+      ) : null}
+
       {scanHelp ? (
         <Modal
           title="Where to find the QR code"
@@ -310,11 +336,18 @@ export function ChatSetup({ available, onScan }: { available: boolean; onScan?: 
         </Modal>
       ) : null}
 
-      {security ? <ChatSecurity onClose={() => setSecurity(false)} /> : null}
+      {security ? (
+        <ChatSecurity
+          onClose={() => {
+            setSecurity(false)
+            refreshBackup()
+          }}
+        />
+      ) : null}
 
       {asking === 'enable' ? (
         <Modal
-          title="Turn on chat on this PC?"
+          title={`Turn on chat on ${here()}?`}
           onClose={() => setAsking(null)}
           footer={
             <>
@@ -326,13 +359,13 @@ export function ChatSetup({ available, onScan }: { available: boolean; onScan?: 
           }
         >
           <p className="text-sm text-foreground">
-            This PC signs in to chat with the account you are signed in to in the Store, and makes its own
+            {Here()} signs in to chat with the account you are signed in to in the Store, and makes its own
             encryption keys. Your messages are end-to-end encrypted: only the people in a conversation can read
             them, not Kryoto.
           </p>
           <p className="text-xs text-muted-foreground">
-            The keys stay on this PC, protected by your Windows or Linux account (or a passphrase, where neither keeps
-            secrets).
+            The keys stay on {here()}, protected by the device's own account (or a passphrase, where the system keeps
+            no secrets).
           </p>
         </Modal>
       ) : null}
@@ -360,8 +393,8 @@ export function ChatSetup({ available, onScan }: { available: boolean; onScan?: 
           }
         >
           <p className="text-sm text-foreground">
-            Type the recovery code you saved when you turned on your key backup. {Here()} then uses the same chat
-            identity as your other devices, and your friends see no warning.
+            Type the recovery code you saved when you turned on your key backup, or the one your other device shows
+            now. {Here()} then uses the same chat identity as your other devices, and your friends see no warning.
           </p>
           <textarea
             autoFocus
