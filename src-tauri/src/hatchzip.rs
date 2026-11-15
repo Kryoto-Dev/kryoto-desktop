@@ -90,6 +90,11 @@ pub enum Failure {
 
 static TOOL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// Whether this platform has a HatchZip build to unpack in place with.
+pub fn supported() -> bool {
+    PINNED.is_some()
+}
+
 /// Where the CLI lives once fetched, or `None` on a platform with no pinned
 /// build, or while it cannot be fetched (the unpack then goes to 7-Zip).
 pub async fn ensure<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
