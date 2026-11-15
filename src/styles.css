@@ -370,7 +370,7 @@ html[data-window='tray'] #root {
 .tray-action-icon svg { width: 15px; height: 15px; }
 .tray-action strong { font-size: 12px; }
 .tray-action small { margin-left: auto; color: var(--muted-foreground); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
-.tray-action-chevron { color: var(--muted-foreground); font-size: 20px; }
+.tray-action-chevron { color: var(--muted-foreground); width: 14px; height: 14px; }
 .tray-recent { display: grid; gap: 5px; }
 .tray-games {
   display: grid;

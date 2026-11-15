@@ -12,9 +12,10 @@ use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, WindowEvent,
 };
-use tauri::window::Color;
+#[cfg(windows)]
+use tauri::{window::Color, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 /* ── One copy at a time ───────────────────────────────────── */
 
@@ -277,12 +278,32 @@ fn indicator_library_present() -> bool {
         .any(|name| !unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY) }.is_null())
 }
 
-/// Open the Steam-like tray surface beside the pointer that opened it.
+/// The tray panel's size, in logical pixels.
+#[cfg(windows)]
+const TRAY_PANEL: (f64, f64) = (336.0, 430.0);
+
+/// Open the tray panel beside the pointer that opened it, kept inside the
+/// screen's work area whatever the scale and wherever the taskbar is.
+/// Windows only: elsewhere the tray opens its native menu.
+#[cfg(windows)]
 pub fn show_tray_panel<R: Runtime>(app: &AppHandle<R>, position: tauri::PhysicalPosition<f64>) {
-    let panel_width = 336.0;
-    let panel_height = 430.0;
-    let x = (position.x - panel_width).round() as i32;
-    let y = (position.y - panel_height - 10.0).round() as i32;
+    let (panel_width, panel_height) = TRAY_PANEL;
+    let monitor = app.monitor_from_point(position.x, position.y).ok().flatten().or_else(|| app.primary_monitor().ok().flatten());
+    let scale = monitor.as_ref().map_or(1.0, |m| m.scale_factor());
+    let (w, h) = ((panel_width * scale).round() as i32, (panel_height * scale).round() as i32);
+    let gap = (10.0 * scale).round() as i32;
+    let (px, py) = (position.x.round() as i32, position.y.round() as i32);
+    let (x, y) = match monitor {
+        Some(m) => {
+            let area = m.work_area();
+            let (left, top) = (area.position.x, area.position.y);
+            let (right, bottom) = (left + area.size.width as i32, top + area.size.height as i32);
+            // Above the pointer when the taskbar is at the bottom, below it otherwise.
+            let y = if py - gap - h >= top { py - gap - h } else { py + gap };
+            ((px - w).clamp(left, (right - w).max(left)), y.clamp(top, (bottom - h).max(top)))
+        }
+        None => (px - w, py - gap - h),
+    };
     let panel = match app.get_webview_window(TRAY_PANEL_LABEL) {
         Some(panel) => panel,
         None => match WebviewWindowBuilder::new(app, TRAY_PANEL_LABEL, WebviewUrl::default())
@@ -313,7 +334,14 @@ pub fn show_tray_panel<R: Runtime>(app: &AppHandle<R>, position: tauri::Physical
 #[tauri::command]
 pub fn tray_action(app: AppHandle, action: String) -> Result<(), String> {
     if action == "exit" {
-        app.exit(0);
+        // The same way out as the tray menu's Exit Kryoto.
+        quit(&app);
+        return Ok(());
+    }
+    if action == "close" {
+        if let Some(panel) = app.get_webview_window(TRAY_PANEL_LABEL) {
+            let _ = panel.hide();
+        }
         return Ok(());
     }
     show_main(&app);
@@ -368,6 +396,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         })
         .on_tray_icon_event(|tray, event| {
+            #[cfg(windows)]
             if let TrayIconEvent::Click {
                 button: MouseButton::Left | MouseButton::Right,
                 button_state: MouseButtonState::Up,
@@ -375,6 +404,10 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 ..
             } = event {
                 show_tray_panel(tray.app_handle(), position);
+            }
+            #[cfg(not(windows))]
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main(tray.app_handle());
             }
         });
     #[cfg(not(windows))]

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Download, Library, LogOut, Settings, Store, X } from '@/ui/pixel-icons'
+import { ChevronRight, Download, Library, LogOut, Settings, Store, X } from '@/ui/pixel-icons'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { emitTo } from '@tauri-apps/api/event'
 import { call, errorText } from '@/lib/bridge'
@@ -29,7 +29,7 @@ export function TrayApp() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') void call('tray_action', { action: 'open' })
+      if (event.key === 'Escape') void call('tray_action', { action: 'close' })
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -55,7 +55,7 @@ export function TrayApp() {
           <span className="tray-mark"><KryoMark className="h-3.5 text-primary-foreground" /></span>
           <span><strong>KRYOTO</strong><small>DESKTOP</small></span>
         </div>
-        <button type="button" className="tray-close" aria-label="Close menu" onClick={() => choose('open')}>
+        <button type="button" className="tray-close" aria-label="Close menu" onClick={() => void call('tray_action', { action: 'close' })}>
           <X aria-hidden />
         </button>
       </header>
@@ -66,7 +66,7 @@ export function TrayApp() {
             <span className="tray-action-icon"><Icon aria-hidden /></span>
             <strong>{label}</strong>
             <small>{hint}</small>
-            <span className="tray-action-chevron">›</span>
+            <ChevronRight className="tray-action-chevron" aria-hidden />
           </button>
         ))}
       </div>
