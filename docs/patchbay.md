@@ -45,7 +45,7 @@ Times are Unix seconds. A **version** looks like this:
 
 | Request | Answer |
 |---|---|
-| `GET /api/saves` | `{ perk: true, allowance: { totalBytes, versionsPerGame, maxBackupBytes }, usage: { bytes, games, versions }, games: [{ gameKey, aliases, slug, title, bytes, versions: [version, newest first] }] }` |
+| `GET /api/saves` | `{ perk: true, allowance: { totalBytes, versionsPerGame, maxBackupBytes, maxRawBytes }, usage: { bytes, games, versions }, games: [{ gameKey, aliases, slug, title, bytes, versions: [version, newest first] }] }`. `maxBackupBytes` is the biggest backup file; `maxRawBytes` (optional) the most save data one backup may hold before packing. Without it, Desktop never sends saves bigger than `maxBackupBytes`; with it, saves over `maxBackupBytes` are offered packed small, and checked to fit before anything is sent. |
 | `GET /api/saves?gameKey=K` | `{ perk: true, allowance, head: version or null }` |
 | `POST /api/saves/prepare` with `{ gameKey, aliases, slug, title, size, md5, sha256, manifest, machine, parentVersion }` | `{ uploadId, url, headers }`. `url` is where Desktop PUTs the backup file with `headers`, **without** the token, so make it a signed or one-time link. Answer `409 { error, head }` when `parentVersion` is not the game's newest version (another PC backed up first). Answer `413` when it is too big. |
 | `PUT <url>` | `2xx` once the bytes are stored. Check the size and sha256 against what `prepare` was told. |
