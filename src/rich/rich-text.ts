@@ -12,6 +12,7 @@
  *     > a quoted line          ``` a code block ```
  *     {rainbow}text effects{/rainbow}   (lib/text-effects.ts, the perk)
  *     <@123> mentions          (lib/mentions.ts; resolved ones too)
+ *     [game:hades:v34:p720]    game mentions (lib/mentions.ts; resolved ones too)
  *     :telly_wave: emoji       [sticker:telly-says-hi] stickers (lib/rich-catalog.ts)
  *     😂 standard emoji, which stay text and are marked to be drawn as big as ours
  *
@@ -25,7 +26,7 @@
  */
 
 import { splitLinks, safeHref } from './autolink'
-import { MAX_MENTIONS, mentionLabel, parseResolved, type MentionIdentity } from './mentions'
+import { MAX_GAME_MENTIONS, MAX_MENTIONS, gameMentionLabel, mentionLabel, parseResolved, parseResolvedGame, type GameMention, type MentionIdentity } from './mentions'
 import { STANDARD_EMOJI, isEmojiName, stickerFor } from './rich-catalog'
 import { MAX_FX_SPANS, TEXT_EFFECTS, type TextEffectId } from './text-effects'
 
@@ -42,6 +43,8 @@ export type RichInline =
   /** A standard emoji (rich-catalog.ts STANDARD_EMOJI), marked so it is drawn the size of ours. */
   | { t: 'emojichar'; v: string }
   | { t: 'sticker'; id: string }
+  /** `g` is null for a stored `[game:...]` nobody resolved (end-to-end chat): drawn as plain words. */
+  | { t: 'game'; slug: string; g: GameMention | null }
 
 export type RichBlock =
   | { t: 'para'; c: RichInline[] }
@@ -67,6 +70,8 @@ const RAW_AT = /<@(\d{1,20})>/y
 const RESOLVED_AT = /\uE000@([^\uE001]{0,200})\uE001/y
 const EMOJI_AT = /:([a-z0-9_]{1,40}):/y
 const STICKER_AT = /\[sticker:([a-z0-9-]{1,40})\]/y
+const GAME_AT = /\[game:([a-z0-9-]{1,120})(?::v\d{1,12})?(?::p\d{1,7})?\]/y
+const RESOLVED_GAME_AT = /\uE000#([^\uE001]{0,400})\uE001/y
 const CHAR_AT = new RegExp(`(?:${STANDARD_EMOJI})`, 'uy')
 const ANY_CHAR = new RegExp(STANDARD_EMOJI, 'u')
 const LINK_AT = /\[([^[\]\n]{1,300})\]\(([^()\s]{1,2048})\)/y
@@ -74,7 +79,7 @@ const ADDRESS_AT = /(?:https?:\/\/|www\.)[^\s<>"]+/iy
 const FENCE = /^ {0,3}```/
 const QUOTE = /^ {0,3}>(?: |$)/
 
-type Ctx = { fx: number; mentions: number; emoji: number; chars: number; stickers: number; inLink: boolean }
+type Ctx = { fx: number; mentions: number; games: number; emoji: number; chars: number; stickers: number; inLink: boolean }
 
 /** Where a written link may go: our own pages by path, or an http(s) address. */
 function linkHref(url: string): string | null {
@@ -207,6 +212,15 @@ function inline(src: string, depth: number, ctx: Ctx): RichInline[] {
       }
     }
     if (ch === '\uE000') {
+      const g = ctx.games < MAX_GAME_MENTIONS ? at(RESOLVED_GAME_AT, src, i) : null
+      if (g) {
+        flush()
+        const game = parseResolvedGame(g[1]!)
+        out.push({ t: 'game', slug: game.state === 'game' ? game.slug : '', g: game })
+        ctx.games++
+        i += g[0].length
+        continue
+      }
       const m = at(RESOLVED_AT, src, i)
       if (m) {
         flush()
@@ -242,6 +256,14 @@ function inline(src: string, depth: number, ctx: Ctx): RichInline[] {
       }
     }
     if (ch === '[') {
+      const g = ctx.games < MAX_GAME_MENTIONS ? at(GAME_AT, src, i) : null
+      if (g) {
+        flush()
+        out.push({ t: 'game', slug: g[1]!, g: null })
+        ctx.games++
+        i += g[0].length
+        continue
+      }
       const s = ctx.stickers < MAX_STICKERS ? at(STICKER_AT, src, i) : null
       if (s && stickerFor(s[1]!)) {
         flush()
@@ -292,7 +314,7 @@ export function parseRich(text: string): RichBlock[] {
   const source = text.replace(/\r\n?/g, '\n')
   const head = source.slice(0, RICH_PARSE_LIMIT)
   const tail = source.slice(RICH_PARSE_LIMIT)
-  const ctx: Ctx = { fx: 0, mentions: 0, emoji: 0, chars: 0, stickers: 0, inLink: false }
+  const ctx: Ctx = { fx: 0, mentions: 0, games: 0, emoji: 0, chars: 0, stickers: 0, inLink: false }
   const lines = head.split('\n')
   const blocks: RichBlock[] = []
   let para: string[] = []
@@ -365,6 +387,8 @@ function plainInline(nodes: RichInline[]): string {
           return `:${n.name}:`
         case 'sticker':
           return `[${stickerFor(n.id)?.label ?? 'Sticker'}]`
+        case 'game':
+          return n.g ? gameMentionLabel(n.g) : 'a game'
         default:
           return plainInline(n.c)
       }
@@ -379,7 +403,7 @@ function plainInline(nodes: RichInline[]): string {
 export function clipRich(text: string, max: number): string {
   if (text.length <= max) return text
   let cut = text.slice(0, Math.max(0, max - 3))
-  const open = Math.max(cut.lastIndexOf('<@'), cut.lastIndexOf('\uE000'), cut.lastIndexOf('[sticker:'), cut.lastIndexOf('{'))
+  const open = Math.max(cut.lastIndexOf('<@'), cut.lastIndexOf('\uE000'), cut.lastIndexOf('[sticker:'), cut.lastIndexOf('[game:'), cut.lastIndexOf('{'))
   if (open !== -1) {
     const ch = cut[open]
     const closed = ch === '<' ? cut.indexOf('>', open) : ch === '\uE000' ? cut.indexOf('\uE001', open) : ch === '[' ? cut.indexOf(']', open) : cut.indexOf('{/', open)

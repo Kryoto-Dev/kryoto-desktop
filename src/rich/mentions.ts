@@ -153,10 +153,15 @@ export function mentionHref(who: MentionIdentity): string | null {
  * so it becomes the plain word.
  */
 export function editableText(text: string): string {
-  return text.replace(RESOLVED_MENTION, (_m, inner: string) => {
-    const who = parseResolved(inner)
-    return who.state === 'user' ? `@${who.username}` : mentionLabel(who)
-  })
+  return text
+    .replace(RESOLVED_MENTION, (_m, inner: string) => {
+      const who = parseResolved(inner)
+      return who.state === 'user' ? `@${who.username}` : mentionLabel(who)
+    })
+    .replace(RESOLVED_GAME, (_m, inner: string) => {
+      const g = parseResolvedGame(inner)
+      return g.state === 'game' ? rawGame(g.slug, g.release?.id, g.minutes) : ''
+    })
 }
 
 /** Mentions as words, for text that cannot hold a link (notifications, Discord, titles). */
@@ -167,4 +172,80 @@ export function plainMentions(text: string): string {
       return who.state === 'user' ? `@${mentionLabel(who)}` : mentionLabel(who)
     })
     .replace(RAW_MENTION, '@someone')
+    .replace(RESOLVED_GAME, (_m, inner: string) => gameMentionLabel(parseResolvedGame(inner)))
+    .replace(RAW_GAME, 'a game')
+}
+
+/*
+ * Game mentions: "GoreBox27 b1, played for 12 hours", a link that opens the
+ * game with that build picked. Stored by the game's slug (its id here) as
+ * `[game:<slug>]`, with
+ * `:v<release id>` for a build and `:p<minutes>` for the writer's play time
+ * (the server writes the minutes from the writer's own sessions, never what
+ * was typed). Resolved on the server like `<@id>`, into a token between the
+ * same two private-use characters, marked `#`.
+ */
+
+/** Most games one text may mention. */
+export const MAX_GAME_MENTIONS = 10
+/** A stored game mention. */
+export const RAW_GAME = /\[game:([a-z0-9-]{1,120})(?::v(\d{1,12}))?(?::p(\d{1,7}))?\]/g
+/** A resolved one. */
+export const RESOLVED_GAME = /#([^]{0,400})/g
+
+export type GameMention =
+  | { state: 'game'; slug: string; title: string; release: { id: string; label: string } | null; minutes: number | null }
+  /** Gone, hidden or not out: nothing about it is shown. */
+  | { state: 'gone' }
+
+/** The stored form. */
+export function rawGame(slug: string, release?: string | null, minutes?: number | null): string {
+  return `[game:${slug}${release ? `:v${release}` : ''}${minutes && minutes > 0 ? `:p${Math.round(minutes)}` : ''}]`
+}
+
+/** Every stored game mention: ids, release ids and minutes, in order. */
+export function gameMentions(text: string): { slug: string; release: string | null; minutes: number | null }[] {
+  return [...text.matchAll(RAW_GAME)].map((m) => ({ slug: m[1]!, release: m[2] ?? null, minutes: m[3] ? Number(m[3]) : null }))
+}
+
+/** Whether a text has anything the server resolves: people or games. */
+export function hasMentionTokens(text: string): boolean {
+  return text.includes('<@') || text.includes('[game:')
+}
+
+/** The resolved token for a game as it is now. */
+export function resolvedGameToken(g: GameMention): string {
+  if (g.state === 'gone') return `${OPEN}#-${CLOSE}`
+  const slug = /^[a-z0-9-]{1,120}$/.test(g.slug) ? g.slug : ''
+  return `${OPEN}#${slug}${SEP}${tokenSafe(g.title)}${SEP}${g.release?.id ?? ''}${SEP}${tokenSafe(g.release?.label ?? '')}${SEP}${g.minutes ?? ''}${CLOSE}`
+}
+
+/** Read a resolved game token's inside (what RESOLVED_GAME captured). */
+export function parseResolvedGame(inner: string): GameMention {
+  const [slug, title, releaseId, releaseLabel, minutes] = inner.split(SEP)
+  if (!slug || !/^[a-z0-9-]{1,120}$/.test(slug) || !title) return { state: 'gone' }
+  const release = releaseId && /^\d{1,12}$/.test(releaseId) ? { id: releaseId, label: releaseLabel || '' } : null
+  const m = minutes && /^\d{1,7}$/.test(minutes) ? Number(minutes) : null
+  return { state: 'game', slug, title, release, minutes: m && m > 0 ? m : null }
+}
+
+/** Play time in words: "45 minutes", "1 hour", "12 hours". */
+export function playedFor(minutes: number): string {
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`
+  const h = minutes < 600 ? Math.round(minutes / 6) / 10 : Math.round(minutes / 60)
+  return `${h} hour${h === 1 ? '' : 's'}`
+}
+
+/** What a game mention reads as: "GoreBox27 b1, played for 12 hours". */
+export function gameMentionLabel(g: GameMention): string {
+  if (g.state === 'gone') return 'a game that is not on Kryoto'
+  const name = g.release?.label ? `${g.title} ${g.release.label}` : g.title
+  return g.minutes ? `${name}, played for ${playedFor(g.minutes)}` : name
+}
+
+/** The page a game mention opens: the game, with its build picked. */
+export function gameMentionHref(g: GameMention): string | null {
+  if (g.state === 'gone') return null
+  const path = `/game/${encodeURIComponent(g.slug)}`
+  return g.release ? `${path}?release=${encodeURIComponent(g.release.id)}&download=1` : path
 }
