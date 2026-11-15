@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState, type CSSProperties, type ReactN
 import { call } from '@/lib/bridge'
 import { openExternal, openStorePage } from '@/lib/window'
 import { cn } from '@/lib/utils'
-import { mentionHref, mentionLabel, type MentionIdentity } from './mentions'
+import { gameMentionHref, gameMentionLabel, mentionHref, mentionLabel, type GameMention, type MentionIdentity } from './mentions'
 import { canUseRank, emojiFor, emojiPath, isMascotEmoji, rankOfName, stickerFor, stickerPath, type RankId } from './rich-catalog'
 import { isEmojiOnly, isPlainRich, parseRich, type RichBlock, type RichInline } from './rich-text'
 import type { TextEffectId } from './text-effects'
@@ -22,7 +22,9 @@ import './rich-text.css'
  * are. A stored `<@id>` (end-to-end chat, which the server never reads) is
  * named by `people` when the chat knows the person, otherwise asked of kryo.to
  * (`/api/mentions`, which masks anonymous people), and reads "@someone" until
- * then. Emoji and stickers load from kryo.to itself.
+ * then. A game mention opens that game's page (with its build picked) the way
+ * any kryo.to link does; an unresolved one shows the game by its address.
+ * Emoji and stickers load from kryo.to itself.
  */
 export function RichText({
   text,
@@ -196,6 +198,8 @@ function inline(n: RichInline, ctx: Ctx): ReactNode {
     }
     case 'emojichar':
       return <span className="kryo-emoji-char">{n.v}</span>
+    case 'game':
+      return <GameLink g={n.g} slug={n.slug} />
     case 'sticker': {
       const id = rankArtOk(stickerFor(n.id)?.rank, ctx) ? n.id : rankOfName(n.id)!.base
       const src = stickerPath(id)
@@ -221,6 +225,26 @@ function Mention({ who }: { who: MentionIdentity | null }) {
       }}
     >
       @{label}
+    </a>
+  )
+}
+
+/** One game mention: "GoreBox27 b1, played for 12 hours", opening that game with that build picked. */
+function GameLink({ g, slug }: { g: GameMention | null; slug: string }) {
+  // Not resolved (end-to-end chat, which the server never reads): the game by its address.
+  const href = g ? gameMentionHref(g) : slug ? `/game/${encodeURIComponent(slug)}` : null
+  const label = g ? gameMentionLabel(g) : slug || 'a game'
+  if (!href) return <span className="kryo-mention kryo-mention-quiet">{label}</span>
+  return (
+    <a
+      href={`https://kryo.to${href}`}
+      className="kryo-mention"
+      onClick={(e) => {
+        e.preventDefault()
+        openStorePage(href)
+      }}
+    >
+      {label}
     </a>
   )
 }
