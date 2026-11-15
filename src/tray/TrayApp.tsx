@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Download, Library, LogOut, Settings, Store, X } from 'lucide-react'
+import { Download, Library, LogOut, Settings, Store, X } from '@/ui/pixel-icons'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { emitTo } from '@tauri-apps/api/event'
 import { call, errorText } from '@/lib/bridge'

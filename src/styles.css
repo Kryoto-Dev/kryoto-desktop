@@ -293,7 +293,7 @@ html[data-window='tray'] #root {
   word-spacing: var(--kryo-word-spacing);
   background: color-mix(in oklch, var(--card) 97%, black);
   border: 1px solid color-mix(in oklch, var(--foreground) 15%, transparent);
-  border-radius: 18px;
+  border-radius: var(--kryo-radius);
   box-shadow: 0 18px 48px rgb(0 0 0 / 42%), 0 0 0 1px rgb(255 255 255 / 4%);
 }
 
@@ -329,7 +329,7 @@ html[data-window='tray'] #root {
   place-items: center;
   color: var(--primary-foreground);
   background: var(--primary);
-  border-radius: 9px;
+  border-radius: min(var(--kryo-radius), 9px);
 }
 .tray-mark svg { width: 17px; height: 17px; }
 .tray-close {
@@ -340,7 +340,7 @@ html[data-window='tray'] #root {
   color: var(--muted-foreground);
   background: transparent;
   border: 0;
-  border-radius: 8px;
+  border-radius: min(var(--kryo-radius), 8px);
 }
 .tray-close:hover { color: var(--foreground); background: var(--secondary); }
 .tray-close svg { width: 15px; height: 15px; }
@@ -355,7 +355,7 @@ html[data-window='tray'] #root {
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: 10px;
+  border-radius: min(var(--kryo-radius), 10px);
 }
 .tray-action:hover { background: var(--secondary); }
 .tray-action-icon {
@@ -365,7 +365,7 @@ html[data-window='tray'] #root {
   place-items: center;
   color: var(--muted-foreground);
   background: color-mix(in oklch, var(--foreground) 7%, transparent);
-  border-radius: 6px;
+  border-radius: min(var(--kryo-radius), 6px);
 }
 .tray-action-icon svg { width: 15px; height: 15px; }
 .tray-action strong { font-size: 12px; }
@@ -397,7 +397,7 @@ html[data-window='tray'] #root {
   overflow: hidden;
   object-fit: cover;
   background: var(--secondary);
-  border-radius: 6px;
+  border-radius: min(var(--kryo-radius), 6px);
 }
 .tray-game img { transition: transform 140ms ease, filter 140ms ease; }
 .tray-game:hover img { filter: brightness(1.12); transform: translateY(-2px); }
@@ -417,7 +417,7 @@ html[data-window='tray'] #root {
   line-height: 1.35;
   background: color-mix(in oklch, var(--destructive) 10%, transparent);
   border: 1px solid color-mix(in oklch, var(--destructive) 24%, transparent);
-  border-radius: 6px;
+  border-radius: min(var(--kryo-radius), 6px);
 }
 .tray-footer {
   padding-top: 12px;

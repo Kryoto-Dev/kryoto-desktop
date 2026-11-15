@@ -7,6 +7,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
+// The tray's menu, built only where the tray delivers clicks to it (see build_tray).
+#[cfg(not(windows))]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
@@ -330,17 +332,21 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         crate::logging::info("tray", "no appindicator library on this system, so no tray icon");
         return Ok(());
     }
-    // First, because on Linux the tray only opens its menu - a click on the
-    // icon itself is not delivered there.
-    let open = MenuItem::with_id(app, "tray-open", "Open Kryoto", true, None::<&str>)?;
-    let store = MenuItem::with_id(app, "tray-store", "Store", true, None::<&str>)?;
-    let library = MenuItem::with_id(app, "tray-library", "Library", true, None::<&str>)?;
-    let downloads = MenuItem::with_id(app, "tray-downloads", "Downloads", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "tray-settings", "Settings", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
-    let exit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
-    let sep_top = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &exit])?;
+    // The panel's menu, where the tray opens it: on Linux a click on the icon
+    // itself is not delivered, so this is the only way in. Windows opens the
+    // panel on either button, so it builds no menu.
+    #[cfg(not(windows))]
+    let menu = {
+        let open = MenuItem::with_id(app, "tray-open", "Open Kryoto", true, None::<&str>)?;
+        let store = MenuItem::with_id(app, "tray-store", "Store", true, None::<&str>)?;
+        let library = MenuItem::with_id(app, "tray-library", "Library", true, None::<&str>)?;
+        let downloads = MenuItem::with_id(app, "tray-downloads", "Downloads", true, None::<&str>)?;
+        let settings = MenuItem::with_id(app, "tray-settings", "Settings", true, None::<&str>)?;
+        let sep = PredefinedMenuItem::separator(app)?;
+        let exit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
+        let sep_top = PredefinedMenuItem::separator(app)?;
+        Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &exit])?
+    };
     let mut builder = TrayIconBuilder::with_id("kryoto")
         // The channel keeps the name right in a dev or Preview build (channel.rs).
         .tooltip(crate::channel::APP_NAME)
