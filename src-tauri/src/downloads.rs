@@ -61,6 +61,9 @@ pub struct CatalogMeta {
     pub short: Option<String>,
     pub developer: Option<String>,
     pub size_bytes: Option<u64>,
+    /// The installed game's size as kryo.to lists it (`size`, "150 GB"), for the
+    /// room a download needs: a game unpacks bigger than its archive.
+    pub install_bytes: Option<u64>,
     pub nsfw: bool,
     /// The Steam branch the listing builds from: `public`, or a beta listed as
     /// a game of its own (GoreBox27 is GoreBox's `gb27`). None from a site
@@ -1655,6 +1658,7 @@ pub fn meta_from_json(g: &serde_json::Value) -> CatalogMeta {
         nsfw: g["nsfw"].as_bool().unwrap_or(false),
         steam_branch: s("steam_branch"),
         size_bytes: g["download_size_bytes"].as_u64(),
+        install_bytes: g["size"].as_str().and_then(crate::addons::size_bytes),
         vr: crate::vr::kind_of(&g["vr"]),
     }
 }
@@ -2295,7 +2299,7 @@ async fn fetch_filez<R: Runtime>(
         && d.segments.len() == filez_segments(file.size).len();
     if !reusable {
         let dir = archive_dir(settings);
-        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), file.size, file.size, unpacks_in_place(&d), &d.meta.title)?;
+        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), file.size, file.size, install_size(&d), unpacks_in_place(&d), &d.meta.title)?;
         let name = safe_name(&file.name);
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot write to {}: {e}", dir.display()))?;
         let path = dir.join(&name);
@@ -3536,7 +3540,7 @@ async fn transfer<R: Runtime>(
     // Room for the rest of the archive, and for about as much again unpacked.
     // The exact unpacked size is checked again before extracting.
     if let Some(t) = total {
-        crate::storage::check_download_room(&path_dir(&path), Path::new(&settings.library_dir), t.saturating_sub(received), t, unpacks_in_place(&item), &item.meta.title)
+        crate::storage::check_download_room(&path_dir(&path), Path::new(&settings.library_dir), t.saturating_sub(received), t, install_size(&item), unpacks_in_place(&item), &item.meta.title)
             .map_err(Transfer::Fatal)?;
     }
     edit(app, id, |d| {
@@ -3744,7 +3748,7 @@ async fn transfer_parallel<R: Runtime>(
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
         drop(probe);
         let dir = archive_dir(settings);
-        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), total, total, unpacks_in_place(&item), &item.meta.title).map_err(Transfer::Fatal)?;
+        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), total, total, install_size(&item), unpacks_in_place(&item), &item.meta.title).map_err(Transfer::Fatal)?;
         std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
         let path = dir.join(&name);
         crate::hatchzip::forget(&path);
@@ -3982,6 +3986,12 @@ fn archive_dir(settings: &crate::settings::Settings) -> PathBuf {
         "" => Path::new(&settings.library_dir).join("_downloads"),
         own => PathBuf::from(own),
     }
+}
+
+/// How big the game is once installed, when kryo.to lists it for the build
+/// this row downloads (another build picked on the page may differ).
+fn install_size(d: &Download) -> Option<u64> {
+    d.release.is_none().then_some(d.meta.install_bytes).flatten()
 }
 
 /// Whether this download's archive can be unpacked in place (HatchZip), so the

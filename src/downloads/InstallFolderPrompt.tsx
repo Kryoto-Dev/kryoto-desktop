@@ -27,6 +27,10 @@ export function InstallFolderPrompt() {
 
   if (!waiting) return null
   const size = waiting.total ?? waiting.meta.sizeBytes ?? null
+  // What the drive needs: the game, as it is unpacked in place (HatchZip eats the
+  // archive as the game appears), plus a little; the same sum the download checks
+  // before it starts (src-tauri storage.rs check_download_room).
+  const needs = size ? Math.max(size, waiting.meta.installBytes ?? size) + 1.5 * 2 ** 30 + size / 50 : null
   const answer = (job: Promise<void>) => {
     setBusy(true)
     setError(null)
@@ -52,7 +56,7 @@ export function InstallFolderPrompt() {
         Pick the library folder for <span className="font-bold text-foreground">{waiting.meta.title}</span>
         {size ? `, about ${formatBytes(size)} to download` : ''}.
       </p>
-      <FolderChoice folders={folders ?? []} picked={picked} onPick={setPicked} needs={size ? size * 2 : null} />
+      <FolderChoice folders={folders ?? []} picked={picked} onPick={setPicked} needs={needs} />
       <Check
         checked={always}
         onChange={(v) => {

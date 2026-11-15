@@ -70,6 +70,8 @@ export type Download = {
     source: string | null
     version: string | null
     sizeBytes: number | null
+    /** The installed game's size as kryo.to lists it: what the drive needs with HatchZip. */
+    installBytes?: number | null
     nsfw?: boolean
     /** The Steam branch the listing builds from (`public`, or a beta such as `gb27`). */
     steamBranch?: string | null

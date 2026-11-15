@@ -223,9 +223,9 @@ pub struct AddonsGot {
     pub store: bool,
 }
 
-/// "1.2 GB" as kryo.to writes a size, in bytes. Only for the progress bar
-/// until the file's own length is known.
-fn size_bytes(text: &str) -> Option<u64> {
+/// "1.2 GB" as kryo.to writes a size, in bytes: the progress bar until the
+/// file's own length is known, and a game's install size (downloads.rs).
+pub(crate) fn size_bytes(text: &str) -> Option<u64> {
     let mut parts = text.split_whitespace();
     let n: f64 = parts.next()?.replace(',', ".").parse().ok()?;
     let unit = match parts.next()?.to_ascii_uppercase().as_str() {

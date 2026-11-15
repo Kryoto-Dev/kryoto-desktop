@@ -658,24 +658,32 @@ pub fn same_drive(a: &Path, b: &Path) -> bool {
 /// written, and for about as much again unpacked in the library. With a download
 /// folder on another drive, each drive only needs its own share.
 ///
+/// `unpacked` is the game's install size when kryo.to lists it; without it the
+/// game is taken to be as big as its archive.
+///
 /// On one drive, `in_place` (HatchZip can unpack this one, hatchzip.rs) asks
-/// only for the archive and a little extra: the unpack eats the archive as the
-/// game appears, and downloads.rs forces it when the drive is short for both.
-/// A solid archive that gains nothing from it is checked again before 7-Zip
-/// unpacks it, with the archive kept for Retry.
-pub fn check_download_room(archive_dir: &Path, library: &Path, archive_left: u64, unpacked: u64, in_place: bool, what: &str) -> Result<(), String> {
+/// for the game, not the game and its archive: the unpack eats the archive as
+/// the game appears, so the drive holds the rest of the archive, what the game
+/// adds beyond it, and a little extra. downloads.rs forces it when the drive is
+/// short for both. A solid archive that gains nothing from it is checked again
+/// before 7-Zip unpacks it, with the archive kept for Retry.
+pub fn check_download_room(archive_dir: &Path, library: &Path, archive_left: u64, archive_total: u64, unpacked: Option<u64>, in_place: bool, what: &str) -> Result<(), String> {
+    // A listed size under half the archive is a wrong listing, not a game.
+    let unpacked = unpacked.filter(|&u| u >= archive_total / 2).unwrap_or(archive_total);
     if same_drive(archive_dir, library) {
-        let more = if in_place { in_place_extra(unpacked) } else { unpacked };
+        let more = if in_place { unpacked.saturating_sub(archive_total) + in_place_extra(archive_total) } else { unpacked };
         return check_room(library, archive_left + more, what);
     }
     check_room(archive_dir, archive_left, what)?;
     check_room(library, unpacked, what)
 }
 
-/// What an unpack in place needs beyond the archive itself: the 500 MB HatchZip
-/// keeps free, a 1 GB margin, and 2% for a game a little larger than its archive.
-fn in_place_extra(unpacked: u64) -> u64 {
-    (3 << 29) + unpacked / 50
+/// What an unpack in place needs beyond the game itself: the 500 MB HatchZip
+/// keeps free, a 1 GB margin, and 2% of the archive for the block being
+/// unpacked while it is still on the disk (Forge's archives are many small
+/// solid blocks: 82 in a 3.6 GB one at its default level).
+fn in_place_extra(archive: u64) -> u64 {
+    (3 << 29) + archive / 50
 }
 
 /// Before a download lands: is there room for the archive and what it unpacks
@@ -706,9 +714,16 @@ mod tests {
             return;
         }
         let archive = free / 10 * 6;
-        assert!(check_download_room(&dir, &dir, archive, archive, false, "a game").is_err());
-        assert!(check_download_room(&dir, &dir, archive, archive, true, "a game").is_ok());
-        assert!(check_download_room(&dir, &dir, free, free, true, "a game").is_err());
+        assert!(check_download_room(&dir, &dir, archive, archive, None, false, "a game").is_err());
+        assert!(check_download_room(&dir, &dir, archive, archive, None, true, "a game").is_ok());
+        assert!(check_download_room(&dir, &dir, free, free, None, true, "a game").is_err());
+        // A game listed bigger than its archive needs that much more (Wukong:
+        // 130 GB archive, 150 GB game), and half done needs only the rest.
+        let bigger = Some(archive / 10 * 17);
+        assert!(check_download_room(&dir, &dir, archive, archive, bigger, true, "a game").is_err());
+        assert!(check_download_room(&dir, &dir, archive / 4, archive, Some(archive / 10 * 11), true, "a game").is_ok());
+        // A listing far under the archive is ignored.
+        assert!(check_download_room(&dir, &dir, archive, archive, Some(1), true, "a game").is_ok());
     }
 
     #[test]
