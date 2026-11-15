@@ -657,12 +657,25 @@ pub fn same_drive(a: &Path, b: &Path) -> bool {
 /// Before a download starts: room for what is left of the archive where it is
 /// written, and for about as much again unpacked in the library. With a download
 /// folder on another drive, each drive only needs its own share.
-pub fn check_download_room(archive_dir: &Path, library: &Path, archive_left: u64, unpacked: u64, what: &str) -> Result<(), String> {
+///
+/// On one drive, `in_place` (HatchZip can unpack this one, hatchzip.rs) asks
+/// only for the archive and a little extra: the unpack eats the archive as the
+/// game appears, and downloads.rs forces it when the drive is short for both.
+/// A solid archive that gains nothing from it is checked again before 7-Zip
+/// unpacks it, with the archive kept for Retry.
+pub fn check_download_room(archive_dir: &Path, library: &Path, archive_left: u64, unpacked: u64, in_place: bool, what: &str) -> Result<(), String> {
     if same_drive(archive_dir, library) {
-        return check_room(library, archive_left + unpacked, what);
+        let more = if in_place { in_place_extra(unpacked) } else { unpacked };
+        return check_room(library, archive_left + more, what);
     }
     check_room(archive_dir, archive_left, what)?;
     check_room(library, unpacked, what)
+}
+
+/// What an unpack in place needs beyond the archive itself: the 500 MB HatchZip
+/// keeps free, a 1 GB margin, and 2% for a game a little larger than its archive.
+fn in_place_extra(unpacked: u64) -> u64 {
+    (3 << 29) + unpacked / 50
 }
 
 /// Before a download lands: is there room for the archive and what it unpacks
@@ -683,6 +696,20 @@ pub fn check_room(folder: &Path, needed: u64, what: &str) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpacking_in_place_needs_room_for_the_game_not_twice() {
+        // KB-0319: 159 GB on 219 GB free was refused with HatchZip on.
+        let dir = std::env::temp_dir();
+        let Some((_, free)) = disk_space(&dir) else { return };
+        if free < 8 << 30 {
+            return;
+        }
+        let archive = free / 10 * 6;
+        assert!(check_download_room(&dir, &dir, archive, archive, false, "a game").is_err());
+        assert!(check_download_room(&dir, &dir, archive, archive, true, "a game").is_ok());
+        assert!(check_download_room(&dir, &dir, free, free, true, "a game").is_err());
+    }
 
     #[test]
     fn an_outside_game_moves_with_its_own_folder_only() {

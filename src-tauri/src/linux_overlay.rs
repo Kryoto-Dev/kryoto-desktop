@@ -64,6 +64,36 @@ pub fn place(view: &tauri::Webview, x: f64, y: f64, width: f64, height: f64) {
     });
 }
 
+/// Make a placed web view draw a whole frame again. Shown after being hidden,
+/// WebKitGTK 2.54 (Fedora's own; the AppImage carries an older one) could put
+/// up only what the page had changed since, over a cleared buffer: a Store with
+/// nothing but the search box's cursor, or the greeting without the wall behind
+/// it (KB-0320). A one-pixel narrower size and back makes it reallocate and
+/// draw everything; the pixel is gone again within a frame or two.
+pub fn repaint(view: &tauri::Webview) {
+    let name = view.label().to_string();
+    let _ = view.with_webview(move |_| {
+        let Some(r) = RECTS.with(|m| m.borrow().get(&name).copied()) else { return };
+        let Some(overlay) = OVERLAY.with(|o| o.borrow().clone()) else { return };
+        if r.2 < 2 {
+            return;
+        }
+        let nudged = (r.0, r.1, r.2 - 1, r.3);
+        RECTS.with(|m| m.borrow_mut().insert(name.clone(), nudged));
+        overlay.queue_resize();
+        gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+            // Unless `place` moved it meanwhile: then that size stands.
+            RECTS.with(|m| {
+                let mut m = m.borrow_mut();
+                if m.get(&name) == Some(&nudged) {
+                    m.insert(name, r);
+                }
+            });
+            overlay.queue_resize();
+        });
+    });
+}
+
 /// Move the shell out of Tauri's box into a new overlay that takes its place.
 fn wrap_shell(placed: &gtk::Widget) -> Option<gtk::Overlay> {
     let vbox = placed.parent()?.downcast::<gtk::Box>().ok()?;

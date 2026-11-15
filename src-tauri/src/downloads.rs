@@ -2239,7 +2239,7 @@ async fn fetch_filez<R: Runtime>(
         && d.segments.len() == filez_segments(file.size).len();
     if !reusable {
         let dir = archive_dir(settings);
-        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), file.size, file.size, &d.meta.title)?;
+        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), file.size, file.size, unpacks_in_place(&d), &d.meta.title)?;
         let name = safe_name(&file.name);
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot write to {}: {e}", dir.display()))?;
         let path = dir.join(&name);
@@ -3466,7 +3466,7 @@ async fn transfer<R: Runtime>(
     // Room for the rest of the archive, and for about as much again unpacked.
     // The exact unpacked size is checked again before extracting.
     if let Some(t) = total {
-        crate::storage::check_download_room(&path_dir(&path), Path::new(&settings.library_dir), t.saturating_sub(received), t, &item.meta.title)
+        crate::storage::check_download_room(&path_dir(&path), Path::new(&settings.library_dir), t.saturating_sub(received), t, unpacks_in_place(&item), &item.meta.title)
             .map_err(Transfer::Fatal)?;
     }
     edit(app, id, |d| {
@@ -3674,7 +3674,7 @@ async fn transfer_parallel<R: Runtime>(
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
         drop(probe);
         let dir = archive_dir(settings);
-        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), total, total, &item.meta.title).map_err(Transfer::Fatal)?;
+        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), total, total, unpacks_in_place(&item), &item.meta.title).map_err(Transfer::Fatal)?;
         std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
         let path = dir.join(&name);
         crate::hatchzip::forget(&path);
@@ -3912,6 +3912,12 @@ fn archive_dir(settings: &crate::settings::Settings) -> PathBuf {
         "" => Path::new(&settings.library_dir).join("_downloads"),
         own => PathBuf::from(own),
     }
+}
+
+/// Whether this download's archive can be unpacked in place (HatchZip), so the
+/// drive needs room for the game, not for the game and its archive side by side.
+fn unpacks_in_place(d: &Download) -> bool {
+    crate::hatchzip::supported() && !d.unpack_whole
 }
 
 /// The folder a file is in.
