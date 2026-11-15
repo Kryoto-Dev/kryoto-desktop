@@ -29,6 +29,8 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
   const [devices, setDevices] = useState<MyDevice[] | null>(null)
   const [code, setCode] = useState<string | null>(null)
   const [wroteDown, setWroteDown] = useState(false)
+  // A QR is easy to photograph from across a room: shown only when asked for.
+  const [showQr, setShowQr] = useState(false)
   const [confirm, setConfirm] = useState<'delete-backup' | 'new-code' | MyDevice | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -78,10 +80,16 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
         <code className="kryo-radius block select-all border border-border bg-background p-3 font-mono text-sm leading-relaxed tracking-wider text-foreground">
           {code}
         </code>
-        <QrCode text={code} label="Your recovery code as a QR code" className="kryo-radius mx-auto size-44" />
+        {showQr ? (
+          <QrCode text={code} label="Your recovery code as a QR code" className="kryo-radius mx-auto size-44" />
+        ) : (
+          <Button size="sm" className="mx-auto" onClick={() => setShowQr(true)}>
+            Show as a QR code
+          </Button>
+        )}
         <p className="text-center text-[11px] text-muted-foreground">
-          To add your other device, choose Scan the QR code under Chat there and point its camera here, or type the code
-          above.
+          To add your phone, choose Scan the QR code under Chat there and point its camera at the QR, or type the code
+          above. Show the QR only where nobody else can see your screen.
         </p>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <Button size="sm" onClick={() => navigator.clipboard.writeText(code).catch(() => {})}>

@@ -325,13 +325,13 @@ export function ChatSetup({ available, onScan }: { available: boolean; onScan?: 
               <b className="font-semibold">Backup and devices</b>.
             </li>
             <li>
-              Click <b className="font-semibold">Turn on backup</b>, or{' '}
-              <b className="font-semibold">Make a new recovery code</b> if a backup is already there.
+              Click <b className="font-semibold">Turn on backup</b>, then{' '}
+              <b className="font-semibold">Show as a QR code</b>.
             </li>
             <li>Leave that window open and point your camera here: the code is shown only once.</li>
           </ol>
           <p className="text-xs text-muted-foreground">
-            Making a new code cancels the old one, so any code you saved earlier stops working.
+            Already have a backup? Cancel and type the recovery code you saved: making a new one there would cancel it.
           </p>
         </Modal>
       ) : null}
