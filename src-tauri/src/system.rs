@@ -7,11 +7,14 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
+// The tray's menu, built only where the tray delivers clicks to it (see build_tray).
+#[cfg(not(windows))]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+use tauri::window::Color;
 
 /* ── One copy at a time ───────────────────────────────────── */
 
@@ -171,6 +174,7 @@ pub static SHELL_READY: AtomicBool = AtomicBool::new(false);
 /// Whether the tray icon exists. Without one (a Linux desktop with no tray),
 /// closing must quit: a hidden window with no icon to bring it back is lost.
 pub static TRAY_OK: AtomicBool = AtomicBool::new(false);
+pub const TRAY_PANEL_LABEL: &str = "tray";
 
 #[tauri::command]
 pub fn shell_ready(ready: bool) {
@@ -273,26 +277,79 @@ fn indicator_library_present() -> bool {
         .any(|name| !unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY) }.is_null())
 }
 
+/// Open the Steam-like tray surface beside the pointer that opened it.
+pub fn show_tray_panel<R: Runtime>(app: &AppHandle<R>, position: tauri::PhysicalPosition<f64>) {
+    let panel_width = 336.0;
+    let panel_height = 430.0;
+    let x = (position.x - panel_width).round() as i32;
+    let y = (position.y - panel_height - 10.0).round() as i32;
+    let panel = match app.get_webview_window(TRAY_PANEL_LABEL) {
+        Some(panel) => panel,
+        None => match WebviewWindowBuilder::new(app, TRAY_PANEL_LABEL, WebviewUrl::default())
+            .title("Kryoto")
+            .inner_size(panel_width, panel_height)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .build()
+        {
+            Ok(panel) => panel,
+            Err(error) => {
+                crate::logging::error("tray", &format!("tray panel: {error}"));
+                return;
+            }
+        },
+    };
+    let _ = panel.set_position(PhysicalPosition::new(x, y));
+    let _ = panel.show();
+    let _ = panel.set_focus();
+}
+
+#[tauri::command]
+pub fn tray_action(app: AppHandle, action: String) -> Result<(), String> {
+    if action == "exit" {
+        app.exit(0);
+        return Ok(());
+    }
+    show_main(&app);
+    if action != "open" {
+        app.emit_to("main", "tray-go", action).map_err(|e| e.to_string())?;
+    }
+    if let Some(panel) = app.get_webview_window(TRAY_PANEL_LABEL) {
+        let _ = panel.hide();
+    }
+    Ok(())
+}
+
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     #[cfg(target_os = "linux")]
     if !indicator_library_present() {
         crate::logging::info("tray", "no appindicator library on this system, so no tray icon");
         return Ok(());
     }
-    // First, because on Linux the tray only opens its menu - a click on the
-    // icon itself is not delivered there.
-    let open = MenuItem::with_id(app, "tray-open", "Open Kryoto", true, None::<&str>)?;
-    let store = MenuItem::with_id(app, "tray-store", "Store", true, None::<&str>)?;
-    let library = MenuItem::with_id(app, "tray-library", "Library", true, None::<&str>)?;
-    let downloads = MenuItem::with_id(app, "tray-downloads", "Downloads", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "tray-settings", "Settings", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
-    let exit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
-    let sep_top = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &exit])?;
+    // The panel's menu, where the tray opens it: on Linux a click on the icon
+    // itself is not delivered, so this is the only way in. Windows opens the
+    // panel on either button, so it builds no menu.
+    #[cfg(not(windows))]
+    let menu = {
+        let open = MenuItem::with_id(app, "tray-open", "Open Kryoto", true, None::<&str>)?;
+        let store = MenuItem::with_id(app, "tray-store", "Store", true, None::<&str>)?;
+        let library = MenuItem::with_id(app, "tray-library", "Library", true, None::<&str>)?;
+        let downloads = MenuItem::with_id(app, "tray-downloads", "Downloads", true, None::<&str>)?;
+        let settings = MenuItem::with_id(app, "tray-settings", "Settings", true, None::<&str>)?;
+        let sep = PredefinedMenuItem::separator(app)?;
+        let exit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
+        let sep_top = PredefinedMenuItem::separator(app)?;
+        Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &exit])?
+    };
     let mut builder = TrayIconBuilder::with_id("kryoto")
+        // The channel keeps the name right in a dev or Preview build (channel.rs).
         .tooltip(crate::channel::APP_NAME)
-        .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
@@ -311,10 +368,19 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                show_main(tray.app_handle());
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left | MouseButton::Right,
+                button_state: MouseButtonState::Up,
+                position,
+                ..
+            } = event {
+                show_tray_panel(tray.app_handle(), position);
             }
         });
+    #[cfg(not(windows))]
+    {
+        builder = builder.menu(&menu);
+    }
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
