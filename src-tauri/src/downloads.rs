@@ -970,6 +970,25 @@ fn enqueue_item<R: Runtime>(
             return Ok(());
         }
     }
+    // An add-on from the game's card that waited on the download window's
+    // check: the link its Download minted carries that row on, so it applies
+    // to the game it was asked for and no second row stands beside it.
+    if mirror.is_none() && remote_id.is_none() {
+        let waiting = state.list.lock().ok().and_then(|list| waiting_addon(&list, &url, slug.as_deref()));
+        if let Some(found) = waiting {
+            edit(app, &found, |d| {
+                d.url = url.clone();
+                // Minted by the Store, over whichever family it took.
+                d.family = None;
+                d.error = None;
+                d.mint_at_turn = false;
+            });
+            persist(app);
+            let _ = app.emit("download-started", found.clone());
+            let _ = requeue(app, &found);
+            return Ok(());
+        }
+    }
     // Download pressed again for a game whose download failed with nothing
     // kept (a damaged archive is deleted): that row starts over with the fresh
     // link, rather than a second row of the same game failing beside it.
@@ -1094,9 +1113,34 @@ pub fn enqueue_collection<R: Runtime>(app: &AppHandle<R>, games: &[crate::collec
 }
 
 /// What a row added from a game's Add-ons & DLC card says when kryo.to wants
-/// the check only its page can pass (a new account, say). The card offers the
-/// game's download window for it.
-pub const ADDON_CHALLENGE: &str = "kryo.to wants a check only its download window can pass for this account. Open the download window to add it there.";
+/// Cloudflare's check, which only its page can pass. The game's download
+/// window opens with it; Download there carries this row on (`waiting_addon`).
+pub const ADDON_CHALLENGE: &str = "kryo.to wants a check only its download window can pass. Press Download on it there and it carries on here.";
+
+/// The download window opens once for a game's add-ons refused together
+/// ("Add all DLC"), not once per add-on.
+fn open_window_once(slug: &str) -> bool {
+    static LAST: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else { return true };
+    if last.as_ref().is_some_and(|(s, at)| s == slug && at.elapsed() < std::time::Duration::from_secs(60)) {
+        return false;
+    }
+    *last = Some((slug.to_string(), Instant::now()));
+    true
+}
+
+/// An add-on queued from a game's card that stopped on Cloudflare's check
+/// (`ADDON_CHALLENGE`), which the link `url` from that game's download window
+/// is for: a DLC by its name in the file. That row carries on with the link.
+fn waiting_addon(list: &[Download], url: &str, slug: Option<&str>) -> Option<String> {
+    let label = dlc_label(&file_name_in_link(url)?)?;
+    list.iter()
+        .filter(|d| d.status == Status::Failed && d.addon_release.is_some() && d.mirror.is_none() && d.received == 0)
+        // This text, or the one before it (0.3.1 to 0.3.8): both name the window.
+        .filter(|d| d.error.as_deref().is_some_and(|e| e.contains("download window")) && slug.is_some() && d.slug.as_deref() == slug)
+        .find(|d| d.addon.as_deref().is_some_and(|a| a.trim().eq_ignore_ascii_case(label.trim())))
+        .map(|d| d.id.clone())
+}
 
 /// One of a game's add-ons, as its Add-ons & DLC card asks for it.
 pub struct AddonRequest {
@@ -2044,7 +2088,15 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
                 continue;
             }
             Err(crate::phone::MintError::Other(e)) => return Err(e),
-            Err(crate::phone::MintError::Challenge) if d.addon_release.is_some() => return Err(ADDON_CHALLENGE.into()),
+            // Cloudflare's check, which only the game's download window can
+            // pass: it opens, and the link its Download mints carries this
+            // row on (`waiting_addon`), as a refused game's does.
+            Err(crate::phone::MintError::Challenge) if d.addon_release.is_some() => {
+                if let Some(slug) = d.slug.as_deref().filter(|s| open_window_once(s)) {
+                    let _ = app.emit_to("main", "store-download-page", slug.to_string());
+                }
+                return Err(ADDON_CHALLENGE.into());
+            }
             Err(crate::phone::MintError::Challenge) => {
                 return Err(format!("kryo.to wants a check only its page can pass. Press Download on {}'s page, or Retry later.", d.meta.title));
             }
@@ -5518,6 +5570,40 @@ mod tests {
         assert!(is_dlc_link(&dlc) && !is_dlc_link(&game));
         assert!(!same_request(&row(&game), &dlc, false));
         assert_eq!(row_kind(&row(&dlc), None), FileKind::Addon(String::new()));
+    }
+
+    /// A DLC refused for the window's check carries on with the link that
+    /// window mints for it, and with no other.
+    #[test]
+    fn a_dlc_waiting_on_the_window_takes_its_own_link() {
+        let token = |name: &str| {
+            use base64::Engine;
+            let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::json!({ "k": "a/b", "exp": 1, "n": name }).to_string());
+            format!("https://dl.kryo.to/d/{body}.c2ln")
+        };
+        let waiting = |id: &str, label: &str, error: &str| Download {
+            id: id.into(),
+            slug: Some("euro-truck-simulator-2".into()),
+            status: Status::Failed,
+            addon: Some(label.into()),
+            addon_release: Some("4556".into()),
+            error: Some(error.into()),
+            ..Default::default()
+        };
+        let list = vec![
+            waiting("a", "DLC: Going East!", ADDON_CHALLENGE),
+            waiting("b", "DLC: Scandinavia", "kryo.to wants a check only its download window can pass for this account. Open the download window to add it there."),
+            waiting("c", "DLC: Italia", "The download was interrupted."),
+        ];
+        let slug = Some("euro-truck-simulator-2");
+        let link = |dlc: &str| token(&format!("Euro Truck Simulator 2 - DLC {dlc} - kryoto.7z"));
+        assert_eq!(waiting_addon(&list, &link("Going East!"), slug).as_deref(), Some("a"));
+        // Refused by an older version, with its words.
+        assert_eq!(waiting_addon(&list, &link("Scandinavia"), slug).as_deref(), Some("b"));
+        // Stopped for another reason: Retry is its way on.
+        assert_eq!(waiting_addon(&list, &link("Italia"), slug), None);
+        assert_eq!(waiting_addon(&list, &token("Euro Truck Simulator 2 - Kryoto.7z"), slug), None);
+        assert_eq!(waiting_addon(&list, &link("Going East!"), Some("forts")), None);
     }
 
     /// Fetched from a mirror that renamed it, an add-on is still found by the page.
