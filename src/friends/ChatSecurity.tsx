@@ -13,6 +13,7 @@ import {
   type BackupStatus,
   type MyDevice,
 } from '@/lib/chat'
+import { QrCode } from '@/settings/QrCode'
 import { Busy, Button, Caption, Check, Modal } from '@/ui'
 
 function day(ms: number): string {
@@ -77,6 +78,11 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
         <code className="kryo-radius block select-all border border-border bg-background p-3 font-mono text-sm leading-relaxed tracking-wider text-foreground">
           {code}
         </code>
+        <QrCode text={code} label="Your recovery code as a QR code" className="kryo-radius mx-auto size-44" />
+        <p className="text-center text-[11px] text-muted-foreground">
+          To add your other device, choose Scan the QR code under Chat there and point its camera here, or type the code
+          above.
+        </p>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <Button size="sm" onClick={() => navigator.clipboard.writeText(code).catch(() => {})}>
             <Copy className="size-3" aria-hidden /> Copy
