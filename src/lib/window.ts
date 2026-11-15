@@ -197,7 +197,8 @@ export function mountStore(url: string, rect: { x: number; y: number; width: num
   noteStore(rect)
   // The page's own pixel ratio, so the view lands where it was measured even
   // when Windows reports another scale for the window (src-tauri placement.rs).
-  return call<void>('store_mount', { url, ...rect, visible: visible ?? null, userAgent: navigator.userAgent, scale: window.devicePixelRatio || null })
+  // Linux uses the viewport width to include zoom on older WebKit versions too.
+  return call<void>('store_mount', { url, ...rect, visible: visible ?? null, userAgent: navigator.userAgent, scale: window.devicePixelRatio || null, viewportWidth: window.innerWidth })
 }
 
 /*

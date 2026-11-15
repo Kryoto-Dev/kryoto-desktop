@@ -1049,12 +1049,15 @@ async fn store_mount(
     user_agent: Option<String>,
     // The shell's devicePixelRatio; see placement.rs.
     scale: Option<f64>,
+    viewport_width: Option<f64>,
 ) -> Result<(), String> {
+    let window = app.get_window("main").ok_or("The main window is gone.")?;
+    let scale = placement::shell_scale(&window, scale, viewport_width)?;
     menus::set_store_origin(x, y);
     if let Some(view) = app.get_webview(STORE) {
         placement::place(&view, x, y, width, height, scale)?;
         #[cfg(target_os = "linux")]
-        linux_overlay::place(&view, x, y, width, height);
+        linux_overlay::place(&view, x, y, width, height, scale);
         // Visibility is `store_visible`'s job: a resize while a dialog is up
         // must not bring the page back over it.
         return Ok(());
@@ -1139,7 +1142,7 @@ async fn store_mount(
         let _ = view.hide();
     }
     #[cfg(target_os = "linux")]
-    linux_overlay::place(&view, x, y, width, height);
+    linux_overlay::place(&view, x, y, width, height, scale);
     #[cfg(windows)]
     allow_repeat_downloads(&view, settings::load(&app));
     Ok(())

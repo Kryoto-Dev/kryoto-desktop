@@ -171,7 +171,7 @@ export async function openMenu(menu: string, anchor: DOMRect | Anchor, entries: 
     return { id, label: e.label, hint: e.hint, danger: e.danger, disabled: e.disabled, checked: e.checked, icon: iconMarkup(icon) }
   })
   setCurrent(menu)
-  await call<boolean>('menu_open', { scale: window.devicePixelRatio || null, anchor: anchorOf(anchor), right: align === 'right', payload: { menu, kind: 'menu', items, minWidth, focus, look: look() } }).then(
+  await call<boolean>('menu_open', { scale: window.devicePixelRatio || null, viewportWidth: window.innerWidth, anchor: anchorOf(anchor), right: align === 'right', payload: { menu, kind: 'menu', items, minWidth, focus, look: look() } }).then(
     (drawn) => {
       if (drawn && current === menu) shown = true
     },
@@ -191,7 +191,7 @@ export async function openInbox(
   handlers.set(`${menu}:read`, actions.markRead)
   handlers.set(`${menu}:all`, actions.all)
   setCurrent(menu)
-  await call('menu_open', { scale: window.devicePixelRatio || null, anchor: anchorOf(anchor), right: true, payload: { menu, kind: 'inbox', inbox, look: look() } }).catch((e: unknown) =>
+  await call('menu_open', { scale: window.devicePixelRatio || null, viewportWidth: window.innerWidth, anchor: anchorOf(anchor), right: true, payload: { menu, kind: 'inbox', inbox, look: look() } }).catch((e: unknown) =>
     openFailed(menu, e),
   )
 }
@@ -227,6 +227,7 @@ export function openTip(text: string, target: DOMRect, top: number) {
   if (current) return
   void call('menu_open', {
     scale: window.devicePixelRatio || null,
+    viewportWidth: window.innerWidth,
     anchor: { left: target.left, right: target.right, bottom: top - 6 },
     right: false,
     payload: { menu: 'tip', kind: 'tip', text, look: look() },
