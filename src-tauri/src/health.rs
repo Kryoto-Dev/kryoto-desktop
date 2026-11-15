@@ -10,6 +10,12 @@
 //!   Kryoto: the player's connection may be the reason.
 //! - **partial**: the site answers, but something on it is not right.
 //!
+//! When this app's own request fails, the Store page is asked to fetch
+//! `/api/health` too (`ask_page`), and its answer counts: on a PC whose
+//! antivirus or proxy lets the web view through and not this app's own
+//! requests, kryo.to is answering, and the Store it shows is never hidden
+//! behind "Kryoto is not answering" (KB-0323).
+//!
 //! The site's `/api/health` answer is cached for a few seconds there, so this
 //! costs it very little (kryoto-bugs KB-0002 is what polling can do): every 30
 //! seconds while the window is up, every 3 minutes while it is hidden, and
@@ -255,11 +261,59 @@ fn status_url(testing: bool) -> String {
 
 static NOW: Mutex<Option<Health>> = Mutex::new(None);
 static POKE: Notify = Notify::const_new();
+/// The Store page's own `/api/health` answer (`page_answered`): status (0 for
+/// none at all) and body.
+static PAGE: Mutex<Option<(u16, String)>> = Mutex::new(None);
+static PAGE_ANSWERED: Notify = Notify::const_new();
 
-async fn ask_site(client: &reqwest::Client, endpoint: &str) -> Site {
-    let Ok(res) = client.get(format!("{endpoint}/api/health")).send().await else { return Site::Failed };
+/// `/api/health`, or why there was no answer (every cause in the chain:
+/// reqwest's own text names only the address).
+async fn ask_site(client: &reqwest::Client, endpoint: &str) -> Result<Site, String> {
+    let res = client.get(format!("{endpoint}/api/health")).send().await.map_err(|e| causes(&e))?;
     let code = res.status().as_u16();
-    read_site(code, &res.text().await.unwrap_or_default())
+    Ok(read_site(code, &res.text().await.unwrap_or_default()))
+}
+
+fn causes(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
+/// What the Store page got for `/api/health` (lib.rs `report_catalog_state`).
+pub fn page_answered(code: u16, body: String) {
+    *PAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some((code, body));
+    PAGE_ANSWERED.notify_one();
+}
+
+/// The Store page's own reading of the site, when it is on kryo.to and
+/// answers in time; `None` when it cannot say.
+async fn ask_page<R: Runtime>(app: &AppHandle<R>) -> Option<Site> {
+    let store = app.get_webview(crate::STORE)?;
+    PAGE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    store.eval("window.__kryoHealthTick && window.__kryoHealthTick()").ok()?;
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        if let Some((code, body)) = PAGE.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            return Some(if code == 0 { Site::Failed } else { read_site(code, &body) });
+        }
+        // A wake-up left over from an earlier answer finds nothing: wait on.
+        tokio::time::timeout_at(deadline, PAGE_ANSWERED.notified()).await.ok()?;
+    }
+}
+
+/// This app's reading, or the Store page's when this app got no answer.
+fn reading(own: &Result<Site, String>, page: Option<Site>) -> Site {
+    match (own, page) {
+        (Ok(site), _) => site.clone(),
+        (Err(_), Some(site)) => site,
+        (Err(_), None) => Site::Failed,
+    }
 }
 
 async fn ask_feed(client: &reqwest::Client, status: &str) -> Feed {
@@ -294,11 +348,23 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
         let mut round = 0u32;
         let mut owed_checked = false;
         let mut outage_since: Option<Instant> = None;
+        // Said once a run of it: the page reaches kryo.to and this app does not.
+        let mut said_split = false;
         loop {
             let settings = crate::settings::load(&app);
             let endpoint = crate::settings::catalog_endpoint(&settings);
             let status = status_url(!settings.catalog_endpoint.trim().is_empty());
-            let site = ask_site(&client, &endpoint).await;
+            let own = ask_site(&client, &endpoint).await;
+            let page = if own.is_err() { ask_page(&app).await } else { None };
+            match (&own, &page) {
+                (Err(e), Some(site)) if *site != Site::Failed && !said_split => {
+                    said_split = true;
+                    crate::logging::error("health", &format!("kryo.to answers the Store but not this app's own requests: {e}"));
+                }
+                (Ok(_), _) => said_split = false,
+                _ => {}
+            }
+            let site = reading(&own, page);
             // The feed every other round while all is calm, every round otherwise.
             let feed = if watch.watchful() || site != Site::Fine || round.is_multiple_of(2) {
                 Some(ask_feed(&client, &status).await)
@@ -360,6 +426,21 @@ mod tests {
     const FINE: &str = r#"{"groups":[{"components":[{"id":"website","status":"operational"},{"id":"chat","status":"operational"}]}]}"#;
     const SITE_DOWN: &str = r#"{"groups":[{"components":[{"id":"website","status":"down"},{"id":"chat","status":"operational"}]}]}"#;
     const CHAT_DOWN: &str = r#"{"groups":[{"components":[{"id":"website","status":"operational"},{"id":"chat","status":"degraded"},{"id":"discord","status":"down"}]}]}"#;
+
+    /// This app's request failing (an antivirus scanning HTTPS, say) while
+    /// the Store page reaches kryo.to is no outage: the page's answer counts.
+    #[test]
+    fn the_store_page_answering_is_kryoto_answering() {
+        let failed: Result<Site, String> = Err("error sending request: invalid peer certificate: UnknownIssuer".into());
+        assert_eq!(reading(&failed, Some(Site::Fine)), Site::Fine);
+        assert_eq!(reading(&failed, Some(Site::Failed)), Site::Failed);
+        assert_eq!(reading(&failed, None), Site::Failed);
+        assert_eq!(reading(&Ok(Site::Fine), Some(Site::Failed)), Site::Fine);
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in (0..=300).step_by(10) {
+            assert_eq!(run(&mut w, t, at, reading(&failed, Some(Site::Fine)), Some("<html>")), State::Ok, "at {at}");
+        }
+    }
 
     fn run(watch: &mut Watch, start: Instant, at: u64, site: Site, feed: Option<&str>) -> State {
         watch.step(site, feed.map(read_feed), start + Duration::from_secs(at));

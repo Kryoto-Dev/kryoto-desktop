@@ -888,7 +888,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
         previewBus.emit('downloads', clone(downloadList))
         setTimeout(() => {
           if (challenge) {
-            Object.assign(item, { status: 'failed', error: 'kryo.to wants a check only its download window can pass for this account. Open the download window to add it there.' })
+            Object.assign(item, { status: 'failed', error: 'kryo.to wants a check only its download window can pass. Press Download on it there and it carries on here.' })
           } else {
             Object.assign(item, { status: 'downloading', speed: 30_000_000 })
           }

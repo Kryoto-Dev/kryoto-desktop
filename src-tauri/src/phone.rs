@@ -778,38 +778,111 @@ pub async fn mint_release<R: Runtime>(app: &AppHandle<R>, session: &Session, rel
     if release_id.is_empty() || !release_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err("kryo.to sent a release without an ID.".to_string().into());
     }
-    let response = session
-        .client
-        .post(format!("{}/api/download/v/{release_id}", session.endpoint))
-        .header(reqwest::header::COOKIE, &session.cookie)
-        .header("x-kryo-install", logging::install_id(app))
-        .json(&match turnstile_token {
-            Some(token) => serde_json::json!({ "turnstileToken": token }),
-            None => serde_json::json!({}),
-        })
-        .send()
-        .await
-        .map_err(|e| format!("Could not reach kryo.to: {e}"))?;
-    let status = response.status();
-    let body: serde_json::Value = response.json().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(match (status.as_u16(), body["error"].as_str()) {
-            // Direct downloads turned off for everyone but supporters (an
-            // owner switch while the servers are full): the site's own words,
-            // and the game's mirrors are still there in Kryoto Desktop.
-            (403, Some("supporter_required")) => MintError::Other(crate::downloads::SUPPORTER_REQUIRED.to_string()),
-            (403, _) => MintError::Challenge,
-            (429, _) => MintError::Other("Too many downloads started. Wait a moment.".into()),
-            (404, _) => MintError::Other("That build is no longer on Kryoto's filehost.".into()),
-            (_, Some(text)) => MintError::Other(text.to_string()),
-            (code, None) => MintError::Other(format!("kryo.to answered {code}.")),
-        });
+    let install = logging::install_id(app);
+    let (mut status, mut body) = post_mint(session, release_id, &install, turnstile_token, None).await?;
+    // A new account (or one seen on many PCs) proves a moment of work before
+    // it gets a link (kryo.to lib/download-gate.ts): done here, silently, and
+    // asked again. A proof that was not taken (expired, used) gets one more
+    // try. Without it every add-on of a day-old account stopped on "a check
+    // only its download window can pass".
+    for _ in 0..2 {
+        if !(status == 403 && is_proof_request(body["error"].as_str())) {
+            break;
+        }
+        let proof = prove(session, &install).await?;
+        (status, body) = post_mint(session, release_id, &install, turnstile_token, Some(&proof)).await?;
+    }
+    if !(200..300).contains(&status) {
+        return Err(mint_refusal(status, &body));
     }
     let link = body["url"].as_str().and_then(|u| url::Url::parse(u).ok()).ok_or("kryo.to did not send a download link.".to_string())?;
     if !crate::downloads::is_ours(&link, &settings::load(app)) {
         return Err("That download does not come from Kryoto.".to_string().into());
     }
     Ok(link.to_string())
+}
+
+/// One `POST /api/download/v/<release>`: its status and its JSON.
+async fn post_mint(session: &Session, release_id: &str, install: &str, turnstile_token: Option<&str>, proof: Option<&str>) -> Result<(u16, serde_json::Value), String> {
+    let mut req = session
+        .client
+        .post(format!("{}/api/download/v/{release_id}", session.endpoint))
+        .header(reqwest::header::COOKIE, &session.cookie)
+        .header("x-kryo-install", install)
+        .json(&match turnstile_token {
+            Some(token) => serde_json::json!({ "turnstileToken": token }),
+            None => serde_json::json!({}),
+        });
+    if let Some(proof) = proof {
+        req = req.header("x-kryo-pow", proof);
+    }
+    let response = req.send().await.map_err(|e| format!("Could not reach kryo.to: {e}"))?;
+    let status = response.status().as_u16();
+    Ok((status, response.json().await.unwrap_or_default()))
+}
+
+/// kryo.to asking for (another) proof of work before it mints.
+fn is_proof_request(error: Option<&str>) -> bool {
+    matches!(error, Some("pow_required" | "pow_invalid"))
+}
+
+/// What a refused mint means. Only Cloudflare's check (`challenge_failed`,
+/// `challenge_required`) is the one only a window can pass; the rest are
+/// said as they are.
+fn mint_refusal(status: u16, body: &serde_json::Value) -> MintError {
+    match (status, body["error"].as_str()) {
+        // Direct downloads turned off for everyone but supporters (an
+        // owner switch while the servers are full): the site's own words,
+        // and the game's mirrors are still there in Kryoto Desktop.
+        (403, Some("supporter_required")) => MintError::Other(crate::downloads::SUPPORTER_REQUIRED.to_string()),
+        (403, error) if is_proof_request(error) => MintError::Other("kryo.to did not take this PC's proof. Retry in a moment.".into()),
+        (403, _) => MintError::Challenge,
+        (401, _) => MintError::Other("Sign in to kryo.to in Kryoto Desktop first.".into()),
+        (429, _) => MintError::Other("Too many downloads started. Wait a moment.".into()),
+        (404, _) => MintError::Other("That build is no longer on Kryoto's filehost.".into()),
+        (_, Some(text)) => MintError::Other(text.to_string()),
+        (code, None) => MintError::Other(format!("kryo.to answered {code}.")),
+    }
+}
+
+/// A proof of work for this account: a challenge from kryo.to, solved off
+/// the async threads (about a million hashes, a second or two), as the
+/// `x-kryo-pow` value. kryo.to docs/download-gate.md, "Proof of work".
+async fn prove(session: &Session, install: &str) -> Result<String, MintError> {
+    let res = session
+        .get("/api/download/challenge")
+        .header("x-kryo-install", install)
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach kryo.to: {e}"))?;
+    let status = res.status().as_u16();
+    let body: serde_json::Value = res.json().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(mint_refusal(status, &body));
+    }
+    let nonce = body["nonce"].as_str().filter(|n| !n.is_empty()).ok_or("kryo.to sent no challenge.".to_string())?.to_string();
+    // Past 32 bits it would take this PC hours: not something kryo.to asks.
+    let bits = body["bits"].as_u64().filter(|b| *b <= 32).ok_or("kryo.to sent a challenge this app cannot answer.".to_string())? as u32;
+    tauri::async_runtime::spawn_blocking(move || solve_proof(&nonce, bits))
+        .await
+        .map_err(|e| MintError::Other(e.to_string()))?
+        .ok_or_else(|| "kryo.to sent a challenge this app cannot answer.".to_string().into())
+}
+
+/// `<nonce>.<counter>` whose SHA-256 starts with `bits` zero bits.
+fn solve_proof(nonce: &str, bits: u32) -> Option<String> {
+    (0u64..1 << 36).map(|counter| format!("{nonce}.{counter}")).find(|candidate| leading_zero_bits(&Sha256::digest(candidate.as_bytes())) >= bits)
+}
+
+fn leading_zero_bits(hash: &[u8]) -> u32 {
+    let mut bits = 0;
+    for byte in hash {
+        bits += byte.leading_zeros();
+        if *byte != 0 {
+            break;
+        }
+    }
+    bits
 }
 
 /// Ask kryo.to for a game's current release with the account signed in here,
@@ -822,15 +895,23 @@ pub async fn mint<R: Runtime>(app: &AppHandle<R>, slug: &str, turnstile_token: O
 
 /// `mint`, as `session` (over one address family, say).
 pub async fn mint_with<R: Runtime>(app: &AppHandle<R>, session: &Session, slug: &str, turnstile_token: Option<&str>, mirrors: bool) -> Result<Minted, MintError> {
+    mint_version(app, session, slug, None, turnstile_token, mirrors).await
+}
+
+/// `mint_with` for one build of the game (`version`, as kryo.to names it),
+/// or the current one when `None`: a download of an older build picked on the
+/// page gets a fresh link for that build, not for the newest.
+pub async fn mint_version<R: Runtime>(
+    app: &AppHandle<R>,
+    session: &Session,
+    slug: &str,
+    version: Option<&str>,
+    turnstile_token: Option<&str>,
+    mirrors: bool,
+) -> Result<Minted, MintError> {
     let listing = listing(session, slug).await?;
     let title = listing["title"].as_str().unwrap_or(slug).to_string();
-    // The release players get now.
-    let release = listing["releases"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|r| r["primary"].as_bool() == Some(true) && r["archived"].as_bool() != Some(true))
-        .ok_or("This game has no release to download right now.".to_string())?;
+    let release = pick_release(&listing, version).ok_or("This game has no release to download right now.".to_string())?;
     let links: Vec<&str> = release["links"].as_array().into_iter().flatten().filter_map(|l| l["url"].as_str()).collect();
     if !links.iter().any(|u| u.starts_with("/api/download/v/")) {
         if !mirrors {
@@ -842,6 +923,15 @@ pub async fn mint_with<R: Runtime>(app: &AppHandle<R>, session: &Session, slug: 
     let release_id = release["id"].as_str().unwrap_or_default();
     let url = mint_release(app, session, release_id, turnstile_token).await?;
     Ok(Minted::Link { url, title })
+}
+
+/// The release `version` in a `/api/games/<slug>/downloads` answer, else the
+/// one players get now; never an archived one.
+fn pick_release<'a>(listing: &'a serde_json::Value, version: Option<&str>) -> Option<&'a serde_json::Value> {
+    let live = || listing["releases"].as_array().into_iter().flatten().filter(|r| r["archived"].as_bool() != Some(true));
+    version
+        .and_then(|v| live().find(|r| r["version"].as_str() == Some(v)))
+        .or_else(|| live().find(|r| r["primary"].as_bool() == Some(true)))
 }
 
 /// What the phone's Download does: exactly what Download does in Kryoto
@@ -1095,6 +1185,50 @@ pub fn phone_revoke(app: AppHandle, id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The proof kryo.to's download gate checks: SHA-256 of `<nonce>.<counter>`
+    /// starting with `bits` zero bits (lib/download-gate.ts hasLeadingZeroBits).
+    #[test]
+    fn a_proof_of_work_has_the_zero_bits_asked_for() {
+        assert_eq!(leading_zero_bits(&[0, 0, 0x0f, 0xff]), 20);
+        assert_eq!(leading_zero_bits(&[0x80]), 0);
+        assert_eq!(leading_zero_bits(&[0, 0x01]), 15);
+        let proof = solve_proof("payload.sig", 12).unwrap();
+        let (nonce, counter) = proof.rsplit_once('.').unwrap();
+        assert_eq!(nonce, "payload.sig");
+        assert!(counter.bytes().all(|b| b.is_ascii_digit()));
+        assert!(leading_zero_bits(&Sha256::digest(proof.as_bytes())) >= 12);
+    }
+
+    /// A fresh link for a download of an older build is for that build.
+    #[test]
+    fn a_picked_build_is_minted_again_as_itself() {
+        let listing = serde_json::json!({ "releases": [
+            { "id": "3", "version": "1.2", "primary": true },
+            { "id": "2", "version": "1.1", "primary": false },
+            { "id": "1", "version": "1.0", "primary": false, "archived": true },
+        ] });
+        let id = |v: Option<&str>| pick_release(&listing, v).and_then(|r| r["id"].as_str());
+        assert_eq!(id(None), Some("3"));
+        assert_eq!(id(Some("1.1")), Some("2"));
+        // Archived (mirrors only) or gone: the current build.
+        assert_eq!(id(Some("1.0")), Some("3"));
+        assert_eq!(id(Some("0.9")), Some("3"));
+    }
+
+    /// Only Cloudflare's check is the one the window must pass; a proof of
+    /// work or the supporters switch is said as what it is.
+    #[test]
+    fn only_the_cloudflare_check_wants_the_window() {
+        let refusal = |status: u16, error: &str| mint_refusal(status, &serde_json::json!({ "error": error }));
+        assert!(matches!(refusal(403, "challenge_failed"), MintError::Challenge));
+        assert!(matches!(refusal(403, "challenge_required"), MintError::Challenge));
+        assert!(matches!(refusal(403, "pow_required"), MintError::Other(_)));
+        assert!(matches!(refusal(403, "pow_invalid"), MintError::Other(_)));
+        assert!(matches!(refusal(403, "supporter_required"), MintError::Other(e) if e == crate::downloads::SUPPORTER_REQUIRED));
+        assert!(matches!(refusal(401, "unauthorized"), MintError::Other(e) if e.starts_with("Sign in")));
+        assert!(is_proof_request(Some("pow_required")) && !is_proof_request(Some("challenge_failed")) && !is_proof_request(None));
+    }
 
     fn issued(now: Instant) -> (Inner, String) {
         let mut inner = Inner::default();
