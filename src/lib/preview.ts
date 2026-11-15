@@ -522,7 +522,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   community_offer_add_shot: () => ({ shown: true, toVersion: '1.4.2', kryotoVersion: '1.4.0', playedSeconds: 720, needSeconds: 600, exitCode: 0, shots: ['shot.png'], autoShots: true, offerId: null, offerState: null, reasons: [] }),
   community_offer_send: () => ({ shown: true, toVersion: '1.4.2', kryotoVersion: '1.4.0', playedSeconds: 720, needSeconds: 600, exitCode: 0, shots: ['shot.png'], autoShots: true, offerId: '1', offerState: 'review', reasons: [] }),
   // Cloud saves (src-tauri saves/): one game with every kind of location, a conflict on another.
-  cloud_saves_status: () => ({ feature: true, on: true, perk: true, allowance: { totalBytes: GB, versionsPerGame: 5, maxBackupBytes: 100 * 1_048_576 }, usage: { bytes: 214_000_000, games: 7, versions: 23 }, lastSync: now() - 300, conflicts: [], endpoint: ownHost('savesEndpoint'), mode: settings.savesMode === 'local' ? 'local' : ownHost('savesEndpoint') ? 'patchbay' : 'account', localDir: (settings.savesLocalDir as string) || null }),
+  cloud_saves_status: () => ({ feature: true, on: true, perk: true, allowance: { totalBytes: GB, versionsPerGame: 5, maxBackupBytes: 100 * 1_048_576, maxRawBytes: 400 * 1_048_576 }, usage: { bytes: 214_000_000, games: 7, versions: 23 }, lastSync: now() - 300, conflicts: [], endpoint: ownHost('savesEndpoint'), mode: settings.savesMode === 'local' ? 'local' : ownHost('savesEndpoint') ? 'patchbay' : 'account', localDir: (settings.savesLocalDir as string) || null }),
   cloud_saves_refresh: () => HANDLERS.cloud_saves_status!({}),
   cloud_saves_library: () => games.slice(0, 4).map((g, i) => ({ id: g.id, title: g.title, lastBackupAt: i === 1 ? null : now() - i * 3600, conflict: i === 1, error: null, tooBig: i === 2 })),
   cloud_saves_game: (a) => {
@@ -552,8 +552,8 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
             { location: 'known:AppData\\LocalLow\\Team Cherry\\Hollow Knight', folder: 'Saves', label: 'AppData\\LocalLow\\Team Cherry\\Hollow Knight\\Saves', files: 6, bytes: 1_200_000 },
           ]
         : [],
-      files: big ? 483 : 9, bytes: big ? 438_048_000 : 1_948_000, registryValues: 35, truncated: false, maxBackupBytes: 100 * 1_048_576,
-      state: { baseVersion: 'v3', baseHash: 'x', lastBackupAt: now() - 3600, lastRestoreAt: null, cloudHead: conflict ? { id: 'v4', size: 1_200_000, sha256: '', md5: '', fileCount: 9, machine: 'LIVING-ROOM-PC', createdAt: now() - 7200, parentId: 'v3' } : null, conflict, error: big ? "This game's saves are 257 MB packed, over the 100 MB a backup can be." : null, tooBig: big },
+      files: big ? 483 : 9, bytes: big ? 438_048_000 : 1_948_000, registryValues: 35, truncated: false, maxBackupBytes: 100 * 1_048_576, maxRawBytes: 400 * 1_048_576,
+      state: { baseVersion: 'v3', baseHash: 'x', lastBackupAt: now() - 3600, lastRestoreAt: null, cloudHead: conflict ? { id: 'v4', size: 1_200_000, sha256: '', md5: '', fileCount: 9, machine: 'LIVING-ROOM-PC', createdAt: now() - 7200, parentId: 'v3' } : null, conflict, error: big ? 'These saves are 418 MB. A backup holds at most 400 MB of saves, even packed small. Nothing was packed or uploaded.' : null, tooBig: big, compressible: false, packedEstimate: null, compress: false },
       localBackups: [{ file: `${now() - 86400}.ksave`, createdAt: now() - 86400, size: 1_700_000 }],
     }
   },

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronDown, Cloud, CloudUpload, FolderOpen, FolderPlus, History, Plus, RotateCcw, ScanSearch, X } from '@/ui/pixel-icons'
+import { Check, ChevronDown, Cloud, CloudUpload, FolderOpen, FolderPlus, History, Plus, RotateCcw, ScanSearch, Shrink, X } from '@/ui/pixel-icons'
 import { AsciiBar, Busy, Button, Caption, Card, IconButton, Label, Modal, Tag } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { PHASE_LABEL, cloudSaves, formatAgo, formatBytes, useGameSaves, useSaveProgress, type SaveFinding, type SaveLocation, type SaveVersion } from '@/lib/cloud-saves'
@@ -76,7 +76,13 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
   // fold away; what this PC has, or the player added, stays in sight.
   const shown = data.locations.filter((l) => l.exists || l.source === 'player')
   const elsewhere = data.locations.filter((l) => !shown.includes(l))
-  const overCap = s.tooBig || data.bytes > data.maxBackupBytes
+  // Over the cap as they are. Saves the player chose to pack small back up
+  // as long as they fit that way (sync.rs checks before packing).
+  const overCap = s.tooBig || data.bytes > data.maxRawBytes || (data.bytes > data.maxBackupBytes && !s.compress)
+  // Packing small fits (checked), or may (not checked yet: Compress and back
+  // up checks first and packs nothing that would not fit).
+  const mayCompress = !s.tooBig && data.bytes > data.maxBackupBytes && data.bytes <= data.maxRawBytes
+  const offerCompress = !noPerk && !off && (s.compressible || mayCompress)
   const leaveOut = (key: string, folder: string, on: boolean) => void run('leave', () => cloudSaves.leaveOut(game.id, key, folder, on))
 
   const place = keptIn(settings, 'saves')
@@ -89,6 +95,7 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
         <Caption>
           {hasSaves ? found.join(' · ') : 'None found yet'}
           {s.lastBackupAt ? ` · backed up ${formatAgo(s.lastBackupAt)}` : ''}
+          {s.compress && data.bytes > data.maxBackupBytes && !overCap ? ' · packed small' : ''}
         </Caption>
       </div>
 
@@ -152,9 +159,24 @@ export function CloudSavesCard({ game, running = false }: { game: LibraryGame; r
       {overCap ? (
         <div id={anchorId('game-saves-fix')} role="alert" className="kryo-radius grid gap-3 border border-foreground/40 p-3">
           <p className="text-xs leading-relaxed text-foreground">
-            Too big to back up: {formatBytes(data.bytes)} of saves, and a backup can be {formatBytes(data.maxBackupBytes)} here.
+            {offerCompress
+              ? `Too big to back up as they are: ${formatBytes(data.bytes)} of saves, and a backup can be ${formatBytes(data.maxBackupBytes)} here. ${s.compressible && s.packedEstimate ? `Packed small they come to about ${formatBytes(s.packedEstimate)}, so they fit.` : 'Packed small they may fit.'}`
+              : data.bytes > data.maxRawBytes
+                ? `Too big to back up: ${formatBytes(data.bytes)} of saves, and a backup holds at most ${formatBytes(data.maxRawBytes)} of saves here, even packed small.`
+                : s.packedEstimate
+                  ? `Too big to back up, even packed small: ${formatBytes(data.bytes)} of saves come to about ${formatBytes(s.packedEstimate)}, and a backup can be ${formatBytes(data.maxBackupBytes)} here.`
+                  : `Too big to back up: ${formatBytes(data.bytes)} of saves, and a backup can be ${formatBytes(data.maxBackupBytes)} here.`}
           </p>
-          <Caption>{data.heavy.length ? 'Leave out what is not your saves (downloaded maps, mods, replays)' : 'Take a location that is not saves off the list above'}</Caption>
+          {offerCompress ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button size="sm" variant="primary" disabled={running || !!busy || !!progress} onClick={() => run('compress', () => cloudSaves.backup(game.id, false, true))}>
+                <Shrink className="size-3" aria-hidden />
+                {busy === 'compress' ? 'Compressing' : 'Compress and back up'}
+              </Button>
+              <Caption>Slower to pack. This game&apos;s saves are packed small from then on.</Caption>
+            </div>
+          ) : null}
+          <Caption>{data.heavy.length ? `${offerCompress ? 'Or leave' : 'Leave'} out what is not your saves (downloaded maps, mods, replays)` : `${offerCompress ? 'Or take' : 'Take'} a location that is not saves off the list above`}</Caption>
           {data.heavy.length ? <ul className="grid gap-2">
             {data.heavy.map((h) => (
               <li key={`${h.location}|${h.folder}`} className="grid grid-cols-[1fr_auto] items-center gap-3">

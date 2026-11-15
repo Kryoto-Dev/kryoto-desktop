@@ -100,7 +100,7 @@ impl LocalStore {
 
     fn allowance(&self, used: u64) -> Allowance {
         let room = crate::storage::disk_space(&self.dir).map(|(_, free)| free).unwrap_or(0);
-        Allowance { total_bytes: used + room, versions_per_game: self.keep, max_backup_bytes: MAX_BACKUP }
+        Allowance { total_bytes: used + room, versions_per_game: self.keep, max_backup_bytes: MAX_BACKUP, max_raw_bytes: 4 * MAX_BACKUP }
     }
 
     fn file_url(path: &Path) -> Result<String, ApiError> {

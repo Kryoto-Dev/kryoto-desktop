@@ -2823,6 +2823,7 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
+ "flate2",
  "md-5",
  "serde",
  "serde_json",

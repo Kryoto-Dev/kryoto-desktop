@@ -18,8 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
-use kryoto_saves::bundle::{self, BundleFile, Manifest, RegValue};
+use kryoto_saves::bundle::{self, BundleFile, Manifest, Packing, RegValue};
 use kryoto_saves::decide::{decide, Action, Base};
+use kryoto_saves::fit::{self, Fit, Limits};
 use kryoto_saves::scan::{collect, Collected, HashCache, MAX_FILES};
 use kryoto_saves::Rule;
 use serde_json::json;
@@ -136,8 +137,21 @@ pub(crate) struct Local {
 /// What the game's saves are on this PC right now. Reads files (hashing only
 /// changed ones), so call it off the main thread.
 pub(crate) fn local<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, roots: &kryoto_saves::SaveRoots) -> Local {
+    let (rules, found) = measure(app, game, roots);
+    local_from(app, game, rules, found)
+}
+
+/// The game's save files on this PC and their sizes, from the folders'
+/// listings alone (nothing is read). Blocking.
+fn measure<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, roots: &kryoto_saves::SaveRoots) -> (Vec<Rule>, Collected) {
     let (rules, _) = locations(app, game, roots);
     let found = collect(&rules, roots, MAX_FILES);
+    (rules, found)
+}
+
+/// [`local`] from what [`measure`] found: hashes changed files and reads
+/// the registry values. Blocking.
+fn local_from<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, rules: Vec<Rule>, found: Collected) -> Local {
     let cache_file = game_data(app, &game.id).map(|d| d.join("hashes.json"));
     let mut cache: HashCache = cache_file.as_ref().map(|f| super::read_json(f)).unwrap_or_default();
     let files: Vec<BundleFile> = found
@@ -223,41 +237,149 @@ fn note_error<R: Runtime>(app: &AppHandle<R>, state: &mut GameState, e: &ApiErro
     state.error = Some(e.to_string());
 }
 
+/* ── will it fit ─────────────────────────────────────────────────────── */
+
+/// What one backup may be where the saves are kept.
+pub(crate) fn limits<R: Runtime>(app: &AppHandle<R>) -> Limits {
+    let a = account(app).allowance;
+    let packed = a.as_ref().map(|a| a.max_backup_bytes).filter(|m| *m > 0).unwrap_or(DEFAULT_MAX_BACKUP);
+    // A server that does not say (kryo.to before it took saves that pack
+    // small) holds the save data to the packed cap as well.
+    let raw = a.as_ref().map(|a| a.max_raw_bytes).filter(|m| *m > 0).unwrap_or(packed).max(packed);
+    Limits { packed, raw }
+}
+
+/// Before anything is hashed or packed: whether these saves can fit. Only
+/// saves over the cap are read, a few MB of them (fit::estimate); blocking.
+fn size_check(found: &Collected, limits: Limits, state: &GameState) -> Fit {
+    let raw = found.bytes;
+    fit::judge(raw, limits, || {
+        let guess = fit::estimate(&found.files);
+        // Never kinder than what packing this game's saves small really did.
+        match state.packed_small {
+            Some((was, packed)) if was > 0 => guess.max((u128::from(raw) * u128::from(packed) / u128::from(was)) as u64),
+            _ => guess,
+        }
+    })
+}
+
+/// How to pack, or why not to: saves that fit only packed small are packed
+/// so once the player has said so for this game (`compress`). Pure.
+fn packing(fit: Fit, compress: bool) -> Result<Packing, Fit> {
+    match fit {
+        Fit::Fits => Ok(Packing::Normal),
+        Fit::Compress { .. } if compress => Ok(Packing::Small),
+        other => Err(other),
+    }
+}
+
+/// What the player reads when a backup was not started. Pure.
+pub(crate) fn too_big_text(raw: u64, limits: Limits, fit: Fit) -> String {
+    let size = crate::storage::human_size;
+    match fit {
+        Fit::Fits => String::new(),
+        Fit::Compress { estimate } => format!("These saves are {}, over the {} a backup can be. Packed small they come to about {}, so they fit.", size(raw), size(limits.packed), size(estimate)),
+        Fit::TooBig { estimate: Some(estimate) } => {
+            format!("These saves are {}, over the {} a backup can be, and still about {} packed small. Nothing was packed or uploaded.", size(raw), size(limits.packed), size(estimate))
+        }
+        Fit::TooBig { estimate: None } => format!("These saves are {}. A backup holds at most {} of saves, even packed small. Nothing was packed or uploaded.", size(raw), size(limits.raw)),
+    }
+}
+
+/// A backup not started because of its size: the game page says why and
+/// offers what helps. A backup the player did not ask for says it once, as
+/// a notice, until something changes.
+fn stopped<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, state: &mut GameState, raw: u64, limits: Limits, fit: Fit, manual: bool) -> String {
+    let compressible = matches!(fit, Fit::Compress { .. });
+    let new = !state.too_big || state.compressible != compressible;
+    let text = too_big_text(raw, limits, fit);
+    state.too_big = true;
+    state.compressible = compressible;
+    state.packed_estimate = match fit {
+        Fit::Compress { estimate } | Fit::TooBig { estimate: Some(estimate) } => Some(estimate),
+        _ => None,
+    };
+    state.error = Some(text.clone());
+    if !manual && new {
+        let body = if compressible {
+            format!("{}'s saves fit only packed small. Compress and back up on its page.", game.title)
+        } else {
+            format!("{}: {text}", game.title)
+        };
+        notice(app, "Saves too big to back up", &body, game);
+    }
+    crate::logging::info("saves", &format!("{}: not backed up, {raw} bytes of saves ({fit:?})", game.title));
+    text
+}
+
 /* ── backing up ──────────────────────────────────────────────────────── */
 
 /// Back a game's saves up. `manual` is the player pressing Back up now (it
 /// always asks kryo.to); otherwise unchanged saves are left alone.
-pub async fn backup<R: Runtime>(app: &AppHandle<R>, id: &str, manual: bool) -> Result<String, String> {
+/// `compress` is the player pressing Compress and back up: this game's saves
+/// are packed small from then on whenever only that fits.
+///
+/// Their size is checked first, from the folders' listings: saves that would
+/// be refused are not hashed, packed or uploaded.
+pub async fn backup<R: Runtime>(app: &AppHandle<R>, id: &str, manual: bool, compress: bool) -> Result<String, String> {
     if !super::enabled(app) {
         return Err("Cloud saves are off.".into());
     }
     let _busy = Busy::take(id)?;
     let game = game(app, id)?;
+    let mut state = load_state(app, id);
+    if compress && !state.compress {
+        state.compress = true;
+        save_state(app, id, &state);
+    }
     let progress = Progress::new(app, id);
     progress.report("scanning", 0, 0);
     let roots = roots(app, &game);
+    let limits = limits(app);
     let app2 = app.clone();
     let game2 = game.clone();
     let roots2 = roots.clone();
-    let local = tauri::async_runtime::spawn_blocking(move || local(&app2, &game2, &roots2)).await.map_err(|e| e.to_string())?;
-    let mut state = load_state(app, id);
+    let state2 = state.clone();
+    let checked = tauri::async_runtime::spawn_blocking(move || {
+        let (rules, found) = measure(&app2, &game2, &roots2);
+        if found.truncated {
+            return Err(None);
+        }
+        match packing(size_check(&found, limits, &state2), state2.compress) {
+            Ok(packing) => Ok((local_from(&app2, &game2, rules, found), packing)),
+            Err(fit) => Err(Some((found.bytes, fit))),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let (local, packing) = match checked {
+        Ok(go) => go,
+        Err(None) => {
+            state.too_big = true;
+            state.error = Some(format!("More than {MAX_FILES} save files. Take off a location that is not saves."));
+            save_state(app, id, &state);
+            return Err(state.error.clone().unwrap_or_default());
+        }
+        Err(Some((raw, fit))) => {
+            let text = stopped(app, &game, &mut state, raw, limits, fit, manual);
+            save_state(app, id, &state);
+            let _ = app.emit("cloud-saves", super::status_of(app, &account(app)));
+            return Err(text);
+        }
+    };
     let Some(hash) = local.hash.clone() else {
         return Ok("No saves found for this game yet.".into());
     };
-    if local.found.truncated {
-        state.too_big = true;
-        state.error = Some(format!("More than {MAX_FILES} save files. Take off a location that is not saves."));
-        save_state(app, id, &state);
-        return Err(state.error.clone().unwrap_or_default());
-    }
     if !manual && state.base_hash.as_deref() == Some(hash.as_str()) && state.base_version.is_some() {
         return Ok("Already backed up.".into());
     }
-    let result = upload(app, &game, &local, &mut state, &progress).await;
+    let result = upload(app, &game, &local, &mut state, &progress, packing).await;
     match &result {
         Ok(_) => {
             state.error = None;
             state.too_big = false;
+            state.compressible = false;
+            state.packed_estimate = None;
             state.conflict = false;
         }
         Err(e) => {
@@ -280,7 +402,7 @@ pub async fn backup<R: Runtime>(app: &AppHandle<R>, id: &str, manual: bool) -> R
     }
 }
 
-async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Local, state: &mut GameState, progress: &Progress<R>) -> Result<(), ApiError> {
+async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Local, state: &mut GameState, progress: &Progress<R>, how: Packing) -> Result<(), ApiError> {
     let api = Api::new(app)?;
     refresh_community(app, game, &api).await;
     let dir = game_data(app, &game.id).ok_or_else(|| ApiError::Other("No app data folder.".into()))?;
@@ -289,14 +411,23 @@ async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Loca
     let files = local.found.files.clone();
     let out2 = out.clone();
     let packing = progress.share();
-    let (manifest, written) = tauri::async_runtime::spawn_blocking(move || bundle::write_with(&tpl, &files, &out2, &mut |done, total| packing.report("packing", done, total)))
+    let (manifest, written) = tauri::async_runtime::spawn_blocking(move || bundle::write_packed(&tpl, &files, &out2, how, &mut |done, total| packing.report("packing", done, total)))
         .await
         .map_err(|e| ApiError::Other(e.to_string()))?
         .map_err(ApiError::Other)?;
-    let max = account(app).allowance.map(|a| a.max_backup_bytes).filter(|m| *m > 0).unwrap_or(DEFAULT_MAX_BACKUP);
+    if how == Packing::Small {
+        // What packing small really did, for the next size check.
+        state.packed_small = Some((local.found.bytes, written.size));
+    }
+    // Checked before anything is sent: a backup over the cap is not uploaded.
+    let max = limits(app).packed;
     if written.size > max {
         let _ = std::fs::remove_file(&out);
-        return Err(ApiError::TooBig(format!("This game's saves are {} MB packed, over the {} MB a backup can be.", written.size.div_ceil(1 << 20), max >> 20)));
+        let size = crate::storage::human_size;
+        return Err(ApiError::TooBig(match how {
+            Packing::Small => format!("Packed small these saves still come to {}, over the {} a backup can be. Nothing was uploaded.", size(written.size), size(max)),
+            Packing::Normal => format!("This game's saves are {} MB packed, over the {} MB a backup can be.", written.size.div_ceil(1 << 20), max >> 20),
+        }));
     }
     let body = json!({
         "gameKey": manifest.game_key,
@@ -353,7 +484,8 @@ pub async fn bring_from_hydra<R: Runtime>(app: &AppHandle<R>, id: &str, hydra_ba
         let app2 = app.clone();
         let game2 = game.clone();
         let roots2 = roots.clone();
-        let local = tauri::async_runtime::spawn_blocking(move || -> Option<Local> {
+        let (limits, state) = (limits(app), load_state(app, id));
+        let local = tauri::async_runtime::spawn_blocking(move || -> Option<(Local, Packing)> {
             let found: Vec<kryoto_saves::scan::Found> = kryoto_saves::ludusavi::game_folders(&dir).iter().flat_map(|f| kryoto_saves::ludusavi::files(f, &roots2).0).collect();
             if found.is_empty() {
                 return None;
@@ -361,22 +493,33 @@ pub async fn bring_from_hydra<R: Runtime>(app: &AppHandle<R>, id: &str, hydra_ba
             // Where Hydra's backup says the game saves becomes one of its
             // locations here, so every later backup includes it too.
             learn_folders(&app2, &game2.id, &found);
+            let bytes = found.iter().map(|f| f.size).sum();
+            let found = Collected { files: found, bytes, ..Default::default() };
+            // Too big to keep as it is: the backup of the saves here now
+            // (below) says so on the game's page.
+            let packing = match packing(size_check(&found, limits, &state), state.compress) {
+                Ok(p) => p,
+                Err(fit) => {
+                    crate::logging::warn("saves", &format!("{}: Hydra's backup is too big to keep ({bytes} bytes, {fit:?})", game2.title));
+                    return None;
+                }
+            };
+            let found = found.files;
             let files: Vec<BundleFile> = found
                 .iter()
                 .filter_map(|f| Some(BundleFile { root: f.root, path: f.path.clone(), size: f.size, sha256: kryoto_saves::scan::sha256_file(&f.abs).ok()?, mtime: f.mtime, rule: f.rule.clone() }))
                 .collect();
             let hash = Some(bundle::content_hash(&files, &[]));
-            let bytes = found.iter().map(|f| f.size).sum();
             let (rules, _) = locations(&app2, &game2, &roots2);
-            Some(Local { rules, found: Collected { files: found, bytes, ..Default::default() }, files, registry: Vec::new(), hash, machine: Some("Hydra's backup".into()) })
+            Some((Local { rules, found: Collected { files: found, bytes, ..Default::default() }, files, registry: Vec::new(), hash, machine: Some("Hydra's backup".into()) }, packing))
         })
         .await
         .map_err(|e| e.to_string())?;
-        if let Some(local) = local {
+        if let Some((local, packing)) = local {
             let _busy = Busy::take(id)?;
             let progress = Progress::new(app, id);
             let mut state = load_state(app, id);
-            match upload(app, &game, &local, &mut state, &progress).await {
+            match upload(app, &game, &local, &mut state, &progress, packing).await {
                 Ok(()) => made += 1,
                 Err(e) => crate::logging::warn("saves", &format!("{}: Hydra's backup was not kept: {e}", game.title)),
             }
@@ -384,7 +527,7 @@ pub async fn bring_from_hydra<R: Runtime>(app: &AppHandle<R>, id: &str, hydra_ba
         }
     }
     // The saves here now; nothing new when they are what Hydra's backup held.
-    if backup(app, id, false).await.is_ok_and(|m| m == "Backed up.") {
+    if backup(app, id, false, false).await.is_ok_and(|m| m == "Backed up.") {
         made += 1;
     }
     let _ = app.emit("cloud-saves", super::status_of(app, &account(app)));
@@ -684,7 +827,7 @@ pub fn before_launch<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) {
             let app2 = app.clone();
             let id = game.id.clone();
             tauri::async_runtime::spawn(async move {
-                let _ = backup(&app2, &id, false).await;
+                let _ = backup(&app2, &id, false, false).await;
             });
         }
         _ => {}
@@ -945,7 +1088,7 @@ pub fn after_exit<R: Runtime>(app: AppHandle<R>, game_id: String, tracer: Option
         if running(&app, &game) {
             return;
         }
-        if let Err(e) = tauri::async_runtime::block_on(backup(&app, &game.id, false)) {
+        if let Err(e) = tauri::async_runtime::block_on(backup(&app, &game.id, false, false)) {
             crate::logging::warn("saves", &format!("{}: {e}", game.title));
             let mut state = load_state(&app, &game.id);
             state.owed = true;
@@ -967,7 +1110,7 @@ pub fn catch_up<R: Runtime>(app: AppHandle<R>) {
             if !state.owed || state.conflict || state.too_big || running(&app, &game) {
                 continue;
             }
-            match tauri::async_runtime::block_on(backup(&app, &game.id, false)) {
+            match tauri::async_runtime::block_on(backup(&app, &game.id, false, false)) {
                 Ok(_) => {
                     let mut state = load_state(&app, &game.id);
                     state.owed = false;
@@ -1003,5 +1146,71 @@ mod tests {
         ]);
         let got: Vec<(Root, &str)> = rules.iter().map(|r| (r.root, r.path.as_str())).collect();
         assert_eq!(got, vec![(Root::SavedGames, "Hades"), (Root::GameDir, "saves")]);
+    }
+
+    mod size {
+        use super::super::{packing, size_check, too_big_text, GameState};
+        use kryoto_saves::bundle::Packing;
+        use kryoto_saves::fit::{Fit, Limits};
+        use kryoto_saves::scan::{Collected, Found};
+        use kryoto_saves::Root;
+
+        const MB: u64 = 1 << 20;
+        const LIMITS: Limits = Limits { packed: 100 * MB, raw: 400 * MB };
+
+        #[test]
+        fn saves_that_fit_only_packed_small_wait_for_the_player_once() {
+            assert_eq!(packing(Fit::Fits, false), Ok(Packing::Normal));
+            assert_eq!(packing(Fit::Fits, true), Ok(Packing::Normal), "saves that fit are never slowed down");
+            let small = Fit::Compress { estimate: 80 * MB };
+            assert_eq!(packing(small, false), Err(small), "asked first, nothing packed");
+            assert_eq!(packing(small, true), Ok(Packing::Small), "remembered for this game");
+            for no in [Fit::TooBig { estimate: None }, Fit::TooBig { estimate: Some(150 * MB) }] {
+                assert_eq!(packing(no, true), Err(no), "never packed, even when the player said compress");
+            }
+        }
+
+        #[test]
+        fn a_check_never_reads_saves_that_fit_or_cannot_fit() {
+            // Files that do not exist: reading any would count as not packing.
+            let files = |n: u64, each: u64| Collected {
+                files: (0..n).map(|i| Found { root: Root::Documents, path: format!("G/{i}.sav"), abs: "Z:/nowhere".into(), size: each, mtime: 0, rule: String::new() }).collect(),
+                bytes: n * each,
+                ..Default::default()
+            };
+            let state = GameState::default();
+            assert_eq!(size_check(&files(10, 10 * MB), LIMITS, &state), Fit::Fits);
+            assert_eq!(size_check(&files(10, 41 * MB), LIMITS, &state), Fit::TooBig { estimate: None });
+            // Unreadable, so taken as not packing at all: too big, honestly.
+            assert!(matches!(size_check(&files(10, 20 * MB), LIMITS, &state), Fit::TooBig { estimate: Some(e) } if e >= 200 * MB));
+        }
+
+        #[test]
+        fn a_real_pack_small_bounds_the_next_estimate() {
+            let d = std::env::temp_dir().join(format!("kryo-size-check-{}", std::process::id()));
+            std::fs::create_dir_all(&d).unwrap();
+            // 1 MB of zeros samples as packing to almost nothing...
+            std::fs::write(d.join("a.sav"), vec![0u8; MB as usize]).unwrap();
+            let found = Collected {
+                files: vec![Found { root: Root::Documents, path: "G/a.sav".into(), abs: d.join("a.sav"), size: 200 * MB, mtime: 0, rule: String::new() }],
+                bytes: 200 * MB,
+                ..Default::default()
+            };
+            assert!(matches!(size_check(&found, LIMITS, &GameState::default()), Fit::Compress { .. }));
+            // ...but packing it small last time came to 60%: over the cap.
+            let packed_before = GameState { packed_small: Some((100 * MB, 60 * MB)), ..Default::default() };
+            assert_eq!(size_check(&found, LIMITS, &packed_before), Fit::TooBig { estimate: Some(120 * MB) });
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        #[test]
+        fn the_player_reads_the_sizes() {
+            let ask = too_big_text(260 * MB, LIMITS, Fit::Compress { estimate: 70 * MB });
+            assert_eq!(ask, "These saves are 260 MB, over the 100 MB a backup can be. Packed small they come to about 70 MB, so they fit.");
+            let no = too_big_text(300 * MB, LIMITS, Fit::TooBig { estimate: Some(150 * MB) });
+            assert!(no.contains("300 MB") && no.contains("150 MB") && no.contains("Nothing was packed or uploaded"), "{no}");
+            let far = too_big_text(2048 * MB, LIMITS, Fit::TooBig { estimate: None });
+            assert_eq!(far, "These saves are 2.0 GB. A backup holds at most 400 MB of saves, even packed small. Nothing was packed or uploaded.");
+        }
     }
 }

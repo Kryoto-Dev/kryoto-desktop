@@ -466,9 +466,37 @@ pub struct GameState {
     /// The last thing that went wrong, for the game page.
     pub error: Option<String>,
     pub too_big: bool,
+    /// Too big as they are, but packing small fits: the game page offers
+    /// Compress and back up.
+    pub compressible: bool,
+    /// About how big the saves pack small, from the last size check that
+    /// stopped a backup (for the game page).
+    pub packed_estimate: Option<u64>,
+    /// The player pressed Compress and back up: this game's saves are packed
+    /// small whenever only that fits, without asking again.
+    pub compress: bool,
+    /// The last time they were packed small: (save data, packed) bytes, so
+    /// the next size check is never kinder than packing really was.
+    pub packed_small: Option<(u64, u64)>,
     /// The backup when the game closed did not get through: tried again when
     /// kryo.to next answers (`sync::catch_up`).
     pub owed: bool,
+}
+
+impl GameState {
+    /// The saves' size changed by the player's hand (a location or folder
+    /// taken off or put back): what the last size check said no longer holds.
+    fn sizes_changed(&mut self) -> bool {
+        let was = self.too_big || self.compressible || self.packed_estimate.is_some() || self.packed_small.is_some();
+        if self.too_big {
+            self.error = None;
+        }
+        self.too_big = false;
+        self.compressible = false;
+        self.packed_estimate = None;
+        self.packed_small = None;
+        was
+    }
 }
 
 pub(crate) fn state_file<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<PathBuf> {
@@ -636,7 +664,10 @@ pub struct GameSaves {
     pub registry_values: usize,
     pub truncated: bool,
     pub state: GameState,
+    /// The biggest one backup can be, packed.
     pub max_backup_bytes: u64,
+    /// The most save data one backup can hold, packed small.
+    pub max_raw_bytes: u64,
     pub local_backups: Vec<LocalBackup>,
 }
 
@@ -772,6 +803,7 @@ pub fn cloud_saves_game(app: AppHandle, id: String) -> Result<GameSaves, String>
     let in_suggested = kryoto_saves::scan::collect(&suggested, &roots, kryoto_saves::scan::MAX_FILES).per_rule();
     let suggestions: Vec<Location> = suggestions.iter().map(|d| location(&d.rule, &roots, &in_suggested, Some(d), &[])).filter(|l| l.exists).collect();
     let a = account(&app);
+    let limits = sync::limits(&app);
     let settings = crate::settings::load(&app);
     let finding = Finding {
         precise_next: wants_precise(&settings.cloud_saves_find, &stored) && cfg!(windows) && settings.cloud_saves_detect,
@@ -796,7 +828,8 @@ pub fn cloud_saves_game(app: AppHandle, id: String) -> Result<GameSaves, String>
         registry_values,
         truncated: found.truncated,
         state: load_state(&app, &id),
-        max_backup_bytes: a.allowance.as_ref().map(|x| x.max_backup_bytes).filter(|b| *b > 0).unwrap_or(sync::DEFAULT_MAX_BACKUP),
+        max_backup_bytes: limits.packed,
+        max_raw_bytes: limits.raw,
         local_backups: local_backups(&app, &id),
     })
 }
@@ -824,6 +857,10 @@ pub fn cloud_saves_location(app: AppHandle, id: String, key: String, action: Str
         _ => return Err("Unknown action.".into()),
     }
     save_rules(&app, &id, &stored);
+    let mut s = load_state(&app, &id);
+    if s.sizes_changed() {
+        save_state(&app, &id, &s);
+    }
     let _ = app.emit("cloud-saves-game", serde_json::json!({ "gameId": game.id }));
     Ok(())
 }
@@ -849,9 +886,7 @@ pub fn cloud_saves_leave_out(app: AppHandle, id: String, key: String, folder: St
     save_rules(&app, &id, &stored);
     // Too big was about the old size; the next backup says again if it still is.
     let mut s = load_state(&app, &id);
-    if s.too_big {
-        s.too_big = false;
-        s.error = None;
+    if s.sizes_changed() {
         save_state(&app, &id, &s);
     }
     let _ = app.emit("cloud-saves-game", serde_json::json!({ "gameId": game.id }));
@@ -900,8 +935,9 @@ pub fn cloud_saves_add_folder(app: AppHandle, id: String, path: String) -> Resul
 
 /// Back the game's saves up now. `over` settles a conflict for this PC: its
 /// saves go on top of the account's newest instead of being refused.
+/// `compress` packs them small when only that fits (and from then on).
 #[tauri::command]
-pub async fn cloud_saves_backup(app: AppHandle, id: String, over: Option<bool>) -> Result<String, String> {
+pub async fn cloud_saves_backup(app: AppHandle, id: String, over: Option<bool>, compress: Option<bool>) -> Result<String, String> {
     if over == Some(true) {
         let mut s = load_state(&app, &id);
         if let Some(head) = s.cloud_head.clone() {
@@ -910,7 +946,7 @@ pub async fn cloud_saves_backup(app: AppHandle, id: String, over: Option<bool>) 
             save_state(&app, &id, &s);
         }
     }
-    sync::backup(&app, &id, true).await
+    sync::backup(&app, &id, true, compress == Some(true)).await
 }
 
 /// The account's backups of this game, newest first.
