@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Bell, BellOff, KeyRound, Lock, Monitor, Power, RotateCcw, ShieldCheck, Smartphone, Trash2 } from '@/ui/pixel-icons'
+import { Bell, BellOff, KeyRound, Lock, Monitor, Power, RotateCcw, ScanLine, ShieldCheck, Smartphone, Trash2 } from '@/ui/pixel-icons'
 import { errorText, isWeb } from '@/lib/bridge'
 import {
   chatAccountDeviceRemove,
@@ -117,12 +117,13 @@ function YourChatDevices({ onRemoved }: { onRemoved: () => void }) {
   )
 }
 
-export function ChatSetup({ available }: { available: boolean }) {
+export function ChatSetup({ available, onScan }: { available: boolean; onScan?: () => Promise<string | null> }) {
   const status = useChatStatus()
   const [asking, setAsking] = useState<Asking>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [security, setSecurity] = useState(false)
+  const [scanHelp, setScanHelp] = useState(false)
   const [passphrase, setPassphrase] = useState('')
   const [repeat, setRepeat] = useState('')
   const [code, setCode] = useState('')
@@ -157,6 +158,20 @@ export function ChatSetup({ available }: { available: boolean }) {
       // A new passphrase is the first step of turning chat on.
       if (next.state === 'off') await chatEnable()
     })
+
+  // A QR code from a device that already has the identity: its text is the recovery code.
+  const scanCode = async () => {
+    if (!onScan) return
+    setError(null)
+    try {
+      const found = await onScan()
+      if (!found) return
+      setCode(found)
+      setAsking('restore')
+    } catch (e) {
+      setError(errorText(e))
+    }
+  }
 
   return (
     <div className="kryo-radius grid w-full max-w-md gap-3 border border-border p-4 text-left">
@@ -211,7 +226,13 @@ export function ChatSetup({ available }: { available: boolean }) {
 
       {status.state === 'needsLink' ? (
         <div className="flex flex-wrap gap-2">
-          <Button variant="primary" size="sm" disabled={busy} onClick={() => setAsking('restore')}>
+          {onScan ? (
+            <Button variant="primary" size="sm" disabled={busy} onClick={() => setScanHelp(true)}>
+              <ScanLine className="size-3" aria-hidden />
+              Scan the QR code
+            </Button>
+          ) : null}
+          <Button variant={onScan ? 'outline' : 'primary'} size="sm" disabled={busy} onClick={() => setAsking('restore')}>
             <KeyRound className="size-3" aria-hidden />
             Use recovery code
           </Button>
@@ -245,6 +266,49 @@ export function ChatSetup({ available }: { available: boolean }) {
 
       {/* Browser pushes: a phone has its own, under Profile > Notifications. */}
       {online && isWeb() && here() !== 'this phone' ? <BrowserNotifications /> : null}
+
+      {scanHelp ? (
+        <Modal
+          title="Where to find the QR code"
+          onClose={() => setScanHelp(false)}
+          footer={
+            <>
+              <Button onClick={() => setScanHelp(false)}>Cancel</Button>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setScanHelp(false)
+                  void scanCode()
+                }}
+              >
+                <ScanLine className="size-3" aria-hidden />
+                Start scanning
+              </Button>
+            </>
+          }
+        >
+          <p className="text-sm text-foreground">
+            The code is made on the device that already has your chat identity, usually Kryoto Desktop.
+          </p>
+          <ol className="grid list-decimal gap-2 pl-5 text-sm text-foreground marker:text-muted-foreground">
+            <li>
+              Open Kryoto Desktop and choose <b className="font-semibold">Friends &amp; chat</b> in the sidebar.
+            </li>
+            <li>
+              In the <b className="font-semibold">Chat on this PC</b> card, click{' '}
+              <b className="font-semibold">Backup and devices</b>.
+            </li>
+            <li>
+              Click <b className="font-semibold">Turn on backup</b>, or{' '}
+              <b className="font-semibold">Make a new recovery code</b> if a backup is already there.
+            </li>
+            <li>Leave that window open and point your camera here: the code is shown only once.</li>
+          </ol>
+          <p className="text-xs text-muted-foreground">
+            Making a new code cancels the old one, so any code you saved earlier stops working.
+          </p>
+        </Modal>
+      ) : null}
 
       {security ? <ChatSecurity onClose={() => setSecurity(false)} /> : null}
 
