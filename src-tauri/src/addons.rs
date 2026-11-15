@@ -145,7 +145,7 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
             .filter(|d| d.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase() == game_name))
             .unwrap_or_else(|| staging_c.clone());
         let mut done = Applied::default();
-        move_recording(&top, &root_c, &root_c, &backup, &own, &mut done).map_err(|e| format!("Applying the add-on failed: {e}"))?;
+        move_recording(&top, &root_c, &root_c, &backup, &own, &mut done).map_err(|e| format!("Applying the add-on failed: {}", crate::logging::why(&e)))?;
         let _ = std::fs::remove_dir_all(&staging_c);
         Ok(done)
     })
@@ -203,7 +203,7 @@ pub async fn addons_list(app: AppHandle, slug: String) -> Result<serde_json::Val
                 .get(format!("{endpoint}/api/games/{slug}/downloads"))
                 .send()
                 .await
-                .map_err(|e| format!("Could not reach kryo.to: {e}"))?
+                .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?
                 .json::<serde_json::Value>()
                 .await
                 .map_err(|e| e.to_string())?

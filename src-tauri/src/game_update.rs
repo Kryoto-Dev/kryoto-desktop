@@ -65,7 +65,7 @@ impl Journal {
 
     pub fn save(&self) -> Result<(), String> {
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(self.path(), text).map_err(|e| format!("Writing the update journal failed: {e}"))
+        std::fs::write(self.path(), text).map_err(|e| format!("Writing the update journal failed: {}", crate::logging::why(&e)))
     }
 
     pub fn load(dir: &Path) -> Option<Journal> {

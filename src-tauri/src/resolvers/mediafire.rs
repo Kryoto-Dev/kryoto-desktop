@@ -33,7 +33,7 @@ fn direct_in(html: &str) -> Option<String> {
 }
 
 pub async fn resolve(url: &str) -> Result<Resolved, String> {
-    let res = super::client(true).get(url).send().await.map_err(|e| format!("MediaFire did not answer ({e})"))?;
+    let res = super::client(true).get(url).send().await.map_err(|e| format!("MediaFire did not answer ({})", crate::logging::why(&e)))?;
     if !res.status().is_success() {
         return Err(format!("MediaFire answered {}", res.status().as_u16()));
     }

@@ -182,7 +182,7 @@ fn unpack_tool(archive: &Path, dir: &Path, inner: &str) -> Result<PathBuf, Strin
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.output().map_err(|e| format!("tar: {e}"))?;
+    let out = cmd.output().map_err(|e| format!("tar: {}", crate::logging::why(&e)))?;
     if !out.status.success() {
         return Err(format!("tar: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }

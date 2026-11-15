@@ -36,7 +36,7 @@ fn client() -> reqwest::Client {
 
 /// One TorBox call: the body's `data` on success, its error in words otherwise.
 async fn call(req: reqwest::RequestBuilder) -> Result<Value, String> {
-    let res = req.send().await.map_err(|e| format!("TorBox could not be reached: {e}"))?;
+    let res = req.send().await.map_err(|e| format!("TorBox could not be reached: {}", crate::logging::why(&e)))?;
     let status = res.status().as_u16();
     let body: Value = res.json().await.unwrap_or(Value::Null);
     data_of(status, body)

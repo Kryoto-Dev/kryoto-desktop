@@ -365,7 +365,7 @@ pub async fn download(url: &str, out: &Path, max: u64, on_got: impl Fn(u64, u64)
         let total = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
         return super::local::copy(&src, out, max, |done| on_got(done, total.max(done))).await.map(|_| ());
     }
-    let res = storage_client().get(url).send().await.map_err(|e| format!("Could not download the backup: {e}"))?;
+    let res = storage_client().get(url).send().await.map_err(|e| format!("Could not download the backup: {}", crate::logging::why(&e)))?;
     if !res.status().is_success() {
         return Err(format!("Could not download the backup ({}).", res.status()));
     }
@@ -375,7 +375,7 @@ pub async fn download(url: &str, out: &Path, max: u64, on_got: impl Fn(u64, u64)
     let mut got = 0u64;
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("The download stopped: {e}"))?;
+        let chunk = chunk.map_err(|e| format!("The download stopped: {}", crate::logging::why(&e)))?;
         got += chunk.len() as u64;
         on_got(got, total.max(got));
         if got > max {

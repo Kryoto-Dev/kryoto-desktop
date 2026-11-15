@@ -14,7 +14,7 @@ pub fn fuckingfast_matches(url: &str) -> bool {
 }
 
 pub async fn fuckingfast(url: &str) -> Result<Resolved, String> {
-    let res = super::client(true).get(url).send().await.map_err(|e| format!("FuckingFast did not answer ({e})"))?;
+    let res = super::client(true).get(url).send().await.map_err(|e| format!("FuckingFast did not answer ({})", crate::logging::why(&e)))?;
     if !res.status().is_success() {
         return Err(format!("FuckingFast answered {}", res.status().as_u16()));
     }

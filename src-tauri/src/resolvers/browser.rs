@@ -258,7 +258,7 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str, mode:
     let builder = builder.browser_extensions_enabled(true).data_directory(
         app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("mirror-browser"),
     );
-    let window = builder.build().map_err(|e| format!("could not open its page ({e})"))?;
+    let window = builder.build().map_err(|e| format!("could not open its page ({})", crate::logging::why(&e)))?;
     #[cfg(target_os = "linux")]
     crate::adblock::install_mirror(&window);
     #[cfg(windows)]
@@ -430,7 +430,7 @@ pub async fn filez_access<R: Runtime>(app: &AppHandle<R>, page: &str, origin: &s
     // the host's own page), and the pass kept for its day between downloads.
     #[cfg(windows)]
     let builder = builder.data_directory(app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("filez-browser"));
-    let window = builder.build().map_err(|e| format!("could not open filez.stream ({e})"))?;
+    let window = builder.build().map_err(|e| format!("could not open filez.stream ({})", crate::logging::why(&e)))?;
 
     let started = Instant::now();
     let mut ran = false;

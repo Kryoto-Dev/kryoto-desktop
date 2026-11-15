@@ -58,7 +58,7 @@ pub async fn resolve(url: &str) -> Result<Resolved, String> {
         .header("Accept-Language", "en-US,en;q=0.9")
         .send()
         .await
-        .map_err(|e| format!("Buzzheavier did not answer ({e})"))?;
+        .map_err(|e| format!("Buzzheavier did not answer ({})", crate::logging::why(&e)))?;
     let status = page.status().as_u16();
     if status == 404 {
         return Err("the file is gone from Buzzheavier".into());
@@ -84,7 +84,7 @@ pub async fn resolve(url: &str) -> Result<Resolved, String> {
         .header("hx-current-url", &page_url)
         .send()
         .await
-        .map_err(|e| format!("Buzzheavier did not answer ({e})"))?;
+        .map_err(|e| format!("Buzzheavier did not answer ({})", crate::logging::why(&e)))?;
     let header = |name: &str| res.headers().get(name).and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty()).map(str::to_string);
     let direct = header("hx-redirect")
         .or_else(|| header("location"))

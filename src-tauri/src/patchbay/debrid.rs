@@ -81,7 +81,7 @@ async fn unrestrict(token: &str, link: &str) -> Result<Resolved, String> {
         .form(&[("link", link)])
         .send()
         .await
-        .map_err(|e| format!("Real-Debrid could not be reached: {e}"))?;
+        .map_err(|e| format!("Real-Debrid could not be reached: {}", crate::logging::why(&e)))?;
     let status = res.status().as_u16();
     let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
     if !(200..300).contains(&status) {
@@ -147,13 +147,13 @@ impl Account {
 }
 
 pub async fn account(token: &str) -> Result<Account, String> {
-    let res = client().get(format!("{API}/user")).bearer_auth(token).send().await.map_err(|e| format!("Real-Debrid could not be reached: {e}"))?;
+    let res = client().get(format!("{API}/user")).bearer_auth(token).send().await.map_err(|e| format!("Real-Debrid could not be reached: {}", crate::logging::why(&e)))?;
     let status = res.status().as_u16();
     let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
     if !(200..300).contains(&status) {
         return Err(error_text(status, &body));
     }
-    serde_json::from_value(body).map_err(|e| format!("Real-Debrid answered oddly: {e}"))
+    serde_json::from_value(body).map_err(|e| format!("Real-Debrid answered oddly: {}", crate::logging::why(&e)))
 }
 
 #[cfg(test)]

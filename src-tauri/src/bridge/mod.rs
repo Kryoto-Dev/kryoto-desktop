@@ -252,7 +252,7 @@ async fn fetch_index<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<CatalogGame>,
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
-    let res = client.get(format!("{endpoint}/api/desktop/match-index")).send().await.map_err(|e| format!("kryo.to could not be reached: {e}"))?;
+    let res = client.get(format!("{endpoint}/api/desktop/match-index")).send().await.map_err(|e| format!("kryo.to could not be reached: {}", crate::logging::why(&e)))?;
     if !res.status().is_success() {
         return Err(format!("kryo.to answered {} for the match index", res.status()));
     }

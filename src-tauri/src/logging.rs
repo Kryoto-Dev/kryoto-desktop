@@ -103,6 +103,24 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
     }));
 
     info("app", &format!("Kryoto Desktop {} started on {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS));
+    // What a report about this PC needs to be read without asking the player:
+    // the system, the web view the Store runs in, and whether a proxy is set
+    // (the app follows the system's, as the web view does).
+    let proxy = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .find(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+        .map(|k| format!("{k} set"))
+        .unwrap_or_else(|| "no proxy variable".into());
+    info(
+        "app",
+        &format!(
+            "system: {} {} ({}), web view {}, {proxy}",
+            sysinfo::System::name().unwrap_or_default(),
+            sysinfo::System::long_os_version().unwrap_or_default(),
+            std::env::consts::ARCH,
+            tauri::webview_version().unwrap_or_else(|e| format!("unknown ({e})")),
+        ),
+    );
 }
 
 fn write_line(level: &str, scope: &str, message: &str) {
@@ -188,6 +206,51 @@ pub fn info(scope: &str, message: &str) {
 
 pub fn warn(scope: &str, message: &str) {
     write_line("warn", scope, message);
+}
+
+/// An error with every cause under it, and what it usually means in plain
+/// words. reqwest says only "error sending request for url (...)" on its own;
+/// the reason (a firewall closing the connection, a certificate an antivirus
+/// put in, a name that did not resolve, a timeout) is in its sources, and
+/// without it a report cannot say why kryo.to "could not be reached".
+pub fn why<E: std::error::Error + ?Sized>(e: &E) -> String {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let next = cause.to_string();
+        if !text.contains(&next) {
+            text.push_str(": ");
+            text.push_str(&next);
+        }
+        source = cause.source();
+    }
+    match hint(&text) {
+        Some(h) => format!("{text} [{h}]"),
+        None => text,
+    }
+}
+
+/// What a network or disk failure usually means on a player's PC.
+fn hint(text: &str) -> Option<&'static str> {
+    let t = text.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+    if has(&["os error 10053", "os error 10013", "os error 10054", "connection reset", "connection aborted", "forcibly closed"]) {
+        Some("the connection was cut on the way: a network that blocks the site (internet provider, router, VPN) or security software")
+    } else if has(&["unknownissuer", "handshakefailure", "handshake failure", "invalid peer certificate", "certificate verify failed", "invalidcertificate", "self signed", "self-signed"]) {
+        Some("the secure connection was refused or not trusted: a network filter, HTTPS scanning or a company proxy in between")
+    } else if has(&["dns error", "no such host", "failed to lookup", "name or service not known", "os error 11001", "temporary failure in name resolution"]) {
+        Some("the name could not be looked up: DNS blocking by the internet provider, or no internet")
+    } else if has(&["os error 10061", "connection refused"]) {
+        Some("the server refused the connection")
+    } else if has(&["timed out", "os error 10060", "deadline has elapsed"]) {
+        Some("no answer in time: a slow connection or a network that drops the site")
+    } else if has(&["os error 112", "no space left", "not enough space"]) {
+        Some("the drive is full")
+    } else if has(&["os error 5)", "access is denied", "permission denied"]) {
+        Some("access denied: an antivirus or folder permissions")
+    } else {
+        None
+    }
 }
 
 /// The browser's notice that a resize was carried to the next frame
@@ -328,6 +391,31 @@ pub async fn logs_send(app: AppHandle) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    /// A network failure says its whole cause and what it usually means (2026-11-15:
+    /// a player's log showed only "error sending request" while their network blocked kryo.to).
+    #[test]
+    fn a_failure_carries_its_causes_and_a_plain_hint() {
+        #[derive(Debug)]
+        struct E(&'static str, Option<Box<E>>);
+        impl std::fmt::Display for E {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for E {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
+            }
+        }
+        let cut = E("error sending request for url (https://kryo.to/api/health)", Some(Box::new(E("client error (Connect)", Some(Box::new(E("aborted (os error 10053)", None)))))));
+        let text = super::why(&cut);
+        assert!(text.starts_with("error sending request for url (https://kryo.to/api/health): client error (Connect): aborted (os error 10053)"));
+        assert!(text.contains("a network that blocks the site"));
+        assert!(super::why(&E("received fatal alert: HandshakeFailure", None)).contains("secure connection was refused"));
+        assert!(super::why(&E("dns error: No such host is known. (os error 11001)", None)).contains("DNS blocking"));
+        assert_eq!(super::why(&E("something else", None)), "something else");
+    }
+
     /// KB-0251: from any window, however the page words its report.
     #[test]
     fn a_resize_carried_to_the_next_frame_is_not_reported() {

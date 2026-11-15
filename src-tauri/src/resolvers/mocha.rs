@@ -31,7 +31,7 @@ pub async fn hotlink(url: &str) -> Result<Resolved, String> {
         .get(format!("{HOTLINK}{token}"))
         .send()
         .await
-        .map_err(|e| format!("dl.kryo.to did not answer ({e})"))?;
+        .map_err(|e| format!("dl.kryo.to did not answer ({})", crate::logging::why(&e)))?;
     let status = res.status().as_u16();
     let json: serde_json::Value = res.json().await.unwrap_or_default();
     if status != 200 {

@@ -24,7 +24,7 @@ pub async fn resolve(url: &str) -> Result<Resolved, String> {
         .get(format!("https://pixeldrain.com/api/file/{id}/info"))
         .send()
         .await
-        .map_err(|e| format!("Pixeldrain did not answer ({e})"))?;
+        .map_err(|e| format!("Pixeldrain did not answer ({})", crate::logging::why(&e)))?;
     match res.status().as_u16() {
         200 => {}
         404 => return Err("the file is gone from Pixeldrain".into()),

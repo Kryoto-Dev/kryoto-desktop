@@ -2946,7 +2946,7 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| format!("Could not read the archive to check it: {e}"))?;
+    .map_err(|e| format!("Could not read the archive to check it: {}", crate::logging::why(&e)))?;
     if flag.load(Ordering::SeqCst) != RUN {
         return Err(STOPPED.into());
     }
@@ -4846,7 +4846,7 @@ fn damaged_files(stderr: &str) -> Option<Vec<String>> {
 
 fn extract_7z(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Result<(), String> {
     let total: u64 = sevenz_rust::Archive::open(archive)
-        .map_err(|e| format!("Not a readable 7z ({e})"))?
+        .map_err(|e| format!("Not a readable 7z ({})", crate::logging::why(&e)))?
         .files
         .iter()
         .map(|f| f.size())
@@ -4886,7 +4886,7 @@ fn extract_7z(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>), 
         std::io::Write::flush(&mut writer).map_err(sevenz_rust::Error::io)?;
         Ok(true)
     })
-    .map_err(|e| format!("Unpacking failed ({e})"))?;
+    .map_err(|e| format!("Unpacking failed ({})", crate::logging::why(&e)))?;
     progress(total, Some(total));
     Ok(())
 }

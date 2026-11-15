@@ -359,7 +359,7 @@ fn devices_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 
 fn read_devices(file: &std::path::Path) -> Result<Vec<Device>, String> {
     match std::fs::read_to_string(file) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("Paired phones could not be read: {e}")),
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("Paired phones could not be read: {}", crate::logging::why(&e))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("Paired phones could not be read: {e}")),
     }
@@ -764,7 +764,7 @@ pub async fn listing(session: &Session, slug: &str) -> Result<serde_json::Value,
         .get(&format!("/api/games/{slug}/downloads"))
         .send()
         .await
-        .map_err(|e| format!("Could not reach kryo.to: {e}"))?
+        .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?
         .error_for_status()
         .map_err(|e| if e.status() == Some(reqwest::StatusCode::NOT_FOUND) { "kryo.to has no such game.".to_string() } else { format!("kryo.to answered {}.", e.status().map_or(0, |s| s.as_u16())) })?
         .json()
@@ -816,7 +816,7 @@ async fn post_mint(session: &Session, release_id: &str, install: &str, turnstile
     if let Some(proof) = proof {
         req = req.header("x-kryo-pow", proof);
     }
-    let response = req.send().await.map_err(|e| format!("Could not reach kryo.to: {e}"))?;
+    let response = req.send().await.map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?;
     let status = response.status().as_u16();
     Ok((status, response.json().await.unwrap_or_default()))
 }
@@ -854,7 +854,7 @@ async fn prove(session: &Session, install: &str) -> Result<String, MintError> {
         .header("x-kryo-install", install)
         .send()
         .await
-        .map_err(|e| format!("Could not reach kryo.to: {e}"))?;
+        .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?;
     let status = res.status().as_u16();
     let body: serde_json::Value = res.json().await.unwrap_or_default();
     if !(200..300).contains(&status) {

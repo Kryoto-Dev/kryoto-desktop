@@ -49,7 +49,7 @@ async fn guest_token(client: &reqwest::Client) -> Result<String, String> {
             return Ok(t.clone());
         }
     }
-    let res = client.post("https://api.gofile.io/accounts").send().await.map_err(|e| format!("Gofile did not answer ({e})"))?;
+    let res = client.post("https://api.gofile.io/accounts").send().await.map_err(|e| format!("Gofile did not answer ({})", crate::logging::why(&e)))?;
     let json: serde_json::Value = res.json().await.map_err(|_| "Gofile's answer was unreadable")?;
     let token = json["data"]["token"].as_str().ok_or("Gofile would not start a guest session")?.to_string();
     *cached = Some((token.clone(), std::time::Instant::now()));
@@ -82,7 +82,7 @@ pub async fn resolve(url: &str) -> Result<Resolved, String> {
         .header("X-BL", LANG)
         .send()
         .await
-        .map_err(|e| format!("Gofile did not answer ({e})"))?;
+        .map_err(|e| format!("Gofile did not answer ({})", crate::logging::why(&e)))?;
     let json: serde_json::Value = res.json().await.map_err(|_| "Gofile's answer was unreadable")?;
     match json["status"].as_str() {
         Some("ok") => {}

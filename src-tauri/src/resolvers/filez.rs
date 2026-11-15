@@ -171,7 +171,7 @@ pub async fn resolve<R: Runtime>(app: &AppHandle<R>, page: &str) -> Result<super
         .get(format!("{origin}/api/files/{id}"))
         .send()
         .await
-        .map_err(|e| format!("filez.stream did not answer ({e})"))?
+        .map_err(|e| format!("filez.stream did not answer ({})", crate::logging::why(&e)))?
         .error_for_status()
         .map_err(|e| match e.status().map(|s| s.as_u16()) {
             Some(404 | 410) => "the file is gone from filez.stream".to_string(),

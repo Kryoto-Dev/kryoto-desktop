@@ -669,10 +669,25 @@ pub fn same_drive(a: &Path, b: &Path) -> bool {
 /// before 7-Zip unpacks it, with the archive kept for Retry.
 pub fn check_download_room(archive_dir: &Path, library: &Path, archive_left: u64, archive_total: u64, unpacked: Option<u64>, in_place: bool, what: &str) -> Result<(), String> {
     // A listed size under half the archive is a wrong listing, not a game.
-    let unpacked = unpacked.filter(|&u| u >= archive_total / 2).unwrap_or(archive_total);
+    let listed = unpacked.filter(|&u| u >= archive_total / 2);
+    let unpacked = listed.unwrap_or(archive_total);
     if same_drive(archive_dir, library) {
         let more = if in_place { unpacked.saturating_sub(archive_total) + in_place_extra(archive_total) } else { unpacked };
-        return check_room(library, archive_left + more, what);
+        let needed = archive_left + more;
+        crate::logging::info(
+            "download",
+            &format!(
+                "{what}: room on {}: {} free, needs {} (archive {} of which {} still to come, game {}{}, unpacked in place: {in_place})",
+                drive_of(library),
+                disk_space(library).map(|(_, f)| human(f)).unwrap_or_else(|| "?".into()),
+                human(needed),
+                human(archive_total),
+                human(archive_left),
+                human(unpacked),
+                if listed.is_some() { " as kryo.to lists it" } else { ", taken as the archive size" },
+            ),
+        );
+        return check_room(library, needed, what);
     }
     check_room(archive_dir, archive_left, what)?;
     check_room(library, unpacked, what)
