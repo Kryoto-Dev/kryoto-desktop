@@ -1184,6 +1184,9 @@ fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
     let Some(view) = app.get_webview(STORE) else { return Ok(()) };
     if visible { view.show() } else { view.hide() }.map_err(|e| e.to_string())?;
     if visible {
+        // WebKitGTK 2.54 can show it again with only the changed parts drawn.
+        #[cfg(target_os = "linux")]
+        linux_overlay::repaint(&view);
         let _ = view.set_focus();
     }
     Ok(())
