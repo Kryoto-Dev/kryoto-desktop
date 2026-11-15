@@ -99,6 +99,18 @@ fn entry_name(root: Root, path: &str) -> String {
     format!("files/{}/{}", root.name(), path)
 }
 
+/// How hard a backup is packed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Packing {
+    /// Deflate's usual level: what every backup was until saves over the cap
+    /// could be packed small.
+    #[default]
+    Normal,
+    /// Deflate's most ([`crate::fit::SMALL_LEVEL`]): slower, for saves that
+    /// fit only this way. Any `.ksave` reader unpacks both.
+    Small,
+}
+
 /// Pack `files` (and the template's registry values) into `out`. Each file's
 /// hash is taken from what was actually written, so a file the game changed a
 /// moment ago is described as it is in the backup. A file that vanished is
@@ -109,6 +121,11 @@ pub fn write(template: &Manifest, files: &[Found], out: &Path) -> Result<(Manife
 
 /// [`write`], saying how far it is: `progress(bytes packed, bytes in all)`.
 pub fn write_with(template: &Manifest, files: &[Found], out: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<(Manifest, Written), String> {
+    write_packed(template, files, out, Packing::Normal, progress)
+}
+
+/// [`write_with`], packed as hard as `packing` says.
+pub fn write_packed(template: &Manifest, files: &[Found], out: &Path, packing: Packing, progress: &mut dyn FnMut(u64, u64)) -> Result<(Manifest, Written), String> {
     let total: u64 = files.iter().map(|f| f.size).sum();
     let mut done = 0u64;
     progress(0, total);
@@ -118,7 +135,11 @@ pub fn write_with(template: &Manifest, files: &[Found], out: &Path, progress: &m
     let tmp = out.with_extension("ksave.part");
     let file = std::fs::File::create(&tmp).map_err(|e| format!("Could not write the backup: {e}"))?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
-    let deflate = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(true);
+    let level = match packing {
+        Packing::Normal => None,
+        Packing::Small => Some(i64::from(crate::fit::SMALL_LEVEL)),
+    };
+    let deflate = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).compression_level(level).large_file(true);
     let mut written = Vec::new();
     let mut buf = vec![0u8; 1 << 16];
     for f in files {

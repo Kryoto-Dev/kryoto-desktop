@@ -13,6 +13,7 @@ sha2 = "0.10"
 md-5 = "0.10"
 base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
 walkdir = "2"
 aho-corasick = "1"
 
