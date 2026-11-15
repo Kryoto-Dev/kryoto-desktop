@@ -5,6 +5,7 @@ import { call, isTauri, on } from '@/lib/bridge'
 import { noteStore } from '@/lib/popup'
 import { SITE_ORIGIN } from '@/lib/endpoint'
 import { onTextSize, textSizeApi } from '@/lib/text-size'
+import { fitWindow, type Size } from '@/lib/window-fit'
 
 export { isTauri }
 
@@ -29,6 +30,8 @@ const SIZES: Record<WindowKind, { width: number; height: number }> = {
   welcome: { width: 960, height: 640 },
   main: { width: 1280, height: 800 },
 }
+/** The client's smallest size, where the screen has room for it. */
+const MAIN_MIN = { width: 1000, height: 640 }
 
 let currentKind: WindowKind | null = null
 let placing: Promise<unknown> = Promise.resolve()
@@ -80,8 +83,12 @@ async function placeWindow(kind: WindowKind, again: boolean) {
   }
   await win.setResizable(kind === 'main')
   if (kind === 'main') {
+    // Inside the screen it opens on, whatever its scale (KB-0321).
+    const fitted = fitWindow({ width: logical.width, height: logical.height }, MAIN_MIN, await screenRoom())
+    logical.width = fitted.size.width
+    logical.height = fitted.size.height
     await win.setMaxSize(null)
-    await win.setMinSize(new LogicalSize(1000, 640))
+    await win.setMinSize(new LogicalSize(fitted.min.width, fitted.min.height))
   } else {
     await win.setMinSize(logical)
     await win.setMaxSize(logical)
@@ -91,21 +98,20 @@ async function placeWindow(kind: WindowKind, again: boolean) {
 }
 
 /** A box's size at the text size, kept inside the screen it is on. */
-async function boxSize(size: { width: number; height: number }, z: number) {
-  let { width, height } = { width: size.width * z, height: size.height * z }
-  if (z > 1) {
-    try {
-      const screen = await currentMonitor()
-      if (screen) {
-        const area = screen.workArea.size.toLogical(screen.scaleFactor)
-        width = Math.min(width, area.width - 32)
-        height = Math.min(height, area.height - 32)
-      }
-    } catch {
-      /* no monitor information: the size as asked */
-    }
+async function boxSize(size: Size, z: number) {
+  const scaled = { width: size.width * z, height: size.height * z }
+  const fitted = z > 1 ? fitWindow(scaled, scaled, await screenRoom()).size : scaled
+  return { width: Math.round(fitted.width), height: Math.round(fitted.height) }
+}
+
+/** The work area of the screen the window is on, in logical pixels; null when unknown. */
+async function screenRoom(): Promise<Size | null> {
+  try {
+    const screen = await currentMonitor()
+    return screen ? screen.workArea.size.toLogical(screen.scaleFactor) : null
+  } catch {
+    return null
   }
-  return { width: Math.round(width), height: Math.round(height) }
 }
 
 /* ── Window controls ───────────────────────────────────── */
