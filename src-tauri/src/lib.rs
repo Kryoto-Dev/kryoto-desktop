@@ -143,6 +143,14 @@ struct Account {
     anonymous: bool,
 }
 
+/// The Store page's `/api/health` answer (`BrowserReport::health`).
+#[derive(Clone, Deserialize)]
+struct PageHealth {
+    code: u16,
+    #[serde(default)]
+    body: String,
+}
+
 /// State reported by the page-side script.
 ///
 /// The `url` field is only believed when it is on the web view's real origin
@@ -176,6 +184,10 @@ struct BrowserReport {
     /// `{ unreadCount, notifications }` from kryo.to's `/api/notifications`.
     #[serde(default)]
     inbox: Option<serde_json::Value>,
+    /// `{ code, body }` from kryo.to's `/api/health`, fetched by the page when
+    /// health.rs asks (`code` 0: no answer at all).
+    #[serde(default)]
+    health: Option<PageHealth>,
     /// `{ version, date }` from kryo.to's `/api/changelog/latest`.
     #[serde(default)]
     news: Option<serde_json::Value>,
@@ -752,6 +764,15 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   // Run on remote.rs's native beat, not a timer here: a hidden Store page's
   // timers are slowed to about once a minute.
   window.__kryoRemoteTick = remote;
+  // health.rs, when this app's own request to kryo.to got no answer: does
+  // this page get one? (An antivirus or proxy can let one through and not
+  // the other, KB-0323.)
+  window.__kryoHealthTick = () => {
+    if (!KRYO) return;
+    fetch('/api/health', { cache: 'no-store', credentials: 'omit' })
+      .then((r) => r.text().then((body) => send({ health: { code: r.status, body: body.slice(0, 4000) } })))
+      .catch(() => send({ health: { code: 0, body: '' } }));
+  };
   // Achievements saved to the account (achievements_cloud.rs, kryo.to
   // lib/cloud-achievements.ts), a supporter perk: send what is new, fetch
   // what this PC may lack, and hand kryo.to's answers back.
@@ -1398,6 +1419,9 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
         }
         if let Some(inbox) = state.inbox {
             let _ = app.emit_to("main", "inbox-state", inbox);
+        }
+        if let Some(health) = state.health {
+            health::page_answered(health.code, health.body.chars().take(4000).collect());
         }
         if let Some(news) = state.news {
             let _ = app.emit_to("main", "news-state", news);
