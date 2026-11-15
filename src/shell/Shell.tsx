@@ -49,6 +49,7 @@ import { NavBar, type NavTabSpec, type TopTab } from '@/shell/NavBar'
 import { AdblockDialog, UrlPill, WebSlot } from '@/shell/WebView'
 import { BottomBar } from '@/shell/BottomBar'
 import { ServiceNotice } from '@/shell/ServiceNotice'
+import { NetworkBlocked } from '@/shell/NetworkBlocked'
 import { UpdateCheck, UpdatePrompt } from '@/shell/UpdatePrompt'
 import { CloudSavesPrompt } from '@/shell/CloudSavesPrompt'
 import { FeatureNotice, useNewSettings, type WhatsNewPlace } from '@/ui/FeatureNotice'
@@ -1572,6 +1573,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         <PadHints family={familyOf(firstPad, firstPad ? padStore.config?.pads[firstPad.guid] : null)} store={storeVisible} />
       ) : null}
       <ServiceNotice health={health} store={storeOpen} />
+      <NetworkBlocked health={health} />
       <BottomBar
         downloads={dl}
         notice={view.kind === 'web' ? (toasts[toasts.length - 1] ?? null) : null}

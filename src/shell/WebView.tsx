@@ -7,6 +7,7 @@ import { settingsApi, useSettings } from '@/lib/settings'
 import { logWarn } from '@/lib/log'
 import { isTauri, mountStore, openExternal, setMainPlacer, STORE_HOME } from '@/lib/window'
 import type { ServiceHealth } from '@/lib/health'
+import { WAYS_AROUND } from '@/shell/NetworkBlocked'
 import { resolveUserInputToUrl } from '@/lib/browser'
 import { cn } from '@/lib/utils'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
@@ -102,10 +103,24 @@ export function WebSlot({
       ) : outage ? (
         <>
           <Matrix state="connect" className="size-6 text-muted-foreground" />
-          <p className="text-xs uppercase tracking-[0.25em] text-primary">{outage.state === 'down' ? 'Kryoto is down' : 'Kryoto is not answering'}</p>
-          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-            Your library, installed games and settings all still work, and the Store comes back by itself, on the page you were on.
+          <p className="text-xs uppercase tracking-[0.25em] text-primary">
+            {outage.blocked ? 'Your network is blocking kryo.to' : outage.state === 'down' ? 'Kryoto is down' : 'Kryoto is not answering'}
           </p>
+          {outage.blocked ? (
+            <div className="grid max-w-sm gap-2 text-left text-xs leading-relaxed text-muted-foreground">
+              <p>Internet providers in some countries block sites like Kryoto, and some routers, school and work networks do too. Kryoto itself is up.</p>
+              <ul className="grid list-disc gap-0.5 pl-5">
+                {WAYS_AROUND.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </ul>
+              <p>Your library and installed games still work, and the Store comes back by itself once kryo.to answers.</p>
+            </div>
+          ) : (
+            <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+              Your library, installed games and settings all still work, and the Store comes back by itself, on the page you were on.
+            </p>
+          )}
           <div className="flex flex-wrap justify-center gap-2">
             {onLibrary ? (
               <Button variant="primary" onClick={onLibrary}>

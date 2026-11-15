@@ -1,6 +1,7 @@
 import { Matrix } from '@/ui'
 import { namedParts, type ServiceHealth } from '@/lib/health'
 import { openExternal } from '@/lib/window'
+import { BLOCKED_LINE } from '@/shell/NetworkBlocked'
 
 /**
  * One quiet line above the footer while Kryoto is not all there. It is outside
@@ -8,6 +9,15 @@ import { openExternal } from '@/lib/window'
  * does. What it promises is what catches up by itself (health.rs, Shell).
  */
 export function ServiceNotice({ health, store }: { health: ServiceHealth; store: boolean }) {
+  // The internet answers and kryo.to does not: this network blocks it. Say what gets around it.
+  if (health.blocked && health.state !== 'down') {
+    return (
+      <div role="status" className="flex h-7 shrink-0 items-center justify-center gap-2 border-t border-border bg-background px-3 text-[11px] text-muted-foreground">
+        <Matrix state="connect" className="size-3 shrink-0" />
+        <span className="truncate">{BLOCKED_LINE}</span>
+      </div>
+    )
+  }
   if (health.state === 'ok') return null
   const lead =
     health.state === 'partial'

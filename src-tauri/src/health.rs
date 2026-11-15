@@ -75,6 +75,11 @@ pub struct Health {
     /// The status page answered last time it was asked.
     pub status_up: bool,
     pub status_url: String,
+    /// kryo.to does not answer this app while the internet does (the Store
+    /// page reaches kryo.to, or a neutral address answers): this network is
+    /// blocking kryo.to, as internet providers in some countries do for sites
+    /// on piracy lists. The player is told so and what gets around it.
+    pub blocked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,6 +249,7 @@ impl Watch {
             answering: self.fails == 0 || self.oks > 0,
             status_up: !matches!(self.feed, Some(Feed::Dead) | None),
             status_url,
+            blocked: false,
         }
     }
 }
@@ -269,20 +275,9 @@ static PAGE_ANSWERED: Notify = Notify::const_new();
 /// `/api/health`, or why there was no answer (every cause in the chain:
 /// reqwest's own text names only the address).
 async fn ask_site(client: &reqwest::Client, endpoint: &str) -> Result<Site, String> {
-    let res = client.get(format!("{endpoint}/api/health")).send().await.map_err(|e| causes(&e))?;
+    let res = client.get(format!("{endpoint}/api/health")).send().await.map_err(|e| crate::logging::why(&e))?;
     let code = res.status().as_u16();
     Ok(read_site(code, &res.text().await.unwrap_or_default()))
-}
-
-fn causes(e: &dyn std::error::Error) -> String {
-    let mut text = e.to_string();
-    let mut source = e.source();
-    while let Some(cause) = source {
-        text.push_str(": ");
-        text.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    text
 }
 
 /// What the Store page got for `/api/health` (lib.rs `report_catalog_state`).
@@ -293,6 +288,20 @@ pub fn page_answered(code: u16, body: String) {
 
 /// The Store page's own reading of the site, when it is on kryo.to and
 /// answers in time; `None` when it cannot say.
+/// Whether the internet answers from this PC at all, asked only when kryo.to
+/// did not: two neutral addresses, either is enough.
+async fn internet_answers(client: &reqwest::Client) -> Result<(), String> {
+    let mut why = Vec::new();
+    for url in ["http://www.msftconnecttest.com/connecttest.txt", "https://www.cloudflare.com/cdn-cgi/trace"] {
+        match client.get(url).timeout(Duration::from_secs(6)).send().await {
+            Ok(res) if res.status().is_success() => return Ok(()),
+            Ok(res) => why.push(format!("{url}: {}", res.status())),
+            Err(e) => why.push(format!("{url}: {}", crate::logging::why(&e))),
+        }
+    }
+    Err(why.join("; "))
+}
+
 async fn ask_page<R: Runtime>(app: &AppHandle<R>) -> Option<Site> {
     let store = app.get_webview(crate::STORE)?;
     PAGE.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -364,6 +373,26 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 (Ok(_), _) => said_split = false,
                 _ => {}
             }
+            let page_reached = page.as_ref().is_some_and(|p| *p != Site::Failed);
+            // kryo.to failed here: does anything else answer? Then it is this network.
+            let internet = if own.is_err() && !page_reached { Some(internet_answers(&client).await) } else { None };
+            let blocked = own.is_err() && (page_reached || matches!(internet, Some(Ok(()))));
+            // For the log: what this round actually saw, in words.
+            let seen = format!(
+                "own request: {}; Store page: {}",
+                match &own {
+                    Ok(s) => format!("{s:?}"),
+                    Err(e) => e.clone(),
+                },
+                match &page {
+                    Some(p) => format!("{p:?}"),
+                    None => "not asked or no answer".into(),
+                }
+            ) + &match &internet {
+                Some(Ok(())) => "; the rest of the internet answers".to_string(),
+                Some(Err(e)) => format!("; the rest of the internet does not either ({e})"),
+                None => String::new(),
+            };
             let site = reading(&own, page);
             // The feed every other round while all is calm, every round otherwise.
             let feed = if watch.watchful() || site != Site::Fine || round.is_multiple_of(2) {
@@ -374,7 +403,8 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
             round = round.wrapping_add(1);
             let was = watch.state;
             watch.step(site, feed, Instant::now());
-            let health = watch.report(status);
+            let mut health = watch.report(status);
+            health.blocked = blocked;
             let changed = {
                 let mut now = NOW.lock().expect("health");
                 let changed = now.as_ref() != Some(&health);
@@ -382,7 +412,18 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 changed
             };
             if changed {
-                crate::logging::info("health", &format!("{:?} {:?}, status page up: {}", health.state, health.parts, health.status_up));
+                // Every change, with what was seen and how long the last state
+                // lasted, so a report of "not answering" says why and for how long.
+                let lasted = outage_since.map(|t| format!(", after {} s", t.elapsed().as_secs())).unwrap_or_default();
+                let line = format!(
+                    "{:?} {:?}, status page up: {}, kryo.to blocked on this network: {}{lasted} ({seen})",
+                    health.state, health.parts, health.status_up, health.blocked
+                );
+                if health.state.outage() || health.blocked {
+                    crate::logging::warn("health", &line);
+                } else {
+                    crate::logging::info("health", &line);
+                }
                 let _ = app.emit("service-health", &health);
             }
             let reachable = !watch.state.outage() && watch.fails == 0;

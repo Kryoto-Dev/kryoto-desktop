@@ -17,6 +17,8 @@ export type ServiceHealth = {
   /** The status page answered last time it was asked. */
   statusUp: boolean
   statusUrl: string
+  /** The internet answers here and kryo.to does not: this network blocks it (health.rs). */
+  blocked?: boolean
 }
 
 export const STATUS_URL = 'https://status.kryo.to'
