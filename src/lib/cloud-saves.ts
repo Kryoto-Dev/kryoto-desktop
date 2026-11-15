@@ -3,7 +3,7 @@ import { call, on } from '@/lib/bridge'
 
 /** Mirrors `src-tauri/src/saves/mod.rs` and `saves/api.rs`. */
 
-export type Allowance = { totalBytes: number; versionsPerGame: number; maxBackupBytes: number }
+export type Allowance = { totalBytes: number; versionsPerGame: number; maxBackupBytes: number; maxRawBytes: number }
 export type Usage = { bytes: number; games: number; versions: number }
 
 export type CloudSavesStatus = {
@@ -68,6 +68,12 @@ export type GameSaveState = {
   conflict: boolean
   error: string | null
   tooBig: boolean
+  /** Too big as they are, but packing small fits (sync.rs size check). */
+  compressible: boolean
+  /** About how big they pack small, from the last size check that stopped a backup. */
+  packedEstimate: number | null
+  /** The player chose Compress and back up: packed small whenever only that fits. */
+  compress: boolean
 }
 
 /** How a game's saves are found (src-tauri saves/precise.rs and tracer.rs). */
@@ -98,7 +104,10 @@ export type GameSaves = {
   registryValues: number
   truncated: boolean
   state: GameSaveState
+  /** The biggest one backup can be, packed. */
   maxBackupBytes: number
+  /** The most save data one backup can hold, packed small. */
+  maxRawBytes: number
   localBackups: { file: string; createdAt: number; size: number }[]
 }
 
@@ -120,8 +129,8 @@ export const cloudSaves = {
   leaveOut: (id: string, key: string, folder: string, on: boolean) => call<void>('cloud_saves_leave_out', { id, key, folder, on }),
   /** Find this game's saves precisely the next time it is played, or not. */
   findPrecisely: (id: string, on: boolean) => call<void>('cloud_saves_find_precisely', { id, on }),
-  /** `over`: this PC's saves win a conflict. */
-  backup: (id: string, over = false) => call<string>('cloud_saves_backup', { id, over }),
+  /** `over`: this PC's saves win a conflict. `compress`: pack them small when only that fits, from now on. */
+  backup: (id: string, over = false, compress = false) => call<string>('cloud_saves_backup', { id, over, compress }),
   versions: (id: string) => call<SaveVersion[]>('cloud_saves_versions', { id }),
   restore: (id: string, versionId: string) => call<string>('cloud_saves_restore', { id, versionId }),
   restoreLocal: (id: string, file: string) => call<string>('cloud_saves_restore_local', { id, file }),

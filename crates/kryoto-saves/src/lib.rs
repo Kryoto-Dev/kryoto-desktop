@@ -11,13 +11,15 @@
 //! ([`emulator`]), the game engine's convention ([`engine`]), the Ludusavi
 //! database ([`known`]) - and from what Kryoto Desktop saw the game write while
 //! it ran ([`trace`]). [`scan`] turns rules into files, [`bundle`] packs them
-//! into a `.ksave` and unpacks one again, and [`decide`] says what a sync
-//! should do. No Tauri, no network: the app wires it up.
+//! into a `.ksave` and unpacks one again, [`fit`] says before packing whether
+//! a backup can fit, and [`decide`] says what a sync should do. No Tauri, no
+//! network: the app wires it up.
 
 pub mod bundle;
 pub mod decide;
 pub mod emulator;
 pub mod engine;
+pub mod fit;
 pub mod known;
 pub mod ludusavi;
 pub mod mentions;

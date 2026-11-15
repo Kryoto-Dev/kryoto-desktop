@@ -24,7 +24,12 @@ use tauri::{AppHandle, Manager, Runtime};
 pub struct Allowance {
     pub total_bytes: u64,
     pub versions_per_game: u32,
+    /// The biggest one backup file can be, packed.
     pub max_backup_bytes: u64,
+    /// The most save data one backup can hold before packing (kryo.to: four
+    /// times the packed cap). 0 when the server does not say: then it is the
+    /// packed cap (`sync::limits`).
+    pub max_raw_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

@@ -31,7 +31,7 @@ const PUBLIC_URL = arg('public-url', 'PATCHBAY_PUBLIC_URL', '').replace(/\/+$/, 
 // Versions kept per game, newest first (Desktop keeps the same on this PC).
 const KEEP = Math.min(100, Math.max(1, Number(arg('keep', 'PATCHBAY_KEEP', '10')) || 10))
 
-const ALLOWANCE = { totalBytes: 50 * 2 ** 30, versionsPerGame: KEEP, maxBackupBytes: 2 * 2 ** 30 }
+const ALLOWANCE = { totalBytes: 50 * 2 ** 30, versionsPerGame: KEEP, maxBackupBytes: 2 * 2 ** 30, maxRawBytes: 8 * 2 ** 30 }
 // Signs upload and download links: Desktop fetches those without the token.
 const SECRET = randomBytes(32)
 
