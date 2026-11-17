@@ -673,7 +673,7 @@ pub async fn chat_devices(state: State<'_, ChatState>) -> Result<Vec<identity::M
 /// device needed (kryoto-gateway src/devices.rs).
 async fn gateway_request(method: reqwest::Method, path: &str) -> Result<serde_json::Value, String> {
     let token = secrets::read(secrets::SESSION)?.ok_or("Sign in to chat first.")?;
-    let r = reqwest::Client::builder()
+    let r = crate::net::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?

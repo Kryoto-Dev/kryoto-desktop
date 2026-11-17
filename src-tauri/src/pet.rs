@@ -63,6 +63,16 @@ fn create<R: Runtime>(app: &AppHandle<R>, saved: Option<[i32; 2]>) -> Result<(),
         .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
+    // A small helper window, not an application window: X11 desktops and
+    // XWayland keep such windows floating rather than tiling them (KB-0336).
+    #[cfg(target_os = "linux")]
+    let _ = window.with_webview(|w| {
+        use gtk::prelude::*;
+        if let Some(top) = w.inner().toplevel().and_then(|t| t.downcast::<gtk::Window>().ok()) {
+            top.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
+            top.set_skip_pager_hint(true);
+        }
+    });
     let pos = saved.filter(|p| on_a_monitor(app, *p)).or_else(|| corner(app));
     if let Some([x, y]) = pos {
         let _ = window.set_position(PhysicalPosition::new(x, y));

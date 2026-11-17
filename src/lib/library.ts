@@ -264,7 +264,7 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
   })
 }
 
-export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null; stopped?: boolean }
+export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null; stopped?: boolean; /** Linux: the launcher's last lines, when it failed at once. */ detail?: string }
 
 export const BLANK_GAME: LibraryGame = {
   id: '',

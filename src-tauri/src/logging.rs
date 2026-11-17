@@ -293,7 +293,7 @@ async fn flush<R: Runtime>(app: &AppHandle<R>) {
         "account": l.account.lock().ok().and_then(|a| a.clone()),
         "entries": batch,
     });
-    let Ok(client) = reqwest::Client::builder()
+    let Ok(client) = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(15))
         .build()

@@ -40,6 +40,7 @@ mod linux_store_downloads;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux_open;
 mod logging;
+mod net;
 mod menus;
 mod online;
 mod repair;
@@ -1108,7 +1109,10 @@ async fn store_mount(
                 let (slug, title) = download_game(webview.app_handle(), &url, webview.url().ok(), &settings);
                 let mut clean_url = url;
                 clean_url.set_fragment(None);
-                downloads::enqueue(webview.app_handle(), clean_url.to_string(), slug, title);
+                // Off this thread: it is the window's own, and queueing reads the
+                // library and saves the queue to disk (downloads.rs `enqueue`).
+                let app = webview.app_handle().clone();
+                std::thread::spawn(move || downloads::enqueue(&app, clean_url.to_string(), slug, title));
                 false
             }
             _ => true,
@@ -2378,6 +2382,8 @@ pub fn run() {
             system::os_notify,
             system::pick_path,
             system::window_corners,
+            system::window_became_client,
+            system::pet_desktop_note,
             system::window_state_get,
             pet::pet_menu,
             pet::pet_drag,

@@ -23,7 +23,7 @@ const DOMAINS_FOR: Duration = Duration::from_secs(12 * 3600);
 static DOMAINS: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .build()

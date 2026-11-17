@@ -747,7 +747,7 @@ pub fn session_over<R: Runtime>(app: &AppHandle<R>, local: Option<std::net::IpAd
         .map(|jar| jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
         .filter(|c| !c.is_empty())
         .ok_or("Sign in to kryo.to in Kryoto Desktop first.".to_string())?;
-    let client = reqwest::Client::builder()
+    let client = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())

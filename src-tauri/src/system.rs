@@ -587,6 +587,55 @@ pub fn radius_for(style: &str) -> i32 {
     }
 }
 
+/// A desktop that lays windows out itself (Hyprland, sway, i3, river, niri
+/// and the like), by what it puts in the environment.
+pub fn tiling_desktop(var: impl Fn(&str) -> Option<String>) -> bool {
+    if ["HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK", "I3SOCK", "NIRI_SOCKET"].iter().any(|k| var(k).is_some_and(|v| !v.is_empty())) {
+        return true;
+    }
+    let names = [var("XDG_CURRENT_DESKTOP"), var("XDG_SESSION_DESKTOP"), var("DESKTOP_SESSION")];
+    names.iter().flatten().flat_map(|v| v.split(':')).any(|d| {
+        let d = d.trim().to_ascii_lowercase();
+        ["hyprland", "sway", "i3", "river", "niri", "dwl", "bspwm", "awesome", "qtile", "xmonad", "herbstluftwm", "labwc-tiling"].contains(&d.as_str())
+    })
+}
+
+/// What Settings says about the pet on this desktop: on a tiling one the
+/// desktop decides where every window goes, so the pet is laid out as a tile
+/// unless the desktop is told to let it float (KB-0336). `None` elsewhere.
+#[tauri::command]
+pub fn pet_desktop_note() -> Option<String> {
+    if !cfg!(target_os = "linux") || !tiling_desktop(|k| std::env::var(k).ok()) {
+        return None;
+    }
+    let hyprland = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
+        || std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.to_ascii_lowercase().contains("hyprland"));
+    Some(if hyprland {
+        "Your desktop tiles windows, so it decides where the pet goes. To let it float above everything, add this line to hyprland.conf: windowrulev2 = float, pin, noborder, noshadow, title:^(Kryoto pet)$".to_string()
+    } else {
+        "Your desktop tiles windows, so it decides where the pet goes. To let it float above everything, add a rule for the window titled \"Kryoto pet\" to make it floating and sticky (in sway: for_window [title=\"^Kryoto pet$\"] floating enable, sticky enable).".to_string()
+    })
+}
+
+/// The sign-in box has become the client. A tiling desktop decides once, as a
+/// window first appears, whether it floats, and floats one of a fixed size:
+/// the box is one, so the client it grew into stayed floating over the tiles
+/// (KB-0336). Taken off the screen and put back, it is looked at again as the
+/// resizable window it now is, and tiled. Nowhere else: other desktops would
+/// only see it blink.
+#[tauri::command]
+pub fn window_became_client(window: tauri::Window) {
+    if !cfg!(target_os = "linux") || !tiling_desktop(|k| std::env::var(k).ok()) {
+        return;
+    }
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        let _ = window.show();
+        let _ = window.set_focus();
+        crate::logging::info("window", "tiling desktop: the client window was shown again so it is tiled");
+    }
+}
+
 /// The shell's corner style changed: round the window to match.
 #[tauri::command]
 pub fn window_corners(window: tauri::Window, radius: String) {
@@ -924,5 +973,26 @@ mod frame_tests {
         assert_eq!(dwm_frame(radius_for("pill"), false), (2, 0xFFFF_FFFF));
         assert_eq!(dwm_frame(radius_for("rounded"), false), (3, 0xFFFF_FFFF));
         assert_eq!(dwm_frame(radius_for("sharp"), false).0, 1);
+    }
+}
+
+#[cfg(test)]
+mod tiling_tests {
+    use super::tiling_desktop;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| pairs.iter().find(|(name, _)| *name == k).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn tiling_desktops_are_known_by_their_environment() {
+        assert!(tiling_desktop(env(&[("HYPRLAND_INSTANCE_SIGNATURE", "abc123")])));
+        assert!(tiling_desktop(env(&[("SWAYSOCK", "/run/user/1000/sway-ipc.sock")])));
+        assert!(tiling_desktop(env(&[("XDG_CURRENT_DESKTOP", "Hyprland")])));
+        assert!(tiling_desktop(env(&[("XDG_CURRENT_DESKTOP", "sway:wlroots")])));
+        for desktop in ["KDE", "GNOME", "ubuntu:GNOME", "X-Cinnamon", "XFCE", ""] {
+            assert!(!tiling_desktop(env(&[("XDG_CURRENT_DESKTOP", desktop)])), "{desktop}");
+        }
+        assert!(!tiling_desktop(env(&[])));
     }
 }

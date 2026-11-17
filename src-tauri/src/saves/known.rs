@@ -86,7 +86,7 @@ fn refresh<R: Runtime>(app: AppHandle<R>, etag: Option<String>) {
 
 /// The manifest, unless it is still the copy with `etag`.
 async fn fetch(etag: Option<String>) -> Result<Option<(String, Option<String>)>, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(180))
         .build()

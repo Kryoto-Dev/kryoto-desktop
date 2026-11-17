@@ -247,7 +247,7 @@ async fn fetch_index<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<CatalogGame>,
         games: Vec<CatalogGame>,
     }
     let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(app));
-    let client = reqwest::Client::builder()
+    let client = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -648,7 +648,7 @@ pub async fn bridge_import(app: AppHandle, launcher_id: String, dir: Option<Stri
     }
     let index = match_index(&app, INDEX_MAX_AGE).await;
     let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(&app));
-    let client = reqwest::Client::builder()
+    let client = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -939,7 +939,7 @@ pub async fn library_merge_offers(app: AppHandle) -> Result<Vec<MergeOffer>, Str
 pub async fn library_merge_answer(app: AppHandle, id: String, slug: String, yes: bool) -> Result<LibraryGame, String> {
     let meta = if yes {
         let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(&app));
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+        let client = crate::net::builder().timeout(std::time::Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
         Some(crate::downloads::fetch_meta(&client, &endpoint, &slug).await.ok_or("kryo.to did not answer. Try again.")?)
     } else {
         None

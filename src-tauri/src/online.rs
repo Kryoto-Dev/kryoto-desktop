@@ -196,7 +196,7 @@ async fn catalog_game<R: tauri::Runtime>(app: &AppHandle<R>, client: &reqwest::C
 }
 
 fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())

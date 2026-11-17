@@ -103,6 +103,13 @@ pub struct Download {
     pub meta: CatalogMeta,
     /// The byte ranges being fetched in parallel, and how far each has got.
     pub segments: Vec<Segment>,
+    /// dl.kryo.to's resume pass for this link (`name=value`), kept with the
+    /// download. It lets a range be fetched from another network than the
+    /// one the link was made on (a phone's 5G reconnecting, wifi to hotspot);
+    /// held only in memory, it was lost on Pause or a restart and the resume
+    /// was refused as "made for another network" (KB-0337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_pass: Option<String>,
     /// The archive's expected SHA-256, when kryo.to lists one.
     pub sha256: Option<String>,
     /// The archive matched it.
@@ -354,7 +361,7 @@ fn backoff(n: u32) -> u64 {
 /// waiting on it. Servers without HTTP/2 keep HTTP/1.1, with each connection
 /// kept for the next range.
 fn client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+    crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .tcp_nodelay(true)
         .tcp_keepalive(std::time::Duration::from_secs(30))
@@ -379,6 +386,20 @@ fn own_client<R: Runtime>(app: &AppHandle<R>, id: &str, jar: &Arc<reqwest::cooki
         builder = builder.local_address(local);
     }
     builder.build().ok()
+}
+
+/// Keep dl.kryo.to's resume pass with the download (`Download::resume_pass`),
+/// so a Pause, a restart or a new client does not lose it.
+fn keep_resume_pass<R: Runtime>(app: &AppHandle<R>, id: &str, jar: &reqwest::cookie::Jar) {
+    use reqwest::cookie::CookieStore;
+    let Some(url) = edit(app, id, |_| {}).and_then(|d| url::Url::parse(&d.url).ok()) else { return };
+    let Some(header) = jar.cookies(&url) else { return };
+    let Some(pass) = header.to_str().ok().and_then(|h| h.split(';').map(str::trim).find(|c| c.starts_with("kr_resume=")).map(str::to_string)) else { return };
+    if edit(app, id, |_| {}).is_some_and(|d| d.resume_pass.as_deref() == Some(pass.as_str())) {
+        return;
+    }
+    edit(app, id, |d| d.resume_pass = Some(pass));
+    persist(app);
 }
 
 /// Wait for `work`, or for the download to be paused or cancelled, whichever is
@@ -430,7 +451,8 @@ impl SpeedMeter {
 async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, Transfer> {
     match tokio::time::timeout(ANSWER_TIMEOUT, request.send()).await {
         Ok(Ok(res)) => Ok(res),
-        Ok(Err(e)) => Err(Transfer::Retry(e.to_string())),
+        // Why, without the link: the address says nothing and fills the row.
+        Ok(Err(e)) => Err(Transfer::Retry(crate::logging::why(&e.without_url()))),
         Err(_) => Err(Transfer::Retry("the server took too long to answer".into())),
     }
 }
@@ -886,7 +908,16 @@ fn base64url(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Queue a download the Store handed over. `slug` is the game page it came from.
+///
+/// Never on the window's thread. It reads the library and writes the queue to
+/// disk and waits for the write to land, behind any save a running download is
+/// making: with games downloading and unpacking on the same drive that wait is
+/// seconds, and on the window's thread the whole app stood still for it, so
+/// "Where should it go?" came up later and later the busier the drive got
+/// (KB-0330). One at a time, so two presses keep their order.
 pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>, title: Option<String>) {
+    static ONE: Mutex<()> = Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     if let Err(e) = enqueue_item(app, url, slug, title, None, None, None) {
         let _ = app.emit("notify", Notice::new("Could not queue download", &e, None).sound("error"));
     }
@@ -1059,11 +1090,14 @@ fn enqueue_item<R: Runtime>(
         ..Default::default()
     };
     state.list.lock().map_err(|_| "download list lock poisoned")?.insert(0, item);
+    // Shown first, saved second: the row (and the folder question) must not
+    // wait for a busy disk.
+    emit(app, true);
     if let Err(e) = persist_checked(app) {
         if let Ok(mut list) = state.list.lock() { list.retain(|d| d.id != id); }
+        emit(app, true);
         return Err(format!("Could not save the download queue: {e}"));
     }
-    emit(app, true);
     let _ = app.emit("download-started", id.clone());
     if !ask_folder {
         start(app.clone(), id);
@@ -1232,7 +1266,8 @@ pub fn asks_for_folder(settings: &crate::settings::Settings, installed: bool) ->
 /// The answer to "where should it go?": `folder` is one of the library
 /// folders. `always_default` stops the question for good (Settings > Storage
 /// can turn it back on). Then the download takes its place in the queue.
-#[tauri::command]
+// `async`: off the window's thread, as it saves the settings and the queue.
+#[tauri::command(async)]
 pub fn download_pick_folder(app: AppHandle, id: String, folder: String, always_default: bool) -> Result<(), String> {
     let mut settings = crate::settings::load(&app);
     let folders = crate::settings::all_folders(&settings);
@@ -2189,8 +2224,13 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
 
     let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
     let (mut client, mut connections) = (client.clone(), settings.connections);
-    // Our own link: see `own_client`.
+    // Our own link: see `own_client`. The pass from an earlier run goes back in.
     let jar = Arc::new(reqwest::cookie::Jar::default());
+    if !is_mirror {
+        if let Some((pass, url)) = edit(app, id, |_| {}).and_then(|d| Some((d.resume_pass?, url::Url::parse(&d.url).ok()?))) {
+            jar.add_cookie_str(&pass, &url);
+        }
+    }
     if !is_mirror {
         if let Some(ours) = own_client(app, id, &jar) {
             client = ours;
@@ -2225,7 +2265,13 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
         let filez = if is_mirror { edit(app, id, |_| {}).and_then(|d| crate::resolvers::filez::file_for(&d.url)) } else { None };
         let done = match filez {
             Some(file) => fetch_filez(app, id, flag, &mut client, &settings, &limiter, file).await?,
-            None => fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror, &jar).await?,
+            None => {
+                let fetched = fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror, &jar).await;
+                if !is_mirror {
+                    keep_resume_pass(app, id, &jar);
+                }
+                fetched?
+            }
         };
         if !done {
             return settle_stopped(app, id, flag);
@@ -2536,7 +2582,7 @@ async fn filez_range(
             Err(_) if last_data.elapsed() >= STALL_TIMEOUT => return Err(Transfer::Retry(format!("no data for {} s", STALL_TIMEOUT.as_secs()))),
             Err(_) => continue,
             Ok(None) => break,
-            Ok(Some(Err(e))) => return Err(Transfer::Retry(e.to_string())),
+            Ok(Some(Err(e))) => return Err(Transfer::Retry(crate::logging::why(&e.without_url()))),
             Ok(Some(Ok(bytes))) => {
                 limiter.take(bytes.len() as u64).await;
                 sealed.extend_from_slice(&bytes);
@@ -3222,6 +3268,21 @@ fn explain_os_error(e: String) -> String {
             "{e}\n\nWindows would not let Kryoto write there. Usually it is antivirus holding a file it is scanning, or a folder that needs administrator rights. Wait a moment and press Retry, or pick another library folder in Settings > Storage."
         );
     }
+    // Linux: a second drive mounted for another user or read-only, most often
+    // one under /media or /run/media (an NTFS disk from Windows). Players saw
+    // only "Permission denied" (KB-0338).
+    if cfg!(target_os = "linux") && (e.contains("os error 13)") || e.contains("os error 30)")) {
+        let readonly = e.contains("os error 30)");
+        return format!(
+            "{e}\n\n{} Pick a folder in your home folder under Settings > Storage, or {}",
+            if readonly { "That drive is mounted read-only." } else { "Your account may not write to that folder." },
+            if readonly {
+                "mount the drive with write access (an NTFS drive Windows left in Fast Startup or hibernation opens read-only: shut Windows down fully, or turn Fast Startup off)."
+            } else {
+                "give your account that folder (for example `sudo chown -R $USER` on it), or mount the drive with your user as its owner."
+            }
+        );
+    }
     e
 }
 
@@ -3698,6 +3759,9 @@ fn check_status(code: u16) -> Result<(), Transfer> {
         200 | 206 => Ok(()),
         401 | 403 | 410 => Err(Transfer::Refused(code)),
         408 | 429 => Err(Transfer::Retry(format!("the server answered {code}"))),
+        // The host took the file down (a takedown, or blocked in this country).
+        451 => Err(Transfer::Fatal("This host has taken the file down or blocks it in your country (it answered 451). Take another mirror, or Kryoto's own copy.".into())),
+        404 => Err(Transfer::Fatal("The file is not on this host any more (it answered 404). Take another mirror, or Kryoto's own copy.".into())),
         s if s >= 500 => Err(Transfer::Retry(format!("the server answered {s}"))),
         s => Err(Transfer::Fatal(format!("The download failed: the server answered {s}."))),
     }
@@ -4324,7 +4388,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             // Pause or Cancel that asked for it. A failed unpack starts over too.
             throw_away(staging_clone.clone());
         }
-        if unpacked.as_ref().is_err_and(|e| e == HATCHZIP_MEMORY) {
+        if unpacked.as_ref().is_err_and(|e| unpack_whole_after(e)) {
             edit(&progress_app, &progress_id, |d| d.unpack_whole = true);
         }
         if unpacked.as_ref().is_err_and(|e| e == STOPPED) {
@@ -4494,6 +4558,11 @@ fn extract_in_place(
                 format!("The archive is damaged and could not be unpacked ({}). Retry downloads it again.", first_line(&text))
             }
             Failure::Password => "The archive wants a password, which Kryoto does not have. Report the release on its kryo.to page.".into(),
+            // Every run that got further was carried on already (hatchzip.rs
+            // `extract`): this one freed nothing, so the drive really is full.
+            Failure::Other(text) if hatchzip::stopped_for_space(&text) => {
+                format!("The drive filled up while unpacking {title} ({}). Free some space on it, then press Retry: it carries on from where it stopped.", first_line(&text).trim_start_matches("not enough disk space to continue:").trim().trim_end_matches('.'))
+            }
             Failure::Other(text) => format!("HatchZip could not unpack it: {}. Press Retry to carry on from where it stopped.", first_line(&text)),
         }
     };
@@ -4512,7 +4581,8 @@ fn extract_in_place(
         // HatchZip could not get the memory a block's dictionary needs
         // (KB-0264, Baldur's Gate 3). 7-Zip unpacks one block at a time and
         // can: it takes over while the archive is still whole.
-        Err(Failure::Other(text)) if hatchzip::out_of_memory(&text) => {
+        // Or it will not unpack an entry of this archive here at all (KB-0338).
+        Err(Failure::Other(text)) if hatchzip::out_of_memory(&text) || hatchzip::refused(&text) => {
             hatchzip::forget(archive);
             let untouched = !resuming && whole.is_some() && std::fs::metadata(archive).map(|m| m.len()).ok() == whole;
             crate::logging::warn("hatchzip", &format!("{title}: {}; 7-Zip instead (archive whole: {untouched})", first_line(&text)));
@@ -4522,7 +4592,16 @@ fn extract_in_place(
             }
             // Partly eaten already: only a fresh copy can be unpacked now.
             let _ = std::fs::remove_file(archive);
-            Err(HATCHZIP_MEMORY.into())
+            Err(if hatchzip::refused(&text) { HATCHZIP_REFUSED } else { HATCHZIP_MEMORY }.into())
+        }
+        // Unreadable as it stands: a fresh copy, unpacked with 7-Zip, which
+        // carries on past a damaged file and says which (KB-0338).
+        Err(Failure::Other(text)) if hatchzip::unreadable(&text) => {
+            hatchzip::forget(archive);
+            let _ = std::fs::remove_file(archive);
+            let _ = std::fs::remove_dir_all(staging);
+            crate::logging::warn("hatchzip", &format!("{title}: {}; the archive goes and the next try unpacks with 7-Zip", first_line(&text)));
+            Err(HATCHZIP_UNREADABLE.into())
         }
         Err(f) => Err(explain(f)),
     }
@@ -4531,6 +4610,15 @@ fn extract_in_place(
 /// An unpack in place that ran out of memory after it had eaten part of the
 /// archive. The row then never unpacks in place again (`unpack_whole`).
 const HATCHZIP_MEMORY: &str = "Unpacking in place needed more memory than this PC could give, so this game is unpacked with 7-Zip instead. Retry downloads it again.";
+/// The same for an archive HatchZip will not unpack here (`hatchzip::refused`).
+const HATCHZIP_REFUSED: &str = "Unpacking in place cannot handle a file in this game, so it is unpacked with 7-Zip instead. Retry downloads it again.";
+/// An archive that cannot be read as it is (`hatchzip::unreadable`).
+const HATCHZIP_UNREADABLE: &str = "The archive could not be read to the end, so it was deleted. Retry downloads it again and unpacks it with 7-Zip.";
+
+/// The unpack failures after which this row unpacks with 7-Zip from then on.
+fn unpack_whole_after(error: &str) -> bool {
+    [HATCHZIP_MEMORY, HATCHZIP_REFUSED, HATCHZIP_UNREADABLE].contains(&error)
+}
 
 fn first_line(text: &str) -> String {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no details");
@@ -4910,7 +4998,7 @@ pub(crate) async fn ensure_7zr<R: Runtime>(app: &AppHandle<R>) {
     }
     let _ = std::fs::create_dir_all(&dir);
     let fetched = async {
-        let res = reqwest::Client::builder()
+        let res = crate::net::builder()
             .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -6020,7 +6108,7 @@ mod tests {
         let (progress, arrived) = (vec![AtomicU64::new(0)], vec![AtomicU64::new(0)]);
         let (stop, limiter) = (AtomicU8::new(RUN), Limiter::new(0));
         let expect = Expected { etag: Some("v1".into()), total: Some(total) };
-        let client = reqwest::Client::new();
+        let client = crate::net::builder().build().unwrap_or_default();
         let res = rt.block_on(fetch_range(&client, url, &path, 0, seg, &progress, &arrived, &stop, &limiter, &expect));
         (res, std::fs::read(&path).unwrap())
     }
@@ -6055,7 +6143,7 @@ mod tests {
             rt.spawn(async move {
                 let (stop, limiter) = (AtomicU8::new(RUN), Limiter::new(0));
                 let expect = Expected { etag: Some("v1".into()), total: Some(1000) };
-                fetch_range(&reqwest::Client::new(), &url, &path, 0, Segment { start: 0, end: 999, done: 0 }, &progress, &arrived, &stop, &limiter, &expect).await.is_ok()
+                fetch_range(&crate::net::builder().build().unwrap_or_default(), &url, &path, 0, Segment { start: 0, end: 999, done: 0 }, &progress, &arrived, &stop, &limiter, &expect).await.is_ok()
             })
         };
         let started = Instant::now();
@@ -6154,7 +6242,7 @@ mod tests {
             });
             let path = scratch("bench").join("file.bin");
             std::fs::File::create(&path).unwrap().set_len(TOTAL).unwrap();
-            let client = reqwest::Client::builder().tcp_nodelay(true).build().unwrap();
+            let client = crate::net::builder().tcp_nodelay(true).build().unwrap();
             let url = format!("http://{addr}/file");
             for conns in [8u32, 16] {
                 let segs = Arc::new(split(TOTAL, conns));

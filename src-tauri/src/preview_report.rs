@@ -62,7 +62,7 @@ pub struct NewReport {
 #[tauri::command(async)]
 pub async fn preview_report_send(app: AppHandle, report: NewReport) -> Result<serde_json::Value, String> {
     let kryo = Kryo::new(&app)?;
-    let put = reqwest::Client::builder().timeout(Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
+    let put = crate::net::builder().timeout(Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
     let mut ids = Vec::new();
     for f in report.files.iter().take(5) {
         let bytes = base64::engine::general_purpose::STANDARD.decode(f.data.as_bytes()).map_err(|_| format!("{} could not be read.", f.name))?;

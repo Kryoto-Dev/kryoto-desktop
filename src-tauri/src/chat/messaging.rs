@@ -740,7 +740,7 @@ impl Chat {
             _ => return Err(SendError::Failed("Unexpected answer.".into())),
         };
         let url = format!("{http_base}/v1/attachments/{}?t={}&s={}", ticket.id, ticket.upload_token, sealed.ciphertext.len());
-        let res = reqwest::Client::new()
+        let res = crate::net::builder().build().unwrap_or_default()
             .put(url)
             .body(sealed.ciphertext)
             .send()
@@ -780,7 +780,7 @@ impl Chat {
         }
         let file: FileBody = serde_json::from_str(&row.body).map_err(|_| "The file details are damaged.".to_string())?;
         let url = format!("{http_base}/v1/attachments/{}?t={}", file.id, file.token);
-        let res = reqwest::Client::new().get(url).send().await.map_err(|e| format!("Could not download the file: {e}"))?;
+        let res = crate::net::builder().build().unwrap_or_default().get(url).send().await.map_err(|e| format!("Could not download the file: {e}"))?;
         if res.status() == reqwest::StatusCode::NOT_FOUND {
             return Err("This file is no longer available (files are kept for 30 days).".into());
         }

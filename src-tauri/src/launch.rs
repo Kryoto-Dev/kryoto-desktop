@@ -404,45 +404,79 @@ pub fn clean_appimage_env(cmd: &mut std::process::Command) {
     let _ = cmd;
 }
 
+/// The variables an AppImage's start script points into itself.
+pub const APPIMAGE_VARS: [&str; 24] = [
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PERLLIB",
+    "PERL5LIB",
+    "GIO_EXTRA_MODULES",
+    "GIO_MODULE_DIR",
+    "GI_TYPELIB_PATH",
+    "GSETTINGS_SCHEMA_DIR",
+    "GDK_PIXBUF_MODULE_FILE",
+    "QT_PLUGIN_PATH",
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "GTK_PATH",
+    "GTK_EXE_PREFIX",
+    "GTK_DATA_PREFIX",
+    "XDG_DATA_DIRS",
+    "GST_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    // The AppImage's own GStreamer plugins (bundleMediaFramework, KB-0292):
+    // Wine and Proton play game videos through the system's.
+    "GST_PLUGIN_PATH_1_0",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+    "GST_PLUGIN_SCANNER",
+    "GST_PLUGIN_SCANNER_1_0",
+];
+
+/// A folder inside some AppImage as it runs: its FUSE mount
+/// (`/tmp/.mount_Kryoto1a2B3c`), or where it unpacked itself on a PC without
+/// FUSE (`/tmp/appimage_extracted_<hash>`, `squashfs-root`).
+pub fn in_an_appimage(path: &Path) -> bool {
+    path.components().any(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        name.starts_with(".mount_") || name.starts_with("appimage_extracted_") || name == "squashfs-root"
+    })
+}
+
+/// One of `APPIMAGE_VARS` without what another copy of the AppImage left in
+/// it. `None`: nothing of the kind in it. `Some(None)`: nothing else in it.
+///
+/// After an in-app update the new copy is started by the old one and takes
+/// its environment with it: the new AppImage puts its own folders in front,
+/// and the old copy's stay behind them (its bundled libraries, Python and
+/// Perl). Everything this app cleans for a game or a tool is "under this
+/// AppImage's folder", so the old copy's entries passed straight through to
+/// Wine, Proton and umu, which do not start on another distro's libraries
+/// and Python (KB-0311 measured that for curl and python3): every game ended
+/// with exit code 1 until Kryoto was started fresh (KB-0327).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn without_old_copies(value: &std::ffi::OsStr, current: Option<&Path>) -> Option<Option<std::ffi::OsString>> {
+    let paths: Vec<_> = std::env::split_paths(value).collect();
+    let old = |p: &PathBuf| in_an_appimage(p) && !current.is_some_and(|root| p.starts_with(root));
+    if !paths.iter().any(old) {
+        return None;
+    }
+    let kept: Vec<_> = paths.into_iter().filter(|p| !old(p)).collect();
+    Some(if kept.is_empty() { None } else { std::env::join_paths(kept).ok() })
+}
+
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn apply_appimage_env(cmd: &mut std::process::Command, root: &Path, vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>) {
     if !root.is_absolute() {
         return;
     }
     for (key, value) in vars {
-        if !matches!(
-            key.to_str(),
-            Some(
-                "PATH"
-                    | "LD_LIBRARY_PATH"
-                    | "LD_PRELOAD"
-                    | "PYTHONHOME"
-                    | "PYTHONPATH"
-                    | "GIO_EXTRA_MODULES"
-                    | "GIO_MODULE_DIR"
-                    | "GI_TYPELIB_PATH"
-                    | "GSETTINGS_SCHEMA_DIR"
-                    | "QT_PLUGIN_PATH"
-                    | "QT_QPA_PLATFORM_PLUGIN_PATH"
-                    | "GTK_PATH"
-                    | "GTK_EXE_PREFIX"
-                    | "GTK_DATA_PREFIX"
-                    | "XDG_DATA_DIRS"
-                    | "PERL5LIB"
-                    | "GST_PLUGIN_PATH"
-                    | "GST_PLUGIN_SYSTEM_PATH"
-                    // The AppImage's own GStreamer plugins (bundleMediaFramework, KB-0292):
-                    // Wine and Proton play game videos through the system's.
-                    | "GST_PLUGIN_PATH_1_0"
-                    | "GST_PLUGIN_SYSTEM_PATH_1_0"
-                    | "GST_PLUGIN_SCANNER"
-                    | "GST_PLUGIN_SCANNER_1_0"
-            )
-        ) {
+        if !key.to_str().is_some_and(|k| APPIMAGE_VARS.contains(&k)) {
             continue;
         }
         let paths: Vec<_> = std::env::split_paths(&value).collect();
-        let kept: Vec<_> = paths.iter().filter(|p| !p.starts_with(root) && !crate::appimage_tls::is_ours(p)).collect();
+        let kept: Vec<_> = paths.iter().filter(|p| !p.starts_with(root) && !crate::appimage_tls::is_ours(p) && !in_an_appimage(p)).collect();
         if kept.len() == paths.len() {
             continue;
         }
@@ -702,6 +736,42 @@ mod tests {
         assert!(!env.contains_key(std::ffi::OsStr::new("DISPLAY")));
         cmd.env("PYTHONHOME", "explicit-player-setting");
         assert_eq!(cmd.get_envs().find(|(k, _)| *k == "PYTHONHOME").unwrap().1, Some(std::ffi::OsStr::new("explicit-player-setting")));
+    }
+
+    /// KB-0327: an update's relaunch hands the old AppImage's folders to the
+    /// new copy; they are dropped at the start and never reach a game.
+    #[test]
+    fn another_copys_appimage_folders_are_dropped() {
+        // Under the temp folder, so the paths are absolute on every system.
+        let tmp = std::env::temp_dir();
+        let (new, old, unpacked, system) = (tmp.join(".mount_KryotoNEW"), tmp.join(".mount_KryotoOLD"), tmp.join("appimage_extracted_0a1b2c"), tmp.join("usr"));
+        let join = |parts: &[PathBuf]| std::env::join_paths(parts).unwrap();
+        // The old copy's entries go, the current copy's and the system's stay.
+        let value = join(&[new.join("usr/lib"), old.join("usr/lib"), system.join("lib")]);
+        assert_eq!(without_old_copies(&value, Some(&new)), Some(Some(join(&[new.join("usr/lib"), system.join("lib")]))));
+        // A PC without FUSE unpacks the AppImage instead of mounting it.
+        let value = join(&[unpacked.join("usr/bin"), system.join("bin")]);
+        assert_eq!(without_old_copies(&value, Some(&new)), Some(Some(join(&[system.join("bin")]))));
+        // A single path into the old copy (PYTHONHOME): the variable goes.
+        assert_eq!(without_old_copies(old.join("usr").as_os_str(), Some(&new)), Some(None));
+        // Nothing of the kind: left exactly as it is.
+        assert_eq!(without_old_copies(&join(&[system.join("local/bin"), system.join("bin"), tmp.join("me/.mount/bin")]), Some(&new)), None);
+        assert_eq!(without_old_copies(&join(&[new.join("usr/bin"), system.join("bin")]), Some(&new)), None);
+        // The .deb or .rpm started by an AppImage: no folder of its own.
+        assert_eq!(without_old_copies(&join(&[old.join("usr/lib")]), None), Some(None));
+
+        // And whatever is still there when a game starts is dropped then too.
+        let mut cmd = std::process::Command::new("unused");
+        let vars = vec![
+            ("LD_LIBRARY_PATH".into(), join(&[new.join("usr/lib"), old.join("usr/lib")])),
+            ("PYTHONHOME".into(), old.join("usr").into_os_string()),
+            ("PATH".into(), join(&[unpacked.join("usr/bin"), system.join("bin")])),
+        ];
+        apply_appimage_env(&mut cmd, &new, vars);
+        let env: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(env[std::ffi::OsStr::new("LD_LIBRARY_PATH")], None);
+        assert_eq!(env[std::ffi::OsStr::new("PYTHONHOME")], None);
+        assert_eq!(env[std::ffi::OsStr::new("PATH")], Some(system.join("bin").as_os_str()));
     }
 
     #[test]

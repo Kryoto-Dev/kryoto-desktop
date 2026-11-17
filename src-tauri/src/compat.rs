@@ -544,7 +544,7 @@ pub async fn compat_install(app: AppHandle) -> Result<CompatTool, String> {
     let _install = INSTALL.lock().await;
     let dir = managed_dir(&app).ok_or("No app data folder.")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let client = reqwest::Client::builder()
+    let client = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(900))
@@ -615,7 +615,7 @@ pub async fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
         return Ok(path);
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let client = reqwest::Client::builder()
+    let client = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(120))
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     #[ignore]
     fn release_pages_live() {
-        let client = reqwest::Client::builder().user_agent("KryotoDesktop/test").build().unwrap();
+        let client = crate::net::builder().user_agent("KryotoDesktop/test").build().unwrap();
         tauri::async_runtime::block_on(async {
             let proton = from_release_page(&client, "GloriousEggroll/proton-ge-custom").await.unwrap();
             proton_asset(&proton, "x86_64").unwrap();

@@ -162,7 +162,7 @@ fn ua() -> &'static str {
 
 /// A client for storage addresses: no cookies, no redirects to elsewhere.
 pub fn storage_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::net::builder()
         .user_agent(ua())
         .connect_timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::limited(3))
@@ -181,7 +181,7 @@ impl Api {
             super::Target::Local(dir) => {
                 let keep = crate::settings::load(app).saves_local_keep;
                 let place = dir.to_string_lossy().into_owned();
-                return Ok(Api { http: reqwest::Client::new(), base: String::new(), place, auth: Auth::Local(super::local::LocalStore::new(dir, keep)) });
+                return Ok(Api { http: crate::net::builder().build().unwrap_or_default(), base: String::new(), place, auth: Auth::Local(super::local::LocalStore::new(dir, keep)) });
             }
             super::Target::Account => {}
         }
@@ -193,7 +193,7 @@ impl Api {
             .map(|jar| jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
             .filter(|c| !c.is_empty())
             .ok_or(ApiError::SignedOut)?;
-        let http = reqwest::Client::builder()
+        let http = crate::net::builder()
             .user_agent(ua())
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())

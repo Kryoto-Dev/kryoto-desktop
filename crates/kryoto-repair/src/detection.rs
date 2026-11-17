@@ -5,6 +5,12 @@ use std::{
 };
 use walkdir::WalkDir;
 
+/// Files and folders looked at before the scan gives up: a whole library, not
+/// one game. It was 100,000, which a real game can pass: City Bus Manager's
+/// Repair stopped with "Too many files" on its own folder, with its maps
+/// kept as a great many small files (KB-0333).
+const MAX_ENTRIES: usize = 2_000_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameIdentity {
     pub slug: String,
@@ -148,7 +154,7 @@ pub fn scan(root: &Path) -> Result<Evidence, String> {
     for entry in entries {
         let e = entry.map_err(|_| "Some game files cannot be read. Check folder permissions.")?;
         visited += 1;
-        if visited > 100_000 {
+        if visited > MAX_ENTRIES {
             return Err(
                 "Too many files. Put the fixer inside one game folder, not your whole library."
                     .into(),

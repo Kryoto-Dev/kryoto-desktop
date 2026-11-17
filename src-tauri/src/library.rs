@@ -157,6 +157,9 @@ struct GameEvent {
     /// Exit code, when there is one.
     code: Option<i32>,
     stopped: bool,
+    /// Linux: the last lines its launcher printed, when it failed at once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 /// A Steam branch's name the way people say it ("Public beta", "GB27"), or None
@@ -732,7 +735,7 @@ pub fn library_restore_found(app: AppHandle, dirs: Vec<String>) -> Result<usize,
 async fn relink<R: Runtime>(app: &AppHandle<R>) {
     let settings = crate::settings::load(app);
     let endpoint = crate::settings::catalog_endpoint(&settings);
-    let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build() else { return };
+    let Ok(client) = crate::net::builder().timeout(std::time::Duration::from_secs(20)).build() else { return };
     let Ok(games) = load(app) else { return };
     let Some(index) = crate::bridge::match_index(app, crate::bridge::INDEX_MAX_AGE).await else { return };
     let mut found: Vec<(String, String, crate::downloads::CatalogMeta)> = Vec::new();
@@ -772,7 +775,7 @@ pub fn fill_branches<R: Runtime>(app: &AppHandle<R>) {
             return;
         }
         let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(&app));
-        let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build() else { return };
+        let Ok(client) = crate::net::builder().timeout(std::time::Duration::from_secs(20)).build() else { return };
         let mut found: Vec<(String, String)> = Vec::new();
         for (id, slug) in missing {
             if let Some(branch) = crate::downloads::fetch_meta(&client, &endpoint, &slug).await.and_then(|m| m.steam_branch) {
@@ -1816,7 +1819,7 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
     let open_session = OpenSession::start(&app, &id, started_at);
     crate::presence::beat(&app);
     crate::discord_rpc::started(&app, &id, started);
-    let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None, stopped: false });
+    let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None, stopped: false, detail: None });
     crate::achievements::watch(app.clone(), &game, crate::achievements::roots_for(&plan.env).with_game(Path::new(&game.install_dir)));
     // A community update's playtest: its screenshots, taken from the game itself.
     crate::community_offer::during_play(&app, &game, pid);
@@ -1855,6 +1858,14 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
             }
         }
         let seconds = if followed.is_some() { started_at.elapsed().as_secs() } else { exited_after };
+        // A start that failed at once under Wine, Proton or umu: why, in their
+        // own last lines (the threads reading them get a moment to finish).
+        let detail = (!cfg!(windows) && !session.stopped() && seconds < 5 && code.is_some_and(|c| c != 0))
+            .then(|| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                log.as_ref().and_then(|l| l.last_words())
+            })
+            .flatten();
         if let Some(log) = &log {
             log.finish(code, seconds, followed);
         }
@@ -1878,7 +1889,7 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
         crate::community_offer::after_play(&install_dir, seconds, code);
         crate::presence::beat(&app);
         crate::discord_rpc::ended(&app, &id);
-        let _ = app.emit("game-state", GameEvent { id: id.clone(), running: false, seconds: Some(seconds), code, stopped: session.stopped() });
+        let _ = app.emit("game-state", GameEvent { id: id.clone(), running: false, seconds: Some(seconds), code, stopped: session.stopped(), detail });
         // Learn where it saved, then back the saves up.
         crate::saves::after_exit(app.clone(), id, tracer);
     });

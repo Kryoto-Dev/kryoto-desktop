@@ -95,6 +95,8 @@ async function placeWindow(kind: WindowKind, again: boolean) {
   }
   await win.setSize(logical)
   await win.center()
+  // A tiling desktop floated the fixed-size box this window was: have it looked at again.
+  if (kind === 'main' && !first) await call('window_became_client').catch(() => undefined)
 }
 
 /** A box's size at the text size, kept inside the screen it is on. */

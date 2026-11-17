@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { artSrc } from '@/lib/art'
 import { Wand2, Bell, Cloud, Download, FolderInput, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, ChevronDown } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Check, Dropdown, Section, Segmented, inputCls } from '@/ui'
-import { errorText, on } from '@/lib/bridge'
+import { call, errorText, on } from '@/lib/bridge'
 import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, PET_SIZES, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, openBigPicture, openSetup, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
@@ -429,6 +429,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
             <Check checked={s.minimizeOnPlay} onChange={(v) => set('minimizeOnPlay', v)} label="Minimize Kryoto while a game runs" />
             <Section title="Desktop pet" hint="Drag it anywhere; right-click it to switch or hide it. It steps aside while a game runs.">
               <Check checked={s.pet} onChange={(v) => set('pet', v)} label="Show the pet on my desktop" />
+              <PetDesktopNote />
               {s.pet ? <Segmented label="Desktop pet" value={s.petMascot} options={PET_MASCOTS.map((m) => ({ value: m.id, label: m.label }))} onChange={(v) => set('petMascot', v)} /> : null}
               {s.pet ? <Segmented label="Size" value={s.petSize ?? 'normal'} options={PET_SIZES.map((z) => ({ value: z.id, label: z.label }))} onChange={(v) => set('petSize', v)} /> : null}
             </Section>
@@ -653,4 +654,14 @@ function BridgeButton() {
       {open ? <Bridge onClose={() => setOpen(false)} /> : null}
     </>
   )
+}
+
+/** Linux, on a tiling desktop: how to let the pet float (system.rs `pet_desktop_note`). */
+function PetDesktopNote() {
+  const [note, setNote] = useState<string | null>(null)
+  useEffect(() => {
+    if (!isTauri()) return
+    void call<string | null>('pet_desktop_note').then(setNote).catch(() => setNote(null))
+  }, [])
+  return note ? <p className="text-xs leading-relaxed text-muted-foreground">{note}</p> : null
 }

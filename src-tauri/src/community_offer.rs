@@ -205,7 +205,7 @@ impl Kryo {
             .map(|jar| jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
             .filter(|c| !c.is_empty())
             .ok_or("Sign in to kryo.to in Kryoto Desktop first.")?;
-        let http = reqwest::Client::builder()
+        let http = crate::net::builder()
             .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(120))
             .redirect(reqwest::redirect::Policy::none())
@@ -271,7 +271,7 @@ impl Kryo {
 
 /// Storage addresses: no cookies.
 pub(crate) fn storage() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(30 * 60))

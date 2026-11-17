@@ -100,7 +100,7 @@ export function useLibrary() {
           // A game gone within seconds almost never ran - say so instead of
           // leaving a Play button that silently did nothing.
           if (!event.stopped && !stopWhenUp.current.has(event.id) && (event.seconds ?? 0) < 5) {
-            const [message, quiet] = quickExit(event.code)
+            const [message, quiet] = quickExit(event.code, event.detail)
             setError(message, quiet, event.id)
           }
           stopWhenUp.current.delete(event.id)
@@ -238,7 +238,7 @@ const EXIT_REASONS: Record<number, string> = {
  * game (handoff.rs), so reaching this means nothing from the game's folder was
  * running afterwards either.
  */
-function quickExit(code: number | null | undefined): [string, boolean] {
+function quickExit(code: number | null | undefined, detail?: string): [string, boolean] {
   // ERROR_CANCELLED: the game needs administrator rights and Windows' prompt was turned down.
   if (code === 1223) return ['It did not start: this game needs administrator rights. Press Play and answer Yes on Windows\' prompt.', true]
   // 0x80131700: the .NET runtime could not start, so it is missing.
@@ -262,6 +262,10 @@ function quickExit(code: number | null | undefined): [string, boolean] {
       'It started and closed again without an error. If no window opened, pick the game\'s own .exe (not a launcher) in Properties.',
       true,
     ]
+  }
+  // Linux: Wine, Proton and umu all end with a bare 1; their last lines say why.
+  if (detail) {
+    return [`It closed again straight away (exit code ${code}). Its last lines: ${detail} The whole log is under Properties > Logs.`, false]
   }
   return [
     `It closed again straight away (exit code ${code}). Check the launch options and the exe in Properties.`,

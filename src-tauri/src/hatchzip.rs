@@ -126,7 +126,7 @@ pub async fn ensure<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
 
 async fn fetch(pinned: &Pinned, dir: &Path, file: &Path) -> Result<(), String> {
     let url = format!("https://github.com/xevrion/hatchzip/releases/download/{VERSION}/{}", pinned.asset);
-    let res = reqwest::Client::builder()
+    let res = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(120))
         .build()
@@ -299,7 +299,95 @@ pub fn forget(archive: &Path) {
 /// the last one took: a big game on a hard disk takes seconds to walk, and
 /// walked twice a second it fought the unpack for the disk. Pause or Cancel
 /// kills the tool; its own files keep where it got to.
+///
+/// A run that stops for space with part of the archive eaten is carried on at
+/// once, as often as each run gets further (`stopped_for_space`).
 pub fn extract(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total: Option<u64>, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Result<(), Failure> {
+    let size = || std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
+    // What the archive was when this unpack began, for the bar across runs.
+    let whole = size();
+    // The bar never goes back when a run carries on from the last one.
+    let high = std::cell::Cell::new(0u64);
+    let forward = |done: u64, total: Option<u64>| {
+        if done >= high.get() {
+            high.set(done);
+            progress(done, total);
+        }
+    };
+    let mut runs = 1u32;
+    let mut busy = 0u32;
+    loop {
+        let before = size();
+        match extract_once(tool, archive, dest, keep_free, total, whole, &forward, stop) {
+            Err(Failure::Other(text)) if stopped_for_space(&text) && resumes(archive) && size() < before => {
+                crate::logging::info("hatchzip", &format!("run {runs} stopped for space with {} of the archive freed; carrying on ({})", crate::storage::human_size(before - size()), first_line(&text)));
+                runs += 1;
+            }
+            // Held open by something else for a moment: an antivirus reading
+            // the archive that has just landed, or Windows' search indexer.
+            // Each ended the unpack with "Press Retry", which was all it took
+            // (KB-0338); now it waits and tries again by itself, for a minute.
+            Err(Failure::Other(text)) if held_open(&text) && busy < 12 => {
+                busy += 1;
+                if busy == 1 {
+                    crate::logging::info("hatchzip", &format!("the archive is held open by another program; trying again for a minute ({})", first_line(&text)));
+                }
+                for _ in 0..50 {
+                    if stop.load(Ordering::SeqCst) != crate::downloads::RUN {
+                        return Err(Failure::Stopped);
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            done => return done,
+        }
+    }
+}
+
+/// The archive is open in another program, or another HatchZip.
+pub fn held_open(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("is in use by another program")
+}
+
+/// HatchZip will not unpack this archive at all, and said so before changing
+/// anything: an entry whose name it refuses on this system, such as an NTFS
+/// stream (`forzahorizon6.exe:4`, Forza Horizon 6), which it reads as a path
+/// leaving the folder (KB-0338). 7-Zip unpacks those, so it takes over.
+pub fn refused(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("would be written outside the destination folder") || t.contains("extraction refused") || t.contains("refused before anything changes")
+}
+
+/// The archive cannot be read as it is: damaged on the way, or cut short by an
+/// unpack in place whose progress files are gone. HatchZip says it plainly;
+/// only a fresh copy helps, and "Press Retry to carry on" sent players round
+/// the same failure (KB-0338).
+pub fn unreadable(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("not a readable") || t.contains("checksumverificationfailed") || t.contains("next header offset out of range") || t.contains("corrupted input data")
+}
+
+/// HatchZip stopped mid-unpack saying the drive is full, with its progress
+/// saved. Through 0.1.10 that is usually not true on Windows: NTFS keeps the
+/// part of the archive it cut off allocated until HatchZip's handle on it
+/// closes, so its own look at the free space between batches misses what it
+/// just freed, and it stops on a drive with room (xevrion/hatchzip#79; fixed
+/// there after 0.1.10, in no release yet). The same command then carries on,
+/// which is all Retry did: ten PCs in Desktop 0.3.10's first day stopped this
+/// way, some three times in one game (KB-0329). A run that freed nothing is a
+/// drive that really is full, and is not tried again.
+pub fn stopped_for_space(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("not enough disk space to continue")
+}
+
+fn first_line(text: &str) -> String {
+    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no details").chars().take(300).collect()
+}
+
+/// One run of `hatchzip extract`. `whole` is the archive's size when the
+/// unpack began, which a run carrying on from another no longer sees.
+#[allow(clippy::too_many_arguments)]
+fn extract_once(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total: Option<u64>, whole: u64, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Result<(), Failure> {
     use std::io::Read;
     let mut child = command(tool)
         .arg("extract")
@@ -332,7 +420,7 @@ pub fn extract(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total:
         text
     });
     progress(0, total);
-    let archive_size = std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
+    let archive_size = whole;
     let mut last = Instant::now();
     // The last walk of `dest`: when it ended and how long it took. The next
     // one waits ten times that (at least the half second of the tick), so a
@@ -419,6 +507,32 @@ mod tests {
         assert!(out_of_memory("needed memory too big for mem_limit_kb"));
         assert!(!out_of_memory("error: extracting Game.pck: corrupted input data (LZMA2:3)"));
         assert!(!out_of_memory(""));
+    }
+
+    /// KB-0329: HatchZip's own words when it stops for space mid-unpack.
+    #[test]
+    fn a_stop_for_space_is_told_apart() {
+        assert!(stopped_for_space(
+            "error: not enough disk space to continue: 'paks/chunk1.pak' requires 419.4 MB and 390.3 MB is available (1.3 TB reserved).\n29.1 MB more is required. Progress is saved; free up space and resume the extraction."
+        ));
+        assert!(!stopped_for_space("error: extracting Game.pck: corrupted input data (LZMA2:3)"));
+        assert!(!stopped_for_space("error: An Application Control policy has blocked this file. (os error 4551)"));
+    }
+
+    /// KB-0338: what HatchZip printed for each of these in Desktop 0.3.10's reports.
+    #[test]
+    fn its_other_failures_are_told_apart() {
+        let refusal = "'FH6/Forza Horizon 6/forzahorizon6.exe:4' would be written outside the destination folder; extraction refused";
+        assert!(refused(refusal) && !unreadable(refusal) && !held_open(refusal));
+        for damaged in [
+            "not a readable 7z archive: Other(\"next header offset out of range\")",
+            "extracting 'End/Content/Movie/MV_TITLB_0010.emov': ChecksumVerificationFailed",
+        ] {
+            assert!(unreadable(damaged) && !refused(damaged), "{damaged}");
+        }
+        let busy = "~/Downloads/_downloads/Project Exhibitionist - Kryoto.7z is in use by another program or HatchZip process";
+        assert!(held_open(busy) && !refused(busy) && !unreadable(busy));
+        assert!(!refused("dictionary allocation too large") && !unreadable("not enough disk space to continue"));
     }
 
     #[test]

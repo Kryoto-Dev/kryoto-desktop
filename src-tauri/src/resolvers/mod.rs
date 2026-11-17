@@ -276,7 +276,7 @@ pub async fn resolve<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolv
 
 /// A client that looks like a browser, with a cookie jar of its own.
 pub(crate) fn client(redirects: bool) -> reqwest::Client {
-    let mut b = reqwest::Client::builder()
+    let mut b = crate::net::builder()
         .user_agent(UA)
         .cookie_store(true)
         .timeout(std::time::Duration::from_secs(30));
@@ -372,7 +372,7 @@ mod live {
             };
             println!("{url} -> {r:?}");
             let r = r.expect("resolves");
-            let mut req = reqwest::Client::new().get(&r.url).header("Range", "bytes=0-0");
+            let mut req = crate::net::builder().build().unwrap_or_default().get(&r.url).header("Range", "bytes=0-0");
             for (k, v) in &r.headers {
                 req = req.header(k, v);
             }

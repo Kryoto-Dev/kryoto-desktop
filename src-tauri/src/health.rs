@@ -20,6 +20,16 @@
 //! costs it very little (kryoto-bugs KB-0002 is what polling can do): every 30
 //! seconds while the window is up, every 3 minutes while it is hidden, and
 //! faster only while something looks wrong.
+//!
+//! The same patience goes for "this network blocks kryo.to": one request of
+//! this app's that got no answer says nothing. Desktop 0.3.10 called it on the
+//! first one, and a kept connection that a router or antivirus had quietly
+//! dropped was enough: 222 Windows PCs and 21 Linux ones were told their
+//! network blocks kryo.to in its first two days, many of them every few
+//! minutes while the Store beside it worked (KB-0328). So each look is made on
+//! a connection of its own, asked a second time before it counts as failed,
+//! and the network is only blamed after several looks in a row over the grace
+//! period.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -169,6 +179,10 @@ struct Watch {
     parts: Vec<String>,
     seen_parts: Vec<String>,
     part_reads: u32,
+    /// This app's own requests to kryo.to that failed in a row while the
+    /// internet (or the Store page) answered, and when the run began.
+    own_fails: u32,
+    own_first_fail: Option<Instant>,
 }
 
 impl Watch {
@@ -237,9 +251,49 @@ impl Watch {
         }
     }
 
+    /// Whether this network blocks kryo.to, as opposed to Kryoto being down.
+    /// Called after `step`, so the status page's word for this look is in.
+    ///
+    /// This app's own request failed (`own_failed`), `FAILS` looks in a row
+    /// over `GRACE`, and one of:
+    /// - the Store page reaches kryo.to (`page_reached`): the site is plainly
+    ///   up, and only this app's requests are stopped;
+    /// - the rest of the internet answers (`internet`) and the status page,
+    ///   which watches the site from outside, has had `FEED_LAG` to notice an
+    ///   outage and still says the site is fine, or cannot be reached either
+    ///   (it is under kryo.to too, so a block takes both).
+    ///
+    /// The status page saying the site is bad is Kryoto down, never a block;
+    /// and before it has had time to notice, nobody is blamed (0.3.10 said
+    /// "blocked" through the first minutes of every real outage, KB-0328).
+    /// One good answer of this app's own ends it.
+    fn blocked(&mut self, own_failed: bool, page_reached: bool, internet: bool, now: Instant) -> bool {
+        if !own_failed {
+            self.own_fails = 0;
+            self.own_first_fail = None;
+            return false;
+        }
+        self.own_fails += 1;
+        let long = now.duration_since(*self.own_first_fail.get_or_insert(now));
+        if self.own_fails < FAILS || long < GRACE {
+            return false;
+        }
+        if page_reached {
+            return true;
+        }
+        if !internet {
+            return false;
+        }
+        match &self.feed {
+            Some(Feed::Says { site_bad: true, .. }) => false,
+            Some(Feed::Says { site_bad: false, .. }) => long >= FEED_LAG,
+            Some(Feed::Dead) | None => true,
+        }
+    }
+
     /// Anything less than calm: look again soon.
     fn watchful(&self) -> bool {
-        self.fails > 0 || self.state != State::Ok || !self.seen_parts.is_empty()
+        self.fails > 0 || self.own_fails > 0 || self.state != State::Ok || !self.seen_parts.is_empty()
     }
 
     fn report(&self, status_url: String) -> Health {
@@ -273,11 +327,24 @@ static PAGE: Mutex<Option<(u16, String)>> = Mutex::new(None);
 static PAGE_ANSWERED: Notify = Notify::const_new();
 
 /// `/api/health`, or why there was no answer (every cause in the chain:
-/// reqwest's own text names only the address).
+/// reqwest's own text names only the address). Asked a second time, a moment
+/// later, before no answer is believed: a single request lost on the way is
+/// common and means nothing.
 async fn ask_site(client: &reqwest::Client, endpoint: &str) -> Result<Site, String> {
-    let res = client.get(format!("{endpoint}/api/health")).send().await.map_err(|e| crate::logging::why(&e))?;
-    let code = res.status().as_u16();
-    Ok(read_site(code, &res.text().await.unwrap_or_default()))
+    let mut why = String::new();
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        match client.get(format!("{endpoint}/api/health")).send().await {
+            Ok(res) => {
+                let code = res.status().as_u16();
+                return Ok(read_site(code, &res.text().await.unwrap_or_default()));
+            }
+            Err(e) => why = crate::logging::why(&e),
+        }
+    }
+    Err(why)
 }
 
 /// What the Store page got for `/api/health` (lib.rs `report_catalog_state`).
@@ -344,11 +411,52 @@ fn jitter(wait: Duration) -> Duration {
     wait.mul_f64(0.9 + f64::from(nanos % 1000) / 5000.0)
 }
 
+/// Windows: how many window-manager objects (windows, icons, menus, cursors)
+/// this process holds, of the 10,000 it may. Some PCs run out after long use,
+/// and then no window can open (the tray panel, a download's page, the pet;
+/// KB-0335); what uses them up is not known. Said once past each mark, with
+/// what the app is doing, so the next report names it.
+#[cfg(windows)]
+fn watch_window_objects<R: Runtime>(app: &AppHandle<R>, said: &mut u32) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetGuiResources(process: *mut std::ffi::c_void, flags: u32) -> u32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    }
+    // SAFETY: both only read this process's own counters.
+    let (user, gdi) = unsafe { (GetGuiResources(GetCurrentProcess(), 1), GetGuiResources(GetCurrentProcess(), 0)) };
+    let mark = [8000, 5000, 2500, 1000].into_iter().find(|m| user >= *m).unwrap_or(0);
+    if mark <= *said {
+        return;
+    }
+    *said = mark;
+    let running = app.try_state::<crate::library::Running>().and_then(|r| r.0.lock().ok().map(|m| m.len())).unwrap_or(0);
+    let line = format!(
+        "window objects: {user} of 10000 in use (GDI {gdi}); views open: {}, games running: {running}, controllers: {}, pet: {}",
+        app.webviews().len(),
+        crate::pad::connected(app).0.len(),
+        app.get_webview_window(crate::pet::LABEL).is_some(),
+    );
+    if mark >= 5000 {
+        crate::logging::error("windows", &line);
+    } else {
+        crate::logging::warn("windows", &line);
+    }
+}
+
 pub fn start<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        let Ok(client) = reqwest::Client::builder()
+        let Ok(client) = crate::net::builder()
             .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
             .timeout(TIMEOUT)
+            // A connection of its own for every look. Kept between looks, one
+            // that a router, a VPN or an antivirus had dropped without a word
+            // (or that died while the PC slept) took the next request with it:
+            // no answer for the whole timeout, on a network that was fine.
+            .pool_max_idle_per_host(0)
             .build()
         else {
             return;
@@ -359,24 +467,20 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
         let mut outage_since: Option<Instant> = None;
         // Said once a run of it: the page reaches kryo.to and this app does not.
         let mut said_split = false;
+        #[cfg(windows)]
+        let mut objects_said = 0u32;
         loop {
+            #[cfg(windows)]
+            watch_window_objects(&app, &mut objects_said);
             let settings = crate::settings::load(&app);
             let endpoint = crate::settings::catalog_endpoint(&settings);
             let status = status_url(!settings.catalog_endpoint.trim().is_empty());
             let own = ask_site(&client, &endpoint).await;
             let page = if own.is_err() { ask_page(&app).await } else { None };
-            match (&own, &page) {
-                (Err(e), Some(site)) if *site != Site::Failed && !said_split => {
-                    said_split = true;
-                    crate::logging::error("health", &format!("kryo.to answers the Store but not this app's own requests: {e}"));
-                }
-                (Ok(_), _) => said_split = false,
-                _ => {}
-            }
             let page_reached = page.as_ref().is_some_and(|p| *p != Site::Failed);
-            // kryo.to failed here: does anything else answer? Then it is this network.
+            // kryo.to failed here: does anything else answer? Then it is this
+            // network, once it has gone on (`Watch::blocked`).
             let internet = if own.is_err() && !page_reached { Some(internet_answers(&client).await) } else { None };
-            let blocked = own.is_err() && (page_reached || matches!(internet, Some(Ok(()))));
             // For the log: what this round actually saw, in words.
             let seen = format!(
                 "own request: {}; Store page: {}",
@@ -403,6 +507,18 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
             round = round.wrapping_add(1);
             let was = watch.state;
             watch.step(site, feed, Instant::now());
+            let blocked = watch.blocked(own.is_err(), page_reached, matches!(internet, Some(Ok(()))), Instant::now());
+            match &own {
+                // Reported once a run of it, and only once it has lasted: a
+                // single miss is a line in the log, not an error.
+                Err(e) if blocked && page_reached && !said_split => {
+                    said_split = true;
+                    crate::logging::error("health", &format!("kryo.to answers the Store but not this app's own requests: {e}"));
+                }
+                Err(e) if !blocked => crate::logging::info("health", &format!("a look at kryo.to got no answer: {e}")),
+                Ok(_) => said_split = false,
+                _ => {}
+            }
             let mut health = watch.report(status);
             health.blocked = blocked;
             let changed = {
@@ -480,6 +596,86 @@ mod tests {
         let (mut w, t) = (Watch::default(), Instant::now());
         for at in (0..=300).step_by(10) {
             assert_eq!(run(&mut w, t, at, reading(&failed, Some(Site::Fine)), Some("<html>")), State::Ok, "at {at}");
+        }
+    }
+
+    /// One request of this app's that got no answer (a dropped connection, a
+    /// PC just awake) is not a blocked network, however well the Store page
+    /// answers: 0.3.10 said so at once (KB-0328).
+    #[test]
+    fn one_missed_request_is_not_a_blocked_network() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        let at = |s: u64| t + Duration::from_secs(s);
+        assert!(!w.blocked(true, true, false, at(0)));
+        assert!(w.watchful(), "it looks again soon");
+        assert!(!w.blocked(false, true, false, at(10)));
+        assert!(!w.watchful());
+        // Every other look failing, as those PCs had it for hours: never.
+        for round in 0..40 {
+            assert!(!w.blocked(round % 2 == 0, true, false, at(20 + round * 30)), "round {round}");
+        }
+    }
+
+    /// The Store page reaches kryo.to and this app's requests keep failing.
+    #[test]
+    fn a_network_that_keeps_refusing_this_app_is_called_blocked() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        let at = |s: u64| t + Duration::from_secs(s);
+        assert!(!w.blocked(true, true, false, at(0)));
+        assert!(!w.blocked(true, true, false, at(10)));
+        // Three in a row, but not yet over the grace period.
+        assert!(!w.blocked(true, true, false, at(20)));
+        assert!(w.blocked(true, true, false, at(30)));
+        assert!(w.blocked(true, true, false, at(40)));
+        // Its own request answered: over at once.
+        assert!(!w.blocked(false, true, false, at(50)));
+        assert!(!w.blocked(true, true, false, at(60)));
+    }
+
+    /// One whole look: the site's answer, the feed's, then the question.
+    fn look(w: &mut Watch, t: Instant, at: u64, feed: &str, internet: bool) -> (State, bool) {
+        let now = t + Duration::from_secs(at);
+        w.step(Site::Failed, Some(read_feed(feed)), now);
+        (w.state, w.blocked(true, false, internet, now))
+    }
+
+    /// Kryoto really down: the rest of the internet answers here too, and
+    /// that must never read as this network blocking it.
+    #[test]
+    fn kryoto_down_is_never_called_blocked() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        // The status page has not noticed yet: nobody is blamed.
+        for at in (0..=110).step_by(10) {
+            assert_eq!(look(&mut w, t, at, FINE, true), (State::Ok, false), "at {at}");
+        }
+        // It has: down, not blocked, for as long as it lasts.
+        for at in (120..=900).step_by(20) {
+            assert_eq!(look(&mut w, t, at, SITE_DOWN, true), (State::Down, false), "at {at}");
+        }
+    }
+
+    /// The status page, from outside, keeps saying the site is fine while
+    /// this PC reaches the internet and not kryo.to: this network.
+    #[test]
+    fn the_site_fine_from_outside_and_unreachable_here_is_blocked() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in (0..=110).step_by(10) {
+            assert!(!look(&mut w, t, at, FINE, true).1, "at {at}");
+        }
+        assert_eq!(look(&mut w, t, 120, FINE, true), (State::Unreachable, true));
+        // The status page is under kryo.to too: a block usually takes both.
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in [0, 10, 20] {
+            assert!(!look(&mut w, t, at, "<html>", true).1, "at {at}");
+        }
+        assert!(look(&mut w, t, 30, "<html>", true).1);
+    }
+
+    #[test]
+    fn no_internet_at_all_is_not_a_blocked_network() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in (0..=300).step_by(10) {
+            assert!(!look(&mut w, t, at, "<html>", false).1, "at {at}");
         }
     }
 
