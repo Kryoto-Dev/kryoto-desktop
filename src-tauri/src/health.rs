@@ -79,6 +79,8 @@ pub struct Health {
     /// page reaches kryo.to, or a neutral address answers): this network is
     /// blocking kryo.to, as internet providers in some countries do for sites
     /// on piracy lists. The player is told so and what gets around it.
+    /// Like an outage, only once it has lasted (`FAILS` over `GRACE`), and
+    /// never while the status feed says the site itself is down.
     pub blocked: bool,
 }
 
@@ -169,9 +171,31 @@ struct Watch {
     parts: Vec<String>,
     seen_parts: Vec<String>,
     part_reads: u32,
+    /// Rounds in a row that looked like this network blocking kryo.to, and
+    /// since when: counted apart from `fails`, because the Store page reaching
+    /// kryo.to is a block for this app and no failure for the Store.
+    blocks: u32,
+    first_block: Option<Instant>,
+    blocked: bool,
 }
 
 impl Watch {
+    /// Takes this round's word on a block: this app got no answer from kryo.to
+    /// while the Store page or a neutral address did. Like a failure, it is
+    /// said only once it has lasted. Any other round ends it: kryo.to answered,
+    /// or nothing else did either, so it is not this network.
+    fn step_block(&mut self, looks_blocked: bool, now: Instant) {
+        if looks_blocked {
+            self.blocks += 1;
+            let since = *self.first_block.get_or_insert(now);
+            self.blocked = self.blocks >= FAILS && now.duration_since(since) >= GRACE;
+        } else {
+            self.blocks = 0;
+            self.first_block = None;
+            self.blocked = false;
+        }
+    }
+
     fn step(&mut self, site: Site, feed: Option<Feed>, now: Instant) {
         if feed.is_some() {
             self.feed = feed;
@@ -237,9 +261,9 @@ impl Watch {
         }
     }
 
-    /// Anything less than calm: look again soon.
+    /// Anything less than calm, or a block not yet said: look again soon.
     fn watchful(&self) -> bool {
-        self.fails > 0 || self.state != State::Ok || !self.seen_parts.is_empty()
+        self.fails > 0 || self.state != State::Ok || !self.seen_parts.is_empty() || (self.blocks > 0 && !self.blocked)
     }
 
     fn report(&self, status_url: String) -> Health {
@@ -249,7 +273,8 @@ impl Watch {
             answering: self.fails == 0 || self.oks > 0,
             status_up: !matches!(self.feed, Some(Feed::Dead) | None),
             status_url,
-            blocked: false,
+            // The feed saying the site is down outranks it: then it is not this network.
+            blocked: self.blocked && !matches!(self.feed, Some(Feed::Says { site_bad: true, .. })),
         }
     }
 }
@@ -286,8 +311,6 @@ pub fn page_answered(code: u16, body: String) {
     PAGE_ANSWERED.notify_one();
 }
 
-/// The Store page's own reading of the site, when it is on kryo.to and
-/// answers in time; `None` when it cannot say.
 /// Whether the internet answers from this PC at all, asked only when kryo.to
 /// did not: two neutral addresses, either is enough.
 async fn internet_answers(client: &reqwest::Client) -> Result<(), String> {
@@ -302,6 +325,8 @@ async fn internet_answers(client: &reqwest::Client) -> Result<(), String> {
     Err(why.join("; "))
 }
 
+/// The Store page's own reading of the site, when it is on kryo.to and
+/// answers in time; `None` when it cannot say.
 async fn ask_page<R: Runtime>(app: &AppHandle<R>) -> Option<Site> {
     let store = app.get_webview(crate::STORE)?;
     PAGE.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -376,7 +401,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
             let page_reached = page.as_ref().is_some_and(|p| *p != Site::Failed);
             // kryo.to failed here: does anything else answer? Then it is this network.
             let internet = if own.is_err() && !page_reached { Some(internet_answers(&client).await) } else { None };
-            let blocked = own.is_err() && (page_reached || matches!(internet, Some(Ok(()))));
+            let looks_blocked = own.is_err() && (page_reached || matches!(internet, Some(Ok(()))));
             // For the log: what this round actually saw, in words.
             let seen = format!(
                 "own request: {}; Store page: {}",
@@ -402,9 +427,10 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
             };
             round = round.wrapping_add(1);
             let was = watch.state;
-            watch.step(site, feed, Instant::now());
-            let mut health = watch.report(status);
-            health.blocked = blocked;
+            let at = Instant::now();
+            watch.step(site, feed, at);
+            watch.step_block(looks_blocked, at);
+            let health = watch.report(status);
             let changed = {
                 let mut now = NOW.lock().expect("health");
                 let changed = now.as_ref() != Some(&health);
@@ -553,5 +579,67 @@ mod tests {
         assert_eq!(read_site(503, body), Site::Degraded(vec!["Chat".to_string()]));
         assert_eq!(read_site(502, "<html>Bad gateway</html>"), Site::Failed);
         assert_eq!(read_site(429, "slow down"), Site::Fine);
+    }
+
+    /// One round as `start` runs it: what was read, and whether this app
+    /// missed kryo.to while the Store page or a neutral address answered.
+    fn round(watch: &mut Watch, start: Instant, at: u64, site: Site, feed: Option<&str>, looks_blocked: bool) -> Health {
+        let now = start + Duration::from_secs(at);
+        watch.step(site, feed.map(read_feed), now);
+        watch.step_block(looks_blocked, now);
+        watch.report(String::new())
+    }
+
+    /// A blip (waking from sleep, one slow answer) while the rest of the
+    /// internet answers is no blocked network: nobody is told to get a VPN.
+    #[test]
+    fn one_round_that_looks_blocked_says_nothing() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        assert!(!round(&mut w, t, 0, Site::Failed, Some(FINE), true).blocked);
+        assert!(!round(&mut w, t, 10, Site::Fine, Some(FINE), false).blocked);
+        assert!(!round(&mut w, t, 40, Site::Failed, Some(FINE), true).blocked);
+    }
+
+    #[test]
+    fn a_block_is_said_once_it_has_lasted_and_goes_with_an_answer() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in [0, 10, 20] {
+            assert!(!round(&mut w, t, at, Site::Failed, Some(FINE), true).blocked, "at {at}");
+        }
+        assert!(round(&mut w, t, 30, Site::Failed, Some(FINE), true).blocked);
+        assert!(!round(&mut w, t, 40, Site::Fine, Some(FINE), false).blocked);
+    }
+
+    /// The status page saying the site is down outranks it: "Kryoto itself is
+    /// up, try a VPN" is never said while Kryoto is down. Once the feed says
+    /// the site is back and kryo.to still does not answer here, it is this network.
+    #[test]
+    fn the_status_page_saying_down_is_never_called_a_block() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in (0..=60).step_by(10) {
+            assert!(!round(&mut w, t, at, Site::Failed, Some(SITE_DOWN), true).blocked, "at {at}");
+        }
+        assert_eq!(w.state, State::Down);
+        let health = round(&mut w, t, 70, Site::Failed, Some(FINE), true);
+        assert_eq!(health.state, State::Down);
+        assert!(health.blocked);
+    }
+
+    /// The Store page reaching kryo.to while this app cannot: the Store stays
+    /// up, the watcher looks again soon while it might be a block, and the
+    /// block on this app's own requests is said after the same wait.
+    #[test]
+    fn the_store_page_reaching_kryoto_is_a_block_once_it_has_lasted() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in [0, 10, 20] {
+            let health = round(&mut w, t, at, Site::Fine, Some(FINE), true);
+            assert!(!health.blocked, "at {at}");
+            assert_eq!(health.state, State::Ok);
+            assert!(w.watchful(), "at {at}");
+        }
+        let health = round(&mut w, t, 30, Site::Fine, Some(FINE), true);
+        assert!(health.blocked);
+        assert_eq!(health.state, State::Ok);
+        assert!(!w.watchful());
     }
 }
