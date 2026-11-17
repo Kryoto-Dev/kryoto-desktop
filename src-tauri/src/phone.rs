@@ -545,8 +545,10 @@ pub fn control_download(app: &AppHandle, id: &str, action: &str) -> Result<(), S
             return Err("That download has already finished transferring.".into());
         }
         "pause" => {
+            // The PC's own Pause: a row that is unpacking or merging an update
+            // stays so until its worker stops, and a failed one stays failed.
             downloads::download_pause(app.clone(), state, id.to_string());
-            downloads::remote_control(app, id, downloads::Status::Paused)?;
+            downloads::persist_checked(app)?;
         }
         "resume" => {
             downloads::download_resume(app.clone(), id.to_string())?;
