@@ -475,6 +475,62 @@ try {
       assert.ok(now.seenNotices.includes('check-seen'), `seen: ${JSON.stringify(now.seenNotices)}`)
     } finally { await cloud.close() }
   })
+  await check('the Troubleshooting log stays where it was scrolled, and Refresh goes to the newest lines', async () => {
+    const logs = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    logs.on('pageerror', e => failures.push(e.message))
+    await logs.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await logs.goto(base)
+      await logs.getByRole('complementary', { name: 'Your games' }).waitFor()
+      // A log longer than the 400 lines the box shows, so each new line drops one off the top.
+      await logs.evaluate(async () => {
+        const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(name))
+        const bridge = await import(loaded('/src/lib/bridge.ts'))
+        const preview = await import(loaded('/src/lib/preview.ts'))
+        window.logLines = Array.from({ length: 500 }, (_, i) => `2026-09-25 14:03:07Z INFO  preview: line ${i}`)
+        window.addLog = n => { for (let i = 0; i < n; i++) window.logLines.push(`2026-09-25 14:03:08Z INFO  preview: line ${window.logLines.length}`) }
+        bridge.useWebBackend({
+          call: (c, a) => (c === 'logs_tail' ? Promise.resolve(window.logLines.slice(-a.lines).join('\n')) : preview.previewCall(c, a)),
+          on: (e, h) => preview.previewBus.on(e, h),
+        })
+      })
+      await logs.getByRole('button', { name: 'Account menu' }).click()
+      await logs.getByRole('menuitem', { name: /Settings/ }).click()
+      await logs.getByRole('button', { name: 'Troubleshooting', exact: true }).click()
+      const box = logs.locator('pre', { hasText: 'preview: line 499' })
+      await box.waitFor()
+      const pre = await box.elementHandle()
+      const atBottom = () => logs.waitForFunction(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2, pre)
+      const shows = line => logs.waitForFunction(([el, line]) => el.textContent.includes(line), [pre, line])
+      // The first line in view, read from the rows themselves.
+      const top = () => box.evaluate(el => [...el.children].find(r => r.getBoundingClientRect().bottom > el.getBoundingClientRect().top + 1).textContent)
+      await atBottom()
+      // Read from the middle while new lines come in: the same line stays at the top.
+      await box.evaluate(el => { el.style.height = '120px'; el.scrollTop = el.children[50].offsetTop - el.firstElementChild.offsetTop })
+      const reading = await top()
+      assert.match(reading, /line 1[45]\d$/)
+      await logs.evaluate(() => window.addLog(5))
+      await shows('line 504')
+      await logs.waitForTimeout(100)
+      assert.equal(await top(), reading)
+      // A selection dragged into the box from outside it holds the box as it is.
+      await box.evaluate(el => document.getSelection().setBaseAndExtent(el.parentElement, 0, el.children[60].firstChild, 5))
+      await logs.evaluate(() => window.addLog(1))
+      await logs.waitForTimeout(3500)
+      assert.ok(!(await box.textContent()).includes('line 505'))
+      await logs.evaluate(() => document.getSelection().removeAllRanges())
+      await shows('line 505')
+      // At the bottom, the box follows new lines.
+      await box.evaluate(el => { el.scrollTop = el.scrollHeight })
+      await logs.evaluate(() => window.addLog(3))
+      await shows('line 508')
+      await atBottom()
+      // Refresh goes to the newest lines from anywhere.
+      await box.evaluate(el => { el.scrollTop = 0 })
+      await logs.getByRole('button', { name: 'Refresh', exact: true }).click()
+      await atBottom()
+    } finally { await logs.close() }
+  })
   await check('achievement repair offers gbe_fork and every RUNE profile with Undo between attempts', async () => {
     const achievements = await browser.newPage({ viewport: { width: 1100, height: 860 } })
     // This journey starts after startup setup; Windows otherwise waits at the
