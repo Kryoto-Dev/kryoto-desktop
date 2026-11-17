@@ -261,9 +261,14 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
   const [state, setState] = useState<'idle' | 'saving' | 'saved' | string>('idle')
   const [endpointDraft, setEndpointDraft] = useState(stored?.catalogEndpoint ?? '')
   const timer = useRef<number | undefined>(undefined)
+  // What this page changed and has not saved yet: only these go over what is
+  // saved, so a choice saved elsewhere on the page (where saves are kept, a
+  // notice seen) is not undone by the next switch.
+  const pending = useRef<Partial<Settings>>({})
+  const synced = (saved: Settings) => setS({ ...saved, ...pending.current })
   useEffect(() => {
-    if (stored && (!s || (s.recoveryError && !stored.recoveryError))) setS(stored)
-  }, [stored, s])
+    if (stored) synced(stored)
+  }, [stored])
   useEffect(() => {
     if (stored) setEndpointDraft(stored.catalogEndpoint)
   }, [stored?.catalogEndpoint])
@@ -276,23 +281,20 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => patch({ [k]: v } as Partial<Settings>)
   const patch = (p: Partial<Settings>) => {
     if (!s) return
-    const next = { ...s, ...p }
-    setS(next)
+    pending.current = { ...pending.current, ...p }
+    setS({ ...s, ...p })
     setState('saving')
     window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => {
-      // Storage changes its folders straight to disk; keep those.
+      const sent = { ...pending.current }
       void settingsApi
-        .get()
-        .then((latest) =>
-          settingsApi.save({
-            ...next,
-            libraryDir: latest.libraryDir,
-            libraryFolders: latest.libraryFolders,
-            ...('pet' in p || 'petMascot' in p ? {} : { pet: latest.pet, petMascot: latest.petMascot }),
-          }),
-        )
-        .then(() => setState('saved'))
+        .change((latest) => ({ ...latest, ...sent }))
+        .then(() => {
+          // Saved; a field changed again meanwhile is still to go.
+          pending.current = Object.fromEntries(Object.entries(pending.current).filter(([k, v]) => sent[k as keyof Settings] !== v))
+          setState('saved')
+        })
+        // Not saved: still pending, it goes with the next change.
         .catch((e: unknown) => setState(errorText(e)))
     }, 250)
   }
@@ -317,7 +319,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
       .get()
       .then((latest) => settingsApi.save({ ...latest, catalogEndpoint: endpoint }))
       .then((saved) => {
-        setS(saved)
+        synced(saved)
         setEndpointDraft(saved.catalogEndpoint)
         setState('saved')
       })
@@ -403,7 +405,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
             <Check checked={s.deleteArchives} onChange={(v) => set('deleteArchives', v)} label="Delete the archive once a game is installed" />
             <Check checked={s.notifyDownloads} onChange={(v) => set('notifyDownloads', v)} label="Tell me when a game is ready to play" />
             <GameUpdatesSection settings={s} set={set} />
-            <DebridSection s={s} onSaved={setS} />
+            <DebridSection s={s} onSaved={synced} />
           </>
         ) : null}
         {section === 'general' ? (
@@ -458,7 +460,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
                 Patchbay: your own servers
               </summary>
               <div className="grid gap-4 pt-5">
-                <PatchbayPane s={s} onSaved={setS} />
+                <PatchbayPane s={s} onSaved={synced} />
               </div>
             </details>
           </>
