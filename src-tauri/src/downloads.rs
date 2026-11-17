@@ -2284,6 +2284,17 @@ async fn remint_same_file<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     false
 }
 
+/// The whole archive is on the disk, so Retry or Resume can skip fetching it.
+/// One stream counts only what the disk confirmed (`synced`), not the live
+/// count: after a failed last sync, Retry used to install what the disk never
+/// confirmed (KB-0308).
+fn fully_fetched(d: &Download) -> bool {
+    !d.archive_path.is_empty()
+        && d.total.is_some_and(|t| t > 0 && d.received >= t)
+        && d.segments.iter().all(|s| s.done >= s.len())
+        && (!d.segments.is_empty() || d.synced.is_none_or(|s| d.total.is_some_and(|t| s >= t)))
+}
+
 async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<(), String> {
     let settings = crate::settings::load(app);
     let client = client_builder().build().map_err(|e| e.to_string())?;
@@ -2364,7 +2375,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
     }
     let already_complete = {
         let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
-        let fetched = !d.archive_path.is_empty() && d.total.is_some_and(|t| t > 0 && d.received >= t) && d.segments.iter().all(|s| s.done >= s.len());
+        let fetched = fully_fetched(&d);
         // Fetched once, but the file has gone since (an antivirus took it, or
         // somebody tidied the folder): Retry fetches it again. It used to fail
         // the same way for ever, "Could not read the archive to check it".
@@ -7490,6 +7501,24 @@ mod tests {
         std::fs::write(&file, b"kryoto").unwrap();
         assert!(sync_to_disk(&file).is_ok());
         assert!(disk_failed(&file, "I/O error").contains("Retry"));
+    }
+
+    /// One stream whose last sync failed: all of it arrived, but the disk
+    /// confirmed only part. Retry fetches the rest rather than install it.
+    #[test]
+    fn retry_skips_the_fetch_only_for_what_the_disk_confirmed() {
+        let one = |synced| Download { archive_path: "C:/x.7z".into(), total: Some(100), received: 100, synced, ..Default::default() };
+        assert!(!fully_fetched(&one(Some(40))), "the disk confirmed 40 of 100");
+        assert!(fully_fetched(&one(Some(100))));
+        assert!(fully_fetched(&one(None)), "an older row goes by its length as before");
+
+        // Ranges go by their ranges, whatever `synced` says.
+        let ranged = |done| Download { segments: vec![Segment { start: 0, end: 99, done }], ..one(Some(0)) };
+        assert!(!fully_fetched(&ranged(60)));
+        assert!(fully_fetched(&ranged(100)));
+
+        assert!(!fully_fetched(&Download { archive_path: String::new(), ..one(Some(100)) }));
+        assert!(!fully_fetched(&Download { total: Some(0), received: 0, ..one(None) }));
     }
 
     /// Ranges one after another on the same client go on the connection the
