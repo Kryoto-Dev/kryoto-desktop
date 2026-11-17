@@ -253,7 +253,9 @@ impl Api {
             return store.prepare(body);
         }
         let v = self.send(self.http.post(self.url("/api/saves/prepare")).json(&body)).await?;
-        serde_json::from_value(v).map_err(|e| ApiError::Other(e.to_string()))
+        let prepared: Prepared = serde_json::from_value(v).map_err(|e| ApiError::Other(e.to_string()))?;
+        web_address(&prepared.url, &self.place)?;
+        Ok(prepared)
     }
 
     pub async fn claim(&self, upload_id: &str) -> Result<Version, ApiError> {
@@ -269,7 +271,9 @@ impl Api {
             return store.link(version_id);
         }
         let v = self.send(self.http.post(self.url("/api/saves/link")).json(&json!({ "versionId": version_id }))).await?;
-        serde_json::from_value(v).map_err(|e| ApiError::Other(e.to_string()))
+        let link: Link = serde_json::from_value(v).map_err(|e| ApiError::Other(e.to_string()))?;
+        web_address(&link.url, &self.place)?;
+        Ok(link)
     }
 
     pub async fn rules(&self, keys: &[String]) -> Result<HashMap<String, Vec<kryoto_saves::Rule>>, ApiError> {
@@ -291,6 +295,16 @@ impl Api {
         }
         let rules: Vec<_> = rules.iter().take(20).map(|r| json!({ "kind": r.kind, "root": r.root, "path": r.path, "excludes": r.excludes, "source": "detected" })).collect();
         self.send(self.http.post(self.url("/api/saves/rules/report")).json(&json!({ "gameKey": game_key, "rules": rules, "traced": traced }))).await.map(|_| ())
+    }
+}
+
+/// Where a server says to put or fetch a backup. Only a web address is taken
+/// from a server: `upload` and `download` follow a `file:` address to a file
+/// on this PC, and only the folder kept on this PC (local.rs) hands those out.
+fn web_address(url: &str, place: &str) -> Result<(), ApiError> {
+    match url::Url::parse(url) {
+        Ok(u) if matches!(u.scheme(), "https" | "http") => Ok(()),
+        _ => Err(ApiError::Other(format!("{place} answered with a storage address that is not a web address."))),
     }
 }
 
@@ -388,4 +402,62 @@ pub async fn download(url: &str, out: &Path, max: u64, on_got: impl Fn(u64, u64)
     f.flush().await.map_err(|e| e.to_string())?;
     drop(f);
     tokio::fs::rename(&tmp, out).await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A save server of the player's own that answers one request with `reply`.
+    async fn own_server(reply: serde_json::Value) -> Api {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // The whole request first: closing on unread bytes can reset the
+            // connection, and the test would pass on that error instead.
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                got.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&got).to_ascii_lowercase();
+                let whole = text.find("\r\n\r\n").is_some_and(|end| {
+                    let length = text[..end].lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    got.len() >= end + 4 + length
+                });
+                if n == 0 || whole {
+                    break;
+                }
+            }
+            let body = reply.to_string();
+            let res = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(res.as_bytes()).await.unwrap();
+        });
+        let own = crate::patchbay::Own { base: base.clone(), host: "the save server".into(), token: None };
+        Api { http: reqwest::Client::builder().no_proxy().build().unwrap(), base, place: own.host.clone(), auth: Auth::Own(own) }
+    }
+
+    #[tokio::test]
+    async fn a_server_cannot_send_a_backup_to_a_file_on_this_pc() {
+        let file = "file:///C:/Users/player/Documents/thesis.docx";
+        let refused = |r: Result<String, ApiError>| matches!(r, Err(ApiError::Other(m)) if m == "the save server answered with a storage address that is not a web address.");
+        assert!(refused(own_server(json!({ "uploadId": "x", "url": file })).await.prepare(json!({})).await.map(|p| p.url)));
+        assert!(refused(own_server(json!({ "url": file, "size": 4 })).await.link("x").await.map(|l| l.url)));
+        // The same server with a web address is taken at its word.
+        let web = "http://192.168.1.20:8787/upload/x?key=abc";
+        assert_eq!(own_server(json!({ "uploadId": "x", "url": web })).await.prepare(json!({})).await.unwrap().url, web);
+        assert_eq!(own_server(json!({ "url": web, "size": 4 })).await.link("x").await.unwrap().url, web);
+    }
+
+    #[test]
+    fn only_web_addresses_are_taken_from_a_server() {
+        for url in ["https://storage.kryo.to/saves/x?sig=1", "http://192.168.1.20:8787/download/x?key=abc"] {
+            assert_eq!(web_address(url, "kryo.to"), Ok(()), "{url}");
+        }
+        for url in ["file:///C:/Windows/win.ini", "FILE:///home/player/.bashrc", "file://server/share/x", r"C:\Users\player\x", "/upload/x", "ftp://example.com/x", ""] {
+            assert!(web_address(url, "kryo.to").is_err(), "{url}");
+        }
+    }
 }
