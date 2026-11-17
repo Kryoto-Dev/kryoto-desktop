@@ -6162,10 +6162,16 @@ pub fn download_pause(app: AppHandle, state: State<'_, Downloads>, id: String) {
         stop_resolving(&app, &id);
         // A waiting one stops at once instead of at its next check.
         state.turn.notify_waiters();
-    } else if edit(&app, &id, |_| {}).is_some_and(|d| matches!(d.status, Status::Queued | Status::Resolving | Status::Downloading)) {
+    } else if edit(&app, &id, |_| {}).is_some_and(|d| pauses_without_worker(d.status)) {
         // Nothing running behind the row, so nothing would ever say it stopped.
         set_status(&app, &id, Status::Paused, None);
     }
+}
+
+/// Pause on a row with nothing running behind it marks it Paused only if it
+/// was on its way. One that is unpacking, failed or finished keeps its status.
+fn pauses_without_worker(status: Status) -> bool {
+    matches!(status, Status::Queued | Status::Resolving | Status::Downloading)
 }
 
 /// A download stopped while its mirror's page was open: close the page.
@@ -6304,6 +6310,19 @@ pub fn download_remove(app: AppHandle, state: State<'_, Downloads>, id: String) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pause from the phone or kryo.to goes through `download_pause` too: a
+    /// row merging an update stays Extracting, so Play still waits for it,
+    /// and a failed one keeps Install anyway.
+    #[test]
+    fn pause_without_a_worker_only_stops_a_row_on_its_way() {
+        for status in [Status::Queued, Status::Resolving, Status::Downloading] {
+            assert!(pauses_without_worker(status), "{status:?}");
+        }
+        for status in [Status::Extracting, Status::Verifying, Status::Failed, Status::Canceled, Status::Paused, Status::Installed] {
+            assert!(!pauses_without_worker(status), "{status:?}");
+        }
+    }
 
     #[test]
     fn asks_where_only_with_two_folders_and_a_new_game() {

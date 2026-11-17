@@ -287,7 +287,7 @@ fn game_id_of(c: &RemoteCommand) -> Result<String, String> {
 /// Do what kryo.to queued: start a download (from kryo.to's own filehost only),
 /// or pause, resume or cancel one. Confirm each durable acceptance separately.
 #[tauri::command(async)]
-pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads>, commands: Vec<RemoteCommand>) -> Result<Vec<RemoteResult>, String> {
+pub fn remote_apply(app: AppHandle, webview: Webview, commands: Vec<RemoteCommand>) -> Result<Vec<RemoteResult>, String> {
     remote_from_store(&app, &webview)?;
     let _guard = APPLY.lock().map_err(|_| "remote command lock poisoned")?;
     let settings = crate::settings::load(&app);
@@ -349,24 +349,7 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
             }
             "pause" | "resume" | "cancel" => {
                 let download_id = c.download_id.filter(|i| !i.is_empty() && i.len() <= 80).ok_or("Invalid download ID.")?;
-                let current = downloads::snapshot(&app, &download_id).ok_or("That download is no longer in the list.")?;
-                if current.status == downloads::Status::Installed {
-                    return Err("That download has already finished transferring.".into());
-                }
-                match c.kind.as_str() {
-                    "pause" => {
-                        downloads::download_pause(app.clone(), state.clone(), download_id.clone());
-                        downloads::remote_control(&app, &download_id, downloads::Status::Paused)?;
-                    }
-                    "resume" => {
-                        downloads::download_resume(app.clone(), download_id)?;
-                        downloads::persist_checked(&app)?;
-                    }
-                    _ => {
-                        downloads::download_cancel(app.clone(), state.clone(), download_id.clone());
-                        downloads::remote_control(&app, &download_id, downloads::Status::Canceled)?;
-                    }
-                }
+                phone::control_download(&app, &download_id, c.kind.as_str())?;
             }
             // Protocol 3: what the phone does on this network, through kryo.to.
             "clear" => {
