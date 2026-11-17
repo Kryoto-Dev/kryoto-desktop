@@ -35,8 +35,14 @@ fn file_stem(title: &str) -> String {
     if s.is_empty() { "Game".to_string() } else { s.to_string() }
 }
 
+/// The link is the whole value at the end of its line (`URL=<link>`, or
+/// `Exec="<app>" <link>`), so `.../hades` is not `.../hades-2`.
 fn is_ours(path: &Path, link: &str) -> bool {
-    std::fs::read(path).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).lines().any(|l| l.contains(link)))
+    std::fs::read(path).is_ok_and(|bytes| {
+        String::from_utf8_lossy(&bytes).lines().any(|l| {
+            l.trim_end().strip_suffix(link).is_some_and(|rest| rest.ends_with('=') || rest.ends_with(char::is_whitespace))
+        })
+    })
 }
 
 /// Where to write: the title, or the title and the id when that name is
@@ -238,6 +244,21 @@ mod tests {
         assert_eq!(free_path(&dir, "Hades", "hades", "url", link), dir.join("Hades (hades).url"));
         std::fs::write(dir.join("Hades.url"), url_file(link, None)).unwrap();
         assert_eq!(free_path(&dir, "Hades", "hades", "url", link), dir.join("Hades.url"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_game_whose_id_starts_another_s_leaves_its_shortcut_alone() {
+        let dir = std::env::temp_dir().join(format!("kryoto-shortcuts-prefix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (link, other) = ("kryoto://library/hades", "kryoto://library/hades-2");
+        std::fs::write(dir.join("Hades.url"), url_file(other, None)).unwrap();
+        assert!(!is_ours(&dir.join("Hades.url"), link));
+        assert!(is_ours(&dir.join("Hades.url"), other));
+        assert_eq!(free_path(&dir, "Hades", "hades", "url", link), dir.join("Hades (hades).url"));
+        std::fs::write(dir.join("Hades.desktop"), desktop_entry("Hades", Path::new("/opt/k"), other, None)).unwrap();
+        assert!(!is_ours(&dir.join("Hades.desktop"), link));
+        assert!(is_ours(&dir.join("Hades.desktop"), other));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
