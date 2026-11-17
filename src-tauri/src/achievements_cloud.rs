@@ -262,13 +262,11 @@ pub(crate) fn apply(app: &AppHandle, running: &Running, report: Report) -> Resul
         if unlocks.is_empty() {
             continue;
         }
-        let roots = roots(&app, game);
-        let have: BTreeSet<String> = ach::read_unlocked(&roots, appid).into_iter().map(|u| u.name).collect();
+        let Some((dir, have)) = restore_target(&roots(&app, game), appid) else { continue };
         let missing: Vec<&CloudUnlock> = unlocks.iter().filter(|u| !have.contains(&u.name)).collect();
         if missing.is_empty() {
             continue;
         }
-        let Some(dir) = roots.app_data.as_ref().map(|a| a.join("GSE Saves").join(appid)) else { continue };
         match restore(&dir, &missing) {
             Ok(n) if n > 0 => {
                 restored += n;
@@ -294,7 +292,25 @@ pub(crate) fn apply(app: &AppHandle, running: &Running, report: Report) -> Resul
     Ok(restored)
 }
 
-/// Add unlocks to gbe_fork's save (`GSE Saves/<appid>/achievements.json`),
+/// The save folder restored unlocks go to, and what is unlocked already.
+/// A game whose own settings send its saves elsewhere ([`Roots::with_game`])
+/// reads only that folder: they go there, and only that save counts, so a
+/// copy in `GSE Saves` the game never reads cannot hide them. Otherwise
+/// gbe_fork's default, and any emulator's save on this PC counts, so a RUNE
+/// or CODEX game gets no second copy. Pure, for tests.
+fn restore_target(roots: &Roots, appid: &str) -> Option<(PathBuf, BTreeSet<String>)> {
+    let Some(base) = roots.game_saves.first() else {
+        let dir = roots.app_data.as_ref()?.join("GSE Saves").join(appid);
+        return Some((dir, ach::read_unlocked(roots, appid).into_iter().map(|u| u.name).collect()));
+    };
+    let dir = base.join(appid);
+    let have = std::fs::read(dir.join(ach::GBE_FILE))
+        .map(|b| ach::parse_goldberg(String::from_utf8_lossy(&b).trim_start_matches('\u{feff}')))
+        .unwrap_or_default();
+    Some((dir, have.into_iter().map(|u| u.name).collect()))
+}
+
+/// Add unlocks to gbe_fork's save (`<saves>/<appid>/achievements.json`),
 /// keeping everything already in it. Returns how many were added.
 fn restore(dir: &Path, missing: &[&CloudUnlock]) -> Result<usize, String> {
     let file = dir.join(ach::GBE_FILE);
@@ -483,6 +499,41 @@ mod tests {
         restore(&save, &[&x]).unwrap();
         let got = ach::read_unlocked(&Roots { app_data: Some(base.clone()), ..Default::default() }, "620");
         assert_eq!(got, vec![Unlock { name: "ACH.WAKE_UP".into(), time: Some(1_700_000_000) }]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn restore_goes_where_a_portable_build_saves() {
+        let base = dir("portable");
+        let settings = base.join("game").join("steam_settings");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(settings.join("configs.user.ini"), "[user::saves]\nlocal_save_path=./saves\n").unwrap();
+        let roots = Roots { app_data: Some(base.join("appdata")), ..Default::default() }.with_game(&base.join("game"));
+        let (target, have) = restore_target(&roots, "620").unwrap();
+        assert_eq!(target, base.join("game").join("saves").join("620"));
+        assert!(have.is_empty());
+        let x = CloudUnlock { name: "X".into(), unlocked_at: Some(1_700_000_000) };
+        assert_eq!(restore(&target, &[&x]).unwrap(), 1);
+        assert!(!base.join("appdata").join("GSE Saves").exists(), "nothing in the folder the game never reads");
+        // An earlier copy in GSE Saves does not count: the game never read it.
+        std::fs::remove_dir_all(base.join("game").join("saves")).unwrap();
+        restore(&base.join("appdata").join("GSE Saves").join("620"), &[&x]).unwrap();
+        let (target, have) = restore_target(&roots, "620").unwrap();
+        assert_eq!(target, base.join("game").join("saves").join("620"));
+        assert!(!have.contains("X"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn restore_counts_any_emulators_save_by_default() {
+        let base = dir("default");
+        let codex = base.join("public").join("Steam").join("CODEX").join("620");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("achievements.ini"), "[X]\nAchieved=1\nUnlockTime=5\n").unwrap();
+        let roots = Roots { app_data: Some(base.join("appdata")), public_documents: Some(base.join("public")), ..Default::default() };
+        let (target, have) = restore_target(&roots, "620").unwrap();
+        assert_eq!(target, base.join("appdata").join("GSE Saves").join("620"));
+        assert!(have.contains("X"), "a CODEX game gets no second copy");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
