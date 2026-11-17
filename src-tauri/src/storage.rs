@@ -78,16 +78,49 @@ fn drive_of(path: &Path) -> String {
 /// library folder, as `D:\Games\Steam` does with `D:\Games\Steam\Library` added.
 pub fn game_folder(folders: &[String], install_dir: &str) -> Option<PathBuf> {
     let dir = PathBuf::from(install_dir).canonicalize().ok()?;
-    let roots: Vec<PathBuf> = folders.iter().filter_map(|f| PathBuf::from(f).canonicalize().ok()).collect();
-    let root = roots.iter().filter(|r| dir.starts_with(r)).max_by_key(|r| r.components().count())?;
+    own_folder(&canonical_roots(folders), &dir).map(|(_, folder)| folder)
+}
+
+/// `game_folder` on paths already canonical, with which of `roots` it is in.
+fn own_folder(roots: &[Option<PathBuf>], dir: &Path) -> Option<(usize, PathBuf)> {
+    let at = innermost_root(roots, dir)?;
+    let root = roots[at].as_ref()?;
     let Some(Component::Normal(name)) = dir.strip_prefix(root).ok()?.components().next() else {
         return None;
     };
     let folder = root.join(name);
-    if roots.iter().any(|r| r.starts_with(&folder)) {
+    if roots.iter().flatten().any(|r| r.starts_with(&folder)) {
         return None;
     }
-    Some(folder)
+    Some((at, folder))
+}
+
+/// The library folders as the disk spells them, in the same order: `None` for
+/// one that is not there, such as a drive that is unplugged.
+fn canonical_roots(folders: &[String]) -> Vec<Option<PathBuf>> {
+    folders.iter().map(|f| PathBuf::from(f).canonicalize().ok()).collect()
+}
+
+/// Which of `roots` the canonical `dir` is in: the innermost, so with
+/// `D:\Games` and `D:\Games\Kryoto` both library folders a game in the second
+/// is in the second, whichever comes first.
+fn innermost_root(roots: &[Option<PathBuf>], dir: &Path) -> Option<usize> {
+    roots
+        .iter()
+        .enumerate()
+        .filter_map(|(at, r)| r.as_ref().filter(|r| dir.starts_with(r)).map(|r| (at, r.components().count())))
+        .max_by_key(|&(_, depth)| depth)
+        .map(|(at, _)| at)
+}
+
+/// How many games Settings > Storage lists under `roots[at]`: those in their
+/// own folder in it, and not in a library folder inside it.
+fn games_in(roots: &[Option<PathBuf>], at: usize, games: &[LibraryGame]) -> usize {
+    games
+        .iter()
+        .filter_map(|g| PathBuf::from(&g.install_dir).canonicalize().ok())
+        .filter(|dir| own_folder(roots, dir).is_some_and(|(i, _)| i == at))
+        .count()
 }
 
 /// Another game in the library is also in `folder`: deleting or moving it
@@ -244,6 +277,7 @@ fn overview<R: Runtime>(app: &AppHandle<R>) -> Result<StorageOverview, String> {
     let s = settings::load(app);
     let folders = settings::all_folders(&s);
     let games = library::load(app)?;
+    let roots = canonical_roots(&folders);
     let mut out: Vec<LibraryFolder> = folders
         .iter()
         .map(|f| {
@@ -269,10 +303,8 @@ fn overview<R: Runtime>(app: &AppHandle<R>) -> Result<StorageOverview, String> {
         }
         match game_folder(&folders, &g.install_dir) {
             Some(dir) => {
-                let at = out
-                    .iter()
-                    .position(|f| PathBuf::from(&f.path).canonicalize().is_ok_and(|r| dir.starts_with(r)))
-                    .unwrap_or(0);
+                // Listed under the library folder `game_folder` found it in.
+                let at = innermost_root(&roots, &dir).unwrap_or(0);
                 out[at].games.push(stored(g, dir, None));
             }
             None => elsewhere.push(match outside_root(&games, &folders, g) {
@@ -336,8 +368,12 @@ pub fn storage_remove_folder(app: AppHandle, path: String) -> Result<(), String>
     if same_path(&path, &s.library_dir) {
         return Err("New games install here. Make another folder the default first.".into());
     }
-    let folders = vec![path.clone()];
-    let inside = library::load(&app)?.iter().filter(|g| game_folder(&folders, &g.install_dir).is_some()).count();
+    // A game in a library folder inside this one stays where it is.
+    let folders = settings::all_folders(&s);
+    let inside = match folders.iter().position(|f| settings::same_folder(f, &path)) {
+        Some(at) => games_in(&canonical_roots(&folders), at, &library::load(&app)?),
+        None => 0,
+    };
     if inside > 0 {
         return Err(format!(
             "{inside} game{} installed here. Move {} to another folder or uninstall {} first.",
@@ -945,6 +981,33 @@ mod tests {
         assert!(!holds_other_games(&games, &["a", "b"], &shared));
         // Nor does a game its own folder.
         assert!(!holds_other_games(&games[..1], &["a"], &shared));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Settings > Storage listed a game in D:\Games\Kryoto under D:\Games, and
+    /// would not let D:\Games go while D:\Games\Kryoto had games.
+    #[test]
+    fn a_game_counts_in_the_innermost_library_folder_only() {
+        let root = std::env::temp_dir().join("kryoto-storage-innermost-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let inner = root.join("Kryoto");
+        let hades = inner.join("Hades");
+        std::fs::create_dir_all(&hades).unwrap();
+        let (root, inner, hades) = (root.canonicalize().unwrap(), inner.canonicalize().unwrap(), hades.canonicalize().unwrap());
+        let games = vec![LibraryGame { id: "hades".into(), install_dir: hades.to_string_lossy().into_owned(), ..Default::default() }];
+        for (roots, outer_at, inner_at) in [(vec![Some(root.clone()), Some(inner.clone())], 0, 1), (vec![Some(inner.clone()), Some(root.clone())], 1, 0)] {
+            assert_eq!(innermost_root(&roots, &hades), Some(inner_at));
+            assert_eq!(games_in(&roots, outer_at, &games), 0);
+            assert_eq!(games_in(&roots, inner_at, &games), 1);
+            // A game right in a library folder has no folder of its own there.
+            let loose = [LibraryGame { id: "loose".into(), install_dir: inner.to_string_lossy().into_owned(), ..Default::default() }];
+            assert_eq!(games_in(&roots, outer_at, &loose), 0);
+            assert_eq!(games_in(&roots, inner_at, &loose), 0);
+        }
+        // A library folder that is not there holds nothing.
+        assert_eq!(innermost_root(&[None, Some(root.clone())], &hades), Some(1));
+        // A folder above every library folder is in none of them.
+        assert_eq!(innermost_root(&[Some(inner.clone())], &root), None);
         let _ = std::fs::remove_dir_all(root);
     }
 
