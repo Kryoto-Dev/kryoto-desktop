@@ -12,9 +12,11 @@ let deferRunning = false
 let stopError: string | null = null
 let launches = 0
 let stops = 0
+let lists = 0
+let lastPlayed: number | null = null
 useWebBackend({
   call: (command) => {
-    if (command === 'library_list') return Promise.resolve([game])
+    if (command === 'library_list') { lists++; return Promise.resolve([{ ...game, lastPlayed }]) }
     if (command === 'game_running') {
       if (deferRunning) { deferRunning = false; return new Promise(resolve => { deferredRunning = resolve }) }
       return Promise.resolve([...live])
@@ -35,11 +37,12 @@ useWebBackend({
   },
 })
 Object.assign(window, { launchFixture: {
-  stats: () => ({ launches, stops }),
+  stats: () => ({ launches, stops, lists }),
   acknowledge: () => { pending.shift()?.resolve(null) },
   fail: (message: string) => { pending.shift()?.reject(new Error(message)) },
   stopError: (message: string | null) => { stopError = message },
-  live: (running: boolean) => { if (running) live.add(game.id); else live.delete(game.id) },
+  // Rust stamps lastPlayed when the game starts.
+  live: (running: boolean) => { if (running) { live.add(game.id); lastPlayed = 1_700_000_000 } else live.delete(game.id) },
   event: (running: boolean, stopped = false) => { listeners.get('game-state')?.forEach(fn => fn({ id: game.id, running, seconds: running ? null : 1, code: running ? null : 0, stopped })) },
   deferRunning: () => { deferRunning = true },
   staleRunning: () => { deferredRunning?.([game.id]); deferredRunning = null },
@@ -52,6 +55,7 @@ function Harness() {
     <button id="reload" onClick={() => void lib.reload()}>Reload</button>
     <output id="error">{lib.error}</output>
     <output id="loaded">{String(lib.loaded)}</output>
+    <output id="last">{String(lib.games[0]?.lastPlayed)}</output>
   </main>
 }
 createRoot(document.getElementById('root')!).render(<Harness />)
