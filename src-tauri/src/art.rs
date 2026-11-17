@@ -71,7 +71,7 @@ fn percent_decode(s: &str) -> Option<String> {
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::net::builder()
             .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(20))
             .build()

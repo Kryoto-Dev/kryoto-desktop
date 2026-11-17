@@ -176,7 +176,7 @@ pub async fn patchbay_test(app: AppHandle, slot: Slot) -> Result<String, String>
 /// A connection for the player's own servers: no cookies, no redirects to
 /// elsewhere (a token must not follow one), the app's own name.
 pub(crate) fn client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())

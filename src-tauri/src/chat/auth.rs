@@ -29,7 +29,7 @@ struct StartResponse {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::net::builder()
         .timeout(Duration::from_secs(20))
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION"), " chat"))
         .build()

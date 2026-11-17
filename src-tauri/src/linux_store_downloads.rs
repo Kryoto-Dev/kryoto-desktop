@@ -32,6 +32,8 @@ pub fn install(view: &tauri::Webview) -> Result<(), String> {
             };
             let settings = crate::settings::load(&app);
             if !crate::downloads::is_ours(&url, &settings) {
+                // Only the host: the address may carry a signed link.
+                crate::logging::info("download", &format!("Store download left to the web view: {}", url.host_str().unwrap_or(url.scheme())));
                 return;
             }
             // Cancellation here precedes decide-destination, including Wry's
@@ -41,7 +43,9 @@ pub fn install(view: &tauri::Webview) -> Result<(), String> {
             let (slug, title) = crate::download_game(&app, &url, page, &settings);
             url.set_fragment(None);
             crate::logging::info("download", "Store download handed to the installer");
-            crate::downloads::enqueue(&app, url.to_string(), slug, title);
+            // Off GTK's thread: queueing saves to disk (downloads.rs `enqueue`).
+            let app = app.clone();
+            std::thread::spawn(move || crate::downloads::enqueue(&app, url.to_string(), slug, title));
         });
     })
     .map_err(|e| e.to_string())

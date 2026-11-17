@@ -26,7 +26,7 @@ const SCHEMA_FRESH: Duration = Duration::from_secs(7 * 24 * 3600);
 const EMPTY_SCHEMA_FRESH: Duration = Duration::from_secs(3600);
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder().user_agent("Kryoto Desktop").build().unwrap_or_default()
+    crate::net::builder().user_agent("Kryoto Desktop").build().unwrap_or_default()
 }
 
 /// When this game's emulator last unlocked an achievement on this PC: a sign

@@ -557,7 +557,30 @@ mod linux {
         Facts { nvidia, render_node, wayland, last_start_failed, dmabuf_failed, appimage }
     }
 
+    /// What an earlier copy of the AppImage left in this one's environment
+    /// when it started it (an update's relaunch): its own folders in the path
+    /// lists, and the font file it wrote for its WebKit. Dropped before
+    /// anything reads them, so no game, tool or web view of this copy gets
+    /// the old copy's libraries (launch.rs `without_old_copies`, KB-0327).
+    fn forget_old_copy() {
+        let current = std::env::var_os("APPDIR").filter(|d| !d.is_empty()).map(PathBuf::from);
+        for name in crate::launch::APPIMAGE_VARS {
+            let Some(value) = std::env::var_os(name) else { continue };
+            match crate::launch::without_old_copies(&value, current.as_deref()) {
+                Some(Some(clean)) => std::env::set_var(name, clean),
+                Some(None) => std::env::remove_var(name),
+                None => {}
+            }
+        }
+        // Ours from last time, not a font file the person chose.
+        let ours = data_dir().map(|d| d.join("fontconfig").join("fonts.conf"));
+        if std::env::var_os("FONTCONFIG_FILE").map(PathBuf::from).is_some_and(|f| Some(&f) == ours.as_ref()) {
+            std::env::remove_var("FONTCONFIG_FILE");
+        }
+    }
+
     pub fn apply(arm_probe: bool) {
+        forget_old_copy();
         // Variables an earlier copy of Kryoto set, inherited through a restart
         // (an update's relaunch, `watch_crashes`): ours, not the person's, so
         // this start decides them again instead of taking them as an override.

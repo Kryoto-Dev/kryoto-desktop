@@ -99,17 +99,6 @@ pub(crate) fn num(v: Option<&serde_json::Value>) -> Option<u64> {
 static DIRECT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(^|\.)(files\.catbox\.moe|litter\.catbox\.moe)$").unwrap());
 
-/// A 0807.st file link: `0807.st/<id>.<ext>`, the file itself. Never its
-/// `/d/<token>` link - opening that DELETES the file - nor the `/p/` viewer.
-pub(crate) fn st0807_file(url: &str) -> bool {
-    let Ok(u) = url::Url::parse(url) else { return false };
-    if !u.host_str().is_some_and(|h| h.eq_ignore_ascii_case("0807.st") || h.eq_ignore_ascii_case("www.0807.st")) {
-        return false;
-    }
-    let segs: Vec<&str> = u.path_segments().map(|s| s.filter(|x| !x.is_empty()).collect()).unwrap_or_default();
-    matches!(segs.as_slice(), [one] if one.contains('.') && !one.starts_with('.'))
-}
-
 /// Page hosts, by domain, and what stands in the way.
 const PAGE_HOSTS: &[(&str, &str)] = &[
     #[cfg(windows)]
@@ -174,17 +163,14 @@ pub fn classify(url: &str) -> Option<(Kind, &'static str)> {
     if host_matches(url, &DIRECT_RE) {
         return Some((Kind::Direct, "catbox"));
     }
-    if st0807_file(url) {
-        return Some((Kind::Direct, "0807.st"));
-    }
     page_host(url).map(|name| (Kind::Page, name))
 }
 
 /// Links never opened for a download. MEGA decrypts its files inside its own
 /// page and hands the browser a `blob:`, which nothing outside the page can
 /// fetch; a filez.stream address without its key (a file link with one is
-/// `classify`'s, filez.rs) is the same; any 0807.st link that is not the file
-/// itself (its `/d/` link deletes the file when opened).
+/// `classify`'s, filez.rs) is the same. 0807.st has shut down; links to it
+/// can still sit in old downloads, and a dead host's domain is never opened.
 fn never_opened(url: &str) -> bool {
     let host = hostname(url);
     ["mega.nz", "mega.io", "mega.co.nz", "filez.stream", "0807.st"].iter().any(|d| domain_match(&host, d))
@@ -276,7 +262,7 @@ pub async fn resolve<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolv
 
 /// A client that looks like a browser, with a cookie jar of its own.
 pub(crate) fn client(redirects: bool) -> reqwest::Client {
-    let mut b = reqwest::Client::builder()
+    let mut b = crate::net::builder()
         .user_agent(UA)
         .cookie_store(true)
         .timeout(std::time::Duration::from_secs(30));
@@ -300,10 +286,6 @@ mod tests {
         assert_eq!(classify("https://files.catbox.moe/x.7z").map(|c| c.0), Some(Kind::Direct));
         assert_eq!(classify("https://dropdrive.org/d/YIJaPhMI"), Some((Kind::Page, "DropDrive")));
         assert_eq!(classify("https://dropdrive.qsnetwork.dev/d/YIJaPhMI"), Some((Kind::Page, "DropDrive")));
-        assert_eq!(classify("https://0807.st/Ab3dEfG.7z"), Some((Kind::Direct, "0807.st")));
-        // 0807's deletion link deletes the file when opened: never a download.
-        assert_eq!(classify("https://0807.st/d/deletiontoken"), None);
-        assert_eq!(classify("https://0807.st/p/Ab3dEfG"), None);
         assert_eq!(classify("https://mega.nz/file/abc"), None);
         assert_eq!(classify("magnet:?xt=urn:btih:abc"), None);
     }
@@ -330,14 +312,12 @@ mod tests {
         );
         assert_eq!(classify_any("https://www.example.org/get"), Some((Kind::Web, "example.org".into())));
         assert_eq!(classify_any("https://pixeldrain.com/u/abcd1234"), Some((Kind::Api, "Pixeldrain".into())));
-        assert_eq!(classify_any("https://0807.st/Ab3dEfG.7z"), Some((Kind::Direct, "0807.st".into())));
-        // Never opened: MEGA's files only exist inside its page, and 0807's
-        // deletion link deletes the file.
+        // Never opened: MEGA's files only exist inside its page.
         assert_eq!(classify_any("https://mega.nz/file/abc#key"), None);
         // filez.stream: a file link with its key is Kryoto's to fetch; anything else there is not.
         assert_eq!(classify_any("https://filez.stream/Ab12Cd34#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), Some((Kind::Api, "filez.stream".into())));
         assert_eq!(classify_any("https://filez.stream/Ab12Cd34"), None);
-        assert_eq!(classify_any("https://0807.st/d/deletiontoken"), None);
+        assert_eq!(classify_any("https://0807.st/Ab3dEfG.7z"), None);
         assert_eq!(classify_any("magnet:?xt=urn:btih:abc"), None);
         assert_eq!(classify_any("file:///C:/Windows"), None);
     }
@@ -372,7 +352,7 @@ mod live {
             };
             println!("{url} -> {r:?}");
             let r = r.expect("resolves");
-            let mut req = reqwest::Client::new().get(&r.url).header("Range", "bytes=0-0");
+            let mut req = crate::net::builder().build().unwrap_or_default().get(&r.url).header("Range", "bytes=0-0");
             for (k, v) in &r.headers {
                 req = req.header(k, v);
             }

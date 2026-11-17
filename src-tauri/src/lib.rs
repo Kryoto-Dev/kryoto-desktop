@@ -40,6 +40,7 @@ mod linux_store_downloads;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux_open;
 mod logging;
+mod net;
 mod menus;
 mod online;
 mod repair;
@@ -235,7 +236,20 @@ const EXPECT_FOR: std::time::Duration = std::time::Duration::from_secs(90);
 fn take_expected<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<ExpectedDownload> {
     let state = app.try_state::<PendingDownload>()?;
     let mut pending = state.0.lock().ok()?;
-    pending.take().filter(|e| e.at.elapsed() < EXPECT_FOR)
+    pending.take()
+}
+
+/// Whether the page's word still holds for a download that arrived `waited`
+/// after it, and the log line that says so. `arrived` is the game the
+/// download's own address names, when it names one.
+fn expected_arrival(expected: &ExpectedDownload, arrived: Option<&str>, waited: std::time::Duration) -> (bool, String) {
+    let which = if arrived.is_some_and(|slug| slug != expected.slug) { "a download of another game" } else { "a download" };
+    let line = format!("{which} arrived {:.1} s after kryo.to announced {}", waited.as_secs_f32(), expected.slug);
+    if waited < EXPECT_FOR {
+        (true, line)
+    } else {
+        (false, format!("{line}, past the {} s an announcement holds", EXPECT_FOR.as_secs()))
+    }
 }
 
 /// A download's game and title, from everything that can say: the address's
@@ -247,7 +261,20 @@ fn download_game<R: Runtime>(
     settings: &settings::Settings,
 ) -> (Option<String>, Option<String>) {
     let page_slug = page.and_then(|u| game_slug(&u, settings));
-    merge_download_context(download_context(url), take_expected(app), page_slug)
+    let context = download_context(url);
+    let expected = take_expected(app).filter(|expected| {
+        // Nothing in the app runs between the page's word and the web view
+        // handing the download over: a long wait was spent in the page, the
+        // web view or the network.
+        let (holds, line) = expected_arrival(expected, context.0.as_deref(), expected.at.elapsed());
+        if holds {
+            logging::info("download", &line);
+        } else {
+            logging::warn("download", &line);
+        }
+        holds
+    });
+    merge_download_context(context, expected, page_slug)
 }
 
 fn merge_download_context(
@@ -1103,12 +1130,17 @@ async fn store_mount(
             DownloadEvent::Requested { url, .. } => {
                 let settings = settings::load(webview.app_handle());
                 if !downloads::is_ours(&url, &settings) {
+                    // Only the host: the address may carry a signed link.
+                    logging::info("download", &format!("Store download left to the web view: {}", url.host_str().unwrap_or(url.scheme())));
                     return true;
                 }
                 let (slug, title) = download_game(webview.app_handle(), &url, webview.url().ok(), &settings);
                 let mut clean_url = url;
                 clean_url.set_fragment(None);
-                downloads::enqueue(webview.app_handle(), clean_url.to_string(), slug, title);
+                // Off this thread: it is the window's own, and queueing reads the
+                // library and saves the queue to disk (downloads.rs `enqueue`).
+                let app = webview.app_handle().clone();
+                std::thread::spawn(move || downloads::enqueue(&app, clean_url.to_string(), slug, title));
                 false
             }
             _ => true,
@@ -1247,9 +1279,17 @@ fn store_expect_download(
     let title = title
         .map(|t| t.trim().chars().filter(|c| !c.is_control()).take(300).collect::<String>())
         .filter(|t| !t.is_empty());
+    logging::info("download", &format!("kryo.to announced {slug}"));
     let state = app.state::<PendingDownload>();
     let mut pending = state.0.lock().map_err(|_| "busy".to_string())?;
-    *pending = Some(ExpectedDownload { slug, title, at: std::time::Instant::now() });
+    // The page announces right before it navigates to the file, so an
+    // announcement still waiting is a download that has not reached the app.
+    if let Some(earlier) = pending.replace(ExpectedDownload { slug, title, at: std::time::Instant::now() }) {
+        logging::warn(
+            "download",
+            &format!("the announcement of {} from {:.1} s before had not reached the app", earlier.slug, earlier.at.elapsed().as_secs_f32()),
+        );
+    }
     Ok(())
 }
 
@@ -2378,6 +2418,8 @@ pub fn run() {
             system::os_notify,
             system::pick_path,
             system::window_corners,
+            system::window_became_client,
+            system::pet_desktop_note,
             system::window_state_get,
             pet::pet_menu,
             pet::pet_drag,
@@ -2600,6 +2642,30 @@ mod tests {
         assert_eq!(
             merge_download_context((None, None), None, Some("celeste".into())),
             (Some("celeste".into()), None)
+        );
+    }
+
+    /// The log says how long a download took to reach the app after the
+    /// page's word, and never pins another game's arrival on that word.
+    #[test]
+    fn a_download_arriving_after_the_word_is_timed_and_told_apart() {
+        let expected = ExpectedDownload { slug: "hades-ii".into(), title: None, at: std::time::Instant::now() };
+        let secs = std::time::Duration::from_secs_f32;
+        assert_eq!(
+            expected_arrival(&expected, None, secs(4.2)),
+            (true, "a download arrived 4.2 s after kryo.to announced hades-ii".into())
+        );
+        assert_eq!(
+            expected_arrival(&expected, Some("hades-ii"), secs(4.2)),
+            (true, "a download arrived 4.2 s after kryo.to announced hades-ii".into())
+        );
+        assert_eq!(
+            expected_arrival(&expected, Some("celeste"), secs(4.2)),
+            (true, "a download of another game arrived 4.2 s after kryo.to announced hades-ii".into())
+        );
+        assert_eq!(
+            expected_arrival(&expected, None, secs(120.0)),
+            (false, "a download arrived 120.0 s after kryo.to announced hades-ii, past the 90 s an announcement holds".into())
         );
     }
 

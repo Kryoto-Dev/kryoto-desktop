@@ -1243,7 +1243,6 @@ Object.assign(HANDLERS, {
       const api: Record<string, string> = { 'pixeldrain.com': 'Pixeldrain', 'gofile.io': 'Gofile', 'buzzheavier.com': 'Buzzheavier', 'mediafire.com': 'MediaFire' }
       if (page[host]) return { host: page[host], kind: 'page' }
       if (api[host]) return { host: api[host], kind: 'api' }
-      if (host === '0807.st') return { host: '0807.st', kind: 'direct' }
       // filez.stream: a file link with its key is fetched and decrypted by the app.
       if (host === 'filez.stream' && /#[A-Za-z0-9_-]{43}$/.test(u)) return { host: 'filez.stream', kind: 'api' }
       return null

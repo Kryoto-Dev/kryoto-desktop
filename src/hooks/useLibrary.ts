@@ -95,12 +95,13 @@ export function useLibrary() {
         })
         setStarting((current) => without(current, event.id))
         if (event.running && stopWhenUp.current.has(event.id)) void library.stop(event.id).catch((e) => setError(errorText(e), false, event.id))
+        // The list changed with it: lastPlayed is stamped at launch, playtime added at exit.
+        void reload()
         if (!event.running) {
-          void reload()
           // A game gone within seconds almost never ran - say so instead of
           // leaving a Play button that silently did nothing.
           if (!event.stopped && !stopWhenUp.current.has(event.id) && (event.seconds ?? 0) < 5) {
-            const [message, quiet] = quickExit(event.code)
+            const [message, quiet] = quickExit(event.code, event.detail)
             setError(message, quiet, event.id)
           }
           stopWhenUp.current.delete(event.id)
@@ -195,13 +196,39 @@ export function useLibrary() {
   // Starting counts as running everywhere the client shows it.
   const live = useMemo(() => (starting.size ? new Set([...running, ...starting]) : running), [running, starting])
 
+  const runningNow = useRef(running)
+  runningNow.current = running
+  const confirmation = useRef(0)
+
+  /**
+   * Which games Rust has running. The list is read again only when that
+   * changed without its event (lastPlayed is stamped at launch, playtime added
+   * at exit). Starting games are left alone: they are not running there yet.
+   */
+  const confirmRunning = useCallback(async () => {
+    const request = ++confirmation.current
+    const revision = runningRevision.current
+    let ids: string[]
+    try {
+      ids = await library.running()
+    } catch {
+      return // asked again on the next tick
+    }
+    if (request !== confirmation.current || revision !== runningRevision.current) return
+    const now = new Set(ids.filter((id) => !stopWhenUp.current.has(id)))
+    const current = runningNow.current
+    if (now.size === current.size && [...now].every((id) => current.has(id))) return
+    // A start or exit went without its event.
+    void reload()
+  }, [reload])
+
   // IPC events can be missed during a remount or a reload. Confirm active
   // sessions against Rust so a lost exit event cannot leave Stop stuck.
   useEffect(() => {
     if (!live.size) return
-    const timer = window.setInterval(() => void reload(), 2_000)
+    const timer = window.setInterval(() => void confirmRunning(), 2_000)
     return () => window.clearInterval(timer)
-  }, [live.size, reload])
+  }, [live.size, confirmRunning])
 
   return { games, running: live, loaded, error: error ?? refreshError, errorQuiet: error ? errorQuiet : false, errorGame: error ? errorGame : null, setError, reload, play, stop: stopGame, upsert, drop }
 }
@@ -238,7 +265,7 @@ const EXIT_REASONS: Record<number, string> = {
  * game (handoff.rs), so reaching this means nothing from the game's folder was
  * running afterwards either.
  */
-function quickExit(code: number | null | undefined): [string, boolean] {
+function quickExit(code: number | null | undefined, detail?: string): [string, boolean] {
   // ERROR_CANCELLED: the game needs administrator rights and Windows' prompt was turned down.
   if (code === 1223) return ['It did not start: this game needs administrator rights. Press Play and answer Yes on Windows\' prompt.', true]
   // 0x80131700: the .NET runtime could not start, so it is missing.
@@ -262,6 +289,10 @@ function quickExit(code: number | null | undefined): [string, boolean] {
       'It started and closed again without an error. If no window opened, pick the game\'s own .exe (not a launcher) in Properties.',
       true,
     ]
+  }
+  // Linux: Wine, Proton and umu all end with a bare 1; their last lines say why.
+  if (detail) {
+    return [`It closed again straight away (exit code ${code}). Its last lines: ${detail} The whole log is under Properties > Logs.`, false]
   }
   return [
     `It closed again straight away (exit code ${code}). Check the launch options and the exe in Properties.`,

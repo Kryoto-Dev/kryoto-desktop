@@ -406,7 +406,7 @@ async fn run(app: &AppHandle, chosen: &[&'static Runtime]) -> Result<(), String>
     let to_get: Vec<&Runtime> = chosen.iter().copied().filter(|r| !r.url.is_empty() && !dir.join(r.file).is_file()).collect();
     let total_mb: f64 = to_get.iter().map(|r| r.mb.max(1) as f64).sum::<f64>().max(1.0);
     let mut done_mb = 0.0;
-    let client = reqwest::Client::builder().user_agent("Kryoto Desktop").build().unwrap_or_default();
+    let client = crate::net::builder().user_agent("Kryoto Desktop").build().unwrap_or_default();
     for (i, r) in to_get.iter().enumerate() {
         p.current = Some(r.name.into());
         p.step = i + 1;

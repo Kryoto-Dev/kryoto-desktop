@@ -194,7 +194,7 @@ pub async fn addons_list(app: AppHandle, slug: String) -> Result<serde_json::Val
         Ok(session) => crate::phone::listing(&session, &slug).await?,
         Err(_) => {
             let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(&app));
-            let client = reqwest::Client::builder()
+            let client = crate::net::builder()
                 .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
                 .timeout(std::time::Duration::from_secs(30))
                 .build()

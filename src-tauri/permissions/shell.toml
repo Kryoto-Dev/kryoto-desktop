@@ -53,6 +53,8 @@ commands.allow = [
   "os_notify",
   "pick_path",
   "window_corners",
+  "window_became_client",
+  "pet_desktop_note",
   "store_visible",
   "store_sign_out",
   "store_mark_read",

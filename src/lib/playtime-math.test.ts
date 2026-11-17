@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { LibraryGame } from './library'
-import { countedHere, playtimeGap, syncKey } from './playtime-math.ts'
+import { countedHere, playtimeGap, sessionStart, syncKey } from './playtime-math.ts'
 
 const game = (g: Partial<LibraryGame>) => ({ playtimeSeconds: 0, carrySends: [], ...g }) as LibraryGame
 
@@ -36,4 +36,16 @@ test("only games Kryoto counts itself, not while they run, branches summed per k
     ['c'],
   )
   assert.deepEqual(rows, [{ id: 'a', slug: 'gorebox', local: 900, carrying: 120 }])
+})
+
+test('a session started here is not counted from the last one (KB-0344)', () => {
+  const now = 1_800_000_000
+  // Play pressed: lastPlayed is still the previous session's, two hours back.
+  assert.equal(sessionStart(now - 7200, now), now)
+  // Rust stamped the new start a moment after the press: that one counts.
+  assert.equal(sessionStart(now + 3, now), now + 3)
+  // Already running when the view opened: its own start counts, however long ago.
+  assert.equal(sessionStart(now - 3600, null), now - 3600)
+  assert.equal(sessionStart(null, null), null)
+  assert.equal(sessionStart(null, now), now)
 })

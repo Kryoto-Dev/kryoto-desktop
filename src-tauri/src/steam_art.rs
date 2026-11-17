@@ -27,7 +27,7 @@ pub struct SteamArt {
 }
 
 fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(8))
         .build()

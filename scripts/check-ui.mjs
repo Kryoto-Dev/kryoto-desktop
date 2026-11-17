@@ -83,6 +83,63 @@ try {
     assert.equal(await launch.locator('#error').textContent(), '')
     await launch.close()
   })
+  await check('while a game runs, the poll asks which games run, not for the whole library', async () => {
+    const launch = await browser.newPage()
+    await launch.goto(`${base}/test/launch.html`)
+    await launch.waitForFunction(() => document.querySelector('#loaded')?.textContent === 'true')
+    const lists = () => launch.evaluate(() => window.launchFixture.stats().lists)
+    await launch.locator('#play-stop').click()
+    await launch.waitForFunction(() => document.querySelector('#play-stop')?.textContent === 'Stop')
+    let before = await lists()
+    // Only starting, not running in Rust yet: the poll keeps it.
+    await launch.waitForTimeout(3_000)
+    assert.equal(await launch.locator('#play-stop').textContent(), 'Stop')
+    assert.equal(await lists(), before)
+    await launch.evaluate(() => { window.launchFixture.live(true); window.launchFixture.acknowledge() })
+    await launch.waitForFunction(n => window.launchFixture.stats().lists > n, before)
+    await launch.waitForFunction(() => document.querySelector('#play-stop')?.textContent === 'Stop')
+    before = await lists()
+    await launch.waitForTimeout(3_000)
+    assert.equal(await launch.locator('#play-stop').textContent(), 'Stop')
+    assert.equal(await lists(), before)
+    // A lost exit event: back to Play, and the list once for the new playtime.
+    await launch.evaluate(() => window.launchFixture.live(false))
+    await launch.waitForFunction(() => document.querySelector('#play-stop')?.textContent === 'Play')
+    assert.equal(await lists(), before + 1)
+    await launch.close()
+  })
+  await check('a game started from elsewhere reads the list once, for its new lastPlayed', async () => {
+    const launch = await browser.newPage()
+    await launch.goto(`${base}/test/launch.html`)
+    await launch.waitForFunction(() => document.querySelector('#loaded')?.textContent === 'true')
+    const lists = () => launch.evaluate(() => window.launchFixture.stats().lists)
+    const before = await lists()
+    // Started from the phone: only its event reaches this window.
+    await launch.evaluate(() => { window.launchFixture.live(true); window.launchFixture.event(true) })
+    await launch.waitForFunction(() => document.querySelector('#play-stop')?.textContent === 'Stop')
+    await launch.waitForFunction(() => document.querySelector('#last')?.textContent === '1700000000')
+    assert.equal(await lists(), before + 1)
+    await launch.waitForTimeout(3_000)
+    assert.equal(await lists(), before + 1)
+    await launch.close()
+  })
+  await check('a missed start event is caught by the poll, and the list read once for lastPlayed', async () => {
+    const launch = await browser.newPage()
+    await launch.goto(`${base}/test/launch.html`)
+    await launch.waitForFunction(() => document.querySelector('#loaded')?.textContent === 'true')
+    const lists = () => launch.evaluate(() => window.launchFixture.stats().lists)
+    const before = await lists()
+    await launch.locator('#play-stop').click()
+    await launch.waitForFunction(() => document.querySelector('#play-stop')?.textContent === 'Stop')
+    // Running in Rust, but neither its event nor the launch's acknowledgement came.
+    await launch.evaluate(() => window.launchFixture.live(true))
+    await launch.waitForFunction(() => document.querySelector('#last')?.textContent === '1700000000')
+    assert.equal(await lists(), before + 1)
+    await launch.waitForTimeout(3_000)
+    assert.equal(await launch.locator('#play-stop').textContent(), 'Stop')
+    assert.equal(await lists(), before + 1)
+    await launch.close()
+  })
   await check('failed launch and failed termination are visible and retryable', async () => {
     const launch = await browser.newPage()
     await launch.goto(`${base}/test/launch.html`)
@@ -439,6 +496,97 @@ try {
       await pads.getByRole('alert').getByText('Synthetic pad_config_set failure').waitFor()
       assert.equal(await notify.isChecked(), false)
     } finally { await pads.close() }
+  })
+  await check('a Settings switch does not undo where saves are kept, chosen on the same page', async () => {
+    const cloud = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    cloud.on('pageerror', e => failures.push(e.message))
+    await cloud.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await cloud.goto(base)
+      await cloud.getByRole('complementary', { name: 'Your games' }).waitFor()
+      const saveOver = (fields, read) => cloud.evaluate(async ([fields, read]) => {
+        const loaded = n => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(n))
+        const { settingsApi } = await import(loaded('/src/lib/settings.ts'))
+        const latest = await settingsApi.get()
+        await settingsApi.save({ ...latest, ...fields })
+        return latest[read]
+      }, [fields, read])
+      // Saves kept with the account, as the app's own settings always say.
+      await saveOver({ savesMode: '', savesLocalDir: '' }, 'savesMode')
+      await cloud.getByRole('button', { name: 'Account menu' }).click()
+      await cloud.getByRole('menuitem', { name: /Settings/ }).click()
+      await cloud.getByRole('button', { name: 'Cloud', exact: true }).click()
+      const onExit = cloud.getByRole('checkbox', { name: "Back up a game's saves when it closes" })
+      await onExit.waitFor()
+      // As "Where your saves are kept" and a notice marked seen save: on top of what is saved, past the page.
+      const was = await saveOver({ savesMode: 'local', savesLocalDir: 'D:/Saves', seenNotices: ['check-seen'] }, 'cloudSavesOnExit')
+      await onExit.click()
+      const saved = () => cloud.evaluate(async () => (await (await import('/src/lib/bridge.ts')).call('settings_get')))
+      let now = await saved()
+      for (let i = 0; i < 20 && now.cloudSavesOnExit === was; i++) {
+        await cloud.waitForTimeout(100)
+        now = await saved()
+      }
+      assert.equal(now.cloudSavesOnExit, !was)
+      assert.deepEqual([now.savesMode, now.savesLocalDir], ['local', 'D:/Saves'])
+      assert.ok(now.seenNotices.includes('check-seen'), `seen: ${JSON.stringify(now.seenNotices)}`)
+    } finally { await cloud.close() }
+  })
+  await check('the Troubleshooting log stays where it was scrolled, and Refresh goes to the newest lines', async () => {
+    const logs = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    logs.on('pageerror', e => failures.push(e.message))
+    await logs.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await logs.goto(base)
+      await logs.getByRole('complementary', { name: 'Your games' }).waitFor()
+      // A log longer than the 400 lines the box shows, so each new line drops one off the top.
+      await logs.evaluate(async () => {
+        const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(name))
+        const bridge = await import(loaded('/src/lib/bridge.ts'))
+        const preview = await import(loaded('/src/lib/preview.ts'))
+        window.logLines = Array.from({ length: 500 }, (_, i) => `2026-09-25 14:03:07Z INFO  preview: line ${i}`)
+        window.addLog = n => { for (let i = 0; i < n; i++) window.logLines.push(`2026-09-25 14:03:08Z INFO  preview: line ${window.logLines.length}`) }
+        bridge.useWebBackend({
+          call: (c, a) => (c === 'logs_tail' ? Promise.resolve(window.logLines.slice(-a.lines).join('\n')) : preview.previewCall(c, a)),
+          on: (e, h) => preview.previewBus.on(e, h),
+        })
+      })
+      await logs.getByRole('button', { name: 'Account menu' }).click()
+      await logs.getByRole('menuitem', { name: /Settings/ }).click()
+      await logs.getByRole('button', { name: 'Troubleshooting', exact: true }).click()
+      const box = logs.locator('pre', { hasText: 'preview: line 499' })
+      await box.waitFor()
+      const pre = await box.elementHandle()
+      const atBottom = () => logs.waitForFunction(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2, pre)
+      const shows = line => logs.waitForFunction(([el, line]) => el.textContent.includes(line), [pre, line])
+      // The first line in view, read from the rows themselves.
+      const top = () => box.evaluate(el => [...el.children].find(r => r.getBoundingClientRect().bottom > el.getBoundingClientRect().top + 1).textContent)
+      await atBottom()
+      // Read from the middle while new lines come in: the same line stays at the top.
+      await box.evaluate(el => { el.style.height = '120px'; el.scrollTop = el.children[50].offsetTop - el.firstElementChild.offsetTop })
+      const reading = await top()
+      assert.match(reading, /line 1[45]\d$/)
+      await logs.evaluate(() => window.addLog(5))
+      await shows('line 504')
+      await logs.waitForTimeout(100)
+      assert.equal(await top(), reading)
+      // A selection dragged into the box from outside it holds the box as it is.
+      await box.evaluate(el => document.getSelection().setBaseAndExtent(el.parentElement, 0, el.children[60].firstChild, 5))
+      await logs.evaluate(() => window.addLog(1))
+      await logs.waitForTimeout(3500)
+      assert.ok(!(await box.textContent()).includes('line 505'))
+      await logs.evaluate(() => document.getSelection().removeAllRanges())
+      await shows('line 505')
+      // At the bottom, the box follows new lines.
+      await box.evaluate(el => { el.scrollTop = el.scrollHeight })
+      await logs.evaluate(() => window.addLog(3))
+      await shows('line 508')
+      await atBottom()
+      // Refresh goes to the newest lines from anywhere.
+      await box.evaluate(el => { el.scrollTop = 0 })
+      await logs.getByRole('button', { name: 'Refresh', exact: true }).click()
+      await atBottom()
+    } finally { await logs.close() }
   })
   await check('achievement repair offers gbe_fork and every RUNE profile with Undo between attempts', async () => {
     const achievements = await browser.newPage({ viewport: { width: 1100, height: 860 } })

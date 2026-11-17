@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { artSrc } from '@/lib/art'
 import { Wand2, Bell, Cloud, Download, FolderInput, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, ChevronDown } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Check, Dropdown, Section, Segmented, inputCls } from '@/ui'
-import { errorText, on } from '@/lib/bridge'
+import { call, errorText, on } from '@/lib/bridge'
 import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, PET_SIZES, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, openBigPicture, openSetup, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
@@ -261,9 +261,14 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
   const [state, setState] = useState<'idle' | 'saving' | 'saved' | string>('idle')
   const [endpointDraft, setEndpointDraft] = useState(stored?.catalogEndpoint ?? '')
   const timer = useRef<number | undefined>(undefined)
+  // What this page changed and has not saved yet: only these go over what is
+  // saved, so a choice saved elsewhere on the page (where saves are kept, a
+  // notice seen) is not undone by the next switch.
+  const pending = useRef<Partial<Settings>>({})
+  const synced = (saved: Settings) => setS({ ...saved, ...pending.current })
   useEffect(() => {
-    if (stored && (!s || (s.recoveryError && !stored.recoveryError))) setS(stored)
-  }, [stored, s])
+    if (stored) synced(stored)
+  }, [stored])
   useEffect(() => {
     if (stored) setEndpointDraft(stored.catalogEndpoint)
   }, [stored?.catalogEndpoint])
@@ -276,23 +281,20 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => patch({ [k]: v } as Partial<Settings>)
   const patch = (p: Partial<Settings>) => {
     if (!s) return
-    const next = { ...s, ...p }
-    setS(next)
+    pending.current = { ...pending.current, ...p }
+    setS({ ...s, ...p })
     setState('saving')
     window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => {
-      // Storage changes its folders straight to disk; keep those.
+      const sent = { ...pending.current }
       void settingsApi
-        .get()
-        .then((latest) =>
-          settingsApi.save({
-            ...next,
-            libraryDir: latest.libraryDir,
-            libraryFolders: latest.libraryFolders,
-            ...('pet' in p || 'petMascot' in p ? {} : { pet: latest.pet, petMascot: latest.petMascot }),
-          }),
-        )
-        .then(() => setState('saved'))
+        .change((latest) => ({ ...latest, ...sent }))
+        .then(() => {
+          // Saved; a field changed again meanwhile is still to go.
+          pending.current = Object.fromEntries(Object.entries(pending.current).filter(([k, v]) => sent[k as keyof Settings] !== v))
+          setState('saved')
+        })
+        // Not saved: still pending, it goes with the next change.
         .catch((e: unknown) => setState(errorText(e)))
     }, 250)
   }
@@ -317,7 +319,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
       .get()
       .then((latest) => settingsApi.save({ ...latest, catalogEndpoint: endpoint }))
       .then((saved) => {
-        setS(saved)
+        synced(saved)
         setEndpointDraft(saved.catalogEndpoint)
         setState('saved')
       })
@@ -403,7 +405,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
             <Check checked={s.deleteArchives} onChange={(v) => set('deleteArchives', v)} label="Delete the archive once a game is installed" />
             <Check checked={s.notifyDownloads} onChange={(v) => set('notifyDownloads', v)} label="Tell me when a game is ready to play" />
             <GameUpdatesSection settings={s} set={set} />
-            <DebridSection s={s} onSaved={setS} />
+            <DebridSection s={s} onSaved={synced} />
           </>
         ) : null}
         {section === 'general' ? (
@@ -429,6 +431,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
             <Check checked={s.minimizeOnPlay} onChange={(v) => set('minimizeOnPlay', v)} label="Minimize Kryoto while a game runs" />
             <Section title="Desktop pet" hint="Drag it anywhere; right-click it to switch or hide it. It steps aside while a game runs.">
               <Check checked={s.pet} onChange={(v) => set('pet', v)} label="Show the pet on my desktop" />
+              <PetDesktopNote />
               {s.pet ? <Segmented label="Desktop pet" value={s.petMascot} options={PET_MASCOTS.map((m) => ({ value: m.id, label: m.label }))} onChange={(v) => set('petMascot', v)} /> : null}
               {s.pet ? <Segmented label="Size" value={s.petSize ?? 'normal'} options={PET_SIZES.map((z) => ({ value: z.id, label: z.label }))} onChange={(v) => set('petSize', v)} /> : null}
             </Section>
@@ -458,7 +461,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
                 Patchbay: your own servers
               </summary>
               <div className="grid gap-4 pt-5">
-                <PatchbayPane s={s} onSaved={setS} />
+                <PatchbayPane s={s} onSaved={synced} />
               </div>
             </details>
           </>
@@ -653,4 +656,14 @@ function BridgeButton() {
       {open ? <Bridge onClose={() => setOpen(false)} /> : null}
     </>
   )
+}
+
+/** Linux, on a tiling desktop: how to let the pet float (system.rs `pet_desktop_note`). */
+function PetDesktopNote() {
+  const [note, setNote] = useState<string | null>(null)
+  useEffect(() => {
+    if (!isTauri()) return
+    void call<string | null>('pet_desktop_note').then(setNote).catch(() => setNote(null))
+  }, [])
+  return note ? <p className="text-xs leading-relaxed text-muted-foreground">{note}</p> : null
 }

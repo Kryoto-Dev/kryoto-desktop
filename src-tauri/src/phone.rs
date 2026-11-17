@@ -585,7 +585,7 @@ pub fn check_removable(app: &AppHandle, id: &str) -> Result<(), String> {
 /// not install into is only unlisted).
 pub async fn remove_game(app: &AppHandle, id: &str, delete_files: bool) -> Result<bool, String> {
     check_removable(app, id)?;
-    library::library_remove(app.clone(), id.to_string(), delete_files, None).await
+    library::library_remove(app.clone(), id.to_string(), delete_files, None, None).await
 }
 
 async fn downloads_control(AxumState(app): AxumState<AppHandle>, headers: HeaderMap, body: String) -> Reply {
@@ -747,7 +747,7 @@ pub fn session_over<R: Runtime>(app: &AppHandle<R>, local: Option<std::net::IpAd
         .map(|jar| jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
         .filter(|c| !c.is_empty())
         .ok_or("Sign in to kryo.to in Kryoto Desktop first.".to_string())?;
-    let client = reqwest::Client::builder()
+    let client = crate::net::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())

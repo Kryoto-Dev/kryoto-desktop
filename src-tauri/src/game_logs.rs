@@ -45,7 +45,12 @@ struct Inner {
     file: File,
     written: u64,
     capped: bool,
+    /// The last few lines the game (or Wine, Proton, umu) printed: `last_words`.
+    tail: std::collections::VecDeque<String>,
 }
+
+/// How many of the game's last lines are kept for `last_words`.
+const TAIL_LINES: usize = 4;
 
 /// One launch's log, shared by the threads draining the game's output.
 #[derive(Clone)]
@@ -99,9 +104,39 @@ impl GameLog {
                     text.push('\n');
                 }
                 log.write(&text);
+                log.remember(&text);
                 line.clear();
             }
         });
+    }
+
+    fn remember(&self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let Ok(mut g) = self.0.lock() else { return };
+        if g.tail.len() == TAIL_LINES {
+            g.tail.pop_front();
+        }
+        g.tail.push_back(line.chars().take(240).collect());
+    }
+
+    /// What the game's launcher printed last, for a start that failed at once:
+    /// on Linux "exit code 1" is all Wine, Proton and umu give, and the reason
+    /// is in these lines (a missing runtime, a prefix made by another Proton,
+    /// no Python). Until now nobody saw them without opening the log, and a
+    /// report said nothing either (KB-0327). The home folder reads as `~`.
+    pub fn last_words(&self) -> Option<String> {
+        let g = self.0.lock().ok()?;
+        if g.tail.is_empty() {
+            return None;
+        }
+        let mut text = g.tail.iter().cloned().collect::<Vec<_>>().join(" | ");
+        if let Some(home) = std::env::var_os("HOME").map(|h| h.to_string_lossy().into_owned()).filter(|h| h.len() > 1) {
+            text = text.replace(&home, "~");
+        }
+        Some(text.chars().take(600).collect())
     }
 
     /// How it ended.
@@ -139,7 +174,7 @@ pub fn begin<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, plan: &LaunchPl
     prune(&dir);
     let name = format!("{}.log", file_stamp());
     let file = OpenOptions::new().create(true).append(true).open(dir.join(&name)).ok()?;
-    let log = GameLog(Arc::new(Mutex::new(Inner { file, written: 0, capped: false })));
+    let log = GameLog(Arc::new(Mutex::new(Inner { file, written: 0, capped: false, tail: std::collections::VecDeque::new() })));
     log.write(&header(app, game, plan, tool));
     Some(log)
 }

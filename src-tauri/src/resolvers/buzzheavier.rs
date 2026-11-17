@@ -45,7 +45,7 @@ pub async fn resolve(url: &str) -> Result<Resolved, String> {
     }
     let jar = Arc::new(reqwest::cookie::Jar::default());
     let build = |redirects: bool| {
-        let b = reqwest::Client::builder()
+        let b = crate::net::builder()
             .user_agent(super::UA)
             .cookie_provider(jar.clone())
             .timeout(std::time::Duration::from_secs(30));

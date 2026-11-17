@@ -33,3 +33,12 @@ export function countedHere(games: LibraryGame[], running: string[]): Slug[] {
   return [...by.values()].filter((r) => r.local > 0 && !busy.has(r.slug))
 }
 
+/**
+ * Where a running session began (hooks/useLivePlaytime.ts): `lastPlayed`,
+ * unless the view saw the game start after it (a stamp left from the previous
+ * session), then that moment (KB-0344).
+ */
+export function sessionStart(lastPlayed: number | null, seenStart: number | null): number | null {
+  if (seenStart === null) return lastPlayed
+  return lastPlayed !== null && lastPlayed >= seenStart - 5 ? lastPlayed : seenStart
+}

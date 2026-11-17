@@ -14,11 +14,30 @@ export function LogsPane({ sendReports, onSendReports }: { sendReports: boolean;
   const [folder, setFolder] = useState('')
   const [note, setNote] = useState<string | null>(null)
   const box = useRef<HTMLPreElement | null>(null)
+  const last = useRef('')
 
-  const refresh = useCallback(async () => {
+  // The 3 s poll follows new lines only while the box is at the bottom, and leaves
+  // a selection in it alone. Refresh always goes to the newest lines.
+  const refresh = useCallback(async (force = false) => {
     const t = await call<string>('logs_tail', { lines: 400 }).catch((e: unknown) => `Could not read the log: ${errorText(e)}`)
+    if (t === last.current && !force) return
+    const el = box.current
+    const sel = document.getSelection()
+    if (!force && el && sel && !sel.isCollapsed && sel.containsNode(el, true)) return
+    const stick = force || !el || el.scrollHeight - el.scrollTop - el.clientHeight < 24
+    // Scrolled up, the lines the tail drops off the top for new ones come off scrollTop
+    // too, so the lines being read stay put. Rows are reused in place, so the browser's
+    // scroll anchoring has nothing to hold on to.
+    const rows = el?.children
+    const gone = rows ? last.current.split('\n').indexOf(t.split('\n', 1)[0] ?? '') : -1
+    const up = !stick && rows && gone > 0 && gone < rows.length ? rows[gone]!.getBoundingClientRect().top - rows[0]!.getBoundingClientRect().top : 0
+    last.current = t
     setText(t)
-    requestAnimationFrame(() => box.current && (box.current.scrollTop = box.current.scrollHeight))
+    requestAnimationFrame(() => {
+      if (!box.current) return
+      if (stick) box.current.scrollTop = box.current.scrollHeight
+      else if (up) box.current.scrollTop -= up
+    })
   }, [])
   useEffect(() => {
     void refresh()
@@ -65,7 +84,7 @@ export function LogsPane({ sendReports, onSendReports }: { sendReports: boolean;
             <Copy className="size-3" />
             Copy
           </Button>
-          <Button size="sm" onClick={() => refresh()}>
+          <Button size="sm" onClick={() => refresh(true)}>
             <RotateCw className="size-3" />
             Refresh
           </Button>

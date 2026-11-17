@@ -522,6 +522,23 @@ fn recover_settings_file(target: &std::path::Path, current: Settings) -> Result<
     Ok(settings)
 }
 
+/// Each seen notice once, none from another version's intro or lost-games
+/// look, and at most 64, the newest: every writer adds to the end, so cutting
+/// the end lost the notice just seen and it came back each start.
+fn clean_seen_notices(list: &mut Vec<String>, version: &str) {
+    const CAP: usize = 64;
+    let mut seen = std::collections::HashSet::new();
+    list.retain(|n| seen.insert(n.clone()));
+    let v = version.replace('.', "-");
+    let current = [format!("intro-{v}"), format!("found-games-{v}")];
+    // Another version's intro or lost-games look is never asked about again.
+    list.retain(|n| !(n.starts_with("intro-") || n.starts_with("found-games-")) || current.contains(n));
+    if list.len() > CAP {
+        let extra = list.len() - CAP;
+        list.drain(..extra);
+    }
+}
+
 #[tauri::command(async)]
 pub fn settings_get(app: AppHandle) -> Settings {
     load(&app)
@@ -584,8 +601,7 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
         settings.pet_size = "normal".into();
     }
     settings.seen_notices.retain(|n| !n.is_empty() && n.len() <= 40 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
-    settings.seen_notices.dedup();
-    settings.seen_notices.truncate(64);
+    clean_seen_notices(&mut settings.seen_notices, env!("CARGO_PKG_VERSION"));
     if settings.vr_runtime.len() > 80 {
         settings.vr_runtime = String::new();
     }
@@ -675,7 +691,33 @@ mod tests {
         std::fs::remove_file(backup).unwrap();
         std::fs::remove_file(path).unwrap();
     }
-    use super::{catalog_endpoint, is_catalog_origin, normalize_catalog_endpoint, read_settings_file, recovery_defaults, recover_settings_file, save_settings_file, Settings, DEFAULT_CATALOG_ENDPOINT};
+    use super::{catalog_endpoint, clean_seen_notices, is_catalog_origin, normalize_catalog_endpoint, read_settings_file, recovery_defaults, recover_settings_file, save_settings_file, Settings, DEFAULT_CATALOG_ENDPOINT};
+
+    #[test]
+    fn a_full_seen_list_keeps_the_notice_just_seen() {
+        let mut list: Vec<String> = ["setup-0-3-0", "hatchzip", "writeup-nudges-off"].map(String::from).to_vec();
+        for i in 0..31 {
+            list.push(format!("found-games-0-1-{i}"));
+            list.push(format!("intro-0-1-{i}"));
+        }
+        assert_eq!(list.len(), 65);
+        list.push("found-games-0-3-10".into());
+        list.push("intro-0-3-10".into());
+        clean_seen_notices(&mut list, "0.3.10");
+        assert_eq!(list, ["setup-0-3-0", "hatchzip", "writeup-nudges-off", "found-games-0-3-10", "intro-0-3-10"]);
+
+        // Past the cap, the oldest go.
+        let mut list: Vec<String> = (0..70).map(|i| format!("n{i}")).collect();
+        list.push("n3".into());
+        clean_seen_notices(&mut list, "0.3.10");
+        assert_eq!(list.len(), 64);
+        assert_eq!(list.first().map(String::as_str), Some("n6"));
+        assert_eq!(list.last().map(String::as_str), Some("n69"));
+
+        let mut list: Vec<String> = ["a", "b", "a"].map(String::from).to_vec();
+        clean_seen_notices(&mut list, "0.3.10");
+        assert_eq!(list, ["a", "b"]);
+    }
 
     #[test]
     fn the_status_page_is_not_kryo_to_itself() {
