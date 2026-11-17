@@ -57,6 +57,13 @@ const WATCHFUL: Duration = Duration::from_secs(10);
 const PATIENT: Duration = Duration::from_secs(20);
 const PATIENT_AFTER: Duration = Duration::from_secs(300);
 const TIMEOUT: Duration = Duration::from_secs(8);
+/// Neutral addresses, each with text only its real answer carries.
+/// msftconnecttest is what Windows itself asks to tell a Wi-Fi sign-in page
+/// from the internet.
+const NEUTRAL: [(&str, &str); 2] = [
+    ("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test"),
+    ("https://www.cloudflare.com/cdn-cgi/trace", "h=www.cloudflare.com"),
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,6 +173,13 @@ fn read_feed(body: &str) -> Feed {
         }
     }
     Feed::Says { site_bad, parts }
+}
+
+/// A neutral address answering as itself. A Wi-Fi that wants a sign-in first
+/// (a hotel's, an airport's) answers plain HTTP with its own page, and that
+/// is no internet yet: nobody there is helped by being told to get a VPN.
+fn neutral_answered(code: u16, body: &str, mark: &str) -> bool {
+    (200..300).contains(&code) && body.contains(mark)
 }
 
 /// What has been seen so far, and what it adds up to.
@@ -359,10 +373,17 @@ pub fn page_answered(code: u16, body: String) {
 /// did not: two neutral addresses, either is enough.
 async fn internet_answers(client: &reqwest::Client) -> Result<(), String> {
     let mut why = Vec::new();
-    for url in ["http://www.msftconnecttest.com/connecttest.txt", "https://www.cloudflare.com/cdn-cgi/trace"] {
+    for (url, mark) in NEUTRAL {
         match client.get(url).timeout(Duration::from_secs(6)).send().await {
-            Ok(res) if res.status().is_success() => return Ok(()),
-            Ok(res) => why.push(format!("{url}: {}", res.status())),
+            Ok(res) => {
+                let code = res.status();
+                match res.text().await {
+                    Ok(body) if neutral_answered(code.as_u16(), &body, mark) => return Ok(()),
+                    Ok(_) if code.is_success() => why.push(format!("{url}: {code} from another page (a Wi-Fi sign-in?)")),
+                    Ok(_) => why.push(format!("{url}: {code}")),
+                    Err(e) => why.push(format!("{url}: {code}, then {}", crate::logging::why(&e))),
+                }
+            }
             Err(e) => why.push(format!("{url}: {}", crate::logging::why(&e))),
         }
     }
@@ -741,6 +762,20 @@ mod tests {
         assert_eq!(w.parts, vec!["Chat"]);
         assert_eq!(run(&mut w, t, 20, Site::Fine, Some(FINE)), State::Partial);
         assert_eq!(run(&mut w, t, 30, Site::Fine, Some(FINE)), State::Ok);
+    }
+
+    /// A Wi-Fi sign-in page answering for the neutral addresses is no internet,
+    /// so kryo.to failing behind it is not called a block.
+    #[test]
+    fn a_wifi_sign_in_page_is_not_the_internet_answering() {
+        // What the two addresses really answer.
+        let [(_, msft), (_, cloudflare)] = NEUTRAL;
+        assert!(neutral_answered(200, "Microsoft Connect Test", msft));
+        assert!(neutral_answered(200, "fl=60f44\nh=www.cloudflare.com\nip=203.0.113.7\nvisit_scheme=https\n", cloudflare));
+        let portal = "<html><title>Guest Wi-Fi</title><form action=/login>Accept the terms</form></html>";
+        assert!(!neutral_answered(200, portal, msft));
+        assert!(!neutral_answered(200, portal, cloudflare));
+        assert!(!neutral_answered(511, "Microsoft Connect Test", msft));
     }
 
     #[test]
