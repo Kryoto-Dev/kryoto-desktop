@@ -1365,17 +1365,40 @@ pub(crate) fn account_hidden<R: Runtime>(app: &AppHandle<R>, account: &[String])
 /// Settings > Storage - folders this client installs into - and then the
 /// game's whole folder there goes, not just the one holding the exe. A game
 /// added from elsewhere on the PC is the player's folder, not ours, and
-/// removing it only unlists it.
+/// removing it only unlists it. A folder that other games in the library are
+/// also in is not deleted, unless they are in `together`: the games being
+/// uninstalled in the same go.
 ///
 /// `delete_prefix` (Linux) also takes the game's Wine prefix, with whatever
 /// the game kept in it. Left behind otherwise, and listed in Settings > Storage.
 #[tauri::command]
-pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, delete_prefix: Option<bool>) -> Result<bool, String> {
+pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, delete_prefix: Option<bool>, together: Option<Vec<String>>) -> Result<bool, String> {
     // Its files are in use: the delete would stop partway, leaving half a game.
     if is_running(&app, &id) {
         return Err("Stop the game first.".into());
     }
-    let game = load(&app)?.into_iter().find(|g| g.id == id);
+    let games = load(&app)?;
+    let game = games.iter().find(|g| g.id == id).cloned();
+    // Settle which folder goes before deleting anything, the Wine prefix too.
+    // Another launcher's game is only ever unlisted here.
+    let files = match game.as_ref().filter(|g| delete_files && g.launcher.is_none()) {
+        Some(game) => {
+            let folders = crate::settings::all_folders(&crate::settings::load(&app));
+            // Games uninstalled in one go do not keep each other's folder.
+            let leaving: Vec<&str> = std::iter::once(id.as_str()).chain(together.iter().flatten().map(String::as_str)).collect();
+            match crate::storage::game_folder(&folders, &game.install_dir) {
+                Some(dir) if crate::storage::holds_other_games(&games, &leaving, &dir) => {
+                    return Err(format!(
+                        "{} also holds other games in your library, so Kryoto does not delete it. To take {} off the list only, uninstall it without deleting its files.",
+                        dunce::simplified(&dir).display(),
+                        game.title
+                    ));
+                }
+                found => found,
+            }
+        }
+        None => None,
+    };
     if delete_prefix.unwrap_or(false) && game.is_some() {
         let dir = prefix_root(&app, &id)?;
         tauri::async_runtime::spawn_blocking(move || if dir.is_dir() { std::fs::remove_dir_all(dir) } else { Ok(()) })
@@ -1384,29 +1407,25 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
             .map_err(|e| format!("Could not delete the game's Wine prefix: {e}"))?;
     }
     let mut deleted = false;
-    // Another launcher's game is only ever unlisted here.
-    if let (Some(game), true) = (game.as_ref().filter(|g| g.launcher.is_none()), delete_files) {
-        let folders = crate::settings::all_folders(&crate::settings::load(&app));
-        if let Some(dir) = crate::storage::game_folder(&folders, &game.install_dir) {
-            crate::logging::info("library", &format!("uninstalling {} from {}", game.title, dir.display()));
-            let (progress_app, pid) = (app.clone(), id.clone());
-            let result = tauri::async_runtime::spawn_blocking(move || {
-                // The originals its add-ons replaced go with it.
-                let _ = std::fs::remove_dir_all(crate::addons::backups_of(&dir));
-                delete_counting(&dir, &mut |removed, total| {
-                    let _ = progress_app.emit("library-uninstall", DeleteProgress { id: pid.clone(), removed, total, done: false });
-                })
+    if let (Some(game), Some(dir)) = (game.as_ref(), files) {
+        crate::logging::info("library", &format!("uninstalling {} from {}", game.title, dir.display()));
+        let (progress_app, pid) = (app.clone(), id.clone());
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            // The originals its add-ons replaced go with it.
+            let _ = std::fs::remove_dir_all(crate::addons::backups_of(&dir));
+            delete_counting(&dir, &mut |removed, total| {
+                let _ = progress_app.emit("library-uninstall", DeleteProgress { id: pid.clone(), removed, total, done: false });
             })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| format!("Could not delete the game's files: {e}")));
-            let _ = app.emit("library-uninstall", DeleteProgress { id: id.clone(), removed: 0, total: 0, done: true });
-            result?;
-            deleted = true;
-            if let Some(slug) = game.slug.clone() {
-                let data = crate::game_update::data_dir(&app);
-                tauri::async_runtime::spawn_blocking(move || crate::game_update::forget(&data, &slug));
-            }
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| format!("Could not delete the game's files: {e}")));
+        let _ = app.emit("library-uninstall", DeleteProgress { id: id.clone(), removed: 0, total: 0, done: true });
+        result?;
+        deleted = true;
+        if let Some(slug) = game.slug.clone() {
+            let data = crate::game_update::data_dir(&app);
+            tauri::async_runtime::spawn_blocking(move || crate::game_update::forget(&data, &slug));
         }
     }
     update(&app, |games| {

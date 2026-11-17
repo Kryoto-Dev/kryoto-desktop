@@ -70,7 +70,7 @@ export function UninstallDialog({
     try {
       for (const g of games) {
         setCurrent(g.id)
-        deleted = (await library.remove(g.id, deleteFiles, hasPrefix && deletePrefix)) || deleted
+        deleted = (await library.remove(g.id, deleteFiles, hasPrefix && deletePrefix, games.map((x) => x.id))) || deleted
         gone.push(g.id)
       }
       onDone(deleted, gone)
