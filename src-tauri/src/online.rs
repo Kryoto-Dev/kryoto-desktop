@@ -1,27 +1,15 @@
-//! Kryoto Online, set up on this PC - the same thing Kryoto Forge does to a
-//! build, done to an installed game, and undone again.
+//! Kryoto Online on an installed game: whether the game page offers it,
+//! and Undo.
 //!
-//! Beside every `steam_api(64).dll` in the game: Kryoto Online's proxy takes
-//! the dll's place (the original is kept next to it), its core (`kryotoO.dll`,
-//! or `kryotoO32.dll` for 32-bit) goes beside it, and `kryoto-online.ini` is
-//! written next to each exe and dll, telling it which game this is. A shipped
-//! `steam_appid.txt` is set aside, as Forge does - it would undo the spoof.
-//!
-//! Undo deletes what was added and puts every original back, so the game is
-//! exactly as it was. The files come from Kryoto Online's own releases on
-//! GitHub, fetched once and kept in the app's tools folder.
+//! Setting it up goes through the repair engine, like every other emulator.
+//! Games set up by older versions kept their own record here (`LocalOnline`)
+//! of what was added and what was set aside: Undo deletes what was added and
+//! puts every original back, so the game is exactly as it was.
 
 use crate::library::{self, LibraryGame};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-
-
-/// What the game is told it is: Spacewar, which every Steam account owns.
-#[cfg(test)]
-const SPACEWAR_APPID: &str = "480";
-#[cfg(test)]
-const BACKUP_EXT: &str = "kryoto-original";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -35,119 +23,9 @@ pub struct LocalOnline {
     pub applied_at: u64,
 }
 
-#[cfg(test)]
-fn rel(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
-}
-
-/// Every `steam_api.dll` / `steam_api64.dll` in the game, not under plugins.
-#[cfg(test)]
-fn steam_dlls(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![(root.to_path_buf(), 0)];
-    while let Some((dir, depth)) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
-        for e in read.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-            if p.is_dir() {
-                if depth < 8 && name != "plugins" {
-                    stack.push((p, depth + 1));
-                }
-            } else if name == "steam_api64.dll" || name == "steam_api.dll" {
-                out.push(p);
-            }
-        }
-    }
-    out
-}
-
-/// Folders an exe lives in, plus each dll's folder and the root: where the
-/// proxy might look for its ini, since there is no telling which exe runs.
-#[cfg(test)]
-fn config_dirs(root: &Path, dlls: &[PathBuf]) -> Vec<PathBuf> {
-    let mut dirs = vec![root.to_path_buf()];
-    let mut stack = vec![(root.to_path_buf(), 0)];
-    while let Some((dir, depth)) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
-        for e in read.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                if depth < 8 {
-                    stack.push((p, depth + 1));
-                }
-            } else if e.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".exe") {
-                dirs.push(dir.clone());
-            }
-        }
-    }
-    dirs.extend(dlls.iter().filter_map(|d| d.parent().map(Path::to_path_buf)));
-    dirs.sort();
-    dirs.dedup();
-    dirs
-}
-
-/// The DLC the release already unlocks: Forge writes them into gbe_fork's
-/// `steam_settings/configs.app.ini` beside each dll (`[app::dlcs]`,
-/// `<appid>=<name>`). kryo.to only keeps DLC names, so this is the one place
-/// the ids Forge used are on the player's machine.
-#[cfg(test)]
-fn release_dlc(dlls: &[PathBuf]) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
-    for dll in dlls {
-        let Some(dir) = dll.parent() else { continue };
-        let Ok(text) = std::fs::read_to_string(dir.join("steam_settings").join("configs.app.ini")) else { continue };
-        let mut in_dlcs = false;
-        for line in text.lines().map(str::trim) {
-            if line.starts_with('[') {
-                in_dlcs = line.eq_ignore_ascii_case("[app::dlcs]");
-            } else if in_dlcs {
-                if let Some((key, _)) = line.split_once('=') {
-                    let key = key.trim();
-                    if !key.is_empty() && key.chars().all(|c| c.is_ascii_digit()) && !ids.iter().any(|i| i == key) {
-                        ids.push(key.to_string());
-                    }
-                }
-            }
-        }
-    }
-    ids
-}
-
-#[cfg(test)]
-pub fn ini(appid: &str, dlc: &[String]) -> String {
-    let unlock = dlc.join(",");
-    format!(
-        "; Written by Kryoto Desktop. Delete to fall back to defaults.\n\
-         [Settings]\n\
-         AppId={SPACEWAR_APPID}\n\
-         ogAppId={appid}\n\
-         PluginsFolder=plugins\n\
-         GetStubbedLol=true\n\
-         UnlockDLC={unlock}\n\
-         EmulateTicket=true\n"
-    )
-}
-
 fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
     let folders = crate::settings::all_folders(&crate::settings::load(app));
     crate::storage::game_folder(&folders, game).unwrap_or_else(|| PathBuf::from(&game.install_dir))
-}
-
-/// Put `from` at `to`, first saving whatever is at `to` beside it.
-#[cfg(test)]
-fn place(root: &Path, from: &Path, to: &Path, rec: &mut LocalOnline) -> Result<(), String> {
-    if to.exists() {
-        let backup = PathBuf::from(format!("{}.{BACKUP_EXT}", to.display()));
-        if !backup.exists() {
-            std::fs::rename(to, &backup).map_err(|e| format!("Could not set aside {}: {e}", to.display()))?;
-        }
-        rec.saved.push((rel(root, to), rel(root, &backup)));
-    } else {
-        rec.added.push(rel(root, to));
-    }
-    std::fs::copy(from, to).map_err(|e| format!("Could not copy {}: {e}", to.display()))?;
-    Ok(())
 }
 
 /// Why a game has no use for Kryoto Online, or `None` when it does.
@@ -289,57 +167,36 @@ mod tests {
         assert!(online_unneeded(&g(serde_json::json!({})), None).is_some());
     }
 
+    /// A game set up by an older version, as it left it: the proxy in the
+    /// dll's place, its core and ini beside it, the originals set aside.
     #[test]
-    fn set_up_then_undo_leaves_the_game_as_it_was() {
-        let base = std::env::temp_dir().join("kryoto-online-test");
+    fn undo_leaves_the_game_as_it_was() {
+        let base = std::env::temp_dir().join(format!("kryoto-online-undo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("Game");
-        let tools = base.join("tools");
         std::fs::create_dir_all(root.join("bin")).unwrap();
-        std::fs::write(root.join("bin/steam_api64.dll"), "valve").unwrap();
-        std::fs::write(root.join("bin/steam_appid.txt"), "12345").unwrap();
-        std::fs::write(root.join("bin/Game.exe"), "exe").unwrap();
-        std::fs::create_dir_all(tools.join("x64")).unwrap();
-        std::fs::write(tools.join("x64/steam_api64.dll"), "proxy").unwrap();
-        std::fs::write(tools.join("x64/kryotoO.dll"), "core").unwrap();
-
-        let dll = root.join("bin/steam_api64.dll");
-        assert_eq!(steam_dlls(&root), vec![dll.clone()]);
-        let mut rec = LocalOnline::default();
-        place(&root, &tools.join("x64/steam_api64.dll"), &dll, &mut rec).unwrap();
-        place(&root, &tools.join("x64/kryotoO.dll"), &root.join("bin/kryotoO.dll"), &mut rec).unwrap();
-        std::fs::rename(root.join("bin/steam_appid.txt"), root.join("bin/steam_appid.txt.kryoto-original")).unwrap();
-        rec.saved.push(("bin/steam_appid.txt".into(), "bin/steam_appid.txt.kryoto-original".into()));
-        assert_eq!(std::fs::read_to_string(&dll).unwrap(), "proxy");
-        assert!(config_dirs(&root, std::slice::from_ref(&dll)).contains(&root.join("bin")));
+        std::fs::write(root.join("bin/steam_api64.dll"), "proxy").unwrap();
+        std::fs::write(root.join("bin/steam_api64.dll.kryoto-original"), "valve").unwrap();
+        std::fs::write(root.join("bin/kryotoO.dll"), "core").unwrap();
+        std::fs::write(root.join("bin/kryoto-online.ini"), "ini").unwrap();
+        std::fs::write(root.join("bin/steam_appid.txt.kryoto-original"), "12345").unwrap();
+        let rec = LocalOnline {
+            version: "v1.8.1".into(),
+            added: vec!["bin/kryotoO.dll".into(), "bin/kryoto-online.ini".into()],
+            saved: vec![
+                ("bin/steam_api64.dll".into(), "bin/steam_api64.dll.kryoto-original".into()),
+                ("bin/steam_appid.txt".into(), "bin/steam_appid.txt.kryoto-original".into()),
+            ],
+            applied_at: 1,
+        };
 
         undo_files(&root, &rec);
-        assert_eq!(std::fs::read_to_string(&dll).unwrap(), "valve");
+        assert_eq!(std::fs::read_to_string(root.join("bin/steam_api64.dll")).unwrap(), "valve");
         assert_eq!(std::fs::read_to_string(root.join("bin/steam_appid.txt")).unwrap(), "12345");
         assert!(!root.join("bin/kryotoO.dll").exists());
+        assert!(!root.join("bin/kryoto-online.ini").exists());
         assert!(!root.join("bin/steam_api64.dll.kryoto-original").exists());
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn the_ini_spoofs_spacewar_and_names_the_real_game() {
-        let t = ini("1190600", &["1190610".into(), "1190611".into()]);
-        assert!(t.contains("AppId=480\n") && t.contains("ogAppId=1190600\n") && t.contains("EmulateTicket=true"));
-        assert!(t.contains("UnlockDLC=1190610,1190611\n"));
-    }
-
-    #[test]
-    fn dlc_comes_from_the_release_forge_built() {
-        let base = std::env::temp_dir().join(format!("kryoto-dlc-{}", std::process::id()));
-        let settings = base.join("bin/steam_settings");
-        std::fs::create_dir_all(&settings).unwrap();
-        std::fs::write(
-            settings.join("configs.app.ini"),
-            "[app::general]\nbuild_id=1\n[app::dlcs]\nunlock_all=1\n2001=Soundtrack\n2002 = Artbook\n\n[app::other]\n9=x\n",
-        )
-        .unwrap();
-        assert_eq!(release_dlc(&[base.join("bin/steam_api64.dll")]), vec!["2001".to_string(), "2002".to_string()]);
-        assert!(release_dlc(&[base.join("nowhere/steam_api64.dll")]).is_empty());
+        assert!(!root.join("bin/steam_appid.txt.kryoto-original").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 }
