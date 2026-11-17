@@ -32,6 +32,8 @@ pub fn install(view: &tauri::Webview) -> Result<(), String> {
             };
             let settings = crate::settings::load(&app);
             if !crate::downloads::is_ours(&url, &settings) {
+                // Only the host: the address may carry a signed link.
+                crate::logging::info("download", &format!("Store download left to the web view: {}", url.host_str().unwrap_or(url.scheme())));
                 return;
             }
             // Cancellation here precedes decide-destination, including Wry's
