@@ -434,4 +434,35 @@ mod tests {
         assert!(text.contains("Nothing was changed"));
         assert!(text.contains("Try another source"));
     }
+
+    /// The DLC the release already unlocks: Forge writes them into
+    /// gbe_fork's `configs.app.ini` beside each dll.
+    #[test]
+    fn dlc_comes_from_the_release_forge_built() {
+        let base = std::env::temp_dir().join(format!("kryoto-repair-dlc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let settings = base.join("bin/steam_settings");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(
+            settings.join("configs.app.ini"),
+            "[app::general]\nbuild_id=1\n[app::dlcs]\nunlock_all=1\n2001=Soundtrack\n2002 = Artbook\n\n[app::other]\n9=x\n",
+        )
+        .unwrap();
+        let evidence = |dll: PathBuf| Evidence {
+            appids: BTreeSet::new(),
+            slugs: BTreeSet::new(),
+            signals: BTreeSet::new(),
+            dlls: vec![dll],
+            executable_dirs: BTreeSet::new(),
+            title_hint: String::new(),
+            steamstub_files: Vec::new(),
+        };
+        let dlc = |appid: &str, name: &str| Dlc { appid: appid.into(), name: name.into() };
+        assert_eq!(
+            dlcs(&evidence(base.join("bin/steam_api64.dll"))),
+            vec![dlc("2001", "Soundtrack"), dlc("2002", "Artbook")]
+        );
+        assert!(dlcs(&evidence(base.join("nowhere/steam_api64.dll"))).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
