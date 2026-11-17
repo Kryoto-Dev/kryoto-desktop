@@ -892,15 +892,13 @@ pub fn library_plain_folder(app: AppHandle, id: String) -> Result<LibraryGame, S
     if is_running(&app, &id) {
         return Err("Close the game first: its files are in use.".into());
     }
-    let game = load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
+    let games = load(&app)?;
+    let game = games.iter().find(|g| g.id == id).cloned().ok_or("That game is no longer in the library.")?;
     if game.launcher.is_some() {
         return Err("This game's folder belongs to its own launcher.".into());
     }
-    let install = dunce::canonicalize(&game.install_dir).map_err(|_| "The game's folder is not there any more.".to_string())?;
     let folders = crate::settings::all_folders(&crate::settings::load(&app));
-    // The folder the game is in at the top of a library folder, so a game
-    // whose root is a level down is renamed where the name was given.
-    let top = crate::storage::game_folder(&folders, &game.install_dir).map(|d| dunce::simplified(&d).to_path_buf()).unwrap_or_else(|| install.clone());
+    let (install, top) = rename_target(&games, &folders, &game)?;
     let (Some(parent), Some(name)) = (top.parent(), top.file_name().map(|n| n.to_string_lossy().into_owned())) else {
         return Err("This game's folder cannot be renamed.".into());
     };
@@ -940,6 +938,21 @@ pub fn library_plain_folder(app: AppHandle, id: String) -> Result<LibraryGame, S
     write_marker(&game);
     let _ = app.emit("library-changed", ());
     Ok(game)
+}
+
+/// The game's folder and the folder Manage > Rename folder renames: the one
+/// the game is in at the top of a library folder, so a game whose root is a
+/// level down is renamed where the name was given. Refused when other games
+/// in the library are in it too: renamed under them, they would lose their
+/// place.
+fn rename_target(games: &[LibraryGame], folders: &[String], game: &LibraryGame) -> Result<(PathBuf, PathBuf), String> {
+    let full = PathBuf::from(&game.install_dir).canonicalize().map_err(|_| "The game's folder is not there any more.".to_string())?;
+    let top = crate::storage::game_folder(folders, &game.install_dir).unwrap_or_else(|| full.clone());
+    // Checked before shortening: `holds_other_games` compares the long \\?\ form.
+    if crate::storage::holds_other_games(games, &[game.id.as_str()], &top) {
+        return Err(format!("{} also holds other games in your library, so Kryoto does not rename it.", dunce::simplified(&top).display()));
+    }
+    Ok((dunce::simplified(&full).to_path_buf(), dunce::simplified(&top).to_path_buf()))
 }
 
 /// Is this folder there? For the game page, which says so before Play does.
@@ -2095,7 +2108,7 @@ pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
+    use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, rename_target, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
     use crate::launch::LaunchEntry;
 
     /// KB-0288: Properties offers the folder's start files, likeliest first,
@@ -2318,6 +2331,32 @@ mod tests {
         let empty = root.join("notes");
         std::fs::create_dir_all(&empty).unwrap();
         assert!(from_folder(&empty, "notes").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Manage > Rename folder renamed a folder other games were in too, and
+    /// only the one game followed it.
+    #[test]
+    fn rename_folder_leaves_a_folder_other_games_share() {
+        let root = std::env::temp_dir().join(format!("kryoto-rename-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lib, loose) = (root.join("Library"), root.join("Loose"));
+        for dir in [lib.join("Pack").join("A"), lib.join("Pack").join("B").join("bin"), loose.join("C")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let game = |id: &str, dir: std::path::PathBuf| LibraryGame { id: id.into(), install_dir: dir.to_string_lossy().into_owned(), ..Default::default() };
+        let games = vec![game("a", lib.join("Pack").join("A")), game("b", lib.join("Pack").join("B").join("bin")), game("loose", loose.clone()), game("c", loose.join("C"))];
+        let folders = vec![lib.to_string_lossy().into_owned()];
+        // Both are in Pack at the top of the library folder.
+        assert!(rename_target(&games, &folders, &games[0]).is_err());
+        assert!(rename_target(&games, &folders, &games[1]).is_err());
+        // A game in no library folder: its own folder, which c is in too.
+        assert!(rename_target(&games, &folders, &games[2]).is_err());
+        let plain = |p: std::path::PathBuf| dunce::canonicalize(p).unwrap();
+        assert_eq!(rename_target(&games, &folders, &games[3]), Ok((plain(loose.join("C")), plain(loose.join("C")))));
+        // Alone in Pack, a game a level down renames Pack.
+        assert_eq!(rename_target(&games[1..], &folders, &games[1]), Ok((plain(lib.join("Pack").join("B").join("bin")), plain(lib.join("Pack")))));
+        assert!(rename_target(&games, &folders, &game("gone", root.join("Gone"))).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
