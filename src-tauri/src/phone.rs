@@ -16,8 +16,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::State as AxumState;
-use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::extract::{Request, State as AxumState};
+use axum::http::{header::{AUTHORIZATION, ORIGIN}, HeaderMap, StatusCode};
+use axum::middleware::{from_fn, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -399,6 +401,23 @@ fn fail(status: StatusCode, message: &str) -> Reply {
 
 fn parse<T: for<'a> Deserialize<'a>>(body: &str) -> Result<T, Reply> {
     serde_json::from_str(body).map_err(|_| fail(StatusCode::BAD_REQUEST, "Bad request."))
+}
+
+/// A web page, not the phone app: browsers send `Origin` on every POST from a
+/// page (`no-cors` too) and `Sec-Fetch-*` on nearly every request. Kryoto
+/// Mobile sends neither, since it calls from its native side (`net_request`
+/// and its notifications), not from its webview.
+fn from_a_browser(headers: &HeaderMap) -> bool {
+    headers.contains_key(ORIGIN) || headers.contains_key("sec-fetch-site") || headers.contains_key("sec-fetch-mode")
+}
+
+/// Web pages get nothing here, so a page open on the PC or on this network
+/// cannot use up the pairing code with wrong tries.
+async fn refuse_browsers(request: Request, next: Next) -> Response {
+    if from_a_browser(request.headers()) {
+        return fail(StatusCode::FORBIDDEN, "Only Kryoto Mobile can use this.").into_response();
+    }
+    next.run(request).await
 }
 
 /// Who is asking: the paired phone whose token this is. Refreshes `lastSeen`.
@@ -1142,6 +1161,7 @@ fn router(app: AppHandle) -> Router {
         .route("/v1/downloads", post(downloads_control))
         .route("/v1/library/remove", post(library_remove))
         .route("/v1/achievements", post(achievements))
+        .layer(from_fn(refuse_browsers))
         .with_state(app)
 }
 
@@ -1484,6 +1504,26 @@ mod tests {
         assert_eq!(inner.take_code(wrong, now), Err(CodeError::TooMany));
         // The right code no longer works either.
         assert_eq!(inner.take_code(&code, now), Err(CodeError::Wrong));
+    }
+
+    /// What a page's `fetch(..., { mode: 'no-cors', method: 'POST' })` sends is
+    /// refused; what the phone app sends, with either content type, is not.
+    #[test]
+    fn requests_from_web_pages_are_told_apart() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(*k, v.parse().unwrap());
+            }
+            h
+        };
+        assert!(from_a_browser(&headers(&[("origin", "https://evil.example"), ("content-type", "text/plain;charset=UTF-8")])));
+        assert!(from_a_browser(&headers(&[("origin", "null")])));
+        assert!(from_a_browser(&headers(&[("sec-fetch-mode", "no-cors")])));
+        assert!(from_a_browser(&headers(&[("sec-fetch-site", "cross-site")])));
+        assert!(!from_a_browser(&headers(&[("content-type", "text/plain;charset=UTF-8")])));
+        assert!(!from_a_browser(&headers(&[("content-type", "application/json"), ("authorization", "Bearer x")])));
+        assert!(!from_a_browser(&HeaderMap::new()));
     }
 
     #[test]
