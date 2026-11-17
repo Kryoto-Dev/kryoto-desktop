@@ -585,7 +585,7 @@ pub fn check_removable(app: &AppHandle, id: &str) -> Result<(), String> {
 /// not install into is only unlisted).
 pub async fn remove_game(app: &AppHandle, id: &str, delete_files: bool) -> Result<bool, String> {
     check_removable(app, id)?;
-    library::library_remove(app.clone(), id.to_string(), delete_files, None).await
+    library::library_remove(app.clone(), id.to_string(), delete_files, None, None).await
 }
 
 async fn downloads_control(AxumState(app): AxumState<AppHandle>, headers: HeaderMap, body: String) -> Reply {

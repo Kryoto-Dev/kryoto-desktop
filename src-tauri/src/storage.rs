@@ -70,23 +70,37 @@ fn drive_of(path: &Path) -> String {
         .unwrap_or_else(|| "/".into())
 }
 
-/// The game's own folder inside whichever library folder holds it: for
-/// `D:\Kryoto Games\Hades\bin\Hades.exe`'s root `D:\Kryoto Games\Hades\bin`,
-/// that is `D:\Kryoto Games\Hades`. `None` when the game is not in one of
-/// them - it was added from somewhere else, and is not ours to move or delete.
+/// The game's own folder inside the innermost library folder that holds it:
+/// for `D:\Kryoto Games\Hades\bin\Hades.exe`'s root `D:\Kryoto Games\Hades\bin`,
+/// that is `D:\Kryoto Games\Hades`, even with `D:\` a library folder too.
+/// `None` when the game is not in one of them - it was added from somewhere
+/// else, and is not ours to move or delete - or when that folder holds another
+/// library folder, as `D:\Games\Steam` does with `D:\Games\Steam\Library` added.
 pub fn game_folder(folders: &[String], install_dir: &str) -> Option<PathBuf> {
     let dir = PathBuf::from(install_dir).canonicalize().ok()?;
-    for f in folders {
-        let Ok(root) = PathBuf::from(f).canonicalize() else { continue };
-        if let Ok(rest) = dir.strip_prefix(&root) {
-            let first = rest.components().next()?;
-            if let Component::Normal(name) = first {
-                return Some(root.join(name));
-            }
-        }
+    let roots: Vec<PathBuf> = folders.iter().filter_map(|f| PathBuf::from(f).canonicalize().ok()).collect();
+    let root = roots.iter().filter(|r| dir.starts_with(r)).max_by_key(|r| r.components().count())?;
+    let Some(Component::Normal(name)) = dir.strip_prefix(root).ok()?.components().next() else {
+        return None;
+    };
+    let folder = root.join(name);
+    if roots.iter().any(|r| r.starts_with(&folder)) {
+        return None;
     }
-    None
+    Some(folder)
 }
+
+/// Another game in the library is also in `folder`: deleting or moving it
+/// would take that game along. `leaving` are the games going with it.
+pub fn holds_other_games(games: &[LibraryGame], leaving: &[&str], folder: &Path) -> bool {
+    games
+        .iter()
+        .filter(|g| !leaving.contains(&g.id.as_str()) && !g.install_dir.is_empty())
+        .filter_map(|g| PathBuf::from(&g.install_dir).canonicalize().ok())
+        .any(|dir| dir.starts_with(folder))
+}
+
+const NOT_OWN: &str = "Its folder holds more than this game, so Kryoto does not move it. Move it yourself, then point Properties at the new place.";
 
 /// The folder of a game added from somewhere else (brought over from Hydra,
 /// or picked in Add a game): its install folder, out of the subfolders
@@ -103,7 +117,7 @@ pub fn outside_root(games: &[LibraryGame], folders: &[String], game: &LibraryGam
             _ => break,
         }
     }
-    let not_own = || Err("Its folder holds more than this game, so Kryoto does not move it. Move it yourself, then point Properties at the new place.".to_string());
+    let not_own = || Err(NOT_OWN.to_string());
     // A drive (C:\) or one level under it (C:\Games) is a place, not a game.
     if root.components().filter(|c| matches!(c, Component::Normal(_))).count() < 2 {
         return not_own();
@@ -121,11 +135,8 @@ pub fn outside_root(games: &[LibraryGame], folders: &[String], game: &LibraryGam
             return not_own();
         }
     }
-    let others = games.iter().filter(|g| g.id != game.id && !g.install_dir.is_empty()).filter_map(|g| canon(&g.install_dir));
-    for dir in others {
-        if dir.starts_with(&root) {
-            return not_own();
-        }
+    if holds_other_games(games, &[game.id.as_str()], &root) {
+        return not_own();
     }
     Ok(root)
 }
@@ -526,6 +537,7 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     }
     // A game added from elsewhere moves in with its whole own folder.
     let from = match game_folder(&folders, &game.install_dir) {
+        Some(from) if holds_other_games(&games, &[game.id.as_str()], &from) => return Err(NOT_OWN.into()),
         Some(from) => from,
         None => outside_root(&games, &folders, &game)?,
     };
@@ -887,6 +899,52 @@ mod tests {
         // The library folder itself is never a game's folder.
         assert!(game_folder(&folders, &root.to_string_lossy()).is_none());
         assert!(game_folder(&folders, &std::env::temp_dir().to_string_lossy()).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With D:\Games and D:\Games\Kryoto both library folders, uninstalling a
+    /// game in the second deleted all of D:\Games\Kryoto.
+    #[test]
+    fn a_game_folder_is_under_the_innermost_library_folder() {
+        let root = std::env::temp_dir().join("kryoto-storage-nested-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let inner = root.join("Kryoto");
+        let hades = inner.join("Hades").join("bin");
+        let other = root.join("Other");
+        let steam_library = root.join("Steam").join("Library");
+        let celeste = root.join("Steam").join("common").join("Celeste");
+        for dir in [&hades, &other, &steam_library, &celeste] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        // Both orders: the default comes first, and it can be the outer or the inner one.
+        for folders in [vec![text(&root), text(&inner), text(&steam_library)], vec![text(&steam_library), text(&inner), text(&root)]] {
+            assert_eq!(game_folder(&folders, &text(&hades)), Some(canon(&inner).join("Hades")));
+            assert_eq!(game_folder(&folders, &text(&other)), Some(canon(&root).join("Other")));
+            // Steam holds a library folder: it is not this game's to delete.
+            assert_eq!(game_folder(&folders, &text(&celeste)), None);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_folder_two_games_share_holds_other_games() {
+        let root = std::env::temp_dir().join("kryoto-storage-shared-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let (shared, solo) = (root.join("Shared"), root.join("Solo"));
+        for dir in [shared.join("A"), shared.join("B").join("bin"), solo.clone()] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let game = |id: &str, dir: PathBuf| LibraryGame { id: id.into(), install_dir: dir.to_string_lossy().into_owned(), ..Default::default() };
+        let games = vec![game("a", shared.join("A")), game("b", shared.join("B").join("bin")), game("solo", solo.clone())];
+        let (shared, solo) = (shared.canonicalize().unwrap(), solo.canonicalize().unwrap());
+        assert!(holds_other_games(&games, &["a"], &shared));
+        assert!(!holds_other_games(&games, &["solo"], &solo));
+        // Uninstalled in one go, the two do not keep each other's folder.
+        assert!(!holds_other_games(&games, &["a", "b"], &shared));
+        // Nor does a game its own folder.
+        assert!(!holds_other_games(&games[..1], &["a"], &shared));
         let _ = std::fs::remove_dir_all(root);
     }
 

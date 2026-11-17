@@ -345,8 +345,10 @@ export const library = {
   undoUpdate: (slug: string) => call<void>('game_update_undo', { slug }),
   refreshArtwork: (id: string, art: { cover: string | null; hero: string | null; logo?: string | null; header?: string | null }) =>
     call<LibraryGame>('library_artwork', { id, ...art, logo: art.logo ?? null, header: art.header ?? null }),
-  /** `deletePrefix`: on Linux, its Wine prefix goes too. */
-  remove: (id: string, deleteFiles: boolean, deletePrefix = false) => call<boolean>('library_remove', { id, deleteFiles, deletePrefix }),
+  /** `deletePrefix`: on Linux, its Wine prefix goes too. `together`: the games
+   *  uninstalled in the same go, which may share its folder. */
+  remove: (id: string, deleteFiles: boolean, deletePrefix = false, together: string[] = []) =>
+    call<boolean>('library_remove', { id, deleteFiles, deletePrefix, together }),
   /** The game is somewhere else now: `exePath` is what starts it. Only its place changes. */
   relocate: (id: string, exePath: string) => call<LibraryGame>('library_relocate', { id, exePath }),
   /** Manage > Rename folder: the game's folder in plain letters, where it is (src-tauri library.rs). */
