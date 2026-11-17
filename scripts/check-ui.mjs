@@ -440,6 +440,41 @@ try {
       assert.equal(await notify.isChecked(), false)
     } finally { await pads.close() }
   })
+  await check('a Settings switch does not undo where saves are kept, chosen on the same page', async () => {
+    const cloud = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    cloud.on('pageerror', e => failures.push(e.message))
+    await cloud.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await cloud.goto(base)
+      await cloud.getByRole('complementary', { name: 'Your games' }).waitFor()
+      const saveOver = (fields, read) => cloud.evaluate(async ([fields, read]) => {
+        const loaded = n => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(n))
+        const { settingsApi } = await import(loaded('/src/lib/settings.ts'))
+        const latest = await settingsApi.get()
+        await settingsApi.save({ ...latest, ...fields })
+        return latest[read]
+      }, [fields, read])
+      // Saves kept with the account, as the app's own settings always say.
+      await saveOver({ savesMode: '', savesLocalDir: '' }, 'savesMode')
+      await cloud.getByRole('button', { name: 'Account menu' }).click()
+      await cloud.getByRole('menuitem', { name: /Settings/ }).click()
+      await cloud.getByRole('button', { name: 'Cloud', exact: true }).click()
+      const onExit = cloud.getByRole('checkbox', { name: "Back up a game's saves when it closes" })
+      await onExit.waitFor()
+      // As "Where your saves are kept" and a notice marked seen save: on top of what is saved, past the page.
+      const was = await saveOver({ savesMode: 'local', savesLocalDir: 'D:/Saves', seenNotices: ['check-seen'] }, 'cloudSavesOnExit')
+      await onExit.click()
+      const saved = () => cloud.evaluate(async () => (await (await import('/src/lib/bridge.ts')).call('settings_get')))
+      let now = await saved()
+      for (let i = 0; i < 20 && now.cloudSavesOnExit === was; i++) {
+        await cloud.waitForTimeout(100)
+        now = await saved()
+      }
+      assert.equal(now.cloudSavesOnExit, !was)
+      assert.deepEqual([now.savesMode, now.savesLocalDir], ['local', 'D:/Saves'])
+      assert.ok(now.seenNotices.includes('check-seen'), `seen: ${JSON.stringify(now.seenNotices)}`)
+    } finally { await cloud.close() }
+  })
   await check('achievement repair offers gbe_fork and every RUNE profile with Undo between attempts', async () => {
     const achievements = await browser.newPage({ viewport: { width: 1100, height: 860 } })
     // This journey starts after startup setup; Windows otherwise waits at the
