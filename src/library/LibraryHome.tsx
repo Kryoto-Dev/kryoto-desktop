@@ -206,8 +206,10 @@ export function LibraryHome({
       {filter === 'all' && recent.length > 1 ? (
         <section className="grid min-w-0 gap-3">
           <Label>Recent</Label>
-          {/* Capped: with one or two recent games a `1fr` card filled the whole width at 460:215 and dwarfed the page (KB-0021). */}
-          <div className="grid auto-cols-[minmax(260px,360px)] grid-flow-col justify-start gap-3 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {/* Capped: with one or two recent games a `1fr` card filled the whole width at 460:215 and dwarfed the page (KB-0021).
+              Room on every side (p-2, taken back by -m-2): a scroller cuts off what
+              sticks out, so a lifted card's top and the controller's ring were cut. */}
+          <div className="grid auto-cols-[minmax(260px,360px)] grid-flow-col justify-start gap-3 -m-2 overflow-x-auto p-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {recent.slice(1, 7).map((g) => (
               <div key={g.id} className="group/lift relative">
               <button
@@ -215,7 +217,7 @@ export function LibraryHome({
                 onClick={() => onOpen(g.id)}
                 onDoubleClick={() => onPlay(g)}
                 {...ctx(g)}
-                className="kryo-radius group grid w-full overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-0.5 group-hover/lift:border-foreground/50"
+                className="kryo-radius group grid w-full overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-0.5 group-hover/lift:border-foreground/50 group-focus-within/lift:-translate-y-0.5 group-focus-within/lift:border-foreground/50"
               >
                 <Art adult={g.nsfw} src={capsulesFor(g)[0]} fallback={capsulesFor(g).slice(1)} title={g.title} className="aspect-[460/215] w-full object-cover" />
                 <span className="grid gap-0.5 px-3 py-2.5">
@@ -262,7 +264,7 @@ export function LibraryHome({
             <div key={g.id} className="group/lift">
             <div
               {...ctx(g)}
-              className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60"
+              className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60 group-focus-within/lift:-translate-y-1 group-focus-within/lift:border-foreground/60"
             >
               <button type="button" onClick={() => onOpen(g.id)} className="kryo-square absolute inset-0" aria-label={`Open ${g.title}`}>
                 <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />
@@ -323,7 +325,7 @@ export function LibraryHome({
                 <div key={e.slug} className="group/lift">
                 <div
                   {...gameContext(onSavedContext ? (x, y) => onSavedContext(e, x, y) : undefined)}
-                  className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-dashed border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60"
+                  className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-dashed border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60 group-focus-within/lift:-translate-y-1 group-focus-within/lift:border-foreground/60"
                 >
                   <button type="button" onClick={() => onCatalogGame?.(e.slug)} className="kryo-square absolute inset-0" aria-label={`Open ${e.title}`}>
                     {/* The tall cover, like the cards of games on this PC; the wide one only when kryo.to has no tall one. */}
