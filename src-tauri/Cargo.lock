@@ -2769,7 +2769,7 @@ dependencies = [
 
 [[package]]
 name = "kryoto-desktop"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
