@@ -28,8 +28,9 @@ struct StartResponse {
     expires_in: u64,
 }
 
-fn client() -> reqwest::Client {
-    crate::net::builder()
+/// For kryo.to (`base`), with its name encrypted where that works (net.rs `kryoto_tls`, KB-0347).
+fn client(base: &str) -> reqwest::Client {
+    crate::net::kryoto_tls(base, crate::net::builder())
         .timeout(Duration::from_secs(20))
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION"), " chat"))
         .build()
@@ -46,7 +47,7 @@ async fn error_of(r: reqwest::Response) -> String {
 }
 
 pub async fn start(base: &str, device_name: &str) -> Result<Started, String> {
-    let r = client()
+    let r = client(base)
         .post(format!("{base}/api/auth/device"))
         .json(&serde_json::json!({ "client": "desktop", "device_name": device_name }))
         .send()
@@ -82,7 +83,7 @@ pub async fn wait_for_token(base: &str, started: &Started) -> Result<Zeroizing<S
         status: String,
         token: Option<String>,
     }
-    let http = client();
+    let http = client(base);
     let deadline = Instant::now() + Duration::from_secs(started.expires_in.min(90));
     let mut interval = started.interval;
     while Instant::now() < deadline {
@@ -126,7 +127,7 @@ pub async fn me(base: &str, token: &str) -> Result<Option<Me>, String> {
     struct Body {
         user: Option<User>,
     }
-    let r = client()
+    let r = client(base)
         .get(format!("{base}/api/auth/me"))
         .bearer_auth(token)
         .send()
@@ -148,7 +149,7 @@ pub async fn me(base: &str, token: &str) -> Result<Option<Me>, String> {
 /// GIF search through kryo.to's proxy (supporters only, decided there).
 pub async fn gif_search(base: &str, token: &str, query: &str) -> Result<serde_json::Value, String> {
     let q: String = query.trim().chars().take(80).collect();
-    let r = client()
+    let r = client(base)
         .get(format!("{base}/api/gifs/search"))
         .query(&[("q", q.as_str())])
         .bearer_auth(token)
@@ -168,7 +169,7 @@ pub async fn message_request(base: &str, token: &str, username: &str) -> Result<
     if username.is_empty() {
         return Err("Whose username?".into());
     }
-    let r = client()
+    let r = client(base)
         .post(format!("{base}/api/chat/message-requests"))
         .bearer_auth(token)
         .json(&serde_json::json!({ "username": username }))
@@ -183,7 +184,7 @@ pub async fn message_request(base: &str, token: &str, username: &str) -> Result<
 
 /// Accept or decline a message request someone sent this account.
 pub async fn message_request_respond(base: &str, token: &str, user_id: u64, accept: bool) -> Result<(), String> {
-    let r = client()
+    let r = client(base)
         .post(format!("{base}/api/chat/message-requests/{user_id}"))
         .bearer_auth(token)
         .json(&serde_json::json!({ "action": if accept { "accept" } else { "decline" } }))
@@ -200,7 +201,7 @@ pub async fn message_request_respond(base: &str, token: &str, user_id: u64, acce
 /// of groups you share). Anyone else is left out by kryo.to.
 pub async fn people(base: &str, token: &str, ids: &[u64]) -> Result<serde_json::Value, String> {
     let list = ids.iter().take(64).map(u64::to_string).collect::<Vec<_>>().join(",");
-    let r = client()
+    let r = client(base)
         .get(format!("{base}/api/chat/people"))
         .query(&[("ids", list.as_str())])
         .bearer_auth(token)
@@ -215,7 +216,7 @@ pub async fn people(base: &str, token: &str, ids: &[u64]) -> Result<serde_json::
 
 /// A kryo.to API call with the chat sign-in: the public room.
 pub async fn api(base: &str, token: &str, method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
-    let mut req = client().request(method, format!("{base}{path}")).bearer_auth(token);
+    let mut req = client(base).request(method, format!("{base}{path}")).bearer_auth(token);
     if let Some(b) = body {
         req = req.json(&b);
     }
@@ -228,7 +229,7 @@ pub async fn api(base: &str, token: &str, method: reqwest::Method, path: &str, b
 
 /// Send a chat report (messages the person picked, decrypted here) to staff.
 pub async fn report(base: &str, token: &str, payload: &serde_json::Value) -> Result<(), String> {
-    let r = client()
+    let r = client(base)
         .post(format!("{base}/api/chat/reports"))
         .bearer_auth(token)
         .json(payload)
@@ -243,7 +244,7 @@ pub async fn report(base: &str, token: &str, payload: &serde_json::Value) -> Res
 
 /// Sign this token out on kryo.to (removing chat from this PC).
 pub async fn sign_out(base: &str, token: &str) {
-    let _ = client().post(format!("{base}/api/auth/logout")).bearer_auth(token).send().await;
+    let _ = client(base).post(format!("{base}/api/auth/logout")).bearer_auth(token).send().await;
 }
 
 #[cfg(test)]

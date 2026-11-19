@@ -145,14 +145,60 @@ pub fn builder() -> reqwest::ClientBuilder {
 /* ── Encrypted Client Hello for kryo.to's own connections ─────────────── */
 
 /// `builder` for a request to `url`: with the site's name encrypted when
-/// `url` is one of Kryoto's own HTTPS addresses and Encrypted Client Hello has
-/// been seen to work on this network (`check_ech`). Every other address keeps
-/// the plain handshake: the key is Cloudflare's, and only Cloudflare can open it.
+/// `url` is one of Kryoto's own HTTPS addresses that publishes the same key as
+/// kryo.to, and Encrypted Client Hello has been seen to work on this network
+/// (`check_ech`). Every other address keeps the plain handshake: the key is
+/// Cloudflare's, and only Cloudflare can open it. chat.kryo.to and
+/// status.kryo.to are not behind Cloudflare (2026-11-19) and publish none.
 pub fn kryoto_tls(url: &str, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    let own = url::Url::parse(url).ok().is_some_and(|u| u.scheme() == "https" && u.host_str().is_some_and(ours));
-    match ech_config().filter(|_| own) {
+    match ech_for(url) {
         Some(config) => builder.use_preconfigured_tls((*config).clone()),
         None => builder,
+    }
+}
+
+/// The config `kryoto_tls` would use for `url`, if any.
+fn ech_for(url: &str) -> Option<std::sync::Arc<rustls::ClientConfig>> {
+    let host = url::Url::parse(url).ok().filter(|u| u.scheme() == "https")?.host_str()?.to_ascii_lowercase();
+    if !ours(&host) {
+        return None;
+    }
+    let config = ech_config()?;
+    host_has_key(&host).then_some(config)
+}
+
+/// Which of our names publish kryo.to's key: `Some(true)` it does, `Some(false)`
+/// it does not (or a different one), `None` being looked up. A name not looked
+/// up yet starts its lookup and goes plain this once; `ech_generation` moves on
+/// when it turns out to have the key, so long-lived clients are built again.
+static KEYED: Mutex<Option<HashMap<String, Option<bool>>>> = Mutex::new(None);
+
+fn host_has_key(host: &str) -> bool {
+    let Ok(mut keyed) = KEYED.lock() else { return false };
+    let map = keyed.get_or_insert_with(HashMap::new);
+    match map.get(host) {
+        Some(known) => known.unwrap_or(false),
+        None => {
+            map.insert(host.to_string(), None);
+            let host = host.to_string();
+            tauri::async_runtime::spawn(async move {
+                let same = match (ech_keys(&host).await, ech_list()) {
+                    (Some(theirs), Some(ours)) => theirs == ours,
+                    _ => false,
+                };
+                note_key(&host, same);
+            });
+            false
+        }
+    }
+}
+
+fn note_key(host: &str, same: bool) {
+    if let Ok(mut keyed) = KEYED.lock() {
+        keyed.get_or_insert_with(HashMap::new).insert(host.to_string(), Some(same));
+    }
+    if same {
+        ECH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -161,7 +207,7 @@ enum Ech {
     /// Not looked at yet this run.
     Unknown,
     /// A request with it reached kryo.to with its name encrypted, at that time.
-    Works(std::sync::Arc<rustls::ClientConfig>, Instant),
+    Works(std::sync::Arc<rustls::ClientConfig>, Vec<u8>, Instant),
     /// It did not, at that time, for that reason (an antivirus or company proxy
     /// that reads HTTPS turns it away; the plain handshake is what works there).
     Off(Instant),
@@ -175,7 +221,15 @@ const ECH_FRESH: Duration = Duration::from_secs(30 * 60);
 
 fn ech_config() -> Option<std::sync::Arc<rustls::ClientConfig>> {
     match &*ECH.lock().ok()? {
-        Ech::Works(config, _) => Some(config.clone()),
+        Ech::Works(config, ..) => Some(config.clone()),
+        _ => None,
+    }
+}
+
+/// The key list the working config was made from.
+fn ech_list() -> Option<Vec<u8>> {
+    match &*ECH.lock().ok()? {
+        Ech::Works(_, list, _) => Some(list.clone()),
         _ => None,
     }
 }
@@ -192,7 +246,7 @@ pub fn ech_due(failing: bool) -> bool {
     let Ok(state) = ECH.lock() else { return false };
     match &*state {
         Ech::Unknown => true,
-        Ech::Works(_, at) | Ech::Off(at) => at.elapsed() >= if failing { ECH_RETRY } else { ECH_FRESH },
+        Ech::Works(.., at) | Ech::Off(at) => at.elapsed() >= if failing { ECH_RETRY } else { ECH_FRESH },
     }
 }
 const ECH_RETRY: Duration = Duration::from_secs(60);
@@ -203,32 +257,47 @@ const ECH_RETRY: Duration = Duration::from_secs(60);
 /// Anything else and the plain handshake stays. Say so when the answer changes.
 pub async fn check_ech() {
     let result = try_ech().await;
-    let mut state = match ECH.lock() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let was_on = matches!(*state, Ech::Works(..));
-    let was_known = !matches!(*state, Ech::Unknown);
-    *state = match result {
-        Ok(config) => {
-            if !was_on {
-                crate::logging::info("net", "kryo.to's name goes encrypted (Encrypted Client Hello) on this network");
+    // In a block of its own: the lock must be let go before the next await.
+    let works = {
+        let mut state = match ECH.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let was_on = matches!(*state, Ech::Works(..));
+        let was_known = !matches!(*state, Ech::Unknown);
+        *state = match result {
+            Ok((config, list)) => {
+                if !was_on {
+                    crate::logging::info("net", "kryo.to's name goes encrypted (Encrypted Client Hello) on this network");
+                }
+                // The names looked at again against this key (Cloudflare turns keys over).
+                if let Ok(mut keyed) = KEYED.lock() {
+                    *keyed = Some(HashMap::from([("kryo.to".to_string(), Some(true))]));
+                }
+                Ech::Works(config, list, Instant::now())
             }
-            Ech::Works(config, Instant::now())
-        }
-        Err(why) => {
-            if was_on || !was_known {
-                crate::logging::info("net", &format!("kryo.to's name goes in the clear on this network: {why}"));
+            Err(why) => {
+                if was_on || !was_known {
+                    crate::logging::info("net", &format!("kryo.to's name goes in the clear on this network: {why}"));
+                }
+                Ech::Off(Instant::now())
             }
-            Ech::Off(Instant::now())
+        };
+        let works = matches!(*state, Ech::Works(..));
+        if was_on != works || !was_known {
+            ECH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        works
     };
-    if was_on != matches!(*state, Ech::Works(..)) || !was_known {
-        ECH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // The download host before any download needs it: looked up on first use,
+    // its first connection would go out plain and be cut on such a network.
+    if works {
+        let same = ech_keys("dl.kryo.to").await.is_some_and(|theirs| Some(theirs) == ech_list());
+        note_key("dl.kryo.to", same);
     }
 }
 
-async fn try_ech() -> Result<std::sync::Arc<rustls::ClientConfig>, String> {
+async fn try_ech() -> Result<(std::sync::Arc<rustls::ClientConfig>, Vec<u8>), String> {
     let list = ech_keys("kryo.to").await.ok_or("no key in kryo.to's DNS (or no secure resolver answered)")?;
     let config = std::sync::Arc::new(ech_client_config(&list)?);
     let client = builder()
@@ -240,7 +309,7 @@ async fn try_ech() -> Result<std::sync::Arc<rustls::ClientConfig>, String> {
     let res = client.get("https://kryo.to/cdn-cgi/trace").send().await.map_err(|e| crate::logging::why(&e.without_url()))?;
     let body = res.text().await.map_err(|e| e.to_string())?;
     if body.lines().any(|l| l.trim() == "sni=encrypted") {
-        Ok(config)
+        Ok((config, list))
     } else {
         Err("the request went through without its name encrypted".into())
     }
@@ -470,13 +539,26 @@ mod tests {
     #[test]
     fn only_kryotos_https_addresses_get_the_key() {
         let body = r#"{"Answer":[{"type":65,"data":"1 . ech=AEX+DQBBpQAgACAuwMQtM1v9kQJyUlfYP1aqdSNI2MqKHEv0m5sJCYAFJQAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="}]}"#;
-        let config = std::sync::Arc::new(ech_client_config(&ech_in(body).unwrap()).unwrap());
-        *ECH.lock().unwrap() = Ech::Works(config, Instant::now());
-        // A client built either way; what matters is that nothing panics and other hosts are left alone.
-        for url in ["https://dl.kryo.to/d/x", "https://kryo.to/", "http://kryo.to/", "https://pixeldrain.com/u/x", "https://notkryo.to/"] {
-            assert!(kryoto_tls(url, reqwest::Client::builder()).build().is_ok(), "{url}");
-        }
+        let list = ech_in(body).unwrap();
+        let config = std::sync::Arc::new(ech_client_config(&list).unwrap());
+        *ECH.lock().unwrap() = Ech::Works(config, list, Instant::now());
+        // As looked up: dl.kryo.to has kryo.to's key, chat.kryo.to none (not behind Cloudflare).
+        *KEYED.lock().unwrap() = Some(HashMap::from([
+            ("kryo.to".to_string(), Some(true)),
+            ("dl.kryo.to".to_string(), Some(true)),
+            ("chat.kryo.to".to_string(), Some(false)),
+        ]));
+        assert!(ech_for("https://kryo.to/api/saves").is_some());
+        assert!(ech_for("https://dl.kryo.to/d/x").is_some());
+        assert!(ech_for("https://chat.kryo.to/v1/devices").is_none(), "a name without the key keeps the plain handshake");
+        assert!(ech_for("http://kryo.to/").is_none());
+        assert!(ech_for("https://pixeldrain.com/u/x").is_none());
+        assert!(ech_for("https://notkryo.to/").is_none());
+        assert!(kryoto_tls("https://dl.kryo.to/d/x", reqwest::Client::builder()).build().is_ok());
+        // Nothing known about ECH here: everything plain.
         *ECH.lock().unwrap() = Ech::Unknown;
+        assert!(ech_for("https://kryo.to/").is_none());
+        *KEYED.lock().unwrap() = None;
     }
 
     /// Live: kryo.to's key from its DNS, a request with it, and Cloudflare's own

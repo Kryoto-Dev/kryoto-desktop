@@ -29,6 +29,11 @@ fn client() -> reqwest::Client {
     crate::net::builder().user_agent("Kryoto Desktop").build().unwrap_or_default()
 }
 
+/// `client` for kryo.to itself, with its name encrypted where that works (net.rs `kryoto_tls`, KB-0347).
+fn kryoto_client(endpoint: &str) -> reqwest::Client {
+    crate::net::kryoto_tls(endpoint, crate::net::builder().user_agent("Kryoto Desktop")).build().unwrap_or_default()
+}
+
 /// When this game's emulator last unlocked an achievement on this PC: a sign
 /// it was played here before, for a game whose hours nothing remembers
 /// (library.rs `playtime_offer`). The saves are the PC's own folders on
@@ -348,7 +353,7 @@ async fn appid_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option
     }
     let slug = game.slug.as_deref()?;
     let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(app));
-    let res = client().get(format!("{endpoint}/api/games/{slug}")).timeout(Duration::from_secs(15)).send().await.ok()?;
+    let res = kryoto_client(&endpoint).get(format!("{endpoint}/api/games/{slug}")).timeout(Duration::from_secs(15)).send().await.ok()?;
     let json: serde_json::Value = res.error_for_status().ok()?.json().await.ok()?;
     let id: String = json["game"]["steam_appid"].as_str()?.chars().take_while(char::is_ascii_digit).collect();
     (!id.is_empty() && id != "480").then_some(id)
