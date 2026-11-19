@@ -34,6 +34,13 @@ url = "2"
 # a root of its own reaches kryo.to here as its Store web view does; and the
 # system's proxy setting, as the web view uses it (KB-0323).
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "rustls-tls-native-roots", "system-proxy", "cookies", "http2"] }
+# Encrypted Client Hello for kryo.to's own connections (net.rs `ours`): the
+# same rustls reqwest runs on, an HPKE suite for it (hpke is already here for
+# chat), and the two root sets reqwest's own config would have loaded.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+hpke = { version = "0.14", default-features = false, features = ["alloc", "getrandom", "x25519", "aes", "chacha"] }
+webpki-roots = "1"
+rustls-native-certs = "0.8"
 tokio = { version = "1", features = ["sync", "fs", "io-util", "time", "net", "macros"] }
 futures-util = "0.3"
 sevenz-rust = "0.6"
