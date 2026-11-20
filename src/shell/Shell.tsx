@@ -1087,6 +1087,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         { label: 'Blog', icon: <Newspaper />, onSelect: () => openWeb('/blog') },
         { label: 'Collections', icon: <Layers />, onSelect: () => openWeb('/collections/discover') },
         { label: 'Playtest', icon: <FlaskConical />, onSelect: () => openWeb('/testers') },
+        { label: 'Apply for a role', icon: <Sparkles />, onSelect: () => openWeb('/apply') },
         { separator: true },
         { label: 'Discord', icon: <ArrowUpRight />, onSelect: () => void openExternal(DISCORD_URL) },
         { label: 'Reddit', icon: <ArrowUpRight />, onSelect: () => void openExternal(REDDIT_URL) },
