@@ -771,6 +771,12 @@ html.kryo-pad :focus {
   outline: 3px solid var(--primary);
   outline-offset: 2px;
 }
+/* A button that covers a whole card (the cover that opens a game) sits in a
+   card that clips what is outside it: the ring goes just inside instead, or
+   the selection on a game card did not show at all. */
+html.kryo-pad .absolute.inset-0:focus {
+  outline-offset: -4px;
+}
 
 /* Tooltips (ui/GlobalTooltip.tsx), as kryo.to draws them. */
 .kryo-global-tooltip {

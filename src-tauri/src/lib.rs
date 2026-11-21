@@ -1244,6 +1244,12 @@ fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         linux_overlay::repaint(&view);
         let _ = view.set_focus();
+    } else if app.get_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false) {
+        // The keyboard back to the shell: a hidden Store kept it, so after the
+        // Store a controller (or the keys) moved nothing until a click.
+        if let Some(shell) = app.get_webview("main") {
+            let _ = shell.set_focus();
+        }
     }
     Ok(())
 }

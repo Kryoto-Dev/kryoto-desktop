@@ -908,6 +908,44 @@ impl<R: Runtime> Reader<'_, R> {
     }
 }
 
+/// Whether Kryoto's window is the one in front, so the shell gets the pad.
+/// Windows: asked of Windows itself. The window's own focus flag (tao) goes
+/// false when the keyboard moves into one of its views and back only when the
+/// window itself is focused again; handing the keyboard back to the shell after
+/// the Store turned it off, and the pad moved nothing until the controller was
+/// plugged in again.
+fn in_front<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let Some(window) = app.get_window("main") else { return false };
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOTOWNER};
+        let Ok(ours) = window.hwnd() else { return false };
+        let front = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOTOWNER) };
+        !front.is_null() && std::ptr::eq(front, ours.0)
+    }
+    #[cfg(not(windows))]
+    {
+        window.is_focused().unwrap_or(false)
+    }
+}
+
+/// This thread's own window messages, handled. SDL starts Windows.Gaming.Input
+/// on this thread, and it leaves a message here for every report a controller
+/// sends; never handled, each one held a window object. A pad in use took ~60
+/// a second until Windows' 10,000 ran out and the tray icon, menus and new
+/// windows failed (KB-0335; measured: 600 reports, 600 objects; handled, 2).
+#[cfg(windows)]
+pub(crate) fn thread_messages() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+        unsafe {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
 /// Each connection: "Kryoto detected a controller", with a
 /// Configure button that opens Settings > Controller on it.
 fn ask_to_configure<R: Runtime>(app: &AppHandle<R>, pad: &PadInfo) {
@@ -997,10 +1035,16 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
                     Err(mpsc::TryRecvError::Disconnected) => return,
                 }
             } else {
-                // Paused: wait for Start without spinning.
-                match rx.recv() {
+                // Paused: wait for Start without spinning, still handling this
+                // thread's messages (`thread_messages`: SDL stays started).
+                match rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(r) => r,
-                    Err(_) => return,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        #[cfg(windows)]
+                        thread_messages();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             };
             match req {
@@ -1058,7 +1102,14 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
 
         if focus_at.elapsed() > Duration::from_millis(200) {
             focus_at = Instant::now();
-            r.focused = app.get_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
+            let focused = in_front(app)
+                // Debug builds: as if in front, for tests that cannot take the focus (KB-0335).
+                || (cfg!(debug_assertions) && std::env::var_os("KRYOTO_DEV_PAD_FOCUSED").is_some());
+            // Only while in front does the shell get the pad: say when that changes.
+            if focused != r.focused {
+                crate::logging::info("pads", &format!("Kryoto in front: {focused}"));
+            }
+            r.focused = focused;
         }
 
         if let Some(ev) = pump.wait_event_timeout(8) {
@@ -1067,6 +1118,8 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
                 r.handle(ev, &mut dirty);
             }
         }
+        #[cfg(windows)]
+        thread_messages();
 
         // Sticks and triggers at most 30 times a second, while in front.
         if r.focused && sent_at.elapsed() >= Duration::from_millis(33) && !dirty.is_empty() {

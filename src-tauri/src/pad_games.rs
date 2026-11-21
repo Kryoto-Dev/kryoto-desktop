@@ -1888,6 +1888,104 @@ mod tests {
         assert!(moves > 5, "the mouse barely moved: {moves}");
     }
 
+    /// KB-0335: a controller in use must not use up the app's window objects
+    /// (players hit Windows' 10,000 and the tray icon failed). Plugs a virtual
+    /// Xbox pad, moves the sticks and taps the D-pad for 20 s, and compares the
+    /// dev app's USER objects before and after. The dev app (`KB_DEV_PID` = its
+    /// process id) runs with `KRYOTO_DEV_PAD_FOCUSED=1` and `pad_start` called.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn pad_input_leaves_window_objects_alone_live() {
+        use vigem_client::{Client, TargetId, XButtons, XGamepad, Xbox360Wired};
+        use windows_sys::Win32::System::Threading::{GetGuiResources, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let pid: u32 = std::env::var("KB_DEV_PID").expect("KB_DEV_PID").parse().unwrap();
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        assert!(!process.is_null(), "no process {pid}");
+        let objects = || unsafe { GetGuiResources(process, 1) };
+        let mut pad = Xbox360Wired::new(Client::connect().expect("ViGEmBus"), TargetId::XBOX360_WIRED);
+        pad.plugin().unwrap();
+        pad.wait_ready().unwrap();
+        std::thread::sleep(Duration::from_millis(3500)); // the dev app scans for new pads every two seconds
+        let before = objects();
+        let start = Instant::now();
+        let mut i = 0u32;
+        while start.elapsed() < Duration::from_secs(20) {
+            let t = i as f32 / 6.0;
+            let buttons = match i % 40 {
+                0..=2 => XButtons::RIGHT,
+                20..=22 => XButtons::LEFT,
+                _ => 0,
+            };
+            pad.update(&XGamepad {
+                thumb_lx: (t.sin() * 30000.0) as i16,
+                thumb_ly: (t.cos() * 30000.0) as i16,
+                thumb_rx: ((t * 0.7).sin() * 20000.0) as i16,
+                buttons: XButtons { raw: buttons },
+                ..Default::default()
+            })
+            .unwrap();
+            i += 1;
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        pad.update(&XGamepad::default()).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let after = objects();
+        pad.unplug().unwrap();
+        println!("window objects: {before} -> {after} over {i} reports");
+        assert!(after < before + 50, "controller input used up {} window objects", after - before);
+    }
+
+    /// KB-0335, SDL alone: started as pad.rs starts it, a virtual Xbox pad's
+    /// reports, SDL's events waited on, and this thread's messages handled as
+    /// pad.rs handles them (`thread_messages`); this process's window objects
+    /// must stay put. `KB_SDL_UNHANDLED=1` leaves the messages alone and shows
+    /// the leak: one window object per report (Windows.Gaming.Input).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn sdl_input_leaves_window_objects_alone_live() {
+        use vigem_client::{Client, TargetId, XGamepad, Xbox360Wired};
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetGuiResources};
+        let objects = || unsafe { GetGuiResources(GetCurrentProcess(), 1) };
+        let handled = std::env::var_os("KB_SDL_UNHANDLED").is_none();
+        sdl2::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+        sdl2::hint::set("SDL_JOYSTICK_RAWINPUT", "0");
+        let sdl = sdl2::init().unwrap();
+        let (js, gc, mut pump) = (sdl.joystick().unwrap(), sdl.game_controller().unwrap(), sdl.event_pump().unwrap());
+        let mut pad = Xbox360Wired::new(Client::connect().expect("ViGEmBus"), TargetId::XBOX360_WIRED);
+        pad.plugin().unwrap();
+        pad.wait_ready().unwrap();
+        let settle = Instant::now();
+        while settle.elapsed() < Duration::from_secs(3) {
+            for _ in pump.poll_iter() {}
+            if handled {
+                crate::pad::thread_messages();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let open: Vec<_> = (0..js.num_joysticks().unwrap()).filter_map(|i| gc.open(i).ok()).collect();
+        let before = objects();
+        let mut events = 0u32;
+        for i in 0..600u32 {
+            let t = i as f32 / 6.0;
+            pad.update(&XGamepad { thumb_lx: (t.sin() * 30000.0) as i16, thumb_ly: (t.cos() * 30000.0) as i16, ..Default::default() }).unwrap();
+            if pump.wait_event_timeout(8).is_some() {
+                events += 1 + pump.poll_iter().count() as u32;
+            }
+            if handled {
+                crate::pad::thread_messages();
+            }
+            // A real pad's pace: reports this close together reach Windows as one.
+            std::thread::sleep(Duration::from_millis(8));
+        }
+        let after = objects();
+        pad.unplug().unwrap();
+        drop(open);
+        println!("SDL, messages {}: window objects {before} -> {after} over 600 reports, {events} events", if handled { "handled" } else { "left alone" });
+        assert!(after < before + 50, "SDL used up {} window objects", after - before);
+    }
+
     /// Two pads at once, keyboard and mouse, on Windows: prints what Kryoto sent
     /// for each step, swallowed by a hook as above. Dev app as for
     /// `virtual_pad_becomes_keys_live`; the game's settings are the test.

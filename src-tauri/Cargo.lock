@@ -59,9 +59,23 @@ dependencies = [
  "aead 0.5.2",
  "aes 0.8.4",
  "cipher 0.4.4",
- "ctr",
- "ghash",
+ "ctr 0.9.2",
+ "ghash 0.5.1",
  "subtle",
+]
+
+[[package]]
+name = "aes-gcm"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f2b8006a0c83f52b62ba44a97b58bf76fe2f70a329e588f67f89691d93d498f"
+dependencies = [
+ "aead 0.6.1",
+ "aes 0.9.3",
+ "cipher 0.5.2",
+ "ctr 0.10.1",
+ "ctutils",
+ "ghash 0.6.0",
 ]
 
 [[package]]
@@ -992,6 +1006,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctr"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "ctutils"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1835,7 +1858,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
- "polyval",
+ "polyval 0.6.2",
+]
+
+[[package]]
+name = "ghash"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
+dependencies = [
+ "polyval 0.7.3",
 ]
 
 [[package]]
@@ -2084,6 +2116,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5324110b02044183df000f0bd7d2d7e61f1000631508627e77f63983b6fdffb"
 dependencies = [
  "aead 0.6.1",
+ "aes-gcm 0.11.1",
  "chacha20poly1305",
  "getrandom 0.4.3",
  "hkdf 0.13.0",
@@ -2736,9 +2769,9 @@ dependencies = [
 
 [[package]]
 name = "kryoto-desktop"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
- "aes-gcm",
+ "aes-gcm 0.10.3",
  "argon2",
  "axum",
  "base64 0.22.1",
@@ -2749,6 +2782,7 @@ dependencies = [
  "gtk",
  "hex",
  "hkdf 0.12.4",
+ "hpke",
  "keyring",
  "km-core",
  "km-proto",
@@ -2765,6 +2799,8 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "rfd",
+ "rustls",
+ "rustls-native-certs",
  "sdl2",
  "serde",
  "serde_json",
@@ -2781,6 +2817,7 @@ dependencies = [
  "vigem-client",
  "walkdir",
  "webkit2gtk",
+ "webpki-roots 1.0.9",
  "webview2-com",
  "windows 0.62.2",
  "windows-sys 0.59.0",
@@ -3816,6 +3853,17 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash 0.5.1",
+]
+
+[[package]]
+name = "polyval"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd"
+dependencies = [
+ "cpubits",
+ "cpufeatures 0.3.1",
+ "universal-hash 0.6.1",
 ]
 
 [[package]]

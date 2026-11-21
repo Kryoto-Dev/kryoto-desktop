@@ -193,7 +193,8 @@ impl Api {
             .map(|jar| jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
             .filter(|c| !c.is_empty())
             .ok_or(ApiError::SignedOut)?;
-        let http = crate::net::builder()
+        // kryo.to's name encrypted where that works (net.rs `kryoto_tls`, KB-0347).
+        let http = crate::net::kryoto_tls(&base, crate::net::builder())
             .user_agent(ua())
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())

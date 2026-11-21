@@ -379,9 +379,14 @@ fn client_builder() -> reqwest::ClientBuilder {
 /// `jar`, so a range retried from another network after a drop is not
 /// refused. Built again for new connections (a crawl, a dropped line): over
 /// HTTP/2 every range shares one, which the old client would hand out again.
+///
+/// With dl.kryo.to's name encrypted where that works, as Edge and the Store do
+/// on a network that cuts downloads by the site's name (net.rs `kryoto_tls`,
+/// KB-0347).
 fn own_client<R: Runtime>(app: &AppHandle<R>, id: &str, jar: &Arc<reqwest::cookie::Jar>) -> Option<reqwest::Client> {
-    let family = edit(app, id, |_| {}).and_then(|d| d.family.map(family_addr).or_else(|| link_family(&d.url)));
-    let mut builder = client_builder().cookie_provider(jar.clone());
+    let download = edit(app, id, |_| {})?;
+    let family = download.family.map(family_addr).or_else(|| link_family(&download.url));
+    let mut builder = crate::net::kryoto_tls(&download.url, client_builder()).cookie_provider(jar.clone());
     if let Some(local) = family {
         builder = builder.local_address(local);
     }

@@ -470,18 +470,23 @@ fn watch_window_objects<R: Runtime>(app: &AppHandle<R>, said: &mut u32) {
 
 pub fn start<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        let Ok(client) = crate::net::builder()
-            .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
-            .timeout(TIMEOUT)
-            // A connection of its own for every look. Kept between looks, one
-            // that a router, a VPN or an antivirus had dropped without a word
-            // (or that died while the PC slept) took the next request with it:
-            // no answer for the whole timeout, on a network that was fine.
-            .pool_max_idle_per_host(0)
-            .build()
-        else {
+        let base = || {
+            crate::net::builder()
+                .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+                .timeout(TIMEOUT)
+                // A connection of its own for every look. Kept between looks, one
+                // that a router, a VPN or an antivirus had dropped without a word
+                // (or that died while the PC slept) took the next request with it:
+                // no answer for the whole timeout, on a network that was fine.
+                .pool_max_idle_per_host(0)
+        };
+        let Ok(client) = base().build() else {
             return;
         };
+        // The request to kryo.to itself, with its name encrypted where that
+        // works (net.rs `kryoto_tls`, KB-0347): built again when that changes.
+        let mut own_client: Option<(u64, String, reqwest::Client)> = None;
+        let mut own_failed = false;
         let mut watch = Watch::default();
         let mut round = 0u32;
         let mut owed_checked = false;
@@ -496,7 +501,15 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
             let settings = crate::settings::load(&app);
             let endpoint = crate::settings::catalog_endpoint(&settings);
             let status = status_url(!settings.catalog_endpoint.trim().is_empty());
-            let own = ask_site(&client, &endpoint).await;
+            if crate::net::ech_due(own_failed) {
+                crate::net::check_ech().await;
+            }
+            let generation = crate::net::ech_generation();
+            if !own_client.as_ref().is_some_and(|(g, e, _)| *g == generation && *e == endpoint) {
+                own_client = crate::net::kryoto_tls(&endpoint, base()).build().ok().map(|c| (generation, endpoint.clone(), c));
+            }
+            let own = ask_site(own_client.as_ref().map_or(&client, |(_, _, c)| c), &endpoint).await;
+            own_failed = own.is_err();
             let page = if own.is_err() { ask_page(&app).await } else { None };
             let page_reached = page.as_ref().is_some_and(|p| *p != Site::Failed);
             // kryo.to failed here: does anything else answer? Then it is this

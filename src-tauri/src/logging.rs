@@ -293,14 +293,16 @@ async fn flush<R: Runtime>(app: &AppHandle<R>) {
         "account": l.account.lock().ok().and_then(|a| a.clone()),
         "entries": batch,
     });
-    let Ok(client) = crate::net::builder()
+    let endpoint = crate::settings::catalog_endpoint(&settings);
+    // kryo.to's name encrypted where that works (net.rs `kryoto_tls`, KB-0347):
+    // a network that cuts the app's own requests would cut its reports too.
+    let Ok(client) = crate::net::kryoto_tls(&endpoint, crate::net::builder())
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(15))
         .build()
     else {
         return;
     };
-    let endpoint = crate::settings::catalog_endpoint(&settings);
     if let Ok(res) = client.post(format!("{endpoint}/api/desktop/reports")).json(&body).send().await {
         if res.status().is_success() {
             if let Ok(mut q) = l.queue.lock() {
