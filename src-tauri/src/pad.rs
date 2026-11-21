@@ -908,6 +908,27 @@ impl<R: Runtime> Reader<'_, R> {
     }
 }
 
+/// Whether Kryoto's window is the one in front, so the shell gets the pad.
+/// Windows: asked of Windows itself. The window's own focus flag (tao) goes
+/// false when the keyboard moves into one of its views and back only when the
+/// window itself is focused again; handing the keyboard back to the shell after
+/// the Store turned it off, and the pad moved nothing until the controller was
+/// plugged in again.
+fn in_front<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let Some(window) = app.get_window("main") else { return false };
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOTOWNER};
+        let Ok(ours) = window.hwnd() else { return false };
+        let front = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOTOWNER) };
+        !front.is_null() && std::ptr::eq(front, ours.0)
+    }
+    #[cfg(not(windows))]
+    {
+        window.is_focused().unwrap_or(false)
+    }
+}
+
 /// This thread's own window messages, handled. SDL starts Windows.Gaming.Input
 /// on this thread, and it leaves a message here for every report a controller
 /// sends; never handled, each one held a window object. A pad in use took ~60
@@ -1081,9 +1102,14 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
 
         if focus_at.elapsed() > Duration::from_millis(200) {
             focus_at = Instant::now();
-            r.focused = app.get_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false)
+            let focused = in_front(app)
                 // Debug builds: as if in front, for tests that cannot take the focus (KB-0335).
                 || (cfg!(debug_assertions) && std::env::var_os("KRYOTO_DEV_PAD_FOCUSED").is_some());
+            // Only while in front does the shell get the pad: say when that changes.
+            if focused != r.focused {
+                crate::logging::info("pads", &format!("Kryoto in front: {focused}"));
+            }
+            r.focused = focused;
         }
 
         if let Some(ev) = pump.wait_event_timeout(8) {

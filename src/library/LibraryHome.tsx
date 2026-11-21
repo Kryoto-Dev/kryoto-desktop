@@ -1,6 +1,6 @@
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { gameContext } from './context'
-import { ChevronDown, Download as DownloadIcon, Play, Square } from '@/ui/pixel-icons'
+import { ChevronDown, ChevronLeft, ChevronRight, Download as DownloadIcon, Play, Square } from '@/ui/pixel-icons'
 import { Button, Check, Label, MenuButton, Segmented } from '@/ui'
 import { capsulesFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
@@ -209,7 +209,7 @@ export function LibraryHome({
           {/* Capped: with one or two recent games a `1fr` card filled the whole width at 460:215 and dwarfed the page (KB-0021).
               Room on every side (p-2, taken back by -m-2): a scroller cuts off what
               sticks out, so a lifted card's top and the controller's ring were cut. */}
-          <div className="grid auto-cols-[minmax(260px,360px)] grid-flow-col justify-start gap-3 -m-2 overflow-x-auto p-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <SideScroller count={recent.length} className="grid auto-cols-[minmax(260px,360px)] grid-flow-col justify-start gap-3 -m-2 overflow-x-auto p-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {recent.slice(1, 7).map((g) => (
               <div key={g.id} className="group/lift relative">
               <button
@@ -233,7 +233,7 @@ export function LibraryHome({
               {running.has(g.id) ? <StopChip game={g} onStop={onStop} className="absolute right-2 top-2" /> : null}
               </div>
             ))}
-          </div>
+          </SideScroller>
         </section>
       ) : null}
 
@@ -367,3 +367,55 @@ export function LibraryHome({
   )
 }
 
+/**
+ * A row that scrolls sideways (Recent): an arrow at each end while there is
+ * more that way, and the wheel scrolls it while it can still move, so a
+ * mouse reaches every card. A controller's selection scrolls it by itself.
+ */
+function SideScroller({ className, count, children }: { className: string; count: number; children: ReactNode }) {
+  const box = useRef<HTMLDivElement>(null)
+  const [more, setMore] = useState({ left: false, right: false })
+  useEffect(() => {
+    const el = box.current
+    if (!el) return
+    const look = () => setMore({ left: el.scrollLeft > 4, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4 })
+    look()
+    const wheel = (e: WheelEvent) => {
+      if (e.ctrlKey || Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return
+      const room = e.deltaY > 0 ? el.scrollWidth - el.clientWidth - el.scrollLeft : el.scrollLeft
+      if (room < 1) return
+      e.preventDefault()
+      el.scrollBy({ left: e.deltaY })
+    }
+    el.addEventListener('scroll', look, { passive: true })
+    el.addEventListener('wheel', wheel, { passive: false })
+    const sized = new ResizeObserver(look)
+    sized.observe(el)
+    return () => {
+      el.removeEventListener('scroll', look)
+      el.removeEventListener('wheel', wheel)
+      sized.disconnect()
+    }
+  }, [count])
+  const go = (dir: -1 | 1) => box.current?.scrollBy({ left: dir * box.current.clientWidth * 0.8, behavior: 'smooth' })
+  const arrow = 'kryo-pill absolute top-1/2 grid size-9 -translate-y-1/2 place-items-center border border-border bg-background/90 text-foreground shadow-lg shadow-black/50 backdrop-blur transition-colors hover:bg-foreground hover:text-background'
+  return (
+    // min-w-0: a grid item grows to its content, so the row was as wide as all
+    // its cards, never scrolled, and the page cut the last ones off.
+    <div className="relative min-w-0">
+      <div ref={box} className={className}>
+        {children}
+      </div>
+      {more.left ? (
+        <button type="button" aria-label="Scroll left" onClick={() => go(-1)} className={cn(arrow, 'left-1')}>
+          <ChevronLeft className="size-4" />
+        </button>
+      ) : null}
+      {more.right ? (
+        <button type="button" aria-label="Scroll right" onClick={() => go(1)} className={cn(arrow, 'right-1')}>
+          <ChevronRight className="size-4" />
+        </button>
+      ) : null}
+    </div>
+  )
+}
