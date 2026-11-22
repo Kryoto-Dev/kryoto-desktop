@@ -59,6 +59,8 @@ export type Settings = {
   connections: number
   /** MB/s cap; 0 is none. */
   speedLimitMb: number
+  /** Speeds shown in Mbps instead of MB/s (suggestion #105). */
+  speedInBits?: boolean
   /** Blank uses production; set a local site origin while developing. */
   catalogEndpoint: string
   /** Linux: MangoHud's overlay on Windows games. */

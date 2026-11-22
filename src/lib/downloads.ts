@@ -196,6 +196,19 @@ export function formatBytes(n: number | null | undefined): string {
   return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
 }
 
+/**
+ * A speed, in bytes a second, as the player chose to read it (Settings >
+ * Downloads, suggestion #105): MB/s as before, or megabits a second (Mbps),
+ * the unit internet plans are sold in, decimal like them.
+ */
+export function formatSpeed(bytesPerSec: number | null | undefined, bits = false): string {
+  if (!bits) return `${formatBytes(bytesPerSec)}/s`
+  const b = Math.max(0, bytesPerSec ?? 0) * 8
+  if (b >= 1e9) return `${(b / 1e9).toFixed(b >= 1e11 ? 0 : 1)} Gbps`
+  if (b >= 1e6) return `${(b / 1e6).toFixed(b >= 1e8 ? 0 : 1)} Mbps`
+  return `${(b / 1e3).toFixed(0)} kbps`
+}
+
 export function formatEta(d: Download): string | null {
   if (d.status !== 'downloading' || !d.speed || !d.total) return null
   return formatLeft((d.total - d.received) / d.speed)

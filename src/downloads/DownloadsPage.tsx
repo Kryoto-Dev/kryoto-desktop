@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FolderOpen, HardDrive, HeartHandshake, Moon, Pause, Play, Power, RotateCw, ShieldAlert, X } from '@/ui/pixel-icons'
+import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FolderOpen, HardDrive, HeartHandshake, Moon, Pause, Play, Plus, Power, RotateCw, ShieldAlert, X } from '@/ui/pixel-icons'
 import { settingsApi, useSettings } from '@/lib/settings'
 import { HatchZipExplainer } from '@/ui/FeatureNotice'
-import { AsciiBar, AsciiSpark, Busy, Button, Caption, Dropdown, IconButton, Label, Matrix, Stat, type MatrixState } from '@/ui'
-import { downloads as api, formatBytes, formatClock, formatEta, formatLeft, formatTook, isActive, isWorking, phaseOf, progressOf, useWhenDone, type Download as Dl, type WhenDone } from '@/lib/downloads'
+import { AsciiBar, AsciiSpark, Busy, Button, Caption, Dropdown, IconButton, Label, Matrix, Modal, Stat, type MatrixState } from '@/ui'
+import { FolderChoice, defaultFolder, useLibraryFolders } from '@/downloads/FolderChoice'
+import { pickPath } from '@/lib/pick'
+import { downloads as api, formatBytes, formatSpeed, formatClock, formatEta, formatLeft, formatTook, isActive, isWorking, phaseOf, progressOf, useWhenDone, type Download as Dl, type WhenDone } from '@/lib/downloads'
 import { Art } from '@/library/Art'
 import { capsulesFor, library } from '@/lib/library'
 import { getRelease, useReleases } from '@/library/Versions'
-import { errorText } from '@/lib/bridge'
+import { call, errorText, isTauri } from '@/lib/bridge'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { openExternal, STORE_HOME } from '@/lib/window'
 import { EmptyState } from '@/ui/EmptyState'
@@ -227,15 +229,28 @@ function Donate({ onDonate }: { onDonate: () => void }) {
 }
 
 /**
+ * A download that stopped, or will stop, for want of room on its drive:
+ * "Not enough space on D: ...", a drive that filled up while unpacking, or an
+ * unpack in place that has to start over the usual way (src-tauri
+ * downloads.rs `HATCHZIP_MEMORY`, which needs room for both).
+ */
+export function isShortOnRoom(error: string): boolean {
+  return /^Not enough space|^The drive filled up|needs room for the download and the game/.test(error)
+}
+
+/**
  * A download that stopped for want of room: what unpacking in place is, and
- * the switch that turns it on for every install, with Retry right there.
- * (In-place unpacking already steps in when the drive is short; this is the
- * case where even that was not enough, or the archive gains nothing from it.)
+ * the switch that turns it on for every install, with Retry right there, and
+ * another library folder to put the game in (one on a bigger drive, or a new
+ * one added here). (In-place unpacking already steps in when the drive is
+ * short; this is the case where even that was not enough, or the archive
+ * gains nothing from it.)
  */
 function ShortOnSpace({ d }: { d: Dl }) {
   const settings = useSettings()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [choosing, setChoosing] = useState(false)
   if (!settings) return null
   const turnOn = async () => {
     setBusy(true)
@@ -253,14 +268,87 @@ function ShortOnSpace({ d }: { d: Dl }) {
   return (
     <div className="kryo-radius grid gap-3 border border-border bg-background/40 p-3">
       <HatchZipExplainer compact />
-      {!settings.extractInPlace ? (
-        <Button size="sm" disabled={busy} onClick={() => turnOn()} className="w-fit">
-          <HardDrive className="size-3" />
-          Extract in place and retry
+      <div className="flex flex-wrap gap-2">
+        {!settings.extractInPlace && /^Not enough space/.test(d.error ?? '') ? (
+          <Button size="sm" disabled={busy} onClick={() => turnOn()} className="w-fit">
+            <HardDrive className="size-3" />
+            Extract in place and retry
+          </Button>
+        ) : null}
+        <Button size="sm" disabled={busy} onClick={() => setChoosing(true)} className="w-fit">
+          <FolderOpen className="size-3" />
+          Choose another folder
         </Button>
-      ) : null}
+      </div>
       {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
+      {choosing ? <ChooseFolder d={d} onClose={() => setChoosing(false)} /> : null}
     </div>
+  )
+}
+
+/**
+ * Another library folder for a download that is short of room where it was
+ * going: each folder with its free space (the "Where should it go?" list), a
+ * new folder added from here, and the download carries on in the one picked
+ * (src-tauri downloads.rs `download_pick_folder`).
+ */
+function ChooseFolder({ d, onClose }: { d: Dl; onClose: () => void }) {
+  const [added, setAdded] = useState(0)
+  const { folders, error: foldersError } = useLibraryFolders(true, `${d.id}:${added}`)
+  const [picked, setPicked] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    const current = folders?.find((f) => d.libraryDir && f.path === d.libraryDir) ?? defaultFolder(folders)
+    // Another folder than the one that was short, when there is one.
+    setPicked((p) => p || (folders?.find((f) => f.exists && f.path !== current?.path)?.path ?? current?.path ?? ''))
+  }, [folders, d.libraryDir])
+  const size = d.total ?? d.meta.sizeBytes ?? null
+  // The same sum as the "Where should it go?" list: the game, unpacked in place.
+  const needs = size ? Math.max(size, d.meta.installBytes ?? size) + 1.5 * 2 ** 30 + size / 50 : null
+  const run = async (job: () => Promise<unknown>, close: boolean) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await job()
+      if (close) onClose()
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const addFolder = () =>
+    run(async () => {
+      const dir = isTauri() ? await pickPath({ directory: true, title: 'Add a library folder' }) : 'E:\\Kryoto Games'
+      if (typeof dir !== 'string') return
+      await call('storage_add_folder', { path: dir })
+      setPicked(dir)
+      setAdded((n) => n + 1)
+    }, false)
+  return (
+    <Modal
+      title="Where should it go?"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="ghost" disabled={busy} onClick={() => void addFolder()}>
+            <Plus className="size-3" />
+            Add a folder
+          </Button>
+          <Button variant="primary" disabled={busy || !picked} onClick={() => void run(() => api.pickFolder(d.id, picked, false), true)}>
+            Install here
+          </Button>
+        </>
+      }
+    >
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Pick a library folder with room for <span className="font-bold text-foreground">{d.meta.title}</span>
+        {needs ? `: about ${formatBytes(needs)}` : ''}. It carries on there.
+      </p>
+      <FolderChoice folders={folders ?? []} picked={picked} onPick={setPicked} needs={needs} />
+      {error || foldersError ? <p role="alert" className="text-xs text-destructive">{error ?? foldersError}</p> : null}
+    </Modal>
   )
 }
 
@@ -383,6 +471,7 @@ function Banner({ d, open }: { d: Dl; open: (() => void) | null }) {
 
 function Current({ d, open }: { d: Dl; open: (() => void) | null }) {
   const samples = useSpeedHistory(d)
+  const bits = !!useSettings()?.speedInBits
   const { pending, failed, run } = usePending(d)
   // Past the download: checking the hash, then unpacking.
   const extracting = d.status === 'extracting' || d.status === 'verifying'
@@ -439,7 +528,7 @@ function Current({ d, open }: { d: Dl; open: (() => void) | null }) {
             <dl className="grid grid-cols-[repeat(3,minmax(0,11rem))] gap-x-6">
               {extracting ? (
                 <>
-                  <Stat label="Speed" value={unpackRate > 0 ? `${formatBytes(unpackRate)}/s` : '...'} />
+                  <Stat label="Speed" value={unpackRate > 0 ? formatSpeed(unpackRate, bits) : '...'} />
                   <Stat
                     label={d.status === 'verifying' ? 'Checked' : 'Unpacked'}
                     value={`${formatBytes(d.extracted)}${d.extractTotal ? ` / ${formatBytes(d.extractTotal)}` : ''}`}
@@ -450,7 +539,7 @@ function Current({ d, open }: { d: Dl; open: (() => void) | null }) {
                 </>
               ) : (
                 <>
-                  <Stat label="Speed" value={`${formatBytes(d.speed)}/s`} />
+                  <Stat label="Speed" value={formatSpeed(d.speed, bits)} />
                   <Stat label="Downloaded" value={`${formatBytes(d.received)}${d.total ? ` / ${formatBytes(d.total)}` : ''}`} />
                   {formatEta(d) ? <Stat label="Time left" value={formatEta(d)!} /> : null}
                 </>
@@ -519,7 +608,7 @@ function Row({
         {d.status === 'paused' || d.status === 'queued' ? <AsciiBar fraction={pct} cells={30} /> : null}
         {failed ?? d.error ? <span role={failed ? 'alert' : undefined} className="text-xs text-destructive">{failed ?? d.error}</span> : null}
         {d.error && isSupporterLocked(d.error) && d.slug ? <SupporterLocked d={d} slug={d.slug} /> : null}
-        {d.error && d.status === 'failed' && /^Not enough space/.test(d.error) ? <ShortOnSpace d={d} /> : null}
+        {d.error && d.status === 'failed' && isShortOnRoom(d.error) ? <ShortOnSpace d={d} /> : null}
         {d.warning ? (
           <span className="flex flex-wrap items-center gap-x-2 text-xs leading-relaxed text-warning">
             {d.warning}

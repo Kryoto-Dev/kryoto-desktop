@@ -402,6 +402,16 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
                 onChange={(v) => set('speedLimitMb', Number(v))}
               />
             </Section>
+            <Section title="Speed shown in" hint="Internet plans are sold in megabits a second: 100 Mbps is about 12 MB/s.">
+              <Segmented
+                label="Speed shown in" value={s.speedInBits ? 'bits' : 'bytes'}
+                options={[
+                  { value: 'bytes', label: 'MB/s' },
+                  { value: 'bits', label: 'Mbps' },
+                ]}
+                onChange={(v) => set('speedInBits', v === 'bits')}
+              />
+            </Section>
             <Check checked={s.deleteArchives} onChange={(v) => set('deleteArchives', v)} label="Delete the archive once a game is installed" />
             <Check checked={s.notifyDownloads} onChange={(v) => set('notifyDownloads', v)} label="Tell me when a game is ready to play" />
             <GameUpdatesSection settings={s} set={set} />

@@ -704,11 +704,18 @@ pub enum Minted {
     Mirror { page: String },
 }
 
-/// Why no link came back. `Challenge` is the check only a window can pass.
+/// Why no link came back. `Challenge` is the check only a window can pass;
+/// `SignedOut` is kryo.to not knowing this app's account (signed out in the
+/// Store, or a sign-in that ran out), which kryo.to answers with the same
+/// `challenge_failed` and which the app used to read as the window's check.
 pub enum MintError {
     Challenge,
+    SignedOut,
     Other(String),
 }
+
+/// What a download says when the app is not signed in to kryo.to.
+pub const SIGNED_OUT: &str = "Sign in to kryo.to in Kryoto Desktop (the Store's top right), then press Retry: the app asks for its own links once you are signed in.";
 
 impl From<String> for MintError {
     fn from(e: String) -> Self {
@@ -744,10 +751,19 @@ pub fn session_over<R: Runtime>(app: &AppHandle<R>, local: Option<std::net::IpAd
     let cookie = app
         .get_webview(crate::STORE)
         .and_then(|view| view.cookies_for_url(base.clone()).ok())
-        .map(|jar| jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
-        .filter(|c| !c.is_empty())
+        .and_then(|jar| {
+            let found: Vec<(String, String, Option<i64>)> = jar
+                .iter()
+                .map(|c| (c.name().to_string(), c.value().to_string(), c.expires_datetime().map(|t| t.unix_timestamp())))
+                .collect();
+            session_cookie(&found)
+        })
         .ok_or("Sign in to kryo.to in Kryoto Desktop first.".to_string())?;
-    let client = crate::net::builder()
+    // Over the same handshake as the download that follows (net.rs
+    // `kryoto_tls`): on a network that cuts kryo.to by name the mint went out
+    // plain and failed, or left by another way than the download, and the
+    // link it got was then refused as made for another network (KB-0072).
+    let client = crate::net::kryoto_tls(&endpoint, crate::net::builder())
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
@@ -755,6 +771,28 @@ pub fn session_over<R: Runtime>(app: &AppHandle<R>, local: Option<std::net::IpAd
         .build()
         .map_err(|e| e.to_string())?;
     Ok(Session { client, endpoint, cookie })
+}
+
+/// The `Cookie` header that signs this app in, or `None` with no session.
+///
+/// The Store's web view keeps other cookies for kryo.to too (Cloudflare's,
+/// the page's own settings), and they stay there after signing out. Any
+/// cookie at all used to count as signed in: a signed-out Store let the
+/// add-on card queue its add-ons, kryo.to answered each mint
+/// `challenge_failed` for want of a session, and the row stopped on "a check
+/// only its download window can pass" (KB-0326; 2026-11-21: every such report
+/// on 0.3.10 and 0.3.11 came from an install with nobody signed in). So the
+/// session must be there. kryo.to reads the first `kryo_session` it is sent,
+/// so with two (an old one left beside a new sign-in) only the one that lasts
+/// longest, the newest, goes; the other cookies go as they are (the preview
+/// pass, the adult-content choice).
+pub(crate) fn session_cookie(cookies: &[(String, String, Option<i64>)]) -> Option<String> {
+    let session = cookies
+        .iter()
+        .filter(|(name, value, _)| name == "kryo_session" && !value.trim().is_empty())
+        .max_by_key(|(_, _, expires)| expires.unwrap_or(i64::MAX))?;
+    let rest = cookies.iter().filter(|(name, _, _)| name != "kryo_session");
+    Some(std::iter::once(session).chain(rest).map(|(name, value, _)| format!("{name}={value}")).collect::<Vec<_>>().join("; "))
 }
 
 /// `/api/games/<slug>/downloads` as the signed-in app, which kryo.to answers
@@ -817,8 +855,23 @@ async fn post_mint(session: &Session, release_id: &str, install: &str, turnstile
         req = req.header("x-kryo-pow", proof);
     }
     let response = req.send().await.map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?;
+    Ok(answer_of(response).await)
+}
+
+/// A response's status and JSON. Cloudflare's own answers in front of
+/// kryo.to are HTML, so they are named here: its challenge page
+/// (`cf-mitigated: challenge`) as `cf_challenge`, any other page of its own
+/// (a firewall block) as `edge_refused`.
+async fn answer_of(response: reqwest::Response) -> (u16, serde_json::Value) {
     let status = response.status().as_u16();
-    Ok((status, response.json().await.unwrap_or_default()))
+    let challenged = response.headers().get("cf-mitigated").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("challenge"));
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    let body = match (challenged, body.is_object()) {
+        (true, _) => serde_json::json!({ "error": "cf_challenge" }),
+        (false, false) if !(200..300).contains(&status) => serde_json::json!({ "error": "edge_refused" }),
+        _ => body,
+    };
+    (status, body)
 }
 
 /// kryo.to asking for (another) proof of work before it mints.
@@ -827,8 +880,13 @@ fn is_proof_request(error: Option<&str>) -> bool {
 }
 
 /// What a refused mint means. Only Cloudflare's check (`challenge_failed`,
-/// `challenge_required`) is the one only a window can pass; the rest are
-/// said as they are.
+/// `challenge_required`, or Cloudflare's own challenge page) is the one only
+/// a window can pass; the rest are said as they are.
+///
+/// Until 0.3.12 every other 403 was read as that check too. In the four days
+/// to 2026-11-21 kryo.to logged 98 refused mints from this app's own
+/// requests, every one `attested=no_session`: kryo.to did not know the
+/// account (KB-0326), which a sign-in fixes and the window does not.
 fn mint_refusal(status: u16, body: &serde_json::Value) -> MintError {
     match (status, body["error"].as_str()) {
         // Direct downloads turned off for everyone but supporters (an
@@ -836,10 +894,21 @@ fn mint_refusal(status: u16, body: &serde_json::Value) -> MintError {
         // and the game's mirrors are still there in Kryoto Desktop.
         (403, Some("supporter_required")) => MintError::Other(crate::downloads::SUPPORTER_REQUIRED.to_string()),
         (403, error) if is_proof_request(error) => MintError::Other("kryo.to did not take this PC's proof. Retry in a moment.".into()),
-        (403, _) => MintError::Challenge,
+        // kryo.to would have let a signed-in app through without the check
+        // (lib/download-gate.ts): it fell back to the check because it does
+        // not know this app's session.
+        (403, Some("challenge_failed")) if body["attested"].as_str() == Some("no_session") => MintError::SignedOut,
+        (403, Some("challenge_failed" | "challenge_required" | "cf_challenge")) => MintError::Challenge,
+        (403, Some("edge_refused")) => MintError::Other(
+            "Cloudflare, which kryo.to sits behind, turned this PC's request away. Press Retry in a few minutes; a VPN or proxy can cause it.".into(),
+        ),
+        (403, error) => MintError::Other(
+            body["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("kryo.to refused the link ({}).", error.unwrap_or("no reason given"))),
+        ),
         (401, _) => MintError::Other("Sign in to kryo.to in Kryoto Desktop first.".into()),
         (429, _) => MintError::Other("Too many downloads started. Wait a moment.".into()),
         (404, _) => MintError::Other("That build is no longer on Kryoto's filehost.".into()),
+        (code, Some("edge_refused")) => MintError::Other(format!("kryo.to answered {code}.")),
         (_, Some(text)) => MintError::Other(text.to_string()),
         (code, None) => MintError::Other(format!("kryo.to answered {code}.")),
     }
@@ -855,8 +924,7 @@ async fn prove(session: &Session, install: &str) -> Result<String, MintError> {
         .send()
         .await
         .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?;
-    let status = res.status().as_u16();
-    let body: serde_json::Value = res.json().await.unwrap_or_default();
+    let (status, body) = answer_of(res).await;
     if !(200..300).contains(&status) {
         return Err(mint_refusal(status, &body));
     }
@@ -945,6 +1013,7 @@ pub async fn start_download(app: &AppHandle, slug: &str, turnstile_token: Option
         }
         Ok(Minted::Mirror { .. }) => Err("This game is only on mirrors. Download it in Kryoto Desktop itself.".into()),
         Err(MintError::Other(e)) => Err(e),
+        Err(MintError::SignedOut) => Err("Sign in to kryo.to in Kryoto Desktop first.".into()),
         Err(MintError::Challenge) => {
             // Only a browser that renders kryo.to's challenge can pass it, so
             // this PC cannot ask for the link itself. Put the game's page
@@ -1228,6 +1297,35 @@ mod tests {
         assert!(matches!(refusal(403, "supporter_required"), MintError::Other(e) if e == crate::downloads::SUPPORTER_REQUIRED));
         assert!(matches!(refusal(401, "unauthorized"), MintError::Other(e) if e.starts_with("Sign in")));
         assert!(is_proof_request(Some("pow_required")) && !is_proof_request(Some("challenge_failed")) && !is_proof_request(None));
+    }
+
+    /// kryo.to's `challenge_failed` for an app it does not know the account
+    /// of (`attested: no_session`, every such refusal logged in the four
+    /// days to 2026-11-21) is a sign-in, not the window's check; Cloudflare's
+    /// own challenge page is the check; anything else says what it is.
+    #[test]
+    fn a_refusal_for_want_of_a_session_asks_for_a_sign_in() {
+        let refused = |body: serde_json::Value| mint_refusal(403, &body);
+        assert!(matches!(refused(serde_json::json!({ "error": "challenge_failed", "codes": ["missing-input-response"], "attested": "no_session" })), MintError::SignedOut));
+        assert!(matches!(refused(serde_json::json!({ "error": "challenge_failed", "attested": "turnstile_mode" })), MintError::Challenge));
+        assert!(matches!(refused(serde_json::json!({ "error": "cf_challenge" })), MintError::Challenge));
+        assert!(matches!(refused(serde_json::json!({ "error": "edge_refused" })), MintError::Other(e) if e.starts_with("Cloudflare")));
+        assert!(matches!(refused(serde_json::json!({ "error": "banned", "message": "This account cannot download." })), MintError::Other(e) if e == "This account cannot download."));
+        assert!(matches!(refused(serde_json::json!({})), MintError::Other(e) if e.contains("no reason given")));
+        assert!(matches!(mint_refusal(502, &serde_json::json!({ "error": "edge_refused" })), MintError::Other(e) if e == "kryo.to answered 502."));
+    }
+
+    /// Signed out, the Store keeps kryo.to's other cookies: they are not a
+    /// sign-in. With two sessions the newest goes first, and alone.
+    #[test]
+    fn only_a_session_cookie_signs_the_app_in() {
+        let c = |n: &str, v: &str, e: Option<i64>| (n.to_string(), v.to_string(), e);
+        assert_eq!(session_cookie(&[c("cf_clearance", "x", None), c("kryo_nsfw", "1", None)]), None);
+        assert_eq!(session_cookie(&[c("kryo_session", " ", None)]), None);
+        assert_eq!(
+            session_cookie(&[c("kryo_nsfw", "1", None), c("kryo_session", "old", Some(100)), c("kryo_session", "new", Some(200))]).as_deref(),
+            Some("kryo_session=new; kryo_nsfw=1")
+        );
     }
 
     fn issued(now: Instant) -> (Inner, String) {

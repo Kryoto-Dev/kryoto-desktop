@@ -1702,7 +1702,13 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
             let rel = plan.exe.strip_prefix(&game.install_dir).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
             if !rel.is_empty() && crate::antivirus::was_installed(Path::new(&game.install_dir), &rel) {
                 let name = plan.exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(rel);
-                return Err(format!("{name} is gone from the game's folder: it was there when Kryoto installed the game. The game's page says what removed it, if Windows Security did, and gets it back."));
+                // 170 reports from 15 PCs on 0.3.11 for PlayGTAV.exe alone,
+                // each press of Play again: say who takes such a file and the
+                // two steps that bring it back (src/library/AntivirusCard.tsx
+                // reads "is gone from the game's folder").
+                return Err(format!(
+                    "{name} is gone from the game's folder: it was there when Kryoto installed the game, so something deleted it, almost always an antivirus (Windows Security takes game launchers like this one). On the game's page in your Library: exclude the game's folder, then get the file back, then press Play."
+                ));
             }
             return Err(format!(
                 "{} is not there any more. Point Properties at the game's .exe.",

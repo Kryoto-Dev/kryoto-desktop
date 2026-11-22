@@ -1055,7 +1055,11 @@ fn game_slug(url: &url::Url, settings: &settings::Settings) -> Option<String> {
         !s.is_empty() && s.len() <= 160 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     };
     let mut parts = url.path_segments()?;
-    if parts.next() == Some("game") {
+    // A tester's page for a game in testing (`/testers/<slug>`) is that game's
+    // page too. Unnamed, its download was looked up by title, which a game
+    // still in testing does not answer, so it went into the library with no
+    // game and its pages kept showing Download instead of Play (KB-0353).
+    if matches!(parts.next(), Some("game" | "testers")) {
         if let Some(slug) = parts.next().filter(|s| valid(s)) {
             return Some(slug.to_ascii_lowercase());
         }
@@ -2605,6 +2609,9 @@ mod tests {
             Some("captain-hardcore")
         );
         assert_eq!(game_slug(&u("https://kryo.to/browse"), &settings), None);
+        // KB-0353: a tester's page names its game.
+        assert_eq!(game_slug(&u("https://kryo.to/testers/the-glitched-paradise"), &settings).as_deref(), Some("the-glitched-paradise"));
+        assert_eq!(game_slug(&u("https://kryo.to/testers"), &settings), None);
         assert_eq!(game_slug(&u("https://evil.example/game/x"), &settings), None);
         // The canvas modal on the home and browse boards.
         assert_eq!(game_slug(&u("https://kryo.to/?game=hades-ii"), &settings).as_deref(), Some("hades-ii"));

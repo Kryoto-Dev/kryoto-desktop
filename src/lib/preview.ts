@@ -152,6 +152,7 @@ const settings: Record<string, unknown> = {
   sharePlaytime: true,
   connections: 16,
   speedLimitMb: 0,
+  speedInBits: false,
   catalogEndpoint: '',
   savesEndpoint: '',
   achievementsEndpoint: '',
