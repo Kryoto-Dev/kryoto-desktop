@@ -348,7 +348,7 @@ pub fn plan(fix_root: &Path, scope: &Scope, game_root: &Path, appid: &str) -> Re
     for from in &scope.files {
         // The folder must already be the game's: a fix for another layout
         // (another game, another build) is refused rather than scattered.
-        let (dir, name) = from.rsplit_once('/').map(|(d, n)| (d, n)).unwrap_or(("", from.as_str()));
+        let (dir, name) = from.rsplit_once('/').unwrap_or(("", from.as_str()));
         let target_dir = if dir.is_empty() {
             game_root.to_path_buf()
         } else {
