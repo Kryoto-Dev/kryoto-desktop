@@ -6,7 +6,7 @@ import { fetchAddons, library, type KryoAddon, type LibraryGame } from '@/lib/li
 import { downloads, formatBytes, isActive, phaseOf, progressOf, useDownloads, type Download as Dl } from '@/lib/downloads'
 import { GameRepair } from './GameRepair'
 import { useSettings } from '@/lib/settings'
-import { isLanguagePack, orderPacks, packLanguage, packName, preferredLanguage } from '@/lib/language-packs'
+import { isLanguagePack, languageAfterRemoving, orderPacks, packLanguage, packName, preferredLanguage } from '@/lib/language-packs'
 
 const isOnline = (a: { label: string | null; source: string | null }) => /online/i.test(`${a.label ?? ''} ${a.source ?? ''}`)
 /** A DLC packed on its own, filed on kryo.to as `DLC: <name>` (kryo.to lib/dlc-addons.ts). */
@@ -398,7 +398,10 @@ export function AddonsCard({
                     void run(c.file, async () => {
                       const g = await library.addonUndo(game.id, c.file)
                       setRemovedAt(Date.now() / 1000)
-                      return g
+                      // The language it set goes with it (`add` above set it).
+                      const removed = applied.find((a) => a.file === c.file)?.label ?? ''
+                      const lang = languageAfterRemoving(g.gameLanguage, removed, (g.addons ?? []).map((a) => a.label))
+                      return lang === (g.gameLanguage ?? null) ? g : library.save({ ...g, gameLanguage: lang })
                     })
                 }}
               >

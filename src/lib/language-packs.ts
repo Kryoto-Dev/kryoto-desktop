@@ -22,6 +22,18 @@ export function packLanguage(a: { label: string | null; language?: string | null
   return GAME_LANGUAGES.find((l) => l.label.toLowerCase() === name)?.value ?? null
 }
 
+/**
+ * The game's Language once the pack labelled `removed` is taken out: back to
+ * following Settings (null) when it was that pack's language and no pack of
+ * it is left (`remaining`, the labels still applied); otherwise as it was.
+ * The game no longer has that language's files, so it cannot start in it.
+ */
+export function languageAfterRemoving(gameLanguage: string | null | undefined, removed: string, remaining: string[]): string | null {
+  const gone = isLanguagePack({ label: removed }) ? packLanguage({ label: removed }) : null
+  if (!gone || gameLanguage !== gone) return gameLanguage ?? null
+  return remaining.some((l) => isLanguagePack({ label: l }) && packLanguage({ label: l }) === gone) ? gameLanguage : null
+}
+
 /** A locale (`pl-PL`, `pt-BR`, `zh-TW`) as Steam's code, or null (kryo.to `steamCodeForLocale`). */
 export function steamCodeForLocale(locale: string | null | undefined): string | null {
   const tag = (locale ?? '').trim().toLowerCase().replace('_', '-')

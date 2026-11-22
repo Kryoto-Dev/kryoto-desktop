@@ -1,7 +1,17 @@
 // `pnpm test`: node's own runner, which reads TypeScript as it is.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { isLanguagePack, orderPacks, packLanguage, packName, preferredLanguage, steamCodeForLocale } from './language-packs.ts'
+import { isLanguagePack, languageAfterRemoving, orderPacks, packLanguage, packName, preferredLanguage, steamCodeForLocale } from './language-packs.ts'
+
+test('taking a language pack out puts the game back on Settings when it was in that language', () => {
+  assert.equal(languageAfterRemoving('polish', 'Language: Polish', []), null)
+  // Another pack of the same language is still there, or the game is in another language.
+  assert.equal(languageAfterRemoving('polish', 'Language: Polish', ['Language: Polish']), 'polish')
+  assert.equal(languageAfterRemoving('german', 'Language: Polish', []), 'german')
+  // A DLC is not a language; following Settings stays so.
+  assert.equal(languageAfterRemoving('polish', 'DLC: Soundtrack', []), 'polish')
+  assert.equal(languageAfterRemoving(null, 'Language: Polish', []), null)
+})
 
 test('a language pack is known by its label, like a DLC', () => {
   assert.equal(isLanguagePack({ label: 'Language: Polish' }), true)
