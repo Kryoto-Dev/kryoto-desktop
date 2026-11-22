@@ -112,6 +112,7 @@ commands.allow = [
   "steam_art_search", "steam_art",
   "game_launch_vr", "vr_status",
   "defender_status", "defender_script", "defender_exclude", "game_antivirus", "game_restore_files",
+  "game_files_state", "game_files_fetch", "game_files_check", "game_files_check_cancel", "game_files_restore",
   "game_disk_size",
   "game_start_files",
   "open_folder",

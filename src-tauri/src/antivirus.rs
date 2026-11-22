@@ -30,7 +30,7 @@ use crate::community_offer::{read_json, ReleaseRecord, RELEASE_RECORD};
 /// The kinds of file an antivirus takes from a game: programs, libraries and scripts.
 const WATCHED: [&str; 11] = ["exe", "dll", "asi", "ocx", "sys", "com", "scr", "bat", "cmd", "vbs", "ps1"];
 
-fn watched(rel: &str) -> bool {
+pub(crate) fn watched(rel: &str) -> bool {
     rel.rsplit('.').next().is_some_and(|ext| WATCHED.iter().any(|w| ext.eq_ignore_ascii_case(w)))
 }
 
@@ -59,22 +59,28 @@ pub struct Report {
     pub hits: Vec<Hit>,
     /// The game is from kryo.to, so its files can be fetched again.
     pub can_restore: bool,
+    /// The release has a file list (release_files.rs): `missing` came from its
+    /// last check, and `files` says what each missing or broken file is.
+    pub from_list: bool,
+    pub files: Vec<crate::release_files::Finding>,
 }
 
 /// The release record's programs that are no longer in `dir`, leaving out
 /// what a repair changed. Pure apart from the file checks, for tests.
 pub fn missing_files(dir: &Path) -> Vec<String> {
     let Some(record) = read_json::<ReleaseRecord>(&dir.join(RELEASE_RECORD)) else { return Vec::new() };
-    let repaired: BTreeSet<String> = kryoto_repair::journal::load(dir)
+    let mut repaired: BTreeSet<String> = kryoto_repair::journal::load(dir)
         .ok()
         .flatten()
         .filter(|j| j.state != "undone")
-        .map(|j| j.entries.into_iter().map(|e| e.path.replace('\\', "/").to_ascii_lowercase()).collect())
+        .map(|j| j.entries.into_iter().map(|e| crate::release_files::key(&e.path)).collect())
         .unwrap_or_default();
+    // What an emulator switch set aside from the release (release_files.rs).
+    repaired.extend(crate::release_files::swapped_paths(dir));
     record
         .files
         .keys()
-        .filter(|rel| watched(rel) && !repaired.contains(&rel.to_ascii_lowercase()))
+        .filter(|rel| watched(rel) && !repaired.contains(&crate::release_files::key(rel)))
         .filter(|rel| !dir.join(rel).is_file())
         .cloned()
         .collect()
@@ -191,10 +197,20 @@ pub fn game_antivirus(app: AppHandle, id: String, deep: bool) -> Result<Report, 
         return Ok(Report::default());
     }
     let dir = PathBuf::from(&game.install_dir);
-    let missing = missing_files(&dir);
+    // The release's own list, when it has one, names every file exactly
+    // (missing, and emulator programs that are not the release's); otherwise
+    // the programs Kryoto installed that are gone.
+    let listed = crate::release_files::alarms(&app, &game);
+    let from_list = listed.is_some();
+    let files = listed.unwrap_or_default();
+    let missing: Vec<String> = if from_list {
+        files.iter().filter(|f| f.problem == crate::release_files::Problem::Missing).map(|f| f.path.clone()).collect()
+    } else {
+        missing_files(&dir)
+    };
     let since = read_json::<ReleaseRecord>(&dir.join(RELEASE_RECORD)).map(|r| r.at).unwrap_or(game.added_at);
-    let hits = if cfg!(windows) && (deep || !missing.is_empty()) { defender_hits(&dir, since) } else { Vec::new() };
-    Ok(Report { missing_count: missing.len(), missing: missing.into_iter().take(8).collect(), hits, can_restore: game.slug.is_some() })
+    let hits = if cfg!(windows) && (deep || !missing.is_empty() || !files.is_empty()) { defender_hits(&dir, since) } else { Vec::new() };
+    Ok(Report { missing_count: missing.len(), missing: missing.into_iter().take(8).collect(), hits, can_restore: game.slug.is_some(), from_list, files: files.into_iter().take(12).collect() })
 }
 
 /// Games whose next download of their own build is to put files back, not a
@@ -231,6 +247,8 @@ pub fn restored(slug: &str) {
 /// After an install: programs that never arrived in the folder. Said as a
 /// notice with what Windows Security's log says about them, if anything.
 pub fn after_install<R: Runtime>(app: &AppHandle<R>, game_id: &str, title: &str, dir: &Path, lost: &[(String, u64)], started: u64) {
+    // Every file checked against the release's own list, when it has one.
+    crate::release_files::after_install(app, game_id);
     if lost.is_empty() {
         return;
     }

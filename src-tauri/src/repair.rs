@@ -270,6 +270,13 @@ pub struct Emulators {
     pub interrupted: bool,
     /// Why nothing is offered, when nothing is.
     pub blocked: Option<String>,
+    /// The emulator the release came with, from its file list
+    /// (release_files.rs): "gbe_fork (experimental)".
+    pub release: Option<String>,
+    /// The uploader left the emulator out of this release.
+    pub release_off: bool,
+    /// Steam files the uploader kept as the game shipped them.
+    pub kept_own: Vec<String>,
 }
 
 fn purpose(e: Emulator) -> &'static str {
@@ -318,25 +325,41 @@ pub fn game_emulators(app: AppHandle, game_id: String) -> Result<Emulators, Stri
         None
     };
     let switched = game.repair.as_ref().map(|r| r.source.clone());
+    // What the release's own list says, when one is kept: no question to kryo.to here.
+    let list = crate::release_files::cached_list(&app, &game);
+    let swapped = root(&app, &game).is_ok_and(|r| crate::release_files::has_swap(&r));
     Ok(Emulators {
         choices: choices_for(switched.as_deref(), blocked.is_some()),
         current,
         original: game.repair.as_ref().and_then(|r| r.previous_source.clone()),
         switched,
-        undo: record.as_ref().is_some_and(|j| j.state != "undone") || game.online.is_some(),
+        undo: record.as_ref().is_some_and(|j| j.state != "undone") || game.online.is_some() || swapped,
         interrupted: record.as_ref().is_some_and(|j| j.state == "pending"),
         blocked,
+        release: list.as_ref().and_then(crate::release_files::FileList::emulator_words),
+        release_off: list.as_ref().is_some_and(|l| l.emulator_off),
+        kept_own: list.map(|l| l.excluded).unwrap_or_default(),
     })
 }
 
 /// Switch a game to another emulator in one go: what Kryoto put in before
 /// comes out first (Undo, from its copies), then the new one goes in through
 /// the same `apply` as Repair, which copies every file it replaces.
+///
+/// When the release has a file list (release_files.rs), the release's own
+/// emulator comes out first too, by role: the originals back from the backups
+/// it ships (checked by hash), what the emulator added set aside, fixes and
+/// the game left alone. Back to the release's own files then puts exactly
+/// that back. Without a list, as before.
 #[tauri::command]
 pub async fn repair_switch(app: AppHandle, game_id: String, source: Emulator) -> Result<repair::RepairReport, String> {
     let before = game(&app, &game_id)?;
-    let applied = journal::load(&root(&app, &before)?)?.is_some_and(|j| j.state != "undone");
-    if applied {
+    if library::is_running(&app, &game_id) {
+        return Err("Close the game before changing its emulator.".into());
+    }
+    let dir = root(&app, &before)?;
+    let applied = journal::load(&dir)?.is_some_and(|j| j.state != "undone");
+    if applied || crate::release_files::has_swap(&dir) {
         progress(&app, &game_id, "Putting the game's own files back first", None);
         repair_undo(app.clone(), game_id.clone())?;
     } else if before.online.is_some() {
@@ -344,7 +367,25 @@ pub async fn repair_switch(app: AppHandle, game_id: String, source: Emulator) ->
         progress(&app, &game_id, "Taking Kryoto Online out first", None);
         crate::online::online_undo(app.clone(), game_id.clone())?;
     }
-    apply(&app, &game_id, source, false).await
+    let cleaned = match crate::release_files::ensure_list(&app, &before, true).await {
+        Some(list) => {
+            progress(&app, &game_id, "Taking out the emulator the release came with", None);
+            let at = dir.clone();
+            tauri::async_runtime::spawn_blocking(move || crate::release_files::clean_for_switch(&at, &list)).await.map_err(|e| e.to_string())??
+        }
+        None => None,
+    };
+    if let Some((back, aside)) = cleaned {
+        log(&app, &game_id, &format!("Release's own emulator out: {back} original file(s) back, {aside} file(s) set aside"), None);
+    }
+    match apply(&app, &game_id, source, false).await {
+        Ok(report) => Ok(report),
+        Err(error) if cleaned.is_some() => match crate::release_files::unclean(&dir) {
+            Ok(_) => Err(error),
+            Err(undo) => Err(format!("{error} Putting the release's own emulator back failed: {undo}")),
+        },
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command(async)]
@@ -359,7 +400,18 @@ pub fn repair_undo(app: AppHandle, game_id: String) -> Result<(), String> {
     {
         return Err("Close the game before Undo.".into());
     }
-    journal::undo(&root(&app, &before)?)?;
+    let dir = root(&app, &before)?;
+    // A switch also set the release's own emulator aside (release_files.rs):
+    // Repair's files come out first, then those go back where they were.
+    let swapped = crate::release_files::has_swap(&dir);
+    match journal::undo(&dir) {
+        Ok(()) => {}
+        Err(_) if swapped && journal::load(&dir)?.is_none() => {}
+        Err(error) => return Err(error),
+    }
+    if swapped {
+        crate::release_files::unclean(&dir)?;
+    }
     if let Some(previous) = &before.repair {
         library::update(&app, |games| {
             let game = games
