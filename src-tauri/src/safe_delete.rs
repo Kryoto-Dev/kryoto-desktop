@@ -621,17 +621,25 @@ mod windows_bin {
         (r == 0).then_some(data)
     }
 
-    /// Into the Recycle Bin, as Explorer's Delete does. Should Windows find it
-    /// too big after all, it asks the player itself before deleting for good
+    /// Into the Recycle Bin, as Explorer's Delete does, on a thread of its own
+    /// set up for the shell (single-threaded COM). Should Windows find it too
+    /// big after all, it asks the player itself before deleting for good
     /// (`FOF_WANTNUKEWARNING`).
     pub fn recycle(paths: &[PathBuf]) -> Result<(), String> {
-        use windows_sys::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW};
         let mut from: Vec<u16> = Vec::new();
         for p in paths {
             from.extend(dunce::simplified(p).as_os_str().encode_wide());
             from.push(0);
         }
         from.push(0);
+        std::thread::spawn(move || shell_delete(&from)).join().map_err(|_| "the Recycle Bin call failed".to_string())?
+    }
+
+    fn shell_delete(from: &[u16]) -> Result<(), String> {
+        use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+        use windows_sys::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW};
+        // SAFETY: COM for this new thread only, undone below.
+        let com = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as _) } >= 0;
         // SAFETY: zeroed is a valid empty SHFILEOPSTRUCTW.
         let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
         op.wFunc = FO_DELETE;
@@ -639,6 +647,10 @@ mod windows_bin {
         op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOF_WANTNUKEWARNING) as _;
         // SAFETY: `from` is double-NUL-terminated and outlives the call.
         let r = unsafe { SHFileOperationW(&mut op) };
+        if com {
+            // SAFETY: paired with the successful CoInitializeEx above.
+            unsafe { CoUninitialize() };
+        }
         if r != 0 {
             return Err(format!("Windows answered {r:#x}"));
         }
@@ -1051,6 +1063,22 @@ mod tests {
         assert!(!dir.exists(), "the folder is gone");
         assert_eq!(reports.last(), Some(&(p.bytes, p.bytes)), "ends at the whole size");
         assert!(p.bytes >= 10_001 && reports.windows(2).all(|w| w[0].0 <= w[1].0), "only ever goes forward");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// By hand only (`cargo test --lib recycle_bin -- --ignored`): a scratch
+    /// folder goes into this PC's Recycle Bin, where it can be put back.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn a_folder_goes_to_the_recycle_bin() {
+        let base = scratch("recycle-bin");
+        let dir = base.join("Kryoto recycle test");
+        put(&dir.join("game.exe"), b"recycle me");
+        let p = Plan { folder: dir.clone(), whole: true, files: vec![dir.join("game.exe")], bytes: 10, stop_at: Some(base.clone()), ..Default::default() };
+        assert_eq!(bin_for(&p), Bin::Yes);
+        assert_eq!(run(&p, false, &mut |_, _| {}).unwrap(), Done { to_bin: true, left: 0 });
+        assert!(!dir.exists() && base.exists());
         let _ = std::fs::remove_dir_all(base);
     }
 

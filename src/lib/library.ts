@@ -34,6 +34,26 @@ export type FoundGame = {
   moved?: boolean
 }
 
+/** What an uninstall would delete (library.rs `UninstallPlan`, safe_delete.rs). */
+export type UninstallPlan = {
+  /** `delete`: the folder (or the files in it) go. `listOnly`: Kryoto did not
+   *  install it, so only its place in the Library goes. `refused`: not provably
+   *  this game's alone, so nothing is deleted. */
+  kind: 'delete' | 'listOnly' | 'refused'
+  reason: string | null
+  folder: string | null
+  /** The whole folder goes; otherwise only `files` of it. */
+  whole: boolean
+  files: number
+  bytes: number
+  /** What stays in the folder: saves, and files Kryoto did not install. */
+  keptFiles: number
+  keptBytes: number
+  /** The Recycle Bin (or Trash) takes it; otherwise `binNote` says why it would be deleted for good. */
+  bin: boolean
+  binNote: string | null
+}
+
 export type LibraryGame = {
   id: string
   title: string
@@ -361,9 +381,12 @@ export const library = {
   refreshArtwork: (id: string, art: { cover: string | null; hero: string | null; logo?: string | null; header?: string | null }) =>
     call<LibraryGame>('library_artwork', { id, ...art, logo: art.logo ?? null, header: art.header ?? null }),
   /** `deletePrefix`: on Linux, its Wine prefix goes too. `together`: the games
-   *  uninstalled in the same go, which may share its folder. */
-  remove: (id: string, deleteFiles: boolean, deletePrefix = false, together: string[] = []) =>
-    call<boolean>('library_remove', { id, deleteFiles, deletePrefix, together }),
+   *  uninstalled in the same go, which may share its folder. `permanent`: the
+   *  player was told it cannot go to the Recycle Bin and said yes. */
+  remove: (id: string, deleteFiles: boolean, deletePrefix = false, together: string[] = [], permanent = false) =>
+    call<boolean>('library_remove', { id, deleteFiles, deletePrefix, together, permanent }),
+  /** What uninstalling would delete, worked out on the PC before the player confirms (src-tauri safe_delete.rs). */
+  uninstallPlan: (id: string, together: string[] = []) => call<UninstallPlan>('library_uninstall_plan', { id, together }),
   /** The game is somewhere else now: `exePath` is what starts it. Only its place changes. */
   relocate: (id: string, exePath: string) => call<LibraryGame>('library_relocate', { id, exePath }),
   /** Manage > Rename folder: the game's folder in plain letters, where it is (src-tauri library.rs). */
