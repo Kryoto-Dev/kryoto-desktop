@@ -190,8 +190,21 @@ pub async fn addons_list(app: AppHandle, slug: String) -> Result<serde_json::Val
     if slug.is_empty() || !slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return Err("That is not a kryo.to game.".into());
     }
+    // A game kryo.to took off has no add-ons to list, and is not asked again
+    // for a day (catalog_gone.rs): its Library page asked on every visit.
+    let none = || serde_json::json!([]);
+    if crate::catalog_gone::is_gone(&app, &slug) {
+        return Ok(none());
+    }
     let json = match crate::phone::session(&app) {
-        Ok(session) => crate::phone::listing(&session, &slug).await?,
+        Ok(session) => match crate::phone::listing(&session, &slug).await {
+            Ok(json) => json,
+            Err(e) if crate::phone::listing_says_gone(&e) => {
+                crate::catalog_gone::set(&app, &slug, true);
+                return Ok(none());
+            }
+            Err(e) => return Err(e),
+        },
         Err(_) => {
             let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(&app));
             let client = crate::net::builder()
@@ -199,14 +212,16 @@ pub async fn addons_list(app: AppHandle, slug: String) -> Result<serde_json::Val
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|e| e.to_string())?;
-            client
+            let res = client
                 .get(format!("{endpoint}/api/games/{slug}/downloads"))
                 .send()
                 .await
-                .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?
-                .json::<serde_json::Value>()
-                .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?;
+            if crate::catalog_gone::says_gone(res.status().as_u16()) {
+                crate::catalog_gone::set(&app, &slug, true);
+                return Ok(none());
+            }
+            res.json::<serde_json::Value>().await.map_err(|e| e.to_string())?
         }
     };
     Ok(json.get("addons").cloned().unwrap_or_else(|| serde_json::json!([])))

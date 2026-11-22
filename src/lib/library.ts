@@ -151,8 +151,8 @@ export async function latestFor(game: Pick<LibraryGame, 'slug' | 'version' | 'bu
   if (!game.slug || !game.buildSha || (version && version !== (game.version ?? ''))) return version
   // The same number (or none): only the file says whether it is the same build.
   // Read even when the links are withheld: the hashes still come.
-  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(game.slug)}/downloads`)).catch(() => null)
-  const json = res ? ((await res.json().catch(() => null)) as { hashes?: { sha256?: string }[] } | null) : null
+  const res = await fetchGameApi(game.slug, '/downloads').catch(() => null)
+  const json = res ?((await res.json().catch(() => null)) as { hashes?: { sha256?: string }[] } | null) : null
   const hashes = (json?.hashes ?? []).map((h) => h.sha256?.toLowerCase()).filter((h): h is string => !!h && h.length === 64)
   if (!hashes.length || hashes.includes(game.buildSha.toLowerCase())) return version
   return `${version || game.version || 'This build'}${NEW_UPLOAD}`
@@ -222,8 +222,9 @@ type RawRelease = {
  * resolves by itself follow, API hosts before page hosts.
  */
 export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
-  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}/downloads`))
-  if (!res.ok) throw new Error(res.status === 404 ? `kryo.to has no game at /game/${slug}.` : `kryo.to answered ${res.status}.`)
+  const res = await fetchGameApi(slug, '/downloads')
+  if (!res) throw new Error(goneText(slug))
+  if (!res.ok) throw new Error(`kryo.to answered ${res.status}.`)
   const json = (await res.json()) as {
     releases?: RawRelease[]
     version?: string
@@ -451,6 +452,24 @@ const goneText = (slug: string) => `kryo.to has no game at /game/${slug}.`
 async function catalogGone(slug: string, gone?: boolean): Promise<boolean> {
   if (!isTauri() || isWeb()) return false
   return call<boolean>('catalog_gone', { slug, gone: gone ?? null }).catch(() => false)
+}
+
+/**
+ * `GET /api/games/<slug><rest>` through the same memory: null, without
+ * asking, for a game kryo.to took off less than a day ago, and null (and
+ * remembered) when this answer says so. `rest` is '' or '/downloads', which
+ * answer 404 or 410 only for a game that is gone; any other path is only
+ * skipped for one already known gone (its 404 may mean nothing to show).
+ * A removed game's Library page asked four paths on every visit (2026-11-22).
+ */
+export async function fetchGameApi(slug: string, rest: '' | '/downloads' | '/compatibility' | '/writeups' = ''): Promise<Response | null> {
+  if (await catalogGone(slug)) return null
+  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}${rest}`))
+  if ((rest === '' || rest === '/downloads') && (res.status === 404 || res.status === 410)) {
+    void catalogGone(slug, true)
+    return null
+  }
+  return res
 }
 
 /**

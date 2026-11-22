@@ -881,10 +881,21 @@ pub async fn listing(session: &Session, slug: &str) -> Result<serde_json::Value,
         .await
         .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?
         .error_for_status()
-        .map_err(|e| if e.status() == Some(reqwest::StatusCode::NOT_FOUND) { "kryo.to has no such game.".to_string() } else { format!("kryo.to answered {}.", e.status().map_or(0, |s| s.as_u16())) })?
+        .map_err(|e| match e.status().map(|s| s.as_u16()) {
+            Some(code) if crate::catalog_gone::says_gone(code) => NO_SUCH_GAME.to_string(),
+            code => format!("kryo.to answered {}.", code.unwrap_or(0)),
+        })?
         .json()
         .await
         .map_err(|e| e.to_string())
+}
+
+/// What `listing` says for a game kryo.to took off (404 or 410).
+const NO_SUCH_GAME: &str = "kryo.to has no such game.";
+
+/// Whether `listing`'s error means the game is gone from kryo.to (catalog_gone.rs).
+pub fn listing_says_gone(error: &str) -> bool {
+    error == NO_SUCH_GAME
 }
 
 /// A link to one release of ours (a game's build or one of its add-ons),

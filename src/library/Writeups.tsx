@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { CircleCheck, CircleX, Flame } from '@/ui/pixel-icons'
 import { Caption } from '@/ui'
 import { catalogApiUrl } from '@/lib/endpoint'
+import { fetchGameApi } from '@/lib/library'
 import { viaStore } from '@/lib/friends'
 import { isTauri, isWeb, call } from '@/lib/bridge'
 import { cn } from '@/lib/utils'
@@ -48,7 +49,7 @@ export function LibraryWriteups({ slug, onWeb, own = false }: { slug: string; on
   useEffect(() => {
     let live = true
     void (async () => {
-      const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}/writeups`)).catch(() => null)
+      const res = await fetchGameApi(slug, '/writeups').catch(() => null)
       const json = res?.ok ? ((await res.json().catch(() => null)) as { writeups?: Writeup[] } | null) : null
       const top = (json?.writeups ?? [])
         .filter((w) => w && typeof w.body === 'string' && w.body.trim())
