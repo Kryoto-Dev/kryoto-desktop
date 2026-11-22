@@ -2671,6 +2671,11 @@ async fn fetch_all<R: Runtime>(
     let mut asked_again = false;
     // What had arrived when our own link was last asked for again.
     let mut own_asked_at: Option<u64> = None;
+    // Every dropped or stalled connection this run, progress or not, and
+    // whether a mirror was asked to take over.
+    let mut cuts = 0u32;
+    let mut tried_mirrors = false;
+    let mut is_mirror = is_mirror;
     let mut refreshed = 0u32;
     // Once a server has answered a range with the whole file, it gets one
     // stream for the rest of this run.
@@ -2689,6 +2694,13 @@ async fn fetch_all<R: Runtime>(
         match step {
             Ok(true) => {
                 edit(app, id, |d| d.notice = None);
+                // Counted where the reports can see it: retries are warnings,
+                // which never leave this PC, so nobody could tell how often
+                // a host cuts downloads that still finish (KB-0117).
+                if cuts >= 3 {
+                    let from = edit(app, id, |_| {}).map(|d| source_of(d.mirror.as_ref().map_or(d.url.as_str(), |m| m.page.as_str()))).unwrap_or_default();
+                    crate::logging::error("download", &format!("{id}: finished from {from} after {cuts} dropped or stalled connections"));
+                }
                 return Ok(true);
             }
             Ok(false) => {
@@ -2765,6 +2777,29 @@ async fn fetch_all<R: Runtime>(
                     failures = 0;
                 }
                 failures += 1;
+                cuts += 1;
+                // Our own server keeps cutting the download: the same archive
+                // from one of the game's mirrors, for the bytes still missing
+                // (KB-0117, 2026-11-22: 20 of 30 ranges cut in 50 s, players
+                // on "Reconnecting." for half an hour).
+                if !is_mirror && !tried_mirrors && cuts >= OWN_CUTS_BEFORE_MIRROR {
+                    tried_mirrors = true;
+                    match take_over_from_mirror(app, id, flag, settings).await {
+                        Ok((mirror_client, n, host)) => {
+                            crate::logging::error("download", &format!("{id}: Kryoto's own server cut the download {cuts} times ({e}); carrying on from {host}"));
+                            *client = mirror_client;
+                            *connections = n;
+                            is_mirror = true;
+                            failures = 0;
+                            edit(app, id, |d| d.notice = Some(format!("Our file host is having trouble; continuing from {host}.")));
+                            emit(app, true);
+                            continue;
+                        }
+                        Err(why) => {
+                            crate::logging::error("download", &format!("{id}: Kryoto's own server cut the download {cuts} times ({e}); no mirror could take over: {why}"));
+                        }
+                    }
+                }
                 if failures > MAX_FAILURES {
                     return Err(format!("The connection kept dropping ({e}). Resume to try again."));
                 }
@@ -2790,6 +2825,140 @@ async fn fetch_all<R: Runtime>(
             }
         }
     }
+}
+
+/// Dropped or stalled connections to our own server in one run before a
+/// mirror is asked to carry on. With the back-off between them, about a
+/// minute of trying; it used to retry for as long as each try moved a byte.
+const OWN_CUTS_BEFORE_MIRROR: u32 = 6;
+
+/// The mirror pages kryo.to lists for the build a row downloads, in its order.
+fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<String> {
+    let releases: Vec<&serde_json::Value> = listing["releases"].as_array().into_iter().flatten().collect();
+    let build = release
+        .and_then(|v| releases.iter().find(|r| r["version"].as_str() == Some(v)))
+        .or_else(|| releases.iter().find(|r| r["primary"].as_bool() == Some(true)));
+    build
+        .map(|r| {
+            r["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["url"].as_str())
+                .filter(|u| crate::resolvers::classify(u).is_some())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Our own server keeps cutting this download: the same archive from one of
+/// the game's mirrors carries it on, from where every range got to. A mirror
+/// is only taken when its file is this one: the same size, and the same first
+/// bytes as what is on disk (the 7z start header, which names the archive's
+/// end). The checksum at the end still checks every byte. The mirror's
+/// client, its connection count and its name.
+async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8, settings: &crate::settings::Settings) -> Result<(reqwest::Client, u32, String), String> {
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let slug = d.slug.clone().ok_or("no game to ask kryo.to about")?;
+    let total = d.total.ok_or("the file's size is not known yet")?;
+    let endpoint = crate::settings::catalog_endpoint(settings);
+    let listing = match crate::phone::session(app) {
+        Ok(session) => crate::phone::listing(&session, &slug).await?,
+        Err(_) => client_builder()
+            .build()
+            .map_err(|e| e.to_string())?
+            .get(format!("{endpoint}/api/games/{slug}/downloads"))
+            .send()
+            .await
+            .map_err(|e| crate::logging::why(&e.without_url()))?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+    let pages = mirror_pages(&listing, d.release.as_deref());
+    if pages.is_empty() {
+        return Err("the game has no mirror Kryoto downloads from".into());
+    }
+    // What is on disk of the start, to compare (zeros until range 0 has it).
+    let ours: Vec<u8> = std::fs::File::open(&d.archive_path)
+        .and_then(|mut f| {
+            use std::io::Read;
+            let mut b = [0u8; 32];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        })
+        .unwrap_or_default();
+    let have_head = d.segments.first().is_some_and(|s| s.start == 0 && s.done >= 32) && ours.len() == 32;
+    let mut why = Vec::new();
+    for page in pages {
+        if flag.load(Ordering::SeqCst) != RUN {
+            return Err("stopped".into());
+        }
+        let host = crate::resolvers::classify(&page).map(|(_, h)| h.to_string()).unwrap_or_default();
+        let resolved = match crate::resolvers::resolve(app, &page).await {
+            Ok(r) => r,
+            Err(e) => {
+                why.push(format!("{host}: {e}"));
+                continue;
+            }
+        };
+        // filez.stream sends its file sealed, chunk by chunk (`fetch_filez`):
+        // its bytes cannot fill the ranges of a plain download.
+        if crate::resolvers::filez::file_for(&resolved.url).is_some() {
+            why.push(format!("{host}: sealed, cannot carry on a plain download"));
+            continue;
+        }
+        if resolved.size.is_some_and(|s| s != total) {
+            why.push(format!("{host}: another size ({} bytes, ours {total})", resolved.size.unwrap_or(0)));
+            continue;
+        }
+        let (before_url, before_mirror, before_etag) = (d.url.clone(), d.mirror.clone(), d.etag.clone());
+        let state = app.state::<Downloads>();
+        if let Ok(mut map) = state.resolved.lock() {
+            map.insert(id.to_string(), resolved);
+        }
+        edit(app, id, |row| {
+            row.mirror = Some(Mirror { page: page.clone(), host: host.clone() });
+            row.url = page.clone();
+            // Another host's ETag: each range is checked by size from here.
+            row.etag = None;
+        });
+        let taken = async {
+            let (client, n) = mirror_client(app, id, flag, false, settings.connections).await?;
+            let url = edit(app, id, |_| {}).map(|r| r.url).unwrap_or_default();
+            let res = send(client.get(&url).header(reqwest::header::RANGE, "bytes=0-31")).await.map_err(|_| "no answer".to_string())?;
+            let size = content_range_of(&res).and_then(|r| r.total);
+            if res.status().as_u16() != 206 || size != Some(total) || is_web_page(&res) {
+                return Err(format!("answered {} for {} bytes", res.status().as_u16(), size.map_or("?".into(), |s| s.to_string())));
+            }
+            let head = res.bytes().await.map_err(|e| e.to_string())?;
+            if have_head && head.as_ref() != ours.as_slice() {
+                return Err("another file (its first bytes differ)".into());
+            }
+            Ok((client, n))
+        }
+        .await;
+        match taken {
+            Ok((client, n)) => {
+                persist(app);
+                return Ok((client, n, host));
+            }
+            Err(e) => {
+                why.push(format!("{host}: {e}"));
+                if let Ok(mut map) = state.resolved.lock() {
+                    map.remove(id);
+                }
+                edit(app, id, |row| {
+                    row.url = before_url;
+                    row.mirror = before_mirror;
+                    row.etag = before_etag;
+                });
+            }
+        }
+    }
+    persist(app);
+    Err(why.join("; "))
 }
 
 /// Bytes of the download on disk now.
@@ -3041,7 +3210,23 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
         return Err(STOPPED.into());
     }
     if actual != expected {
-        crate::logging::error("download", &format!("{id}: sha256 {actual} is not {expected}"));
+        // Who served it and what it is, so the reports can tell a host's bad
+        // copy from a torn transfer (KB-0367: the same wrong file on several
+        // PCs, and nothing said from where). No address, no link.
+        let source = source_of(d.mirror.as_ref().map_or(d.url.as_str(), |m| m.page.as_str()));
+        let head = std::fs::File::open(&d.archive_path)
+            .and_then(|mut f| {
+                use std::io::Read;
+                let mut b = [0u8; 32];
+                let n = f.read(&mut b)?;
+                Ok(b[..n].to_vec())
+            })
+            .unwrap_or_default();
+        let declared = seven_z_length(&head).map(|n| format!(", its header says {n} bytes")).unwrap_or_default();
+        crate::logging::error(
+            "download",
+            &format!("{id}: sha256 {actual} is not {expected} (from {source}, {total} bytes, starts as {}{declared})", looks_like(&head)),
+        );
         // The archive stays: the player decides between installing it anyway
         // and downloading it again (Retry, which throws this copy away).
         edit(app, id, |d| {
@@ -3049,6 +3234,10 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
             d.extracted = 0;
             d.extract_total = None;
         });
+        // A mirror gives the same wrong copy every time: Retry from it is no use.
+        if d.mirror.is_some() {
+            return Err(format!("The archive from {source} doesn't match kryo.to's checksum: that copy is not the right file. Take another mirror or Kryoto's own copy, or Install it anyway."));
+        }
         return Err("The archive doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.".into());
     }
     edit(app, id, |d| {
@@ -3908,6 +4097,82 @@ fn range_not_satisfiable(from: u64, expected: Option<u64>, server: Option<u64>) 
     }
 }
 
+/// Who served `url`, for the player and the reports: a mirror's name, or
+/// Kryoto's own server. Never the address itself (signed links).
+fn source_of(url: &str) -> String {
+    let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
+    if host == "kryo.to" || host.ends_with(".kryo.to") {
+        return "Kryoto's own server".into();
+    }
+    crate::resolvers::classify(url).map(|(_, name)| name.to_string()).unwrap_or(host)
+}
+
+/// An answer that is a web page (a host's "file removed" or wait page, a
+/// network's block page) where a file was asked for.
+fn is_web_page(res: &reqwest::Response) -> bool {
+    res.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"))
+}
+
+/// The 7z signature every 7z archive starts with.
+const SEVEN_Z_MAGIC: [u8; 6] = [b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
+
+/// What the first bytes of a download are, in words, for a report.
+fn looks_like(head: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(&head[..head.len().min(64)]).trim_start().to_ascii_lowercase();
+    if head.starts_with(&SEVEN_Z_MAGIC) {
+        "a 7z archive"
+    } else if head.starts_with(b"PK\x03\x04") {
+        "a zip archive"
+    } else if head.starts_with(b"Rar!") {
+        "a rar archive"
+    } else if text.starts_with('<') || text.starts_with("<!doctype") {
+        "a web page"
+    } else if text.starts_with('{') {
+        "a JSON answer"
+    } else if head.iter().all(|b| *b == 0) {
+        "zeros"
+    } else {
+        "something else"
+    }
+}
+
+/// How long a 7z archive says it is, from its 32-byte start header: the
+/// header, then everything up to and including its end header. `None` when
+/// `head` is not a 7z start header.
+fn seven_z_length(head: &[u8]) -> Option<u64> {
+    if head.len() < 32 || !head.starts_with(&SEVEN_Z_MAGIC) {
+        return None;
+    }
+    let u64_at = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap_or([0; 8]));
+    32u64.checked_add(u64_at(12))?.checked_add(u64_at(20))
+}
+
+/// The first 32 bytes, as a probe got them, against the size the host says
+/// its file is: is this the archive, whole? `Err` names what it is instead
+/// (KB-0367: the same wrong file came down on several PCs, the reports did not
+/// say from where, and 7-Zip then said "Cannot open the file as [7z] archive").
+fn check_head(name: &str, head: &[u8], total: u64, source: &str) -> Result<(), String> {
+    let is_7z = name.to_ascii_lowercase().ends_with(".7z");
+    if !is_7z || head.len() < 32 {
+        return Ok(());
+    }
+    match seven_z_length(head) {
+        None => Err(format!(
+            "{source} sent {} instead of the game's archive. Take another mirror, or Kryoto's own copy.",
+            looks_like(head)
+        )),
+        Some(len) if len > total => Err(format!(
+            "{source}'s copy of this file is cut short: {} of {}. Take another mirror, or Kryoto's own copy.",
+            crate::storage::human_size(total),
+            crate::storage::human_size(len)
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 /// What a status code means for a download.
 fn check_status(code: u16) -> Result<(), Transfer> {
     match code {
@@ -3945,7 +4210,10 @@ async fn transfer_parallel<R: Runtime>(
     }
     let resumable = !item.segments.is_empty() && !item.archive_path.is_empty() && on_disk;
     if !resumable {
-        let probe = send(client.get(&item.url).header(reqwest::header::RANGE, "bytes=0-0"));
+        // The first 32 bytes, not one: a 7z's start header says how long the
+        // archive is, so a copy cut short or a page in its place is told
+        // before a byte is written (`check_head`).
+        let probe = send(client.get(&item.url).header(reqwest::header::RANGE, "bytes=0-31"));
         let Some(probe) = unless_stopped(flag, probe).await else { return Ok(false) };
         let probe = probe?;
         check_status(probe.status().as_u16())?;
@@ -3954,6 +4222,10 @@ async fn transfer_parallel<R: Runtime>(
             drop(probe);
             return transfer(app, id, flag, client, settings, limiter).await;
         };
+        let source = source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str()));
+        if is_web_page(&probe) {
+            return Err(Transfer::Fatal(format!("{source} sent a web page instead of the file. Take another mirror, or Kryoto's own copy.")));
+        }
         let etag = etag_of(&probe);
         let name = probe
             .headers()
@@ -3965,7 +4237,11 @@ async fn transfer_parallel<R: Runtime>(
             .or_else(|| probe.url().path_segments().and_then(|mut s| s.next_back()).map(String::from))
             .map(|n| safe_name(&n))
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
-        drop(probe);
+        let head = tokio::time::timeout(ANSWER_TIMEOUT, probe.bytes()).await.ok().and_then(Result::ok).unwrap_or_default();
+        if let Err(why) = check_head(&name, &head, total, &source) {
+            crate::logging::error("download", &format!("{id}: {source} refused before writing: {} ({total} bytes on offer, starts as {})", why, looks_like(&head)));
+            return Err(Transfer::Fatal(why));
+        }
         let dir = archive_dir(settings);
         crate::storage::check_download_room(&dir, &install_parent(app, &item, settings), total, total, install_size(&item), unpacks_in_place(&item), &item.meta.title).map_err(Transfer::Fatal)?;
         std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
@@ -4380,6 +4656,10 @@ async fn fetch_range(
         };
     }
     check_status(res.status().as_u16())?;
+    // Never written into the archive: a page where the bytes should be.
+    if is_web_page(&res) {
+        return Err(Transfer::Fatal(format!("{} sent a web page instead of the file. Take another mirror, or Kryoto's own copy.", source_of(url))));
+    }
     if res.status().as_u16() != 206 {
         return Err(Transfer::NoRanges);
     }
@@ -6099,6 +6379,46 @@ mod tests {
         assert!(!keep_probing(&[Probe::Refused, Probe::Refused, Probe::Refused]));
         // No answer at all over a family: no more tries over it.
         assert!(!keep_probing(&[Probe::Unreachable]));
+    }
+
+    /// KB-0367: a page, or a copy cut short, is told from the first 32 bytes
+    /// and the size on offer, before anything is written, and named by host.
+    #[test]
+    fn a_body_that_is_not_the_archive_is_refused_by_name() {
+        // A 7z start header saying 32 + 100 + 20 bytes.
+        let mut head = SEVEN_Z_MAGIC.to_vec();
+        head.extend_from_slice(&[0, 4, 0, 0, 0, 0]);
+        head.extend_from_slice(&100u64.to_le_bytes());
+        head.extend_from_slice(&20u64.to_le_bytes());
+        head.extend_from_slice(&[0; 4]);
+        assert_eq!(seven_z_length(&head), Some(152));
+        assert!(check_head("Game - Kryoto.7z", &head, 152, "Mocha").is_ok());
+        let short = check_head("Game - Kryoto.7z", &head, 140, "Mocha").unwrap_err();
+        assert!(short.starts_with("Mocha's copy of this file is cut short"), "{short}");
+        let page = b"<!DOCTYPE html><html><head><title>File removed</title>".to_vec();
+        let wrong = check_head("Game - Kryoto.7z", &page, 5_000, "VikingFile").unwrap_err();
+        assert!(wrong.starts_with("VikingFile sent a web page"), "{wrong}");
+        assert_eq!(looks_like(&[0u8; 32]), "zeros");
+        // Not a 7z by name: nothing to read in its head.
+        assert!(check_head("Game.zip", &page, 5_000, "Pixeldrain").is_ok());
+        assert_eq!(source_of("https://dl.kryo.to/d/abc.sig"), "Kryoto's own server");
+    }
+
+    /// KB-0117: the mirrors that can carry on a download our server keeps
+    /// cutting are the ones listed for its build, that Kryoto downloads from.
+    #[test]
+    fn the_mirrors_of_the_build_are_the_ones_asked_to_take_over() {
+        let listing = serde_json::json!({ "releases": [
+            { "version": "1.1", "primary": true, "links": [
+                { "url": "/api/download/v/9" },
+                { "url": "https://pixeldrain.com/u/abc" },
+                { "url": "https://example.com/file" },
+            ] },
+            { "version": "1.0", "links": [{ "url": "https://pixeldrain.com/u/old" }] },
+        ] });
+        assert_eq!(mirror_pages(&listing, None), ["https://pixeldrain.com/u/abc"]);
+        assert_eq!(mirror_pages(&listing, Some("1.0")), ["https://pixeldrain.com/u/old"]);
+        assert!(mirror_pages(&serde_json::json!({}), None).is_empty());
     }
 
     /// What the log says when a link never passes, without an address in it.
