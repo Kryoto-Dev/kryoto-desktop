@@ -5,11 +5,15 @@ import { errorText } from '@/lib/bridge'
 import { fetchAddons, library, type KryoAddon, type LibraryGame } from '@/lib/library'
 import { downloads, formatBytes, isActive, phaseOf, progressOf, useDownloads, type Download as Dl } from '@/lib/downloads'
 import { GameRepair } from './GameRepair'
+import { useSettings } from '@/lib/settings'
+import { isLanguagePack, orderPacks, packLanguage, packName, preferredLanguage } from '@/lib/language-packs'
 
 const isOnline = (a: { label: string | null; source: string | null }) => /online/i.test(`${a.label ?? ''} ${a.source ?? ''}`)
 /** A DLC packed on its own, filed on kryo.to as `DLC: <name>` (kryo.to lib/dlc-addons.ts). */
 const isDlc = (a: { label: string | null }) => /^dlc:\s*/i.test(a.label ?? '')
 const dlcName = (label: string | null) => (label ?? '').replace(/^dlc:\s*/i, '').trim() || 'DLC'
+/** An add-on that is neither a DLC nor a language pack: listed on its own row. */
+const isOther = (a: { label: string | null }) => !isDlc(a) && !isLanguagePack(a)
 /** More DLC than this and the list folds away behind a button. */
 const DLC_SHOWN = 5
 /** downloads.rs `ADDON_CHALLENGE`: kryo.to wants its own check for this account. */
@@ -46,6 +50,10 @@ export function AddonsCard({
   const [allDlc, setAllDlc] = useState(false)
   const [confirm, setConfirm] = useState<{ kind: 'addon'; file: string; label: string; count: number; replaced?: number } | { kind: 'online' } | null>(null)
   const { list: rows } = useDownloads()
+  // Whose language leads the language packs: this game's own Language in
+  // Properties, else Settings > Game language, else this PC's.
+  const settings = useSettings()
+  const preferred = preferredLanguage(game.gameLanguage, settings?.gameLanguage, typeof navigator === 'undefined' ? [] : navigator.languages)
   // When an add-on was last removed here (unix seconds): its download, finished
   // before that, no longer says Installed.
   const [removedAt, setRemovedAt] = useState(0)
@@ -84,19 +92,32 @@ export function AddonsCard({
   // A DLC also by its name: its file's name has changed since some were applied
   // (kryo.to names it `<Game> - DLC <Name> - kryoto`), its label has not.
   const appliedDlc = new Set(applied.filter(isDlc).map((a) => dlcName(a.label).toLowerCase()))
+  // A language pack by its label too, for the same reason.
+  const appliedPacks = new Set(applied.filter(isLanguagePack).map((a) => packName(a.label).toLowerCase()))
   const isApplied = (a: KryoAddon) =>
-    a.links.some((l) => l.name && appliedFiles.has(l.name.toLowerCase())) || (isDlc(a) && appliedDlc.has(dlcName(a.label).toLowerCase()))
+    a.links.some((l) => l.name && appliedFiles.has(l.name.toLowerCase())) ||
+    (isDlc(a) && appliedDlc.has(dlcName(a.label).toLowerCase())) ||
+    (isLanguagePack(a) && appliedPacks.has(packName(a.label).toLowerCase()))
   // The Online add-on only where Kryoto Online is offered at all: Steam lists
   // online play and the release has no way online of its own. kryo.to says
   // so too (`offered`); either one saying no hides it.
   const wanted = (a: KryoAddon) => !isOnline(a) || (onlineOffered && a.offered !== false)
   const offers = (available ?? []).filter((a) => !isApplied(a) && wanted(a))
   const dlcOffers = offers.filter((a) => isDlc(a))
-  const otherOffers = offers.filter((a) => !isDlc(a))
+  const otherOffers = offers.filter(isOther)
   const dlcApplied = applied.filter(isDlc)
-  const otherApplied = applied.filter((a) => !isDlc(a))
+  const otherApplied = applied.filter(isOther)
+  // Language packs, the player's language first (lib/language-packs.ts).
+  const packOffers = orderPacks(offers.filter(isLanguagePack), preferred)
+  const packsApplied = applied.filter(isLanguagePack)
   const undo = (a: (typeof applied)[number]) =>
-    setConfirm({ kind: 'addon', file: a.file, label: isDlc(a) ? dlcName(a.label) : a.label, count: a.files.length, replaced: a.replaced?.length })
+    setConfirm({
+      kind: 'addon',
+      file: a.file,
+      label: isDlc(a) ? dlcName(a.label) : isLanguagePack(a) ? `the ${packName(a.label)} language pack` : a.label,
+      count: a.files.length,
+      replaced: a.replaced?.length,
+    })
   const kryoOnline = offers.find(isOnline)
   const showOnline = !!game.online || onlineOffered
 
@@ -143,6 +164,13 @@ export function AddonsCard({
       // Signed out, or a host only a browser reaches: the download window
       // still adds it to this game when it lands.
       if (got.store) onGet()
+      // One language pack added to a game that follows Settings: the game now
+      // starts in that language, and its packs lead with it after an update.
+      const only = list.length === 1 ? list[0] : undefined
+      const lang = only && isLanguagePack(only) ? packLanguage(only) : null
+      if (lang && game.gameLanguage == null && settings?.gameLanguage !== lang) {
+        onChanged(await library.save({ ...game, gameLanguage: lang }))
+      }
     } catch (e) {
       setError(errorText(e))
     } finally {
@@ -231,6 +259,43 @@ export function AddonsCard({
   return (
     <Card className="grid gap-4">
       <Label>{dlcOffers.length + dlcApplied.length > 0 ? 'Add-ons & DLC' : 'Add-ons'}</Label>
+
+      {/* The game's language packs, each optional like a DLC: the player's
+          language first. Remove takes a pack out and puts back the files it
+          replaced, as for a DLC (addons.rs). */}
+      {packOffers.length + packsApplied.length > 0 ? (
+        <div className="grid gap-2">
+          <Caption>
+            Languages · {[packsApplied.length ? `${packsApplied.length} installed` : '', packOffers.length ? `${packOffers.length} to add` : ''].filter(Boolean).join(' · ')}
+          </Caption>
+          {packOffers.length > 0 ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Adding one also sets the game&apos;s Language in Properties, unless you picked one there.
+            </p>
+          ) : null}
+          {packsApplied.map((a) => (
+            <Row
+              key={a.file}
+              title={packName(a.label)}
+              sub="Installed"
+              action={
+                <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => undo(a)}>
+                  <Undo2 className="size-3" />
+                  Remove
+                </Button>
+              }
+            />
+          ))}
+          {packOffers.map((a) =>
+            offerRow(
+              a,
+              packName(a.label),
+              [preferred !== null && packLanguage(a) === preferred ? 'Your language' : '', a.download_size ?? ''].filter(Boolean).join(' · ') || undefined,
+              'Add',
+            ),
+          )}
+        </div>
+      ) : null}
 
       {/* The game's DLC, each optional. Add (or Add all DLC) downloads each
           for this game and applies it as it lands; Remove takes it out again. */}

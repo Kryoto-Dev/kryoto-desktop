@@ -138,6 +138,11 @@ export type KryoAddon = {
    * already brings its own. Absent from older answers.
    */
   offered?: boolean
+  /**
+   * A language pack's Steam code (`polish`): an add-on labelled
+   * `Language: <name>` (kryo.to lib/game-languages.ts). Absent otherwise.
+   */
+  language?: string | null
 }
 
 /**
