@@ -5353,7 +5353,7 @@ fn needs_newer_7zip(tried: &[String]) -> String {
 /// Where 7-Zip's console might be: an installed 7-Zip, then the standalone
 /// `7zr.exe` this client keeps (which reads only .7z), or on Linux whatever
 /// the distribution calls it. Missing ones are skipped when they fail to start.
-fn seven_zip_tools(is_7z: bool) -> Vec<PathBuf> {
+pub(crate) fn seven_zip_tools(is_7z: bool) -> Vec<PathBuf> {
     #[cfg(windows)]
     let list = {
         let mut list: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]

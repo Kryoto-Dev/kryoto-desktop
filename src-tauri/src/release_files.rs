@@ -742,7 +742,7 @@ pub fn check_tree(root: &Path, list: &FileList, with: &CheckWith, stop: &AtomicB
 /// What Kryoto itself changed in this game, so a check never blames the
 /// player's antivirus for it: the repair journal, the swap record, add-ons
 /// and Kryoto Online. `true` with it when the emulator was switched.
-fn kryoto_changes(game: &LibraryGame, root: &Path) -> (BTreeSet<String>, bool) {
+pub(crate) fn kryoto_changes(game: &LibraryGame, root: &Path) -> (BTreeSet<String>, bool) {
     let mut skip = BTreeSet::new();
     let journal = journal::load(root).ok().flatten().filter(|j| j.state != "undone");
     if let Some(j) = &journal {

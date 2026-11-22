@@ -15,6 +15,7 @@ commands.allow = [
   "community_offer_state", "community_offer_add_shot", "community_offer_send", "community_offer_cancel", "community_update_check", "community_update_try",
   "repair_sources", "repair_state", "repair_apply", "repair_undo", "repair_support", "repair_support_url",
   "repair_switch", "game_emulators",
+  "online_fix_state", "online_fix_lookup", "online_fix_get", "online_fix_from_file", "online_fix_open_page",
   "take_pending_link",
   "update_check_mirror",
   "preview_report_screenshot", "preview_report_send", "preview_reports_mine",

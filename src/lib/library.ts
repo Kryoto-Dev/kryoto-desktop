@@ -4,6 +4,7 @@ import { catalogApiUrl } from '@/lib/endpoint'
 import { automaticArtwork, coverFor } from '@/lib/game-artwork'
 import { autofixBlock } from '@/lib/autofix'
 import type { FilesRestored, FilesState } from '@/lib/release-files'
+import type { OnlineFixState } from '@/lib/online-fix'
 
 /**
  * The Library: games on this PC and how each one starts.
@@ -268,7 +269,17 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
   })
 }
 
-export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null; stopped?: boolean; /** Linux: the launcher's last lines, when it failed at once. */ detail?: string }
+export type GameStateEvent = {
+  id: string
+  running: boolean
+  seconds: number | null
+  code: number | null
+  stopped?: boolean
+  /** Linux: the launcher's last lines, when it failed at once. */
+  detail?: string
+  /** Why it sent the player to Steam ("No licenses"), when it ended at once and its folder says why (src-tauri steam_check.rs). */
+  steam?: string
+}
 
 export const BLANK_GAME: LibraryGame = {
   id: '',
@@ -403,6 +414,15 @@ export const library = {
   /** Get the files back from this PC (another copy, the kept download); says what is left. */
   filesRestore: (gameId: string) => call<FilesRestored>('game_files_restore', { gameId }),
   onlineUndo: (gameId: string) => call<LibraryGame>('online_undo', { gameId }),
+  /** Online-Fix's fix from online-fix.me (src-tauri online_fix.rs): what is known, asking nobody. */
+  onlineFixState: (gameId: string) => call<OnlineFixState>('online_fix_state', { gameId }),
+  /** The same, with online-fix.me asked what it has (once a run, unless `fresh`). */
+  onlineFixLookup: (gameId: string, fresh = false) => call<OnlineFixState>('online_fix_lookup', { gameId, fresh }),
+  /** online-fix.me's folder opens in a window; the player clicks the file; Kryoto checks it and puts it in. */
+  onlineFixGet: (gameId: string) => call<OnlineFixState>('online_fix_get', { gameId }),
+  /** "I have the file": an archive the player downloaded, checked and put in the same way. */
+  onlineFixFromFile: (gameId: string, path: string) => call<OnlineFixState>('online_fix_from_file', { gameId, path }),
+  onlineFixOpenPage: (gameId: string) => call<void>('online_fix_open_page', { gameId }),
 }
 
 /** One emulator a game can switch to (repair.rs `EmulatorChoice`). */

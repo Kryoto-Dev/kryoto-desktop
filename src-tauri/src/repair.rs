@@ -39,13 +39,13 @@ struct Progress {
     percent: Option<u8>,
 }
 
-fn game<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<LibraryGame, String> {
+pub(crate) fn game<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<LibraryGame, String> {
     library::load(app)?
         .into_iter()
         .find(|g| g.id == id)
         .ok_or("That game is no longer in the library.".into())
 }
-fn root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Result<PathBuf, String> {
+pub(crate) fn root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Result<PathBuf, String> {
     let folders = crate::settings::all_folders(&crate::settings::load(app));
     crate::storage::game_folder(&folders, &game.install_dir)
         .unwrap_or_else(|| PathBuf::from(&game.install_dir))
@@ -60,7 +60,7 @@ fn log<R: Runtime>(app: &AppHandle<R>, id: &str, text: &str, percent: Option<u8>
         }
     }
 }
-fn progress<R: Runtime>(app: &AppHandle<R>, id: &str, text: &str, percent: Option<u8>) {
+pub(crate) fn progress<R: Runtime>(app: &AppHandle<R>, id: &str, text: &str, percent: Option<u8>) {
     log(app, id, text, percent);
     let _ = app.emit(
         "repair-progress",
@@ -171,7 +171,7 @@ pub(crate) async fn apply<R: Runtime>(
     if !settings.player_name.trim().is_empty() {
         identity.account_name = settings.player_name.clone();
     }
-    let report = match repair::apply(
+    let mut report = match repair::apply(
         &root,
         &cache,
         Some(slug),
@@ -233,6 +233,12 @@ pub(crate) async fn apply<R: Runtime>(
         ));
     }
     let _ = app.emit("library-changed", ());
+    // The engine's notes stay as they are in the log and the support text;
+    // the player reads them in their own words.
+    for w in &report.warnings {
+        log(&app, &game_id, w, None);
+    }
+    report.warnings = report.warnings.iter().map(|w| plain_warning(w)).collect();
     Ok(report)
 }
 
@@ -358,26 +364,7 @@ pub async fn repair_switch(app: AppHandle, game_id: String, source: Emulator) ->
         return Err("Close the game before changing its emulator.".into());
     }
     let dir = root(&app, &before)?;
-    let applied = journal::load(&dir)?.is_some_and(|j| j.state != "undone");
-    if applied || crate::release_files::has_swap(&dir) {
-        progress(&app, &game_id, "Putting the game's own files back first", None);
-        repair_undo(app.clone(), game_id.clone())?;
-    } else if before.online.is_some() {
-        // Kryoto Online from before it went through Repair.
-        progress(&app, &game_id, "Taking Kryoto Online out first", None);
-        crate::online::online_undo(app.clone(), game_id.clone())?;
-    }
-    let cleaned = match crate::release_files::ensure_list(&app, &before, true).await {
-        Some(list) => {
-            progress(&app, &game_id, "Taking out the emulator the release came with", None);
-            let at = dir.clone();
-            tauri::async_runtime::spawn_blocking(move || crate::release_files::clean_for_switch(&at, &list)).await.map_err(|e| e.to_string())??
-        }
-        None => None,
-    };
-    if let Some((back, aside)) = cleaned {
-        log(&app, &game_id, &format!("Release's own emulator out: {back} original file(s) back, {aside} file(s) set aside"), None);
-    }
+    let cleaned = clear_for_switch(&app, &game_id, &before).await?;
     match apply(&app, &game_id, source, false).await {
         Ok(report) => Ok(report),
         Err(error) if cleaned.is_some() => match crate::release_files::unclean(&dir) {
@@ -386,6 +373,53 @@ pub async fn repair_switch(app: AppHandle, game_id: String, source: Emulator) ->
         },
         Err(error) => Err(error),
     }
+}
+
+/// Before anything new goes in (another emulator, the online fix): what
+/// Kryoto put in before comes out (Undo, from its copies), then the release's
+/// own emulator by role when its file list is known. `Some` when the latter
+/// happened, for `release_files::unclean` if what follows fails.
+pub(crate) async fn clear_for_switch(app: &AppHandle, game_id: &str, before: &LibraryGame) -> Result<Option<(usize, usize)>, String> {
+    let dir = root(app, before)?;
+    let applied = journal::load(&dir)?.is_some_and(|j| j.state != "undone");
+    if applied || crate::release_files::has_swap(&dir) {
+        progress(app, game_id, "Putting the game's own files back first", None);
+        repair_undo(app.clone(), game_id.to_string())?;
+    } else if before.online.is_some() {
+        // Kryoto Online from before it went through Repair.
+        progress(app, game_id, "Taking Kryoto Online out first", None);
+        crate::online::online_undo(app.clone(), game_id.to_string())?;
+    }
+    let cleaned = match crate::release_files::ensure_list(app, before, true).await {
+        Some(list) => {
+            progress(app, game_id, "Taking out the emulator the release came with", None);
+            let at = dir.clone();
+            tauri::async_runtime::spawn_blocking(move || crate::release_files::clean_for_switch(&at, &list)).await.map_err(|e| e.to_string())??
+        }
+        None => None,
+    };
+    if let Some((back, aside)) = cleaned {
+        log(app, game_id, &format!("Release's own emulator out: {back} original file(s) back, {aside} file(s) set aside"), None);
+    }
+    Ok(cleaned)
+}
+
+/// A note from the emulator engine (crack.rs), in a player's words. The
+/// engine's own words are for Forge's staff ("Steamless is not configured"):
+/// a player read that on The Men of Yoshiwara: Kikuya, whose exe still had
+/// Steam's DRM wrapper, and Steam then said "No licenses" (2026-11-19).
+pub fn plain_warning(text: &str) -> String {
+    let l = text.to_ascii_lowercase();
+    if l.contains("steamstub was found") {
+        return "The game's program still has Steam's DRM wrapper, which Kryoto cannot take off on this PC. With this emulator the game asks Steam whether you own it, and Steam says No licenses. Kryoto Online can get past the wrapper; otherwise report it on the game's page so the release can be fixed.".into();
+    }
+    if l.contains("steamstub survived") {
+        return "The game's program still has Steam's DRM wrapper. Kryoto Online gets past it while the game runs; if Steam still says No licenses, go back to the release's own files and report it on the game's page.".into();
+    }
+    if let Some(rest) = text.strip_prefix("achievements: ") {
+        return format!("Achievements may not show for this game: {rest}");
+    }
+    text.to_string()
 }
 
 #[tauri::command(async)]
@@ -478,6 +512,17 @@ mod tests {
         assert!(after.iter().all(|c| c.label != "RUNE"));
         assert!(after.iter().any(|c| c.id == Emulator::GbeFork));
         assert!(after.iter().any(|c| c.online));
+    }
+
+    #[test]
+    fn a_drm_wrapper_left_on_the_game_is_said_in_plain_words() {
+        // The engine's exact words (kryoto-repair crack.rs), as the Kikuya player read them.
+        let gbe = plain_warning("SteamStub was found but Steamless is not configured; not stripped.");
+        assert!(gbe.contains("No licenses") && gbe.contains("report it on the game's page"));
+        assert!(!gbe.contains("Steamless"), "staff words stay out");
+        let online = plain_warning("SteamStub survived on 1 executable(s); the online emulator will patch it at runtime (GetStubbedLol=true). Configuring Steamless is more reliable.");
+        assert!(online.contains("Kryoto Online gets past it") && !online.contains("GetStubbedLol"));
+        assert_eq!(plain_warning("something else"), "something else");
     }
 
     #[test]

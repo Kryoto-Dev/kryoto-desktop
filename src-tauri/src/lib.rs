@@ -47,6 +47,8 @@ mod logging;
 mod net;
 mod menus;
 mod online;
+mod online_fix;
+mod steam_check;
 mod repair;
 mod release_files;
 mod joycons;
@@ -2346,6 +2348,11 @@ pub fn run() {
             repair::repair_undo,
             repair::repair_switch,
             repair::game_emulators,
+            online_fix::online_fix_state,
+            online_fix::online_fix_lookup,
+            online_fix::online_fix_get,
+            online_fix::online_fix_from_file,
+            online_fix::online_fix_open_page,
             repair::repair_support,
             repair::repair_support_url,
             links::take_pending_link,

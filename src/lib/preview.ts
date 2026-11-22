@@ -1150,6 +1150,7 @@ let previewPadConfig = {
     '030000005e040000120b00000b050000': { name: 'Xbox Series X|S Controller', family: null, remap: { a: 'b', b: 'a' }, mapping: null, base: null, sdl: null },
   } as Record<string, Record<string, unknown>>,
 }
+const previewFixLookups = new Map<string, unknown>()
 const previewRepairs = new Map<string, { source: unknown; online: unknown; report: { game: { title: string; slug: string }; source: string; version: string; warnings: string[] } }>()
 
 Object.assign(HANDLERS, {
@@ -1418,6 +1419,33 @@ Object.assign(HANDLERS, {
     if (previewRepairs.has(id)) HANDLERS.repair_undo!({ gameId: id })
     return HANDLERS.repair_apply!({ gameId: id, source: a.source })
   },
+  // Properties > Emulator & fixes > Online fix (src-tauri online_fix.rs): online-fix.me has one for every game here.
+  online_fix_state: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined
+    if (!g) throw new Error('That game is no longer in the library.')
+    const applied = previewRepairs.get(id)?.report.source === 'Online-Fix (generic)'
+    const carried = !applied && /online-?fix|ofme/i.test(String(g.source ?? ''))
+    return { blocked: g.slug ? null : 'Link this game to its kryo.to page first, in the kryo.to tab.', carried, applied, sevenZip: true, installed: (g.version as string | null) ?? null, lookup: previewFixLookups.get(id) ?? null }
+  },
+  online_fix_lookup: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    previewFixLookups.set(id, { status: 'found', page: 'https://online-fix.me/', file: 'Game_Fix_Repair_Steam_Generic.rar', size: '11M', madeFor: '1.0.11', newerNeeded: false, detail: null })
+    return HANDLERS.online_fix_state!({ gameId: id })
+  },
+  online_fix_get: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined
+    if (!g) throw new Error('That game is no longer in the library.')
+    if (previewRepairs.has(id)) HANDLERS.repair_undo!({ gameId: id })
+    previewRepairs.set(id, { source: g.source, online: g.online, report: { game: { title: String(g.title), slug: String(g.slug) }, source: 'Online-Fix (generic)', version: 'preview', warnings: [] } })
+    g.source = 'Steam + Online-Fix (generic)'
+    g.online = null
+    previewBus.emit('library-changed', null)
+    return HANDLERS.online_fix_state!({ gameId: id })
+  },
+  online_fix_from_file: (a: Record<string, unknown>) => HANDLERS.online_fix_get!({ gameId: a.gameId }),
+  online_fix_open_page: () => undefined,
   repair_undo: (a: Record<string, unknown>) => {
     const id = String(a.gameId)
     const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined

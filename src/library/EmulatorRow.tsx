@@ -24,6 +24,8 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
   const [answer, setAnswer] = useState<'working' | 'broken' | null>(null)
+  /** What the switch noted, in a player's words (repair.rs `plain_warning`): a DRM wrapper it could not take off. */
+  const [notes, setNotes] = useState<string[]>([])
   const inFlight = useRef(false)
 
   const load = useCallback(() => {
@@ -58,6 +60,7 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
     setDone(null)
     setAnswer(null)
     setStatus(null)
+    setNotes([])
     try {
       await work()
       setDone(after)
@@ -71,7 +74,11 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
     }
   }
   const switchTo = (id: string, label: string) =>
-    act(label, () => library.switchEmulator(gameId, id), `Now using ${label}. Start the game to check that it works.`)
+    act(
+      label,
+      async () => setNotes((await library.switchEmulator(gameId, id)).warnings.filter((w) => /No licenses|DRM wrapper/.test(w))),
+      `Now using ${label}. Start the game to check that it works.`,
+    )
   const restore = () => act('restore', () => backend.undo(), "The release's own files are back.")
   const report = async () => {
     setAnswer('broken')
@@ -150,6 +157,11 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
           {done}
         </p>
       ) : null}
+      {notes.map((n) => (
+        <p key={n} className="text-[11px] leading-snug text-warning">
+          {n}
+        </p>
+      ))}
       {done && state.switched && !answer && !busy ? (
         <div className="flex flex-wrap gap-2">
           <Button size="sm" onClick={() => { setAnswer('working'); setDone('Good. The copy of the old files stays, in case you want to go back.') }}>
