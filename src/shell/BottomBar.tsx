@@ -1,6 +1,6 @@
 import { Bell, Download, Play, Plus, Users } from '@/ui/pixel-icons'
 import { asciiTrack } from '@/ui'
-import { formatBytes, formatSpeed, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
+import { formatSpeed, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import { useSettings } from '@/lib/settings'
 import { ToastActionButton, type Toast } from '@/shell/Toasts'
 import { useSocialBadge } from '@/hooks/useSocialBadge'
