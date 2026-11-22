@@ -450,7 +450,12 @@ export function GamePage({
           ) : game.keepFiles ? null : (
             <>
               {repairStuck ? <Button size="sm" variant="primary" disabled={running} onClick={() => keepFiles(true)}>Keep my files</Button> : null}
-              <Button size="sm" variant="outline" disabled={running} onClick={onRepair}>Repair game</Button>
+              {/* A release the auto-fixer cannot fix offers its own notice, not Repair game (lib/autofix.ts). */}
+              {catalog?.noAutofix ? (
+                <span className="block w-full text-xs text-muted-foreground">{catalog.noAutofix.notice}</span>
+              ) : (
+                <Button size="sm" variant="outline" disabled={running} onClick={onRepair}>Repair game</Button>
+              )}
             </>
           )}
           {error ? (
