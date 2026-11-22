@@ -4,7 +4,7 @@ import { FolderInput, FolderOpen, HardDrive, Plus, Star, Trash2 } from '@/ui/pix
 import { AsciiBar, Button, Caption, Check, Dropdown, IconButton, inputCls, Section } from '@/ui'
 import { call, errorText, isTauri, on } from '@/lib/bridge'
 import { formatBytes } from '@/lib/downloads'
-import { library } from '@/lib/library'
+import { isWindowsHost, library } from '@/lib/library'
 import { formatLastPlayed } from '@/lib/format'
 import { launcherName } from '@/lib/launchers'
 import { settingsApi } from '@/lib/settings'
@@ -36,6 +36,8 @@ type Folder = {
   total: number
   free: number
   games: StoredGame[]
+  /** A whole drive or the home folder, added before Kryoto refused those (KB-0375). */
+  warning?: string | null
 }
 type Overview = { folders: Folder[]; elsewhere: StoredGame[] }
 type MoveProgress = { id: string; copied: number; total: number; done: boolean; error: string | null }
@@ -160,14 +162,35 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
     }
   }
 
-  const addFolder = async () => {
-    if (!isTauri()) return run('add', () => call('storage_add_folder', { path: 'E:\\Kryoto Games' }))
-    // The picker inside run() too: a picker that fails says so here instead
-    // of the button doing nothing (kryoto-bugs KB-0042).
-    await run('add', async () => {
-      const dir = await pickPath({ directory: true, title: 'Add a library folder' })
-      if (typeof dir === 'string') await call('storage_add_folder', { path: dir })
+  /** Adding a folder: the picker is open, and the path can be typed meanwhile. */
+  const [adding, setAdding] = useState(false)
+  const [typed, setTyped] = useState('')
+  /** The picker has not answered for a while (KB-0042: a Steam Deck's never came). */
+  const [slowPicker, setSlowPicker] = useState(false)
+  const addPath = (path: string) =>
+    run('add', async () => {
+      await call('storage_add_folder', { path })
+      setAdding(false)
+      setTyped('')
     })
+  const addFolder = async () => {
+    if (!isTauri()) return addPath('E:\\Kryoto Games')
+    // The typed path is there at once, beside the picker, and nothing waits
+    // on the picker: one that never opens or never answers (behind Kryoto,
+    // Game Mode on a Steam Deck) leaves the field to use (KB-0042, KB-0020).
+    setAdding(true)
+    setSlowPicker(false)
+    setError(null)
+    const slow = window.setTimeout(() => setSlowPicker(true), 15_000)
+    try {
+      const dir = await pickPath({ directory: true, title: 'Add a library folder' })
+      if (typeof dir === 'string' && dir) await addPath(dir)
+    } catch (e) {
+      setError(`The folder window did not open (${errorText(e)}). Type or paste the folder's path instead.`)
+    } finally {
+      window.clearTimeout(slow)
+      setSlowPicker(false)
+    }
   }
 
   if (!data) {
@@ -221,6 +244,37 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
           <Plus className="size-4" />
         </button>
       </div>
+      {adding ? (
+        <form
+          className="grid gap-1.5"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (typed.trim()) void addPath(typed.trim())
+          }}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder={isWindowsHost() ? 'D:\\Kryoto Games' : '/home/deck/Games'}
+              aria-label="The folder's path"
+              className={cn(inputCls, 'min-w-0 grow basis-64')}
+            />
+            <Button size="sm" type="submit" disabled={!typed.trim() || !!busy}>
+              <Plus className="size-3" />
+              Add
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>
+              Cancel
+            </Button>
+          </div>
+          <span className="text-[11px] text-muted-foreground">
+            {slowPicker
+              ? "No folder window? It may be behind Kryoto, or it cannot open here. Type or paste the folder's path instead."
+              : "Pick a folder in the window that opened, or type or paste its path here. A folder that does not exist yet is made."}
+          </span>
+        </form>
+      ) : null}
 
       {folder ? (
         <>
@@ -232,6 +286,7 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
                   {folder.isDefault ? 'New games install here' : 'Library folder'}
                   {folder.exists ? '' : ' · missing'}
                 </Caption>
+                {folder.warning ? <p className="text-[11px] text-warning">{folder.warning}</p> : null}
               </div>
               <div className="flex shrink-0 gap-1.5">
                 {!folder.isDefault ? (

@@ -414,6 +414,10 @@ pub fn storage_add_folder(app: AppHandle, path: String) -> Result<(), String> {
     if path.is_empty() {
         return Err("Pick a folder.".into());
     }
+    // Typed or pasted as well as picked (KB-0042): only a whole path.
+    if !Path::new(&path).is_absolute() {
+        return Err(format!("Type the folder's whole path, such as {}.", if cfg!(windows) { r"D:\Kryoto Games" } else { "/home/deck/Games" }));
+    }
     if let Some(what) = too_wide(Path::new(&path), crate::safe_delete::home().as_deref()) {
         let inside = Path::new(&path).join("Kryoto Games");
         return Err(format!("{path} is {what}, which holds much more than games. Add a folder for games inside it instead, such as {}.", inside.display()));
