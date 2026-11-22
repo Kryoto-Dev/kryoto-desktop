@@ -700,7 +700,15 @@ pub fn check_tree(root: &Path, list: &FileList, with: &CheckWith, stop: &AtomicB
             Step::Hash => {
                 let path = found.clone().unwrap_or_default();
                 let before = bytes_done;
-                let sha = hash_file(&path, stop, &mut |n| bytes_done += n);
+                // Progress while a big file is read too: between files only,
+                // a game with one 40 GB archive showed no progress at all.
+                let sha = hash_file(&path, stop, &mut |n| {
+                    bytes_done += n;
+                    if last.elapsed() > Duration::from_millis(150) {
+                        progress(i, files.len(), bytes_done, bytes_total);
+                        last = Instant::now();
+                    }
+                });
                 bytes_done = before + f.size;
                 report.hashed += 1;
                 match sha {

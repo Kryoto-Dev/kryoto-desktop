@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { errorText, isTauri } from '@/lib/bridge'
 import { library, type LibraryGame } from '@/lib/library'
 import { notify } from '@/lib/notify'
@@ -273,9 +274,12 @@ function checkFilesAfterFailure(game: LibraryGame | undefined) {
   if (!game?.slug || game.launcher || !isTauri()) return
   void library
     .filesCheck(game.id)
-    .then((s) => {
+    .then(async (s) => {
       const found = alarms([...(s.report?.missing ?? []), ...(s.report?.broken ?? [])])
-      if (!found.length || document.hasFocus()) return
+      if (!found.length) return
+      // The window itself, not the page: WebView2 keeps document.hasFocus()
+      // true behind other programs and even minimized, so this never fired.
+      if (await getCurrentWindow().isFocused().catch(() => document.hasFocus())) return
       const missing = found.some((f) => f.problem === 'missing')
       void notify(`${game.title} ${missing ? 'is missing files' : 'has damaged files'}`, `${plainSummary(found, 2)} Open the game to get them back.`)
     })
