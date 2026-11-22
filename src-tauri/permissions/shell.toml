@@ -41,6 +41,7 @@ commands.allow = [
   "pad_capture",
   "pad_forward",
   "pad_mapping_set",
+  "pad_joycons_set",
   "pad_virtual_driver",
   "pad_game_get",
   "pad_game_set",

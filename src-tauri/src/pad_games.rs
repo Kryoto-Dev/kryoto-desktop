@@ -1219,6 +1219,10 @@ pub struct PadFacts {
     pub xinput: bool,
     /// Its buttons are known (SDL's database, or a setup saved here).
     pub mapped: bool,
+    /// Two Joy-Cons used as one controller (`joycons.rs`).
+    pub pair: bool,
+    /// A Joy-Con whose other half is connected too, and the two could be one.
+    pub half: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1251,8 +1255,19 @@ pub struct Seen {
 /// Windows games read four Xbox controllers at most.
 const XINPUT_SLOTS: u32 = 4;
 
-/// What a game gets from the controllers plugged in, with these settings.
+/// What a game gets from the controllers plugged in, with these settings. A
+/// Joy-Con whose other half is connected too says where to make the two one.
 pub fn describe(p: &GameProfile, pads: &[PadFacts], windows: bool, driver: Option<bool>) -> Seen {
+    let mut seen = describe_each(p, pads, windows, driver);
+    for (line, d) in seen.pads.iter_mut().zip(pads) {
+        if d.half {
+            line.sees.push_str(" It is one of two Joy-Cons: to use them as one controller, open Settings, Devices, Controller.");
+        }
+    }
+    seen
+}
+
+fn describe_each(p: &GameProfile, pads: &[PadFacts], windows: bool, driver: Option<bool>) -> Seen {
     let removed = |d: &PadFacts| p.pads.get(&d.key).is_some_and(|u| u.off);
     let own = |d: &PadFacts| p.pads.get(&d.key).is_some_and(|u| u.own.is_some());
     let line = |d: &PadFacts, sees: String, player: Option<u32>, can_remove: bool, can_own: bool| PadLine {
@@ -1353,6 +1368,10 @@ pub fn describe(p: &GameProfile, pads: &[PadFacts], windows: bool, driver: Optio
                     }
                     if removed(d) {
                         return line(d, "Taken out: hidden from games that use SDL's controller support, with every controller of this model. Others can still read it.".into(), None, true, false);
+                    }
+                    if d.pair {
+                        // SDL combines the pair in the game itself (joycons::game_env).
+                        return line(d, "Games that use SDL, Wine or Proton combine the two Joy-Cons into one controller too; other games see two controllers. Button changes made here for the pair may not reach games.".into(), None, true, false);
                     }
                     let sees = if own(d) { "The game reads it directly, with its own remap if it uses SDL, Wine or Proton." } else { "The game reads it directly, remapped if it uses SDL, Wine or Proton." };
                     line(d, sees.into(), None, true, true)
@@ -1646,7 +1665,26 @@ mod tests {
     }
 
     fn pad(key: &str, xinput: bool) -> PadFacts {
-        PadFacts { key: key.into(), name: key.into(), xinput, mapped: true }
+        PadFacts { key: key.into(), name: key.into(), xinput, mapped: true, pair: false, half: false }
+    }
+
+    #[test]
+    fn it_says_what_a_game_sees_of_a_joycon_pair() {
+        let p = GameProfile { mode: Mode::Gamepad, ..template("action").unwrap() };
+        let pair = PadFacts { pair: true, ..pad("000000007e0500000820000000006b00", false) };
+        // Windows: one virtual Xbox controller, like any pad that is not one.
+        let seen = describe(&p, std::slice::from_ref(&pair), true, Some(true));
+        assert_eq!(seen.pads[0].player, Some(1));
+        assert!(seen.summary.contains("one Xbox controller"), "{}", seen.summary);
+        // Linux: SDL games combine it too; it can be taken out, not remapped.
+        let seen = describe(&p, std::slice::from_ref(&pair), false, None);
+        assert!(seen.pads[0].sees.contains("SDL") && seen.pads[0].sees.contains("two controllers"), "{}", seen.pads[0].sees);
+        assert!(seen.pads[0].can_remove && !seen.pads[0].can_own);
+        // Two halves not yet one: each says where to make them one.
+        let half = |k: &str| PadFacts { half: true, ..pad(k, false) };
+        let seen = describe(&p, &[half("l"), half("r"), pad("other", false)], true, Some(true));
+        assert!(seen.pads[0].sees.contains("Settings, Devices, Controller") && seen.pads[1].sees.contains("Settings"));
+        assert!(!seen.pads[2].sees.contains("Joy-Con"));
     }
 
     #[test]

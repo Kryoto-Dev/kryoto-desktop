@@ -21,6 +21,7 @@ import {
   VIRTUAL_DRIVER_URL,
   type PadConfig,
   type PadInfo,
+  type PadPair,
   type PadPrefs,
 } from '@/lib/pad'
 import { PAD_FAMILIES, type PadControl, type PadFamily } from '@/lib/pad-art'
@@ -72,14 +73,19 @@ export function ControllerPane() {
     if (!pad.mapped) setSetup(true)
   }, [requested, pads])
 
+  // A Joy-Con pair just made one controller (or two again): the page follows
+  // it to what it became.
+  const [follow, setFollow] = useState<'pair' | 'half' | null>(null)
   useEffect(() => {
     // Follow a new connection instead of leaving the test drawing on a
     // saved, disconnected profile after its instance/backend changes.
     // A pad asked for by its notification comes first.
     const waiting = requested && !pads.some((p) => p.guid === requested.guid)
     if ((!requested || waiting) && pads.length && !pads.some(p => p.guid === chosen)) {
-      setChosen(pads[0]!.guid)
+      const next = (follow === 'pair' && pads.find((p) => p.pair?.combined)) || (follow === 'half' && pads.find((p) => p.side === 'left')) || pads[0]!
+      setChosen(next.guid)
       setSetup(false)
+      setFollow(null)
     }
   }, [pads])
 
@@ -127,6 +133,14 @@ export function ControllerPane() {
     if (!pad) return
     setFailed(null)
     void padApi.saveSetup(pad.guid, pad.name, null).then((c) => savePadConfig(c)).catch((e: unknown) => setFailed(`Not saved: ${errorText(e)}`))
+  }
+  const setPair = (key: string, one: boolean) => {
+    setFailed(null)
+    setFollow(one ? 'pair' : 'half')
+    void padApi.joycons(key, one).then((c) => savePadConfig(c)).catch((e: unknown) => {
+      setFollow(null)
+      setFailed(`Not saved: ${errorText(e)}`)
+    })
   }
 
   return (
@@ -188,6 +202,8 @@ export function ControllerPane() {
             </Button>
           </div>
         ) : null}
+
+        {pad?.pair ? <JoyConPair pair={pad.pair} onChoose={setPair} /> : null}
 
         <div
           className="kryo-radius relative grid justify-items-center gap-3 border border-border bg-card/40 px-6 pb-5 pt-6"
@@ -375,6 +391,52 @@ export function ControllerPane() {
         </Section>
       ) : null}
     </>
+  )
+}
+
+/**
+ * Two Joy-Cons (suggestion #79): on either half, the offer to use them as one
+ * controller; on the pair, the way back to two. Kept for that pair.
+ */
+function JoyConPair({ pair, onChoose }: { pair: PadPair; onChoose: (key: string, one: boolean) => void }) {
+  if (pair.combined) {
+    return (
+      <div className="kryo-radius flex flex-wrap items-center gap-4 border border-border p-4">
+        <Gamepad2 className="size-5 shrink-0 text-success" aria-hidden />
+        <div className="min-w-0 grow">
+          <p className="text-sm font-bold text-foreground">Two Joy-Cons, one controller</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">{pair.reach}</p>
+        </div>
+        <Button size="sm" onClick={() => onChoose(pair.key, false)}>
+          Use as two controllers
+        </Button>
+      </div>
+    )
+  }
+  if (!pair.canCombine) {
+    return <p className="text-[11px] text-muted-foreground">{pair.reach}</p>
+  }
+  return (
+    <div className={cn('kryo-radius flex flex-wrap items-center gap-4 border p-4', pair.keptApart ? 'border-border' : 'border-primary/50 bg-primary/5')}>
+      <Gamepad2 className={cn('size-5 shrink-0', pair.keptApart ? 'text-muted-foreground' : 'text-primary')} aria-hidden />
+      <div className="min-w-0 grow">
+        <p className="text-sm font-bold text-foreground">{pair.keptApart ? 'Two Joy-Cons, kept as two controllers' : 'Use these two Joy-Cons as one controller?'}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {pair.keptApart ? 'One player each, held sideways. ' : 'The left and the right Joy-Con together, held like a full controller. '}
+          {pair.reach}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button variant={pair.keptApart ? undefined : 'primary'} size="sm" onClick={() => onChoose(pair.key, true)}>
+          Use as one controller
+        </Button>
+        {pair.keptApart ? null : (
+          <Button size="sm" variant="ghost" onClick={() => onChoose(pair.key, false)}>
+            Keep as two
+          </Button>
+        )}
+      </div>
+    </div>
   )
 }
 
