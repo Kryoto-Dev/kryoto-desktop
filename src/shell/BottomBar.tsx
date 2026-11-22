@@ -1,4 +1,4 @@
-import { Bell, Download, Play, Plus, Users } from '@/ui/pixel-icons'
+import { Bell, Download, FileArchive, Play, Plus, Users } from '@/ui/pixel-icons'
 import { asciiTrack } from '@/ui'
 import { formatSpeed, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import { useSettings } from '@/lib/settings'
@@ -9,7 +9,7 @@ const chip =
   'kryo-pill flex h-7 items-center gap-2 px-3 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground'
 
 /**
- * The footer: Add a Game, the download in progress drawn as the site's ASCII
+ * The footer: Add a Game and Install from a file, the download in progress drawn as the site's ASCII
  * bar (click for Downloads), the latest notice while the Store covers the
  * corner, and Friends & Chat.
  */
@@ -19,6 +19,7 @@ export function BottomBar({
   onNotice,
   onDismissNotice,
   onAddGame,
+  onInstallFile,
   onDownloads,
   onFriends,
   friendsActive = false,
@@ -28,6 +29,8 @@ export function BottomBar({
   onNotice: (t: Toast) => void
   onDismissNotice: (key: number) => void
   onAddGame: () => void
+  /** A game's .7z already on this PC (downloads/InstallFromFile.tsx). */
+  onInstallFile: () => void
   onDownloads: () => void
   /** None for an account friends and chat are not on for. */
   onFriends?: () => void
@@ -47,6 +50,10 @@ export function BottomBar({
         <button type="button" className={chip} onClick={onAddGame}>
           <Plus className="size-3" />
           Add a game
+        </button>
+        <button type="button" className={chip} onClick={onInstallFile} title="A game's .7z you already downloaded, from kryo.to or a mirror">
+          <FileArchive className="size-3" />
+          Install from a file
         </button>
       </div>
 

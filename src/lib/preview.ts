@@ -1022,6 +1022,20 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     previewBus.emit('downloads', clone(downloadList))
     return null
   },
+  // Install from a file (src-tauri from_file.rs): a file named after its game, the size of its build.
+  archive_look: (a) => {
+    const path = String(a.path ?? '')
+    const fileName = path.split(/[\\/]/).pop() ?? path
+    if (!/\.7z$/i.test(fileName)) throw new Error(`${fileName} is not a .7z file. Kryoto installs .7z archives, the files kryo.to and its mirrors serve.`)
+    const slug = (a.slug as string | null) ?? (/^captain hardcore/i.test(fileName) ? 'captain-hardcore' : null)
+    return { path, fileName, size: 2_400_000_000, slug, title: slug ? 'Captain Hardcore' : null, cover: null, nsfw: false, version: slug ? '1.4.2' : null, addon: null, sizeMatch: slug ? true : null, installed: false, reachable: true }
+  },
+  archive_install: (a) => {
+    const id = `dl-file-${downloadList.length}`
+    downloadList.unshift(dl({ id, slug: a.slug, fromFile: true, archivePath: a.path, status: 'verifying', received: 2_400_000_000, total: 2_400_000_000, extracted: 600_000_000, extractTotal: 2_400_000_000 }))
+    previewBus.emit('downloads', clone(downloadList))
+    return id
+  },
   download_resume: (a) => {
     const d = downloadList.find((x) => x.id === a.id)
     if (d) Object.assign(d, d.hashMismatch ? { status: 'downloading', hashMismatch: false, received: 0, error: null } : { status: 'downloading' })

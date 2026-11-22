@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { pickPath } from '@/lib/pick'
-import { ArrowLeft, Bookmark, Download, FolderOpen, Search } from '@/ui/pixel-icons'
+import { ArrowLeft, Bookmark, Download, FileArchive, FolderOpen, Search } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Modal, Section, inputCls } from '@/ui'
 import { errorText, isTauri } from '@/lib/bridge'
 import { fetchCatalogGame, library, slugFrom, type CatalogGame, type LibraryGame } from '@/lib/library'
@@ -31,6 +31,7 @@ export function AddGameDialog({
   onDownload,
   onSave,
   onImport,
+  onInstallFile,
   onClose,
 }: {
   initialSlug: string | null
@@ -40,15 +41,12 @@ export function AddGameDialog({
   onSave: ((game: CatalogGame) => void) | null
   /** Bring a whole library in from another launcher instead (Bridge.tsx). */
   onImport?: () => void
+  /** Its download is already on this PC (a .7z from kryo.to or a mirror): install from that file. */
+  onInstallFile?: (slug: string) => void
   onClose: () => void
 }) {
   const showAdult = useShowAdult()
-  const hideAdult = useHideAdult()
   const [query, setQuery] = useState('')
-  const [hits, setHits] = useState<Hit[] | null>(null)
-  const [searchError, setSearchError] = useState(false)
-  const [searching, setSearching] = useState(false)
-  const [retry, setRetry] = useState(0)
   const [found, setFound] = useState<CatalogGame | null>(null)
   const [manual, setManual] = useState(false)
   const [title, setTitle] = useState('')
@@ -76,31 +74,6 @@ export function AddGameDialog({
     else input.current?.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  // Type to search; a pasted kryo.to link goes straight to the game.
-  useEffect(() => {
-    const q = query.trim()
-    const slug = slugFrom(q)
-    if (slug && /kryo\.to\/game\//.test(q)) {
-      void pick(slug)
-      return
-    }
-    setSearchError(false)
-    setHits(null)
-    if (q.length < 2) { setSearching(false); return }
-    setSearching(true)
-    let cancelled = false
-    const t = window.setTimeout(() => {
-      void search(q)
-        .then((h) => !cancelled && setHits(withoutAdult(h, hideAdult)))
-        .catch(() => !cancelled && setSearchError(true))
-        .finally(() => !cancelled && setSearching(false))
-    }, 180)
-    return () => {
-      cancelled = true
-      window.clearTimeout(t)
-    }
-  }, [query, retry])
 
   // Nothing here waits on the file window but this call: Cancel (null) and a
   // window that cannot open (an error) both leave every button as it was, so
@@ -189,6 +162,16 @@ export function AddGameDialog({
               onClick={() => onSave?.(found)}
             />
           </div>
+          {onInstallFile ? (
+            <button
+              type="button"
+              onClick={() => onInstallFile(found.slug)}
+              className="kryo-square flex w-fit items-center gap-1.5 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+            >
+              <FileArchive className="size-3" />
+              Already downloaded its .7z file? Install from that file
+            </button>
+          ) : null}
           <Button variant="ghost" size="sm" className="w-fit" onClick={back}>
             <ArrowLeft className="size-3" />
             Another game
@@ -213,54 +196,8 @@ export function AddGameDialog({
         </>
       ) : (
         <>
-          <label className="kryo-pill flex h-10 items-center gap-2 border border-border bg-background px-4 text-muted-foreground focus-within:border-foreground">
-            <Search className="size-4 shrink-0" />
-            <input
-              ref={input}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search kryo.to"
-              aria-label="Search kryo.to"
-              className="kryo-square min-w-0 grow bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
-            />
-          </label>
+          <GameSearch inputRef={input} query={query} onQuery={setQuery} onPick={(slug) => void pick(slug)} />
           {looking ? <AsciiBar fraction={null} cells={18} showPct={false} className="text-muted-foreground" /> : null}
-          {searching ? <p role="status" className="text-xs text-muted-foreground">Searching…</p> : null}
-          {searchError ? <div role="alert" className="grid gap-2 text-xs text-destructive">
-            <p>Search is unavailable right now. Try again.</p>
-            <Button size="sm" onClick={() => setRetry(n => n + 1)}>Retry</Button>
-          </div> : null}
-          {hits && hits.length ? (
-            <ul className="grid gap-1">
-              {hits.map((h) => (
-                <li key={h.slug}>
-                  <button
-                    type="button"
-                    onClick={() => void pick(h.slug)}
-                    className="kryo-radius flex w-full items-center gap-3 p-2 text-left hover:bg-secondary"
-                  >
-                    {h.cover_vertical || h.cover ? (
-                      <img
-                        decoding="async"
-                        src={artSrc(h.cover_vertical || h.cover) ?? undefined}
-                        alt=""
-                        className={cn('h-12 w-8 shrink-0 object-cover', adultBlur(h.nsfw, showAdult))}
-                        style={{ borderRadius: 'min(var(--kryo-radius), 4px)' }}
-                      />
-                    ) : (
-                      <span className="h-12 w-8 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 4px)' }} />
-                    )}
-                    <span className="grid min-w-0">
-                      <span className="truncate text-sm text-foreground">{h.title}</span>
-                      <span className="truncate text-[11px] text-muted-foreground">{[h.developer, h.year].filter(Boolean).join(' · ')}</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : hits ? (
-            <p className="text-xs text-muted-foreground">Nothing on kryo.to by that name.</p>
-          ) : null}
           <button
             type="button"
             onClick={() => {
@@ -284,6 +221,109 @@ export function AddGameDialog({
       )}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </Modal>
+  )
+}
+
+/**
+ * Find a game on kryo.to by name: what Add a game searches with, and "Which
+ * game is this?" when a file's name does not say (downloads/InstallFromFile.tsx).
+ * A pasted kryo.to link goes straight to its game. Adult games are left out
+ * when the reader hides them, as on the site.
+ */
+export function GameSearch({
+  query,
+  onQuery,
+  onPick,
+  inputRef,
+}: {
+  query: string
+  onQuery: (q: string) => void
+  onPick: (slug: string) => void
+  inputRef?: React.RefObject<HTMLInputElement | null>
+}) {
+  const showAdult = useShowAdult()
+  const hideAdult = useHideAdult()
+  const [hits, setHits] = useState<Hit[] | null>(null)
+  const [searchError, setSearchError] = useState(false)
+  const [searching, setSearching] = useState(false)
+  const [retry, setRetry] = useState(0)
+
+  // Type to search; a pasted kryo.to link goes straight to the game.
+  useEffect(() => {
+    const q = query.trim()
+    const slug = slugFrom(q)
+    if (slug && /kryo\.to\/game\//.test(q)) {
+      onPick(slug)
+      return
+    }
+    setSearchError(false)
+    setHits(null)
+    if (q.length < 2) { setSearching(false); return }
+    setSearching(true)
+    let cancelled = false
+    const t = window.setTimeout(() => {
+      void search(q)
+        .then((h) => !cancelled && setHits(withoutAdult(h, hideAdult)))
+        .catch(() => !cancelled && setSearchError(true))
+        .finally(() => !cancelled && setSearching(false))
+    }, 180)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, retry])
+
+  return (
+    <>
+      <label className="kryo-pill flex h-10 items-center gap-2 border border-border bg-background px-4 text-muted-foreground focus-within:border-foreground">
+        <Search className="size-4 shrink-0" />
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+          placeholder="Search kryo.to"
+          aria-label="Search kryo.to"
+          className="kryo-square min-w-0 grow bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+        />
+      </label>
+      {searching ? <p role="status" className="text-xs text-muted-foreground">Searching…</p> : null}
+      {searchError ? <div role="alert" className="grid gap-2 text-xs text-destructive">
+        <p>Search is unavailable right now. Try again.</p>
+        <Button size="sm" onClick={() => setRetry(n => n + 1)}>Retry</Button>
+      </div> : null}
+      {hits && hits.length ? (
+        <ul className="grid gap-1">
+          {hits.map((h) => (
+            <li key={h.slug}>
+              <button
+                type="button"
+                onClick={() => onPick(h.slug)}
+                className="kryo-radius flex w-full items-center gap-3 p-2 text-left hover:bg-secondary"
+              >
+                {h.cover_vertical || h.cover ? (
+                  <img
+                    decoding="async"
+                    src={artSrc(h.cover_vertical || h.cover) ?? undefined}
+                    alt=""
+                    className={cn('h-12 w-8 shrink-0 object-cover', adultBlur(h.nsfw, showAdult))}
+                    style={{ borderRadius: 'min(var(--kryo-radius), 4px)' }}
+                  />
+                ) : (
+                  <span className="h-12 w-8 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 4px)' }} />
+                )}
+                <span className="grid min-w-0">
+                  <span className="truncate text-sm text-foreground">{h.title}</span>
+                  <span className="truncate text-[11px] text-muted-foreground">{[h.developer, h.year].filter(Boolean).join(' · ')}</span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : hits ? (
+        <p className="text-xs text-muted-foreground">Nothing on kryo.to by that name.</p>
+      ) : null}
+    </>
   )
 }
 

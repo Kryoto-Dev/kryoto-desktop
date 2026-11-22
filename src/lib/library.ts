@@ -71,6 +71,8 @@ export type LibraryGame = {
   version: string | null
   /** The SHA-256 of the archive it came from, when kryo.to listed one (src-tauri library.rs `build_sha`). */
   buildSha?: string | null
+  /** Installed from the player's own archive, which matched no file kryo.to lists (src-tauri library.rs `unverified`). */
+  unverified?: boolean
   /** A build picked under Versions: while it is installed, no update is offered. */
   pinnedVersion?: string | null
   short: string | null
@@ -165,8 +167,12 @@ export async function latestFor(game: Pick<LibraryGame, 'slug' | 'version' | 'bu
   return `${version || game.version || 'This build'}${NEW_UPLOAD}`
 }
 
-/** A game kryo.to can say has an update: on a known build number, or a known file. */
-export const knowsBuild = (g: Pick<LibraryGame, 'version' | 'buildSha'>) => !!g.version || !!g.buildSha
+/**
+ * A game kryo.to can say has an update: on a known build number, or a known
+ * file. One installed from a file that is not Kryoto's copy is offered
+ * kryo.to's build even when its own number is unknown.
+ */
+export const knowsBuild = (g: Pick<LibraryGame, 'version' | 'buildSha' | 'unverified'>) => !!g.version || !!g.buildSha || !!g.unverified
 
 /**
  * A game's add-ons on kryo.to, asked by the app as the signed-in account
