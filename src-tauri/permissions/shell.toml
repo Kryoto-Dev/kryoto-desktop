@@ -97,6 +97,7 @@ commands.allow = [
   "library_save",
   "library_set_hidden",
   "library_remove",
+  "library_uninstall_plan",
   "game_launch",
   "game_achievements",
   "achievements_turn_on",

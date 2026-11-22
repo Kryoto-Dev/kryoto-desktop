@@ -89,7 +89,7 @@ fn move_recording(from: &Path, to: &Path, root: &Path, backup: &Path, own: &[Str
 }
 
 /// The game's own folder: the top folder in its library folder, or where it is.
-fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
+pub(crate) fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
     let folders = crate::settings::all_folders(&crate::settings::load(app));
     crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir))
 }

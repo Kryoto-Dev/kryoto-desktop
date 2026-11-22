@@ -115,6 +115,10 @@ pub struct LibraryGame {
     /// launcher's and Play opens `launch_url`. Kryoto only lists it.
     pub launcher: Option<String>,
     pub launch_url: Option<String>,
+    /// The player added it with Add a game: its files are theirs, and an
+    /// uninstall only takes it off the list (safe_delete.rs). A Kryoto
+    /// install of it clears this.
+    pub added_by_hand: bool,
     /// What the player chose for this game on Discord, where it differs from
     /// Settings: never shown, or an adult game shown anyway (discord_rpc/).
     pub discord_show: Option<bool>,
@@ -394,7 +398,7 @@ pub(crate) fn write_marker(game: &LibraryGame) {
     }
 }
 
-const MARKER: &str = ".kryoto-game.json";
+pub(crate) const MARKER: &str = ".kryoto-game.json";
 
 /// The entry a game folder keeps of itself, if it has one.
 pub(crate) fn read_marker(dir: &Path) -> Option<LibraryGame> {
@@ -861,6 +865,7 @@ pub fn library_add(app: AppHandle, exe_path: String, mut game: LibraryGame) -> R
     game.entries.retain(LaunchEntry::is_windows);
     game.apply_overrides = true;
     game.added_at = now();
+    game.added_by_hand = true;
     update(&app, |games| {
         let base = game.slug.clone().unwrap_or_else(|| slugify(&game.title));
         let mut id = base.clone();
@@ -1043,6 +1048,7 @@ pub fn upsert_installed<R: Runtime>(app: &AppHandle<R>, mut game: LibraryGame) -
                 slot.repair = None;
                 // These are Kryoto's files again.
                 slot.keep_files = false;
+                slot.added_by_hand = false;
                 slot.version = game.version.clone();
                 slot.build_sha = game.build_sha.clone();
                 slot.pinned_version = game.pinned_version.clone();
@@ -1282,6 +1288,7 @@ pub fn library_save(app: AppHandle, game: LibraryGame) -> Result<LibraryGame, St
         next.origin = slot.origin.clone();
         next.steam_appid = slot.steam_appid.clone();
         next.launcher = slot.launcher.clone();
+        next.added_by_hand = slot.added_by_hand;
         // Set by discord_game_set, at once, wherever the player flips it.
         next.discord_show = slot.discord_show;
         // Likewise library_set_hidden.
@@ -1393,45 +1400,129 @@ pub(crate) fn account_hidden<R: Runtime>(app: &AppHandle<R>, account: &[String])
     Ok(())
 }
 
+/// What an uninstall would do, for the dialog to show before the player
+/// confirms: worked out by safe_delete.rs off the UI thread, sizes and all.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallPlan {
+    /// `delete`: `folder` (or the files in it) go. `listOnly`: Kryoto did not
+    /// install it, so only its place in the Library goes. `refused`: not
+    /// provably this game's alone, so nothing is deleted.
+    kind: &'static str,
+    reason: Option<String>,
+    folder: Option<String>,
+    /// The whole folder goes; otherwise only `files` of it.
+    whole: bool,
+    files: u64,
+    bytes: u64,
+    /// What stays in the folder: saves, and files Kryoto did not install.
+    kept_files: u64,
+    kept_bytes: u64,
+    /// The Recycle Bin (or Trash) takes it; otherwise `bin_note` says why it
+    /// would be deleted for good.
+    bin: bool,
+    bin_note: Option<String>,
+}
+
+/// What `id`'s uninstall may delete, on what is on the disk now.
+fn uninstall_verdict<R: Runtime>(app: &AppHandle<R>, id: &str, leaving: &[&str]) -> Result<(LibraryGame, crate::safe_delete::Verdict), String> {
+    let games = load(app)?;
+    let game = games.iter().find(|g| g.id == id).cloned().ok_or("That game is no longer in the library.")?;
+    let folders = crate::settings::all_folders(&crate::settings::load(app));
+    let release_list = crate::release_files::cached_list(app, &game).map(|l| l.listed().iter().map(|f| (f.path.clone(), f.size)).collect());
+    let known = crate::safe_delete::Known { games: &games, folders: &folders, home: crate::safe_delete::home(), release_list };
+    let verdict = crate::safe_delete::plan(&known, &game, leaving);
+    Ok((game, verdict))
+}
+
+/// The games going in the same uninstall, this one included.
+fn leaving_with<'a>(id: &'a str, together: &'a Option<Vec<String>>) -> Vec<&'a str> {
+    std::iter::once(id).chain(together.iter().flatten().map(String::as_str)).collect()
+}
+
+/// Before the uninstall dialog's button: exactly what would go, where, how
+/// much, what stays, and whether the Recycle Bin can take it.
+#[tauri::command]
+pub async fn library_uninstall_plan(app: AppHandle, id: String, together: Option<Vec<String>>) -> Result<UninstallPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use crate::safe_delete::{bin_for, Bin, Verdict};
+        let (_, verdict) = uninstall_verdict(&app, &id, &leaving_with(&id, &together))?;
+        Ok(match verdict {
+            Verdict::ListOnly(why) => UninstallPlan { kind: "listOnly", reason: Some(why), ..Default::default() },
+            Verdict::Refused(why) => UninstallPlan { kind: "refused", reason: Some(why), ..Default::default() },
+            Verdict::Delete(p) => {
+                let bin = bin_for(&p);
+                UninstallPlan {
+                    kind: "delete",
+                    reason: None,
+                    folder: Some(dunce::simplified(&p.folder).to_string_lossy().into_owned()),
+                    whole: p.whole,
+                    files: p.files.len() as u64,
+                    bytes: p.bytes,
+                    kept_files: p.kept_files,
+                    kept_bytes: p.kept_bytes,
+                    bin: bin == Bin::Yes,
+                    bin_note: match bin {
+                        Bin::No(why) => Some(why),
+                        Bin::Yes => None,
+                    },
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Take it off the list, and with `delete_files` uninstall it too.
 ///
-/// Files are only ever deleted from inside one of the library folders in
-/// Settings > Storage - folders this client installs into - and then the
-/// game's whole folder there goes, not just the one holding the exe. A game
-/// added from elsewhere on the PC is the player's folder, not ours, and
-/// removing it only unlists it. A folder that other games in the library are
-/// also in is not deleted, unless they are in `together`: the games being
-/// uninstalled in the same go.
+/// What goes is settled by safe_delete.rs, the one way Kryoto deletes a
+/// game's files (KB-0375): only what is provably this game's, into the
+/// Recycle Bin or Trash. A game Kryoto did not install only leaves the list;
+/// one whose folder is not provably its own alone is refused, nothing
+/// deleted. `together` are the games uninstalled in the same go, which may
+/// share a folder. `permanent`: the player was told it cannot go to the
+/// Recycle Bin (`library_uninstall_plan`) and confirmed; without it, such an
+/// uninstall is refused (the phone and kryo.to's remote never see that).
 ///
 /// `delete_prefix` (Linux) also takes the game's Wine prefix, with whatever
 /// the game kept in it. Left behind otherwise, and listed in Settings > Storage.
 #[tauri::command]
-pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, delete_prefix: Option<bool>, together: Option<Vec<String>>) -> Result<bool, String> {
+pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, delete_prefix: Option<bool>, together: Option<Vec<String>>, permanent: Option<bool>) -> Result<bool, String> {
+    use crate::safe_delete::{bin_for, Bin, Verdict};
     // Its files are in use: the delete would stop partway, leaving half a game.
     if is_running(&app, &id) {
         return Err("Stop the game first.".into());
     }
-    let games = load(&app)?;
-    let game = games.iter().find(|g| g.id == id).cloned();
-    // Settle which folder goes before deleting anything, the Wine prefix too.
-    // Another launcher's game is only ever unlisted here.
-    let files = match game.as_ref().filter(|g| delete_files && g.launcher.is_none()) {
+    let game = load(&app)?.into_iter().find(|g| g.id == id);
+    // Settle what goes before deleting anything, the Wine prefix too.
+    let files = match game.as_ref().filter(|_| delete_files) {
         Some(game) => {
-            let folders = crate::settings::all_folders(&crate::settings::load(&app));
-            // Games uninstalled in one go do not keep each other's folder.
-            let leaving: Vec<&str> = std::iter::once(id.as_str()).chain(together.iter().flatten().map(String::as_str)).collect();
-            match crate::storage::game_folder(&folders, &game.install_dir) {
-                Some(dir) if crate::storage::holds_other_games(&games, &leaving, &dir) => {
-                    return Err(format!(
-                        "{} also holds other games in your library, so Kryoto does not delete it. To take {} off the list only, uninstall it without deleting its files.",
-                        dunce::simplified(&dir).display(),
-                        game.title
-                    ));
+            let (app2, id2, together2) = (app.clone(), id.clone(), together.clone());
+            let verdict = tauri::async_runtime::spawn_blocking(move || uninstall_verdict(&app2, &id2, &leaving_with(&id2, &together2)).map(|(_, v)| v))
+                .await
+                .map_err(|e| e.to_string())??;
+            match verdict {
+                Verdict::Delete(plan) => Some(plan),
+                // Not Kryoto's to delete: it only leaves the list.
+                Verdict::ListOnly(why) => {
+                    crate::logging::info("library", &format!("{}: only taken off the list: {why}", game.title));
+                    None
                 }
-                found => found,
+                Verdict::Refused(why) => {
+                    crate::logging::warn("library", &format!("{}: uninstall refused: {why}", game.title));
+                    return Err(format!("{why} To take {} off the list only, uninstall it without deleting its files.", game.title));
+                }
             }
         }
         None => None,
+    };
+    let for_good = match files.as_ref().map(bin_for) {
+        Some(Bin::No(why)) if permanent != Some(true) => {
+            return Err(format!("{why} Nothing was deleted. Uninstall it in Kryoto on this PC, which asks before deleting it for good."));
+        }
+        Some(Bin::No(_)) => true,
+        _ => permanent == Some(true),
     };
     if delete_prefix.unwrap_or(false) && game.is_some() {
         let dir = prefix_root(&app, &id)?;
@@ -1441,21 +1532,39 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
             .map_err(|e| format!("Could not delete the game's Wine prefix: {e}"))?;
     }
     let mut deleted = false;
-    if let (Some(game), Some(dir)) = (game.as_ref(), files) {
-        crate::logging::info("library", &format!("uninstalling {} from {}", game.title, dir.display()));
+    if let (Some(game), Some(plan)) = (game.as_ref(), files) {
+        crate::logging::info(
+            "library",
+            &format!(
+                "uninstalling {} from {}: {} {} ({}), {} kept, {}",
+                game.title,
+                plan.folder.display(),
+                if plan.whole { "the whole folder," } else { "its" },
+                plan.files.len(),
+                crate::storage::human_size(plan.bytes),
+                plan.kept_files,
+                if for_good { "for good" } else { "to the Recycle Bin" }
+            ),
+        );
+        // The originals its add-ons replaced, in Kryoto's own folder beside it.
+        let addon_backups = [crate::addons::backups_of(&plan.folder), crate::addons::backups_of(&crate::addons::game_root(&app, game))];
         let (progress_app, pid) = (app.clone(), id.clone());
         let result = tauri::async_runtime::spawn_blocking(move || {
-            // The originals its add-ons replaced go with it.
-            let _ = std::fs::remove_dir_all(crate::addons::backups_of(&dir));
-            delete_counting(&dir, &mut |removed, total| {
+            for b in addon_backups.iter().filter(|b| b.file_name().is_some_and(|n| n.to_string_lossy().ends_with(".kryoto-addons")) && b.is_dir()) {
+                let _ = std::fs::remove_dir_all(b);
+            }
+            crate::safe_delete::run(&plan, for_good, &mut |removed, total| {
                 let _ = progress_app.emit("library-uninstall", DeleteProgress { id: pid.clone(), removed, total, done: false });
             })
         })
         .await
         .map_err(|e| e.to_string())
-        .and_then(|r| r.map_err(|e| format!("Could not delete the game's files: {e}")));
+        .and_then(|r| r);
         let _ = app.emit("library-uninstall", DeleteProgress { id: id.clone(), removed: 0, total: 0, done: true });
-        result?;
+        let done = result?;
+        if done.left > 0 {
+            crate::logging::warn("library", &format!("{}: {} file(s) could not be deleted and stay", game.title, done.left));
+        }
         deleted = true;
         if let Some(slug) = game.slug.clone() {
             let data = crate::game_update::data_dir(&app);
@@ -1487,44 +1596,6 @@ pub struct DeleteProgress {
     pub removed: u64,
     pub total: u64,
     pub done: bool,
-}
-
-/// Delete a folder, saying how far it has got: its files are counted first,
-/// so the bar has an end, then removed one by one, then whatever is left
-/// (the folders, links, and a file that would not go on its own, read-only
-/// say) goes with `remove_dir_all`, as the whole folder always did. Links are
-/// never followed, so nothing outside `dir` is touched.
-pub(crate) fn delete_counting(dir: &Path, report: &mut dyn FnMut(u64, u64)) -> std::io::Result<()> {
-    report(0, 0);
-    let files: Vec<(PathBuf, u64)> = walkdir::WalkDir::new(dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .map(|e| {
-            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-            (e.into_path(), size)
-        })
-        .collect();
-    let total: u64 = files.iter().map(|(_, size)| size).sum();
-    report(0, total);
-    let mut removed = 0u64;
-    let mut last = std::time::Instant::now();
-    for (path, size) in files {
-        if std::fs::remove_file(&path).is_ok() {
-            removed += size;
-        }
-        if last.elapsed().as_millis() > 200 {
-            last = std::time::Instant::now();
-            report(removed, total);
-        }
-    }
-    match std::fs::remove_dir_all(dir) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
-    report(total, total);
-    Ok(())
 }
 
 /// The entry a plain Play starts, for a start with nobody to ask (kryo.to's
@@ -2520,39 +2591,4 @@ mod tests {
         assert_eq!(slugify("  ?? "), "game");
     }
 
-    /// Uninstalling says how far it has got, ends with the whole size, leaves
-    /// nothing behind - a read-only file included - and never follows a link
-    /// out of the game's folder (KB-0305).
-    #[test]
-    fn uninstalling_counts_what_goes_and_stays_inside_the_folder() {
-        let root = std::env::temp_dir().join(format!("kryoto-uninstall-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let game = root.join("Game");
-        let outside = root.join("Outside");
-        std::fs::create_dir_all(game.join("data/deep")).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(game.join("game.exe"), vec![1u8; 1000]).unwrap();
-        std::fs::write(game.join("data/a.pak"), vec![2u8; 3000]).unwrap();
-        std::fs::write(game.join("data/deep/b.pak"), vec![3u8; 6000]).unwrap();
-        let locked = game.join("data/readonly.ini");
-        std::fs::write(&locked, b"x").unwrap();
-        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&locked, perms).unwrap();
-        std::fs::write(outside.join("keep.txt"), b"keep").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, game.join("link")).unwrap();
-        #[cfg(windows)]
-        let _ = std::os::windows::fs::symlink_dir(&outside, game.join("link"));
-
-        let mut reports = Vec::new();
-        super::delete_counting(&game, &mut |removed, total| reports.push((removed, total))).unwrap();
-        assert!(!game.exists(), "the folder is gone");
-        assert_eq!(reports.last(), Some(&(10_001, 10_001)), "ends at the whole size");
-        assert!(reports.windows(2).all(|w| w[0].0 <= w[1].0), "only ever goes forward");
-        assert!(outside.join("keep.txt").is_file(), "a link out of the folder is not followed");
-        // Already gone: nothing to do, and no error.
-        super::delete_counting(&game, &mut |_, _| {}).unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-    }
 }

@@ -76,9 +76,30 @@ fn drive_of(path: &Path) -> String {
 /// `None` when the game is not in one of them - it was added from somewhere
 /// else, and is not ours to move or delete - or when that folder holds another
 /// library folder, as `D:\Games\Steam` does with `D:\Games\Steam\Library` added.
+///
+/// KB-0375: a game found a level down by its marker ("Find games Kryoto
+/// installed", Play on a moved game) sits in a folder that is not its own
+/// when other games Kryoto installed are beside it there (`X:\Games\Foo` with
+/// `X:\` a library folder): its own folder is then where it is, so neither a
+/// move, a rename, an update nor Repair takes the others along.
 pub fn game_folder(folders: &[String], install_dir: &str) -> Option<PathBuf> {
     let dir = PathBuf::from(install_dir).canonicalize().ok()?;
-    own_folder(&canonical_roots(folders), &dir).map(|(_, folder)| folder)
+    let (_, folder) = own_folder(&canonical_roots(folders), &dir)?;
+    if folder != dir && marked_beside(&folder, &dir) {
+        return Some(dir);
+    }
+    Some(folder)
+}
+
+/// `folder`, or one of the folders in it that `dir` is not in, has a game
+/// marker (`.kryoto-game.json`) of its own.
+fn marked_beside(folder: &Path, dir: &Path) -> bool {
+    let marker = |d: &Path| d.join(crate::library::MARKER).is_file();
+    if marker(folder) {
+        return true;
+    }
+    let Ok(read) = std::fs::read_dir(folder) else { return false };
+    read.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).any(|d| !dir.starts_with(&d) && marker(&d))
 }
 
 /// `game_folder` on paths already canonical, with which of `roots` it is in.
@@ -93,6 +114,13 @@ fn own_folder(roots: &[Option<PathBuf>], dir: &Path) -> Option<(usize, PathBuf)>
         return None;
     }
     Some((at, folder))
+}
+
+/// `own_folder` as the uninstall used it up to 0.3.12, for safe_delete's test
+/// that reproduces KB-0375.
+#[cfg(test)]
+pub(crate) fn own_folder_for_tests(roots: &[Option<PathBuf>], dir: &Path) -> Option<(usize, PathBuf)> {
+    own_folder(roots, dir)
 }
 
 /// The library folders as the disk spells them, in the same order: `None` for
@@ -218,6 +246,8 @@ pub struct LibraryFolder {
     total: u64,
     free: u64,
     games: Vec<StoredGame>,
+    /// A whole drive or the home folder, added before Kryoto refused those.
+    warning: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -307,6 +337,7 @@ fn overview<R: Runtime>(app: &AppHandle<R>) -> Result<StorageOverview, String> {
                 total,
                 free,
                 games: Vec::new(),
+                warning: wide_warning(&path),
             }
         })
         .collect();
@@ -350,7 +381,7 @@ pub async fn storage_folders(app: AppHandle) -> Result<Vec<LibraryFolder>, Strin
             .map(|f| {
                 let path = PathBuf::from(f);
                 let (total, free) = disk_space(&path).unwrap_or((0, 0));
-                LibraryFolder { path: f.clone(), drive: drive_of(&path), is_default: same_path(f, &s.library_dir), exists: path.is_dir(), total, free, games: Vec::new() }
+                LibraryFolder { path: f.clone(), drive: drive_of(&path), is_default: same_path(f, &s.library_dir), exists: path.is_dir(), total, free, games: Vec::new(), warning: wide_warning(&path) }
             })
             .collect()
     })
@@ -358,12 +389,34 @@ pub async fn storage_folders(app: AppHandle) -> Result<Vec<LibraryFolder>, Strin
     .map_err(|e| e.to_string())
 }
 
-/// Add a library folder. Made if it does not exist yet.
+/// Why a folder makes a poor library folder: a whole drive or the home folder
+/// holds much more than games (KB-0375). None when it is fine.
+fn too_wide(path: &Path, home: Option<&Path>) -> Option<&'static str> {
+    let full = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if full.parent().is_none() {
+        return Some("a whole drive");
+    }
+    home.filter(|h| *h == full || h.starts_with(&full)).map(|_| "your home folder")
+}
+
+/// What Settings > Storage says under a library folder that is too wide.
+fn wide_warning(path: &Path) -> Option<String> {
+    too_wide(path, crate::safe_delete::home().as_deref()).map(|what| {
+        format!("This is {what}. Uninstalling only ever deletes what Kryoto installed, but new games are safer in a folder of their own: add one inside it and make it the default.")
+    })
+}
+
+/// Add a library folder. Made if it does not exist yet. Never a whole drive
+/// or the home folder: a folder for games inside it instead.
 #[tauri::command(async)]
 pub fn storage_add_folder(app: AppHandle, path: String) -> Result<(), String> {
     let path = path.trim().to_string();
     if path.is_empty() {
         return Err("Pick a folder.".into());
+    }
+    if let Some(what) = too_wide(Path::new(&path), crate::safe_delete::home().as_deref()) {
+        let inside = Path::new(&path).join("Kryoto Games");
+        return Err(format!("{path} is {what}, which holds much more than games. Add a folder for games inside it instead, such as {}.", inside.display()));
     }
     std::fs::create_dir_all(&path).map_err(|e| format!("Cannot use {path}: {e}"))?;
     let mut s = settings::load(&app);
@@ -607,7 +660,12 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     if dest.exists() {
         return Err(format!("{} already exists. Rename or remove it first.", dunce::simplified(&dest).display()));
     }
-    let total = library::dir_size(&from);
+    // The old folder is deleted once copied: only one that holds this game
+    // alone (safe_delete.rs, the same checks as an uninstall; KB-0375).
+    let known = crate::safe_delete::Known { games: &games, folders: &folders, home: crate::safe_delete::home(), release_list: None };
+    let from_disk = dunce::canonicalize(&from).map_err(|e| e.to_string())?;
+    let found = crate::safe_delete::guard(&known, &game, &[game.id.as_str()], &from_disk).map_err(|why| why.replace("so Kryoto deletes nothing in it.", "so Kryoto does not move it."))?;
+    let total: u64 = found.iter().map(|(_, size)| size).sum();
     if let Some((_, free)) = disk_space(&target_root) {
         if free < total && drive_of(&target_root) != drive_of(&from) {
             return Err(format!(
@@ -1028,6 +1086,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// KB-0375: games moved into `Games\` under a drive-root library folder
+    /// and found again a level down. Each one's folder is its own, not
+    /// `Games`; a game whose root is a level down in its own folder (`bin`)
+    /// still has the folder above.
+    #[test]
+    fn a_game_found_a_level_down_beside_other_games_is_its_own_folder() {
+        let root = std::env::temp_dir().join(format!("kryoto-storage-beside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (foo, bar, hades) = (root.join("Games").join("Foo"), root.join("Games").join("Bar"), root.join("Hades").join("bin"));
+        for d in [&foo, &bar, &hades] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(foo.join(crate::library::MARKER), b"{}").unwrap();
+        let folders = vec![root.to_string_lossy().into_owned()];
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        // Alone in Games, it is still Games (as before).
+        assert_eq!(game_folder(&folders, &foo.to_string_lossy()), Some(canon(&root.join("Games"))));
+        std::fs::write(bar.join(crate::library::MARKER), b"{}").unwrap();
+        assert_eq!(game_folder(&folders, &foo.to_string_lossy()), Some(canon(&foo)));
+        assert_eq!(game_folder(&folders, &bar.to_string_lossy()), Some(canon(&bar)));
+        std::fs::write(hades.join(crate::library::MARKER), b"{}").unwrap();
+        assert_eq!(game_folder(&folders, &hades.to_string_lossy()), Some(canon(&root.join("Hades"))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_folder_two_games_share_holds_other_games() {
         let root = std::env::temp_dir().join("kryoto-storage-shared-test");
@@ -1108,6 +1191,17 @@ mod tests {
         // The library folder itself.
         assert!(place(&game("lib", lib.clone())).is_err());
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// KB-0375: a whole drive or the home folder is no library folder.
+    #[test]
+    fn a_drive_or_the_home_folder_is_too_wide() {
+        let temp = dunce::canonicalize(std::env::temp_dir()).unwrap();
+        let drive = temp.ancestors().last().unwrap().to_path_buf();
+        assert_eq!(too_wide(&drive, None), Some("a whole drive"));
+        assert_eq!(too_wide(&temp, Some(&temp)), Some("your home folder"));
+        assert_eq!(too_wide(temp.parent().unwrap(), Some(&temp)), Some("your home folder"));
+        assert_eq!(too_wide(&temp.join("Kryoto Games"), Some(&temp)), None);
     }
 
     #[test]

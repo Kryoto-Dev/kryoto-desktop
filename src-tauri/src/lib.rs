@@ -61,6 +61,7 @@ mod presence;
 mod preview_report;
 mod resolvers;
 mod runtimes;
+mod safe_delete;
 mod saves;
 mod settings;
 mod shortcuts;
@@ -2530,6 +2531,7 @@ pub fn run() {
             library::library_save,
             library::library_set_hidden,
             library::library_remove,
+            library::library_uninstall_plan,
             library::game_launch,
             achievements::game_achievements,
             achievements::achievements_turn_on,
