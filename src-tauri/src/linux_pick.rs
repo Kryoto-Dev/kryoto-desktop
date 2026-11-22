@@ -140,7 +140,7 @@ fn gtk_chooser(parent: Option<&gtk::Window>, ask: &Ask, tx: Answer) {
             filter.add_pattern(&format!("*.{e}"));
             filter.add_pattern(&format!("*.{}", e.to_uppercase()));
         }
-        chooser.add_filter(&filter);
+        chooser.add_filter(filter);
     }
     chooser.connect_response(move |c, response| {
         let path = if response == gtk::ResponseType::Accept { c.filename().map(|p| p.display().to_string()) } else { None };

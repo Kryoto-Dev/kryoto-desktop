@@ -308,7 +308,7 @@ pub async fn pick_path(
         };
         window
             .run_on_main_thread(move || {
-                let gtk_parent = parent.gtk_window().ok().map(|w| gtk::prelude::Cast::upcast::<gtk::Window>(w));
+                let gtk_parent = parent.gtk_window().ok().map(gtk::prelude::Cast::upcast::<gtk::Window>);
                 crate::linux_pick::open(gtk_parent, ask, tx);
             })
             .map_err(|e| e.to_string())?;

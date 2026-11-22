@@ -213,11 +213,11 @@ mod tests {
     fn carrying_copies_the_earlier_ids_saves_and_keeps_them() {
         let base = scratch("carry");
         let saves = silksong(&base);
-        assert_eq!(carry(&[saves.clone()], OLD, NEW).unwrap(), 1);
+        assert_eq!(carry(std::slice::from_ref(&saves), OLD, NEW).unwrap(), 1);
         assert!(saves.join(NEW).join("user1.dat").is_file() && saves.join(OLD).join("user1.dat").is_file());
         // Never over saves the new id already has.
         put(&saves.join(NEW).join("user1.dat"), b"newer");
-        assert_eq!(carry(&[saves.clone()], OLD, NEW).unwrap(), 0);
+        assert_eq!(carry(std::slice::from_ref(&saves), OLD, NEW).unwrap(), 0);
         assert_eq!(std::fs::read(saves.join(NEW).join("user1.dat")).unwrap(), b"newer");
         let _ = std::fs::remove_dir_all(base);
     }
@@ -227,10 +227,10 @@ mod tests {
         let base = scratch("stranded");
         let saves = silksong(&base);
         // Pinned, and the game has not made the new folder yet.
-        assert_eq!(stranded(&[saves.clone()], NEW), Some((saves.join(OLD), saves.join(NEW))));
+        assert_eq!(stranded(std::slice::from_ref(&saves), NEW), Some((saves.join(OLD), saves.join(NEW))));
         // It started a new game there: newer, and smaller.
         put(&saves.join(NEW).join("user1.dat"), b"fresh");
-        let (from, to) = stranded(&[saves.clone()], NEW).unwrap();
+        let (from, to) = stranded(std::slice::from_ref(&saves), NEW).unwrap();
         assert_eq!((from.clone(), to.clone()), (saves.join(OLD), saves.join(NEW)));
         let backup = base.join("backup");
         bring_over(&from, &to, &backup).unwrap();
@@ -239,7 +239,7 @@ mod tests {
         assert!(backup.join(format!("earlier-{OLD}")).join("user1.dat").is_file());
         assert!(saves.join(OLD).join("user1.dat").is_file(), "the earlier saves stay");
         // Now the pinned folder has them: nothing to offer.
-        assert_eq!(stranded(&[saves.clone()], NEW), None);
+        assert_eq!(stranded(std::slice::from_ref(&saves), NEW), None);
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -248,7 +248,7 @@ mod tests {
         let base = scratch("fine");
         let saves = silksong(&base);
         put(&saves.join(NEW).join("user1.dat"), &[2u8; 9000]);
-        assert_eq!(stranded(&[saves.clone()], NEW), None);
+        assert_eq!(stranded(std::slice::from_ref(&saves), NEW), None);
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -258,7 +258,7 @@ mod tests {
         let deep = base.join("Game").join(OLD).join("saves");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::create_dir_all(base.join("Other").join("profiles").join(NEW)).unwrap();
-        assert_eq!(id_folders(&[deep.clone()]), vec![base.join("Game").join(OLD)]);
+        assert_eq!(id_folders(std::slice::from_ref(&deep)), vec![base.join("Game").join(OLD)]);
         assert_eq!(id_folders(&[base.join("Other")]), vec![base.join("Other").join("profiles").join(NEW)]);
         assert!(!is_steam_id("12345") && is_steam_id(OLD));
         let _ = std::fs::remove_dir_all(base);
