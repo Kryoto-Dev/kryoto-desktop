@@ -344,7 +344,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
         {section === 'storage' ? (
           <>
             <StoragePane onChanged={() => void settingsApi.get().then((v) => setS((cur) => (cur ? { ...cur, libraryDir: v.libraryDir, libraryFolders: v.libraryFolders } : v)))} />
-            <Section title="Bring games in" anchor="find-games" hint="Find games Kryoto installed that your library lost, or bring them over from Steam and Hydra with Bridge.">
+            <Section title="Bring games in" anchor="find-games" hint="Find games Kryoto installed that your library lost, or bring them over from Steam, Playnite, Lutris and Hydra with Bridge.">
               <span className="flex flex-wrap items-center gap-2">
                 <FindGamesButton />
                 <span id={anchorId('bridge')}>

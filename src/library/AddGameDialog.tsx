@@ -277,7 +277,7 @@ export function AddGameDialog({
               onClick={onImport}
               className="kryo-square w-fit text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
             >
-              Games in Steam or Hydra? Bring them all in
+              Games in another launcher (Steam, Playnite, Lutris, Hydra)? Bring them all in
             </button>
           ) : null}
         </>
