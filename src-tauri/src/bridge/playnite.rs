@@ -84,7 +84,13 @@ impl Provider for Playnite {
         if let Some(dir) = picked.map(str::trim).filter(|d| !d.is_empty()) {
             return pn::library_in(Path::new(dir));
         }
-        dev_dir().or_else(|| pn::candidate_dirs(env_path("APPDATA").as_deref()).into_iter().find(|d| d.join("games.db").is_file()))
+        // Debug builds with a test library set read only that one, never the
+        // PC's real Playnite (`dev_dir`).
+        #[cfg(debug_assertions)]
+        if env_path("KRYOTO_DEV_PLAYNITE_DIR").is_some() {
+            return dev_dir();
+        }
+        pn::candidate_dirs(env_path("APPDATA").as_deref()).into_iter().find(|d| d.join("games.db").is_file())
     }
 
     /// Playnite holds its library files while open.
