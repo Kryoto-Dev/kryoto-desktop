@@ -136,6 +136,8 @@ const ALLOW = {
     'game titles sit on a black scrim over the cover art, which is a photo and not a theme surface',
   'src/bigpicture/BigPictureIntro.tsx::opaque-white-black':
     'the TV-mode intro is a black stage, like a console boot screen, in every palette',
+  'src/bigpicture/Screensaver.tsx::opaque-white-black':
+    'the screensaver plays the same intro scene dimmed on black, in every palette, so a TV left on shows as little lit as it can',
   'src/boot/Boot.tsx::opaque-white-black':
     'the boot splash draws the ASCII mark on black, as the brand is made to be seen',
   'src/ui/ReleaseIntro.tsx::opaque-white-black':

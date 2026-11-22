@@ -16,6 +16,7 @@ import { gameContext } from '@/library/context'
 import { play } from '@/lib/sound'
 import { dialogCount } from '@/ui/dialog-focus'
 import { BigPictureIntro } from './BigPictureIntro'
+import { Screensaver } from './Screensaver'
 
 /**
  * Big Picture: Kryoto for the couch, made for a controller.
@@ -313,7 +314,7 @@ export function BigPicture({
           Hold to leave
         </button>
       </footer>
-      {intro ? <BigPictureIntro onDone={() => setIntro(false)} /> : null}
+      {intro ? <BigPictureIntro onDone={() => setIntro(false)} /> : <Screensaver games={games} running={running.size > 0} />}
     </div>
   )
 }
