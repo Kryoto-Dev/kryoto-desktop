@@ -157,12 +157,10 @@ impl MachineSealed {
         let salt = b64.decode(file.salt).ok()?;
         let nonce = b64.decode(file.nonce).ok()?;
         let ct = b64.decode(file.ct).ok()?;
-        if nonce.len() != 24 {
-            return None;
-        }
+        let nonce: [u8; 24] = nonce.try_into().ok()?;
         let key = self.key(&salt);
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref()).ok()?;
-        let plain = Zeroizing::new(cipher.decrypt(XNonce::from_slice(&nonce), Payload { msg: &ct, aad: AAD }).ok()?);
+        let plain = Zeroizing::new(cipher.decrypt(&XNonce::from(nonce), Payload { msg: &ct, aad: AAD }).ok()?);
         serde_json::from_slice(&plain).ok()
     }
 
@@ -182,7 +180,7 @@ impl MachineSealed {
         let key = self.key(&salt);
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref()).map_err(|e| e.to_string())?;
         let plain = Zeroizing::new(serde_json::to_vec(entries).map_err(|e| e.to_string())?);
-        let ct = cipher.encrypt(XNonce::from_slice(&nonce), Payload { msg: &plain, aad: AAD }).map_err(|_| "Could not seal the file.".to_string())?;
+        let ct = cipher.encrypt(&XNonce::from(nonce), Payload { msg: &plain, aad: AAD }).map_err(|_| "Could not seal the file.".to_string())?;
         let text = serde_json::to_string(&Sealed { v: 1, salt: b64.encode(salt), nonce: b64.encode(nonce), ct: b64.encode(ct) }).map_err(|e| e.to_string())?;
         write_private(&self.path, text.as_bytes())
     }
