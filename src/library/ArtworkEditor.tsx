@@ -54,10 +54,21 @@ export function ArtworkEditor({ title, value, adult = false, onChange, onBusy }:
   }
 
   async function choose(slot: 'customCover' | 'customHero') {
+    // The file window first, outside `run`: busy only while the picture is
+    // copied. Held across the window too, a window whose answer never came
+    // left Choose picture greyed out for good (KB-0020, firesync).
+    setError(null)
+    let path: string | null
+    try {
+      path = await pickPath({ title: slot === 'customCover' ? 'Choose a cover picture' : 'Choose a banner picture', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif'] })
+    } catch (e) {
+      setError(`The file window did not open: ${errorText(e)}`)
+      return
+    }
+    if (!path) return
+    const picked = path
     await run(async (signal) => {
-      const path = await pickPath({ title: slot === 'customCover' ? 'Choose a cover picture' : 'Choose a banner picture', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif'] })
-      if (!path || signal.aborted) return
-      const uri = await importArtwork(path)
+      const uri = await importArtwork(picked)
       if (signal.aborted) return
       onChange({ [slot]: uri })
       setNote('Picture copied to Kryoto. You can move or delete the original.')

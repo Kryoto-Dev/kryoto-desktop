@@ -217,9 +217,48 @@ pub fn os_notify(app: AppHandle, title: String, body: Option<String>) {
     });
 }
 
+/// A file or folder picker is open. One at a time on Windows, where the
+/// picker holds the whole window while it is up: a second press (one that got
+/// through while it opened behind Kryoto, KB-0020) says where it is instead of
+/// stacking another out of sight.
+#[cfg(windows)]
+static PICKING: AtomicBool = AtomicBool::new(false);
+
+/// Holds `PICKING` for one picker and lets go however it ends: picked,
+/// cancelled, closed, failed or panicked.
+#[cfg(windows)]
+struct PickerOpen;
+
+#[cfg(windows)]
+impl PickerOpen {
+    fn take() -> Result<Self, String> {
+        PICKING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| PickerOpen)
+            .map_err(|_| "Another file window is still open. It may be behind Kryoto: press Alt+Tab to find it, then pick a file or cancel.".to_string())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PickerOpen {
+    fn drop(&mut self) {
+        PICKING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// The system's file or folder picker, over the main window. Our own for the
 /// same reason as `os_notify`: the dialog plugin also swaps `alert` and
 /// `confirm` in every frame of the Store.
+///
+/// Every way it ends answers the page: a path, or null for Cancel (and for
+/// the window's own close button). Add a game's Browse, Find the .exe and
+/// Choose picture opened once and then never again (KB-0020, firesync), which
+/// is what a first answer that never arrives looks like: Choose picture stays
+/// busy waiting for it. On Windows the dialog now runs start to end on a
+/// thread of its own with rfd's plain blocking call, not rfd's future driven
+/// from the main thread: that future can lose its wake-up when the dialog ends
+/// while it is first checked (a dialog that fails to show ends at once), and
+/// then nothing answers.
 #[tauri::command]
 pub async fn pick_path(
     window: tauri::Window,
@@ -229,31 +268,59 @@ pub async fn pick_path(
     extensions: Option<Vec<String>>,
     filter_name: Option<String>,
 ) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    let open = PickerOpen::take()?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let parent = window.clone();
-    // Built on the main thread (GTK insists), awaited off it.
-    window
-        .run_on_main_thread(move || {
-            let mut dialog = rfd::AsyncFileDialog::new().set_parent(&parent).set_can_create_directories(true);
-            if let Some(title) = title {
-                dialog = dialog.set_title(title);
-            }
-            if let Some(dir) = default_path.filter(|p| std::path::Path::new(p).is_dir()) {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(ext) = extensions.filter(|e| !e.is_empty()) {
-                let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
-                dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("Games"), &ext);
-            }
-            type Picked = std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>;
-            let picked: Picked = if directory { Box::pin(dialog.pick_folder()) } else { Box::pin(dialog.pick_file()) };
-            std::thread::spawn(move || {
-                let path = tauri::async_runtime::block_on(picked).map(|h| h.path().display().to_string());
-                let _ = tx.send(path);
-            });
-        })
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "The picker closed unexpectedly.".to_string())
+    let directory_ok = default_path.filter(|p| std::path::Path::new(p).is_dir());
+    #[cfg(windows)]
+    {
+        std::thread::Builder::new()
+            .name("file picker".into())
+            .spawn(move || {
+                let _open = open;
+                let mut dialog = rfd::FileDialog::new().set_parent(&parent).set_can_create_directories(true);
+                if let Some(title) = title {
+                    dialog = dialog.set_title(title);
+                }
+                if let Some(dir) = directory_ok {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(ext) = extensions.filter(|e| !e.is_empty()) {
+                    let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
+                    dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("Games"), &ext);
+                }
+                let picked = if directory { dialog.pick_folder() } else { dialog.pick_file() };
+                let _ = tx.send(picked.map(|p| p.display().to_string()));
+            })
+            .map_err(|e| format!("The file window could not open: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        // Built on the main thread (GTK insists), awaited off it.
+        window
+            .run_on_main_thread(move || {
+                let mut dialog = rfd::AsyncFileDialog::new().set_parent(&parent).set_can_create_directories(true);
+                if let Some(title) = title {
+                    dialog = dialog.set_title(title);
+                }
+                if let Some(dir) = directory_ok {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(ext) = extensions.filter(|e| !e.is_empty()) {
+                    let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
+                    dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("Games"), &ext);
+                }
+                type Picked = std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>;
+                let picked: Picked = if directory { Box::pin(dialog.pick_folder()) } else { Box::pin(dialog.pick_file()) };
+                std::thread::spawn(move || {
+                    let path = tauri::async_runtime::block_on(picked).map(|h| h.path().display().to_string());
+                    let _ = tx.send(path);
+                });
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    rx.await.map_err(|_| "The file window closed unexpectedly. Try again.".to_string())
 }
 
 #[tauri::command]
