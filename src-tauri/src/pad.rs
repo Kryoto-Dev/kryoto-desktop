@@ -26,12 +26,19 @@
 //!     and remapped, rumble included ([`virt`]).
 //! - What a pad does in each game (off, a game's own remap, keyboard and
 //!   mouse) is `pad_games.rs`, which this thread drives while a game runs.
+//! - Two Joy-Cons can be one controller, once the player says so for that
+//!   pair (`joycons.rs`): SDL combines them, or this thread merges them.
+//! - Buttons are read by place, not by label (SDL's
+//!   `SDL_GAMECONTROLLER_USE_BUTTON_LABELS` off), as padmap names them: on a
+//!   Nintendo pad SDL would otherwise call the A it prints (on the right) `a`,
+//!   and Kryoto, reading `a` as the bottom button, would go back on it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::joycons::{self, HalfId, HalfState, Merged, Side, Way};
 use padmap::{Control, Family, Model, Remap};
 use sdl2::controller::{Axis as SAxis, Button as SButton, GameController};
 use sdl2::event::Event;
@@ -63,6 +70,8 @@ enum Req {
     /// A game asked the virtual controller to rumble.
     #[cfg_attr(not(windows), allow(dead_code))]
     VirtualRumble(u32, u8, u8),
+    /// A Joy-Con pair was set to be one controller, or two again.
+    JoyCons,
 }
 
 /// The feel of moving around Kryoto by pad.
@@ -108,6 +117,28 @@ pub struct PadInfo {
     buttons: u32,
     axes: u32,
     hats: u32,
+    /// A Joy-Con half: which one.
+    side: Option<Side>,
+    /// Part of a Joy-Con pair (both halves connected), or the pair itself.
+    pair: Option<PairInfo>,
+}
+
+/// A Joy-Con pair, on each half and on the pair once it is one controller.
+#[derive(Clone, Serialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PairInfo {
+    /// What its choice is kept under (`pad_joycons_set`).
+    key: String,
+    /// The two act as one controller now.
+    combined: bool,
+    /// Kryoto can make the two one here.
+    can_combine: bool,
+    /// On a half: the other half's id.
+    other: Option<u32>,
+    /// Asked before: the player chose to keep the two apart.
+    kept_apart: bool,
+    /// Where it works as one, in plain words, or why it cannot be.
+    reach: String,
 }
 
 /// Settings > Controller, in `controllers.json`.
@@ -130,6 +161,10 @@ pub struct PadConfig {
     pub virtual_pad: bool,
     /// By GUID.
     pub pads: BTreeMap<String, PadPrefs>,
+    /// Joy-Con pairs, by `joycons::pair_key`: true to use the two as one
+    /// controller, false to keep them apart. A pair not here has not been
+    /// asked about yet (two controllers, as SDL lists them).
+    pub joycons: BTreeMap<String, bool>,
 }
 
 impl Default for PadConfig {
@@ -142,6 +177,7 @@ impl Default for PadConfig {
             haptics: true,
             virtual_pad: true,
             pads: BTreeMap::new(),
+            joycons: BTreeMap::new(),
         }
     }
 }
@@ -239,7 +275,23 @@ pub fn game_env<R: Runtime>(app: &AppHandle<R>, game: &str) -> Vec<(String, Stri
     if profile.mode != crate::pad_games::Mode::Gamepad {
         return Vec::new();
     }
-    sdl_env(&cfg.pads, profile)
+    let mut env = sdl_env(&cfg.pads, profile);
+    env.extend(joycon_env(&cfg));
+    env
+}
+
+/// A Joy-Con pair set to be one controller: SDL games combine it too
+/// (`joycons::game_env`), even where `sdl_env` keeps the rest of HIDAPI off.
+/// Pairs only ever kept apart: SDL games keep them apart as well (SDL would
+/// combine them by itself). SDL's switch is one for all pairs.
+fn joycon_env(cfg: &PadConfig) -> Vec<(String, String)> {
+    if cfg.joycons.values().any(|one| *one) {
+        joycons::game_env()
+    } else if !cfg.joycons.is_empty() {
+        vec![("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS".into(), "0".into())]
+    } else {
+        Vec::new()
+    }
 }
 
 /// A pad's USB ids, out of its SDL GUID (vendor at byte 4, product at byte 8,
@@ -296,7 +348,9 @@ pub fn connected<R: Runtime>(app: &AppHandle<R>) -> (Vec<crate::pad_games::PadFa
             let n = names.entry(p.name.as_str()).or_insert(0);
             *n += 1;
             let name = if *n == 1 { p.name.clone() } else { format!("{} ({n})", p.name) };
-            crate::pad_games::PadFacts { key, name, xinput: p.xinput, mapped: p.mapped }
+            let pair = p.pair.as_ref().is_some_and(|x| x.combined);
+            let half = p.pair.as_ref().is_some_and(|x| !x.combined && x.can_combine);
+            crate::pad_games::PadFacts { key, name, xinput: p.xinput, mapped: p.mapped, pair, half }
         })
         .collect();
     let driver = pads.driver.lock().ok().and_then(|d| *d);
@@ -366,8 +420,11 @@ pub fn pad_config_set(app: AppHandle, config: PadConfig) -> Result<PadConfig, St
     update_config(&app, |c| {
         let enabled = c.enabled;
         let before = std::mem::take(&mut c.pads);
+        // Joy-Con pairs change only through `pad_joycons_set`.
+        let joycons = std::mem::take(&mut c.joycons);
         *c = config;
         c.enabled = enabled;
+        c.joycons = joycons;
         for (guid, p) in c.pads.iter_mut() {
             let old = before.get(guid);
             p.mapping = old.and_then(|o| o.mapping.clone());
@@ -376,6 +433,24 @@ pub fn pad_config_set(app: AppHandle, config: PadConfig) -> Result<PadConfig, St
             p.sdl = sdl_line(p);
         }
     })
+}
+
+/// Use a Joy-Con pair as one controller (`one`), or as two again. Kept for
+/// that pair, and applied at once.
+#[tauri::command]
+pub fn pad_joycons_set(app: AppHandle, pads: State<'_, Pads>, key: String, one: bool) -> Result<PadConfig, String> {
+    let key = key.trim().to_lowercase();
+    if key.is_empty() || key.len() > 200 || !key.contains('+') {
+        return Err("Those are not two Joy-Cons Kryoto knows.".into());
+    }
+    // SDL's combined pair answers for every pair it combined at once.
+    let cfg = update_config(&app, |c| {
+        for k in key.split(',').filter(|k| !k.is_empty()) {
+            c.joycons.insert(k.to_string(), one);
+        }
+    })?;
+    send(&pads, Req::JoyCons);
+    Ok(cfg)
 }
 
 /// A short buzz, to tell which pad is which.
@@ -567,6 +642,38 @@ struct Dev {
     raw_axes: Vec<f32>,
     /// Where the system has it, lowercased; empty when SDL does not say.
     path: String,
+    /// A Joy-Con half: which one, how it would join its other half, and its
+    /// serial (empty when the system gives none).
+    side: Option<Side>,
+    way: Way,
+    serial: String,
+    /// SDL's own combined Joy-Con pair (HIDAPI).
+    sdl_pair: bool,
+}
+
+/// A left and a right Joy-Con connected together.
+struct Pair {
+    key: String,
+    left: u32,
+    right: u32,
+    way: Way,
+    /// This thread merges the two for Kryoto (`joycons::merge`).
+    merged: bool,
+    /// What the shell was last told of the merged pair.
+    sent: Merged,
+}
+
+/// A pad's serial, as SDL has it for the open joystick.
+fn serial_of(id: u32) -> String {
+    let joy = unsafe { sdl2::sys::SDL_JoystickFromInstanceID(id as i32) };
+    if joy.is_null() {
+        return String::new();
+    }
+    let raw = unsafe { sdl2::sys::SDL_JoystickGetSerial(joy) };
+    if raw.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().trim().to_string()
 }
 
 /// The system's path for a device, lowercased: the same pad reads the same,
@@ -625,17 +732,50 @@ struct Reader<'a, R: Runtime> {
     focused: bool,
     /// What the running game asks of the pads (`pad_games.rs`).
     games: crate::pad_games::Driver,
+    /// Joy-Con pairs connected now.
+    pairs: Vec<Pair>,
+    /// SDL's Joy-Con combining is on (its hint), and for which pairs.
+    sdl_combine: bool,
+    sdl_keys: Vec<String>,
+    /// SDL's combined pair was connected, when last looked.
+    had_sdl_pair: bool,
+    /// Pairs Kryoto offered to combine this session.
+    offered: HashSet<String>,
+    /// The merged pairs' sticks, last sent.
+    pair_axes_at: Instant,
+    /// When to turn SDL's Joy-Con driver back on, after taking a pair apart.
+    rearm_at: Option<Instant>,
     #[cfg(windows)]
     virt: virt::Virtual,
 }
 
 impl<R: Runtime> Reader<'_, R> {
     /// The pads in connection order, each with its key: player 1 stays player 1.
+    /// A merged Joy-Con pair is one pad, under its left half's id.
     fn keyed(&self) -> Vec<(u32, String)> {
-        let mut ids: Vec<u32> = self.devs.keys().copied().collect();
+        let mut ids: Vec<u32> = self.devs.keys().copied().filter(|id| !self.pairs.iter().any(|p| p.merged && p.right == *id)).collect();
         ids.sort_unstable();
-        let keys = crate::pad_games::pad_keys(ids.iter().map(|id| self.devs[id].info.guid.as_str()));
+        let guid = |id: &u32| if self.merged(*id).is_some() { joycons::MERGED_GUID } else { self.devs[id].info.guid.as_str() };
+        let keys = crate::pad_games::pad_keys(ids.iter().map(guid));
         ids.into_iter().zip(keys).collect()
+    }
+
+    /// The merged pair this pad is a half of.
+    fn merged(&self, id: u32) -> Option<&Pair> {
+        self.pairs.iter().find(|p| p.merged && (p.left == id || p.right == id))
+    }
+
+    /// One Joy-Con half as hid-nintendo gives it, upright.
+    fn half_state(&self, id: u32, side: Side) -> Option<HalfState> {
+        let d = self.devs.get(&id)?;
+        let buttons: Vec<bool> = (0..d.joy.num_buttons()).map(|b| d.joy.button(b).unwrap_or(false)).collect();
+        let axes: Vec<f32> = (0..d.joy.num_axes().min(2)).map(|a| d.joy.axis(a).map(|v| v as f32 / 32767.0).unwrap_or(0.0)).collect();
+        Some(joycons::half_from_raw(side, &buttons, &axes))
+    }
+
+    /// A merged pair as one controller, now; a half that is gone reads released.
+    fn pair_state(&self, p: &Pair) -> Merged {
+        joycons::merge(self.half_state(p.left, Side::Left).as_ref(), self.half_state(p.right, Side::Right).as_ref())
     }
 
     /// What each pad has down right now.
@@ -660,6 +800,10 @@ impl<R: Runtime> Reader<'_, R> {
         self.keyed()
             .into_iter()
             .filter_map(|(id, key)| {
+                if let Some(p) = self.merged(id) {
+                    let m = self.pair_state(p);
+                    return Some((key, crate::pad_games::PadState { pressed: m.pressed.into_iter().collect(), lx: m.lx, ly: m.ly, rx: m.rx, ry: m.ry, lt: m.lt, rt: m.rt }));
+                }
                 let c = self.devs.get(&id)?.ctl.as_ref()?;
                 let a = self.axes_of(id)?;
                 let pressed = BUTTONS.into_iter().filter(|b| c.button(*b)).map(control_of).collect();
@@ -682,8 +826,205 @@ impl<R: Runtime> Reader<'_, R> {
         }
     }
 
-    fn publish(&self) {
-        let mut list: Vec<PadInfo> = self.devs.values().map(|d| d.info.clone()).collect();
+    /// Find the Joy-Con pairs connected, and make each one controller or two as
+    /// its player chose: SDL's combining on or off, or merged here.
+    fn update_pairs(&mut self) {
+        let cfg = load_config(self.app);
+        let halves: Vec<(u32, Side)> = self.devs.iter().filter_map(|(id, d)| d.side.map(|s| (*id, s))).collect();
+        let mut next: Vec<Pair> = Vec::new();
+        let mut sdl_keys: Vec<String> = Vec::new();
+        for (left, right) in joycons::find_pairs(&halves) {
+            let (l, r) = (&self.devs[&left], &self.devs[&right]);
+            let id = |d: &Dev| HalfId { guid: d.info.guid.clone(), serial: d.serial.clone() };
+            let key = joycons::pair_key(&id(l), &id(r));
+            let way = joycons::pair_way(l.way, r.way);
+            let one = cfg.joycons.get(&key) == Some(&true);
+            if one && way == Way::Sdl {
+                sdl_keys.push(key.clone());
+            }
+            // Asked once a session, in Kryoto: the choice is in Settings.
+            if !cfg.joycons.contains_key(&key) && way != Way::None && self.offered.insert(key.clone()) {
+                let note = crate::downloads::Notice::new("Two Joy-Cons connected", "To use them as one controller, open Settings, Devices, Controller.", None);
+                let _ = self.app.emit("notify", note);
+            }
+            let sent = self.pairs.iter().find(|p| p.key == key && p.left == left && p.right == right).map(|p| p.sent.clone()).unwrap_or_default();
+            next.push(Pair { key, left, right, way, merged: one && way == Way::Kryoto, sent });
+        }
+
+        // A merged pair that lost a half: tell the player, and let go of what
+        // the shell still holds from it.
+        for gone in self.pairs.iter().filter(|p| p.merged && !next.iter().any(|n| n.merged && n.key == p.key)) {
+            if self.focused {
+                for control in &gone.sent.pressed {
+                    let _ = self.app.emit("pad-button", ButtonEvent { id: gone.left, control: *control, pressed: false });
+                }
+            }
+            if cfg.joycons.get(&gone.key) == Some(&true) {
+                let left = if self.devs.contains_key(&gone.left) { None } else { Some(Side::Left) };
+                let lost = left.or((!self.devs.contains_key(&gone.right)).then_some(Side::Right));
+                if let Some(side) = lost {
+                    self.tell_split(side);
+                }
+            }
+        }
+
+        // SDL's combined pair: kept while its players still want it as one.
+        let combined = self.devs.values().any(|d| d.sdl_pair);
+        let wanted = |keys: &[String]| !keys.is_empty() && keys.iter().all(|k| cfg.joycons.get(k) == Some(&true));
+        let still = combined && wanted(&self.sdl_keys);
+        if self.had_sdl_pair && !combined && wanted(&self.sdl_keys) {
+            crate::logging::info("pads", "SDL's Joy-Con pair is gone: a half disconnected");
+            let note = crate::downloads::Notice::new("Joy-Con disconnected", "The two Joy-Cons are apart again: the one still connected works on its own. Connect the other to play with both.", None);
+            let _ = self.app.emit("notify", note);
+        }
+        let on = joycons::sdl_combine(!sdl_keys.is_empty(), still);
+        if !sdl_keys.is_empty() {
+            self.sdl_keys = sdl_keys;
+        } else if !still {
+            self.sdl_keys.clear();
+        }
+        if on != self.sdl_combine {
+            crate::logging::info("pads", &format!("SDL combines Joy-Cons: {on}"));
+            sdl2::hint::set("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS", if on { "1" } else { "0" });
+            if !on && combined {
+                // SDL 2.26 takes a pair apart without listing its halves again
+                // (they stay open, with no joystick). Turning its Joy-Con driver
+                // off closes them; on again a moment later, it finds them anew.
+                sdl2::hint::set("SDL_JOYSTICK_HIDAPI_JOY_CONS", "0");
+                self.rearm_at = Some(Instant::now() + Duration::from_millis(400));
+            }
+            self.sdl_combine = on;
+        }
+        self.had_sdl_pair = combined;
+        self.pairs = next;
+    }
+
+    /// One half of a merged pair is gone: say so in Kryoto.
+    fn tell_split(&self, gone: Side) {
+        let other = match gone {
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
+        };
+        crate::logging::info("pads", &format!("merged Joy-Con pair split: the {} half is gone", gone.name()));
+        let body = format!(
+            "The {} Joy-Con disconnected, so the {} one works on its own for now. Connect it again to play with both.",
+            gone.name(),
+            other.name()
+        );
+        let _ = self.app.emit("notify", crate::downloads::Notice::new("Joy-Con disconnected", &body, None));
+    }
+
+    /// What the shell is told of a Joy-Con half or pair.
+    fn pair_info(&self, id: u32, d: &Dev, cfg: &PadConfig) -> Option<PairInfo> {
+        let windows = cfg!(windows);
+        if d.sdl_pair && !self.sdl_keys.is_empty() {
+            return Some(PairInfo {
+                key: self.sdl_keys.join(","),
+                combined: true,
+                can_combine: true,
+                other: None,
+                kept_apart: false,
+                reach: joycons::reach(windows).into(),
+            });
+        }
+        let p = self.pairs.iter().find(|p| p.left == id || p.right == id)?;
+        let other = if p.left == id { p.right } else { p.left };
+        let reach = match p.way {
+            Way::None => "Kryoto cannot read these two as one here: the system gives their buttons in a way Kryoto does not know. They stay two controllers.".to_string(),
+            _ => joycons::reach(windows).to_string(),
+        };
+        Some(PairInfo {
+            key: p.key.clone(),
+            combined: false,
+            can_combine: p.way != Way::None,
+            other: Some(other),
+            kept_apart: cfg.joycons.get(&p.key) == Some(&false),
+            reach,
+        })
+    }
+
+    /// A pair this thread merges, as one pad: under its left half's id.
+    fn merged_info(&self, p: &Pair) -> Option<PadInfo> {
+        let (l, r) = (&self.devs.get(&p.left)?.info, &self.devs.get(&p.right)?.info);
+        let name = "Joy-Con (L/R)";
+        let battery = match (l.battery, r.battery) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        Some(PadInfo {
+            id: p.left,
+            guid: joycons::MERGED_GUID.into(),
+            name: name.into(),
+            system_name: format!("{} + {}", l.system_name, r.system_name),
+            vendor: Some(joycons::NINTENDO),
+            product: Some(joycons::PAIR),
+            model: padmap::identify(Some(joycons::NINTENDO), Some(joycons::PAIR), name),
+            mapped: true,
+            custom: false,
+            xinput: false,
+            rumble: l.rumble,
+            battery,
+            charging: l.charging && r.charging,
+            buttons: 0,
+            axes: 0,
+            hats: 0,
+            side: None,
+            pair: Some(PairInfo {
+                key: p.key.clone(),
+                combined: true,
+                can_combine: true,
+                other: None,
+                kept_apart: false,
+                reach: joycons::reach(cfg!(windows)).into(),
+            }),
+        })
+    }
+
+    /// Each pair this thread merges: its presses and sticks to the shell, as
+    /// one pad, while Kryoto is in front.
+    fn feed_pairs(&mut self) {
+        if !self.focused || !self.pairs.iter().any(|p| p.merged) {
+            return;
+        }
+        let sticks = self.pair_axes_at.elapsed() >= Duration::from_millis(33);
+        let mut pairs = std::mem::take(&mut self.pairs);
+        for p in pairs.iter_mut().filter(|p| p.merged) {
+            let now = self.pair_state(p);
+            for c in now.pressed.iter().filter(|c| !p.sent.pressed.contains(c)) {
+                let _ = self.app.emit("pad-button", ButtonEvent { id: p.left, control: *c, pressed: true });
+            }
+            for c in p.sent.pressed.iter().filter(|c| !now.pressed.contains(c)) {
+                let _ = self.app.emit("pad-button", ButtonEvent { id: p.left, control: *c, pressed: false });
+            }
+            let axes = |m: &Merged| (m.lx, m.ly, m.rx, m.ry, m.lt, m.rt);
+            let moved = axes(&now) != axes(&p.sent);
+            if moved && sticks {
+                let _ = self.app.emit("pad-axes", Axes { id: p.left, lx: now.lx, ly: now.ly, rx: now.rx, ry: now.ry, lt: now.lt, rt: now.rt });
+                p.sent = now;
+            } else {
+                // Sticks wait for their turn; buttons are sent already.
+                p.sent.pressed = now.pressed;
+            }
+        }
+        if sticks {
+            self.pair_axes_at = Instant::now();
+        }
+        self.pairs = pairs;
+    }
+
+    fn publish(&mut self) {
+        self.update_pairs();
+        let cfg = load_config(self.app);
+        let mut list: Vec<PadInfo> = Vec::new();
+        for (id, d) in &self.devs {
+            if self.merged(*id).is_some() {
+                continue;
+            }
+            let mut info = d.info.clone();
+            info.pair = self.pair_info(*id, d, &cfg);
+            list.push(info);
+        }
+        list.extend(self.pairs.iter().filter(|p| p.merged).filter_map(|p| self.merged_info(p)));
         list.sort_by_key(|p| p.id);
         if let Ok(mut l) = self.app.state::<Pads>().list.lock() {
             *l = list.clone();
@@ -732,6 +1073,10 @@ impl<R: Runtime> Reader<'_, R> {
         }
         let custom = load_config(self.app).pads.get(&guid).is_some_and(|p| p.mapping.is_some());
         let (battery, charging) = battery_of(&joy);
+        let side = joycons::side_of(some(vendor), some(product), &system_name);
+        let way = side.map(|s| joycons::way_of(s, &guid, &path, joy.num_buttons(), joy.num_axes())).unwrap_or(Way::None);
+        let serial = if side.is_some() { serial_of(id) } else { String::new() };
+        let sdl_pair = joycons::is_pair_device(some(vendor), some(product), &system_name) && path == "nintendo_joycons_combined";
         use sdl2::sys::SDL_GameControllerType::*;
         let info = PadInfo {
             id,
@@ -750,6 +1095,8 @@ impl<R: Runtime> Reader<'_, R> {
             buttons: joy.num_buttons(),
             axes: joy.num_axes(),
             hats: joy.num_hats(),
+            side,
+            pair: None,
         };
         // Remember SDL's own mapping (not a setup saved here) as the base.
         let base = if custom { None } else { ctl.as_ref().map(|c| c.mapping()) };
@@ -765,7 +1112,7 @@ impl<R: Runtime> Reader<'_, R> {
         }
         let axes = joy.num_axes() as usize;
         crate::logging::info("pads", &format!("opened {} ({}) at {path}", info.name, info.guid));
-        self.devs.insert(id, Dev { joy, ctl, info: info.clone(), raw_axes: vec![0.0; axes], path });
+        self.devs.insert(id, Dev { joy, ctl, info: info.clone(), raw_axes: vec![0.0; axes], path, side, way, serial, sdl_pair });
         if announce && load_config(self.app).notify {
             ask_to_configure(self.app, &info);
         }
@@ -791,6 +1138,9 @@ impl<R: Runtime> Reader<'_, R> {
 
     fn close_all(&mut self) {
         self.devs.clear();
+        // Stopped, not disconnected: nothing to tell.
+        self.pairs.clear();
+        self.had_sdl_pair = false;
         self.capture = None;
         #[cfg(windows)]
         self.virt.unplug_all();
@@ -868,6 +1218,9 @@ impl<R: Runtime> Reader<'_, R> {
                     self.publish();
                 }
             }
+            // A merged Joy-Con pair's halves speak as one (`feed_pairs`).
+            Event::ControllerButtonDown { which, .. } | Event::ControllerButtonUp { which, .. } | Event::ControllerAxisMotion { which, .. }
+                if self.merged(which).is_some() => {}
             Event::ControllerButtonDown { which, button, .. } | Event::ControllerButtonUp { which, button, .. } => {
                 let pressed = matches!(ev, Event::ControllerButtonDown { .. });
                 if self.focused && self.devs.contains_key(&which) {
@@ -988,6 +1341,11 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
     // still handle other controllers (including Bluetooth) as before.
     #[cfg(windows)]
     sdl2::hint::set("SDL_JOYSTICK_RAWINPUT", "0");
+    // Buttons by place, as padmap names them (see the top of this file).
+    sdl2::hint::set("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "0");
+    // Joy-Con pairs start as their two halves, so they can be told apart and
+    // offered; `update_pairs` turns SDL's combining on for a pair chosen as one.
+    sdl2::hint::set("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS", "0");
     let sdl = match sdl2::init() {
         Ok(s) => s,
         Err(e) => return crate::logging::error("pads", &format!("controllers unavailable: {e}")),
@@ -1012,6 +1370,13 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
         capture: None,
         focused: false,
         games: crate::pad_games::Driver::default(),
+        pairs: Vec::new(),
+        sdl_combine: false,
+        sdl_keys: Vec::new(),
+        had_sdl_pair: false,
+        offered: HashSet::new(),
+        pair_axes_at: Instant::now(),
+        rearm_at: None,
         #[cfg(windows)]
         virt: virt::Virtual::new(back),
     };
@@ -1089,10 +1454,16 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
                 Req::VirtualRumble(id, large, small) => {
                     r.rumble(id, u16::from(large) * 257, u16::from(small) * 257, 250);
                 }
+                Req::JoyCons => r.publish(),
             }
         }
         if !active {
             continue;
+        }
+        if r.rearm_at.is_some_and(|at| Instant::now() >= at) {
+            r.rearm_at = None;
+            sdl2::hint::set("SDL_JOYSTICK_HIDAPI_JOY_CONS", "1");
+            crate::logging::info("pads", "SDL's Joy-Con driver back on: the halves are listed again");
         }
         // Reconcile missed hotplug/driver-change notifications without restarting.
         if scan_at.elapsed() >= Duration::from_secs(2) {
@@ -1134,6 +1505,7 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
             }
         }
 
+        r.feed_pairs();
         r.feed_games();
         #[cfg(windows)]
         r.feed_virtual();
@@ -1160,7 +1532,8 @@ impl<R: Runtime> Reader<'_, R> {
         for (id, key) in self.keyed() {
             let Some(d) = self.devs.get(&id) else { continue };
             let Some(ctl) = d.ctl.as_ref() else { continue };
-            if d.info.xinput {
+            // A pair merged here is hid-nintendo halves (Linux): never on Windows.
+            if d.info.xinput || self.merged(id).is_some() {
                 continue;
             }
             // Taken out of this game: no virtual pad for it.
@@ -1422,6 +1795,26 @@ mod tests {
         let p = &c.pads["abc"];
         assert_eq!(p.family, Some(Family::Nintendo));
         assert_eq!(p.remap.acts_as(Control::South), Control::East);
+    }
+
+    #[test]
+    fn joycon_choices_are_kept_per_pair() {
+        // Files from before have none: every pair is still to be asked about.
+        let c: PadConfig = serde_json::from_str(r#"{"pads":{}}"#).unwrap();
+        assert!(c.joycons.is_empty());
+        assert!(joycon_env(&c).is_empty());
+        // One pair as one controller, another kept apart: both kept, by key.
+        let mut c = PadConfig::default();
+        c.joycons.insert("98:b6:e9:00:00:01+98:b6:e9:00:00:02".into(), true);
+        c.joycons.insert("98:b6:e9:00:00:03+98:b6:e9:00:00:04".into(), false);
+        let back: PadConfig = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
+        assert_eq!(back.joycons, c.joycons);
+        // A pair set as one: SDL games combine Joy-Cons too.
+        let env = joycon_env(&back);
+        assert!(env.contains(&("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS".into(), "1".into())));
+        // Only pairs kept apart: SDL games keep them apart too.
+        c.joycons.insert("98:b6:e9:00:00:01+98:b6:e9:00:00:02".into(), false);
+        assert_eq!(joycon_env(&c), vec![("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS".to_string(), "0".to_string())]);
     }
 
     #[test]

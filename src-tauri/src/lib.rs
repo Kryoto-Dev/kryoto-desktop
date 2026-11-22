@@ -48,6 +48,7 @@ mod net;
 mod menus;
 mod online;
 mod repair;
+mod joycons;
 mod pad;
 mod pad_games;
 mod patchbay;
@@ -2410,6 +2411,7 @@ pub fn run() {
             pad::pad_capture,
             pad::pad_forward,
             pad::pad_mapping_set,
+            pad::pad_joycons_set,
             pad::pad_virtual_driver,
             pad_games::pad_game_get,
             pad_games::pad_game_set,

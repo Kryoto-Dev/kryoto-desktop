@@ -1101,6 +1101,42 @@ const previewPads = [
     hats: 1,
   },
 ]
+/** Two Joy-Cons over Bluetooth (src-tauri joycons.rs): offered as one controller, and the pair once it is. */
+const PREVIEW_JOYCON_KEY = '98:b6:e9:00:00:01+98:b6:e9:00:00:02'
+const PREVIEW_JOYCON_REACH = 'Works in Kryoto, and in games through the virtual Xbox controller (it needs ViGEmBus). A game that reads Joy-Cons itself may still see two controllers.'
+const joyConModel = (name: string) => ({ family: 'nintendo', name, features: { touchpad: false, gyro: true, paddles: 0, misc: true, analogTriggers: false }, matched: 'ids' })
+const previewJoyConHalves = (keptApart: boolean) =>
+  (['left', 'right'] as const).map((side, i) => ({
+    id: 2 + i,
+    guid: side === 'left' ? '050000007e0500000620000001006800' : '050000007e0500000720000001006800',
+    name: side === 'left' ? 'Joy-Con (L)' : 'Joy-Con (R)',
+    systemName: side === 'left' ? 'Nintendo Switch Joy-Con (L)' : 'Nintendo Switch Joy-Con (R)',
+    vendor: 0x057e,
+    product: side === 'left' ? 0x2006 : 0x2007,
+    model: joyConModel(side === 'left' ? 'Joy-Con (L)' : 'Joy-Con (R)'),
+    mapped: true,
+    custom: false,
+    xinput: false,
+    rumble: true,
+    battery: side === 'left' ? 55 : 100,
+    charging: false,
+    buttons: 20,
+    axes: 4,
+    hats: 0,
+    side,
+    pair: { key: PREVIEW_JOYCON_KEY, combined: false, canCombine: true, other: 3 - i, keptApart, reach: PREVIEW_JOYCON_REACH },
+  }))
+const previewJoyConPair = () => ({
+  ...previewJoyConHalves(false)[0]!,
+  guid: '030000007e0500000820000000006800',
+  name: 'Nintendo Switch Joy-Con (L/R)',
+  systemName: 'Nintendo Switch Joy-Con (L/R)',
+  product: 0x2008,
+  model: joyConModel('Joy-Con'),
+  side: null,
+  pair: { key: PREVIEW_JOYCON_KEY, combined: true, canCombine: true, other: null, keptApart: false, reach: PREVIEW_JOYCON_REACH },
+})
+previewPads.push(...(previewJoyConHalves(false) as unknown as (typeof previewPads)[number][]))
 let previewPadConfig = {
   enabled: true,
   navigate: true,
@@ -1142,6 +1178,13 @@ Object.assign(HANDLERS, {
     return previewPadConfig
   },
   pad_virtual_driver: () => false,
+  pad_joycons_set: (a: Record<string, unknown>) => {
+    const one = a.one === true
+    previewPadConfig = { ...previewPadConfig, joycons: { ...(previewPadConfig as { joycons?: Record<string, boolean> }).joycons, [String(a.key)]: one } } as typeof previewPadConfig
+    previewPads.splice(2, previewPads.length - 2, ...((one ? [previewJoyConPair()] : previewJoyConHalves(true)) as unknown as (typeof previewPads)[number][]))
+    setTimeout(() => previewBus.emit('pad-list', clone(previewPads)), 30)
+    return previewPadConfig
+  },
   // pad_games.rs: a game following the shared default, one layout to pick.
   pad_game_get: () => {
     const profile = { mode: 'keyboard', template: 'shooter', remap: {}, binds: { righttrigger: 'mouse1', a: 'space' }, leftStick: 'wasd', rightStick: 'mouse', sensitivity: 1600, deadzone: 0.15, invertY: false, pads: {} }
