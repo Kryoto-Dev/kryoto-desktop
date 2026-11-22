@@ -15,6 +15,7 @@ mod antivirus;
 mod defender;
 mod custom_sounds;
 mod display_env;
+mod from_file;
 mod game_logs;
 mod game_update;
 mod remote;
@@ -2597,6 +2598,8 @@ pub fn run() {
             downloads::download_pause,
             downloads::download_resume,
             downloads::download_install_anyway,
+            from_file::archive_look,
+            from_file::archive_install,
             downloads::download_move,
             player_name::player_account_name,
             player_name::game_languages,

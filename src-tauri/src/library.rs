@@ -73,6 +73,10 @@ pub struct LibraryGame {
     /// the same build number, or a new upload with none, has another: that
     /// is an update too, where the version alone said nothing had changed.
     pub build_sha: Option<String>,
+    /// Installed from the player's own archive that matched no file kryo.to
+    /// lists (an older build, a re-pack, a mirror's changed copy): never
+    /// shown as Kryoto's copy, and kryo.to's build is offered as an update.
+    pub unverified: bool,
     /// A build picked under Versions rather than the current one: while it is
     /// the one installed, no update is offered. Like choosing a branch in
     /// Steam's Betas.
@@ -1045,6 +1049,7 @@ pub fn upsert_installed<R: Runtime>(app: &AppHandle<R>, mut game: LibraryGame) -
                 slot.keep_files = false;
                 slot.version = game.version.clone();
                 slot.build_sha = game.build_sha.clone();
+                slot.unverified = game.unverified;
                 slot.pinned_version = game.pinned_version.clone();
                 slot.logo = game.logo.clone().or(slot.logo.take());
                 slot.header = game.header.clone().or(slot.header.take());

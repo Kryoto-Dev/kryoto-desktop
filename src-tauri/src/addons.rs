@@ -110,7 +110,11 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
             // A row named from its file reads "Forts DLC - Firebird" or
             // "Forts - DLC Firebird": the game comes first.
             let game = downloads::dlc_parts(&item.meta.title).map(|(game, _)| game).unwrap_or_else(|| item.meta.title.clone());
-            format!("{label} is an add-on. Install {game} first, then download it again.")
+            if item.from_file {
+                format!("{label} is an add-on for {game}. Install {game} first, then press Retry here. Your file stays where it is.")
+            } else {
+                format!("{label} is an add-on. Install {game} first, then download it again.")
+            }
         })?;
     // Its files are in use while it runs. The archive stays, so Retry is quick.
     if library::is_running(app, &game.id) {
@@ -169,8 +173,8 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
         }
         Ok(())
     })?;
-    if settings.delete_archives {
-        let _ = std::fs::remove_file(&item.archive_path);
+    if let Some(path) = downloads::own_archive(&item).filter(|_| settings.delete_archives) {
+        let _ = std::fs::remove_file(path);
     }
     downloads::finish_as(app, id, &game);
     crate::logging::info("addons", &format!("{label} applied to {} ({count} files)", game.title));
@@ -367,8 +371,8 @@ async fn install_fix<R: Runtime>(
         crate::logging::error("addons", &format!("{label} on {}: {e}", game.title));
         e
     })?;
-    if settings.delete_archives {
-        let _ = std::fs::remove_file(&item.archive_path);
+    if let Some(path) = downloads::own_archive(item).filter(|_| settings.delete_archives) {
+        let _ = std::fs::remove_file(path);
     }
     downloads::finish_as(app, id, game);
     crate::logging::info("addons", &format!("{label} applied to {} as a repair ({} files)", game.title, plan.placements.len()));

@@ -121,6 +121,8 @@ commands.allow = [
   "download_pause",
   "download_resume",
   "download_install_anyway",
+  "archive_look",
+  "archive_install",
   "download_move",
   "player_account_name",
   "game_languages",
