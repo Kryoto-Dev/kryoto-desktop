@@ -704,9 +704,22 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     Ok(())
 }
 
+/// A size in the unit that reads best: "66848.2 GB" was a drive's worth of
+/// terabytes, and a small add-on read "0 MB".
 fn human(bytes: u64) -> String {
-    let gb = bytes as f64 / 1_073_741_824.0;
-    if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.0} MB", bytes as f64 / 1_048_576.0) }
+    const K: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= K * K * K * K {
+        format!("{:.1} TB", b / (K * K * K * K))
+    } else if b >= K * K * K {
+        format!("{:.1} GB", b / (K * K * K))
+    } else if b >= K * K {
+        format!("{:.0} MB", b / (K * K))
+    } else if b >= K {
+        format!("{:.0} KB", b / K)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// `human`, for the other modules' messages and logs.
@@ -816,6 +829,16 @@ pub fn check_room(folder: &Path, needed: u64, what: &str) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_read_in_the_unit_that_fits() {
+        assert_eq!(human(140), "140 B");
+        assert_eq!(human(3 * 1024), "3 KB");
+        assert_eq!(human(25 * 1024 * 1024), "25 MB");
+        assert_eq!(human(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
+        // 64 TiB claimed by a host: it read "65536.0 GB".
+        assert_eq!(human(64 * 1024u64.pow(4)), "64.0 TB");
+    }
 
     #[test]
     fn unpacking_in_place_needs_room_for_the_game_not_twice() {
