@@ -178,7 +178,9 @@ async fn page(client: &reqwest::Client, url: &str, referer: Option<&str>) -> Res
 /// Ask online-fix.me what it has for this game.
 async fn look_up(title: &str, slug: Option<&str>, installed: Option<&str>) -> Lookup {
     let Ok(client) = client() else { return unreachable("no network client".into()) };
-    let search = format!("{}/index.php?do=search&subaction=search&story={}", fixsite::SITE, url::form_urlencoded::byte_serialize(title.as_bytes()).collect::<String>());
+    // The site's search is Latin: "Call of Duty®: Black Ops III" finds nothing with its ®.
+    let query: String = title.chars().filter(|c| c.is_ascii() && !c.is_ascii_control()).collect();
+    let search = format!("{}/index.php?do=search&subaction=search&story={}", fixsite::SITE, url::form_urlencoded::byte_serialize(query.trim().as_bytes()).collect::<String>());
     let html = match page(&client, &search, None).await {
         Ok((_, h)) => h,
         Err(e) => return unreachable(e),
