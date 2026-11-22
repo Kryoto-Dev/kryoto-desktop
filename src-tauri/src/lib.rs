@@ -27,6 +27,9 @@ mod bridge;
 mod channel;
 mod discord_rpc;
 mod discord_web;
+mod signin_handoff;
+mod keyring_memory;
+mod update_mirror;
 mod steam_art;
 mod launch;
 mod proton_script;
@@ -379,6 +382,53 @@ pub(crate) fn catalog_endpoint_changed<R: Runtime>(
 /// Counts the Store's page-load events, so an early injection of
 /// BROWSER_STATE_SCRIPT for one page stops once the next event comes.
 static STORE_LOAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// kryo.to's own page has reported since the Store last started a load: the
+/// page at kryo.to's address really is Kryoto (`watch_store_is_kryoto`).
+static KRYOTO_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How long a finished load at kryo.to's address has to report as Kryoto.
+const KRYOTO_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// What the Store shows when kryo.to's address loads something that is not
+/// Kryoto: a network's block page, its certificate, or the web view's own
+/// "cannot be reached" page (a DNS block, a cut connection). The shell puts its
+/// own screen over it (`store-unreached`), which says so in plain words, and the
+/// next load clears it.
+#[derive(Clone, Serialize)]
+struct StoreUnreached {
+    url: String,
+    reason: String,
+}
+
+/// After a finished load at kryo.to's address: did kryo.to's own page say so?
+/// Its script reports as soon as it runs; a block page or an error page cannot.
+fn watch_store_is_kryoto<R: Runtime>(view: tauri::Webview<R>, load: u64, url: String) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(KRYOTO_ANSWER_WAIT).await;
+        if STORE_LOAD.load(std::sync::atomic::Ordering::SeqCst) != load || KRYOTO_ANSWERED.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        // Asked once more, in case the page was only slow to run its script.
+        let _ = view.eval("window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh()");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if STORE_LOAD.load(std::sync::atomic::Ordering::SeqCst) != load || KRYOTO_ANSWERED.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let health = health::health_get();
+        let reason = if health.as_ref().is_some_and(|h| h.blocked) {
+            "This network blocks kryo.to".to_string()
+        } else {
+            "kryo.to did not load: something on the way answered in its place".to_string()
+        };
+        logging::warn(
+            "store",
+            &format!("the Store's page at {url} is not Kryoto's (no answer from its script); health: {:?}", health.map(|h| (h.state, h.blocked))),
+        );
+        health::health_poke();
+        let _ = view.app_handle().emit_to("main", "store-unreached", StoreUnreached { url, reason });
+    });
+}
 
 /// A link to a picture rather than a page (`/api/steam/image.jpg?url=...`).
 fn is_image_file(url: &url::Url) -> bool {
@@ -854,7 +904,11 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           title: title ? String(title) : null
         }),
         // A collection's page: install what it holds here (collections.rs).
-        installCollection: (collection) => invoke('store_install_collection', { collection })
+        installCollection: (collection) => invoke('store_install_collection', { collection }),
+        // A link to one of our own files, asked for as this PC's app: the
+        // account and this install, which kryo.to counts instead of
+        // Cloudflare's check (`store_mint_release`). { url } or { challenge }.
+        mint: (releaseId) => invoke('store_mint_release', { releaseId: String(releaseId || '') })
       })
     });
   } catch (_) {}
@@ -1312,6 +1366,38 @@ pub(crate) fn from_kryoto_store(app: &tauri::AppHandle, webview: &tauri::Webview
     Ok(())
 }
 
+/// `kryotoDesktop.mint`'s answer: the link, or that only Cloudflare's check
+/// will do (signed out), or what went wrong in words.
+#[derive(Serialize)]
+struct StoreMint {
+    url: Option<String>,
+    challenge: bool,
+    error: Option<String>,
+}
+
+/// A press on Download in the Store, minted as this PC's app.
+///
+/// The page's own request to kryo.to carried no install id (a page never
+/// learns it), so kryo.to could not recognise the install and fell back to
+/// Cloudflare's check, which fails in some web views: about 300 refused
+/// downloads in the logs ("not recognised as an install on Windows"). The app
+/// mints instead, with the Store's session, this install's id and a proof of
+/// work when asked (phone.rs `mint_release`); the id never reaches the page.
+#[tauri::command]
+async fn store_mint_release(app: tauri::AppHandle, webview: tauri::Webview, release_id: String) -> Result<StoreMint, String> {
+    from_kryoto_store(&app, &webview)?;
+    let answer = match phone::session(&app) {
+        Ok(session) => phone::mint_release(&app, &session, release_id.trim(), None).await,
+        Err(_) => Err(phone::MintError::Challenge),
+    };
+    Ok(match answer {
+        Ok(url) => StoreMint { url: Some(url), challenge: false, error: None },
+        // Signed out, or a check only the page can pass: the page asks as before.
+        Err(phone::MintError::Challenge | phone::MintError::SignedOut) => StoreMint { url: None, challenge: true, error: None },
+        Err(phone::MintError::Other(e)) => StoreMint { url: None, challenge: false, error: Some(e) },
+    })
+}
+
 /// A row picked in the menu the Store's own page draws (`menus.rs`). Only a
 /// kryo.to page in the Store may say, and only for the menu that is open.
 #[tauri::command]
@@ -1434,12 +1520,44 @@ fn browser_navigate(app: tauri::AppHandle, url: String) -> Result<(), String> {
     store(&app)?.navigate(map_catalog_url(parsed, &endpoint)?).map_err(|e| e.to_string())
 }
 
+/// The Store page's report, taken off the UI thread.
+///
+/// A sync command runs on the window's own thread, and a report that says who
+/// is signed in sets off file reads and writes (the account's hidden games
+/// against the library, cloud saves, chat's account, the player name), on a
+/// hard disk too. Signing in was where it showed: the window stopped answering
+/// ("Not responding") until they were done. The command only queues the report
+/// now; one thread works through them in the order they came, so a sign-in and
+/// a sign-out can never swap places.
 #[tauri::command]
 fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(), String> {
+    static QUEUE: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<BrowserReport>>> = std::sync::OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<BrowserReport>();
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name("store-reports".into())
+            .spawn(move || {
+                for state in rx {
+                    let _ = take_catalog_report(&app, state);
+                }
+            })
+            .ok();
+        std::sync::Mutex::new(tx)
+    });
+    queue.lock().unwrap_or_else(|e| e.into_inner()).send(state).map_err(|e| e.to_string())
+}
+
+fn take_catalog_report(app: &tauri::AppHandle, state: BrowserReport) -> Result<(), String> {
+    let app = app.clone();
     let view = store(&app)?;
     let actual = view.url().map_err(|e| e.to_string())?;
     // Only kryo.to itself may say who is signed in, or what is in their inbox.
     if is_kryoto(&actual, &app) {
+        // Its own page, not an error page standing at its address.
+        if state.url.parse::<url::Url>().is_ok_and(|u| is_kryoto(&u, &app)) {
+            KRYOTO_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         if let Some(appearance) = state.appearance.filter(|v| matches!(v["theme"].as_str(), Some("light" | "dark"))) {
             let _ = app.emit_to("main", "catalog-appearance", appearance);
         }
@@ -1459,6 +1577,10 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
             // Remote follows the signed-in account's own answer; signed out is off.
             remote::set_consent(&app, account.as_ref().map(|a| (a.remote, a.remote_decided)));
             chat::follow_account(&app, account.as_ref().map(|a| a.id.as_str()));
+            // Downloads that stopped for a sign-in go again.
+            if account.is_some() {
+                phone::signed_in_again(&app);
+            }
             if account.is_none() {
                 collections::signed_out(&app);
             }
@@ -1941,6 +2063,10 @@ pub fn run() {
         .manage(pad::Pads::default())
         .setup(move |app| {
             logging::init(app.handle());
+            // Before anything reads a secret (keyring_memory.rs).
+            if let Ok(dir) = app.path().app_data_dir() {
+                keyring_memory::set_dir(dir);
+            }
             // `--tray` only ever comes from the start-with-Windows entry. With
             // the switch off, that entry is left over (settings reset or
             // restored, an old install): take it away and don't start.
@@ -2025,6 +2151,15 @@ pub fn run() {
             tauri::async_runtime::spawn(async move { responder.respond(art::serve(app, request).await) });
         })
         .on_window_event(|window, event| {
+            logging::step(match event {
+                WindowEvent::Focused(_) => "window focus",
+                WindowEvent::Moved(_) => "window moved",
+                WindowEvent::Resized(_) => "window resized",
+                WindowEvent::CloseRequested { .. } => "window close",
+                WindowEvent::ScaleFactorChanged { .. } => "window scale",
+                WindowEvent::ThemeChanged(_) => "window theme",
+                _ => "window event",
+            });
             if window.label() == "main" {
                 system::on_main_window_event(window, event);
             } else if window.label() == pet::LABEL {
@@ -2063,7 +2198,14 @@ pub fn run() {
                     let from = webview.url().ok();
                     if let discord_web::Outside::Browser(target) = discord_web::route(url, is_kryoto(url, webview.app_handle()), from.as_ref()) {
                         let signing_in = target.path().trim_end_matches('/') == "/api/auth/discord";
-                        let body = if signing_in {
+                        // kryo.to's sign-in box waits for this sign-in itself
+                        // (0.17.23 and later): the browser comes back to this PC
+                        // with it (signin_handoff.rs).
+                        let handed = signing_in && signin_handoff::code_in(&target).is_some();
+                        let target = if handed { signin_handoff::start(webview.app_handle(), &target) } else { target };
+                        let body = if handed {
+                            "Sign in with Discord in your browser. Kryoto Desktop signs in by itself when you are done."
+                        } else if signing_in {
                             "Kryoto never shows Discord's sign-in itself. Signed in there? Choose Sign in with your phone here, and approve it in the browser."
                         } else {
                             "Kryoto never shows Discord's sign-in itself, so Discord's pages open in your browser."
@@ -2137,6 +2279,7 @@ pub fn run() {
             );
             let load = STORE_LOAD.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if loading {
+                KRYOTO_ANSWERED.store(false, std::sync::atomic::Ordering::SeqCst);
                 // The page's `load` waits for every image, ad and frame on it;
                 // one that stalls kept "Checking your account" up for minutes.
                 // The script (and the account check in it) goes in as soon as
@@ -2158,6 +2301,9 @@ pub fn run() {
             } else {
                 let kryo = is_kryoto(payload.url(), webview.app_handle());
                 let _ = webview.eval(store_script(kryo));
+                if kryo && !KRYOTO_ANSWERED.load(std::sync::atomic::Ordering::SeqCst) {
+                    watch_store_is_kryoto(webview.clone(), load, payload.url().to_string());
+                }
                 if kryo {
                     presence::beat(webview.app_handle());
                     if sign_out_is_due() {
@@ -2184,6 +2330,8 @@ pub fn run() {
             repair::repair_support,
             repair::repair_support_url,
             links::take_pending_link,
+            update_mirror::update_check_mirror,
+            store_mint_release,
             display_env::display_rendered,
             game_logs::game_logs,
             remote::remote_snapshot,

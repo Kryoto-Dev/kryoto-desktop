@@ -79,7 +79,10 @@ pub fn keyring_available() -> bool {
         const PROBE: &str = "probe";
         let ok = keyring_write(PROBE, "1").is_ok() && keyring_read(PROBE).ok().flatten().is_some_and(|v| v.as_str() == "1");
         let _ = keyring_remove(PROBE);
-        ok
+        // A store that answers but forgets at every restart (SteamOS Game
+        // Mode, KB-0368) would lose chat's sign-in and its database key:
+        // the passphrase file instead, as with no store at all.
+        ok && !crate::keyring_memory::forgets()
     })
 }
 

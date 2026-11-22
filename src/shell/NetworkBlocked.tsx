@@ -10,6 +10,12 @@ export const WAYS_AROUND = [
   'Ask your internet provider, or whoever runs this network, to unblock kryo.to.',
 ]
 
+/**
+ * kryo.to's page on what to do when a network blocks it. A constant, so its
+ * final address can be set in one place.
+ */
+export const BLOCKED_HELP_URL = 'https://kryo.to/help/blocked'
+
 /** The one line that says it, for the notice above the footer and the Store. */
 export const BLOCKED_LINE = 'Your network seems to be blocking kryo.to. A VPN, your phone’s hotspot or other DNS gets around it.'
 

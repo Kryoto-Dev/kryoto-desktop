@@ -2107,11 +2107,7 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
     }
     let mut unreachable = None;
     for family in route_families() {
-        let session = match crate::phone::session_over(app, Some(family_addr(family))) {
-            Ok(session) => session,
-            Err(e) if e.starts_with("Sign in") => return Err(signed_out(app, &d)),
-            Err(e) => return Err(e),
-        };
+        let session = crate::phone::session_over(app, Some(family_addr(family)))?;
         // An add-on from a game's Add-ons & DLC card: that release's own link.
         let minted = if let Some(release) = &d.addon_release {
             crate::phone::mint_release(app, &session, release, None).await.map(|url| crate::phone::Minted::Link { url, title: String::new() })
@@ -2163,13 +2159,18 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
     Err(unreachable.unwrap_or_else(|| "Could not reach kryo.to.".into()))
 }
 
-/// kryo.to does not know this app's account, so it mints nothing here. An
-/// add-on still has its game's download window, where the page's own check
-/// lets a signed-out player through: it opens, and the link its Download
-/// mints carries the row on (`waiting_addon`, which looks for "download
-/// window" in the text). A game says to sign in.
+/// kryo.to does not know this app's account (a guest, or a session it no
+/// longer takes), so it mints nothing here. Either way the row waits for a
+/// sign-in and goes again by itself once kryo.to reports one
+/// (phone.rs `wait_for_sign_in`). A game opens Sign in. An add-on still has
+/// its game's download window, where the page's own check lets a signed-out
+/// player through: that opens instead, and the link its Download mints
+/// carries the row on (`waiting_addon`, which looks for "download window" in
+/// the text).
 fn signed_out<R: Runtime>(app: &AppHandle<R>, d: &Download) -> String {
-    if d.addon_release.is_none() {
+    let addon = d.addon_release.is_some();
+    crate::phone::wait_for_sign_in(app, &d.id, !addon);
+    if !addon {
         return crate::phone::SIGNED_OUT.into();
     }
     if let Some(slug) = d.slug.as_deref().filter(|s| open_window_once(s)) {
@@ -2180,7 +2181,7 @@ fn signed_out<R: Runtime>(app: &AppHandle<R>, d: &Download) -> String {
 
 /// An add-on row while nobody is signed in to kryo.to here (see `signed_out`).
 pub const ADDON_SIGNED_OUT: &str =
-    "You are signed out of kryo.to, so the app cannot fetch this add-on by itself. Sign in and press Retry, or press Download on it in the game's download window.";
+    "You are signed out of kryo.to, so the app cannot fetch this add-on by itself. Sign in and it carries on, or press Download on it in the game's download window.";
 
 /// Our own link refused (made for another network, or run out), and no
 /// family passes: this app mints the same file again for this PC, so the
@@ -3729,11 +3730,15 @@ async fn probe_families(url: &str, families: &[u8], jar: &Arc<reqwest::cookie::J
 /// view's way out (a proxy, a VPN, Encrypted Client Hello: 11 of the 29 also
 /// logged "kryo.to answers the Store but not this app's own requests"), the
 /// downloader was refused again, and the page opened again. Now a signed-out
-/// player is told to sign in, which lets the app mint over its own
-/// connection; a signed-in one, whose app minted and was still refused three
-/// times, is told what does it. Only an expired link opens the page.
+/// player is asked to sign in, which lets the app mint over its own
+/// connection, and the row goes again by itself once signed in; a signed-in
+/// one, whose app minted and was still refused three times, is told what
+/// does it. Only an expired link opens the page.
 fn refused_ours<R: Runtime>(app: &AppHandle<R>, id: &str, code: u16) -> String {
-    let signed_in = crate::phone::session(app).is_ok();
+    let signed_in = crate::phone::session(app).is_ok_and(|s| s.signed_in());
+    if !signed_in && code != 410 {
+        crate::phone::wait_for_sign_in(app, id, true);
+    }
     if code == 410 {
         if let Some(slug) = edit(app, id, |_| {}).and_then(|d| d.slug) {
             let _ = app.emit_to("main", "store-download-page", slug);
@@ -3746,7 +3751,7 @@ fn refused_ours<R: Runtime>(app: &AppHandle<R>, id: &str, code: u16) -> String {
 fn refused_own_text(code: u16, signed_in: bool) -> String {
     match (code, signed_in) {
         (410, _) => refused_text(410, false),
-        (_, false) => "kryo.to refused the link: it was made for another connection than the one this app downloads over (a VPN, a proxy, or a mobile or satellite line can do this). Sign in to kryo.to in Kryoto Desktop and press Retry: the app then asks for the link over its own connection.".into(),
+        (_, false) => "kryo.to refused the link: it was made for another connection than the one this app downloads over (a VPN, a proxy, or a mobile or satellite line can do this). Sign in to kryo.to in Kryoto Desktop: the app then asks for the link over its own connection and carries on by itself.".into(),
         (_, true) => "kryo.to refused the link three times: this PC reaches kryo.to and its download server from different networks (a VPN, a proxy, or a mobile or satellite line that changes address can do this). Press Retry, turn the VPN or proxy off for kryo.to, or download the game from a mirror on its page.".into(),
     }
 }

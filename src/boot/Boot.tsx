@@ -295,6 +295,18 @@ function GuestButton({ onGuest }: { onGuest: () => void }) {
   )
 }
 
+/** How long the box says "Signing you in" before it shows the page again. */
+const FINISH_WAIT_MS = 12_000
+
+/** kryo.to's pages for signing in, where the box stays open. */
+function onSignInPage(url: string): boolean {
+  try {
+    return /^\/(login|register|signup|link|invite|recover|forgot-password|reset-password|verify-email)(\/|$)/.test(new URL(url).pathname)
+  } catch {
+    return true
+  }
+}
+
 /** kryo.to's sign-in page in a box, in the Store's web view. */
 function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack: () => void; onRetry: () => void }) {
   const slot = useRef<HTMLDivElement | null>(null)
@@ -325,6 +337,22 @@ function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack
     }
   }, [])
 
+  // Signed in on the page: it moves on from the sign-in pages while the app
+  // takes the account in. Said here, over the page, until the account arrives
+  // (Welcome then goes on by itself); a page that stays somewhere else for long
+  // is shown again.
+  const finishing = opened && !page.loading && !page.error && !!page.url && !onSignInPage(page.url)
+  const [stale, setStale] = useState(false)
+  useEffect(() => {
+    setStale(false)
+    if (!finishing || !isTauri()) return
+    void setStoreVisible(false)
+    const t = window.setTimeout(() => {
+      setStale(true)
+      void setStoreVisible(true)
+    }, FINISH_WAIT_MS)
+    return () => window.clearTimeout(t)
+  }, [finishing])
   const ready = opened && !page.loading
   return (
     <section className="no-drag kryo-pop kryo-radius grid min-h-0 w-[460px] grid-rows-[auto_1fr] overflow-hidden border border-border bg-background shadow-2xl shadow-black/70">
@@ -357,6 +385,13 @@ function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack
             <Button variant="primary" onClick={onRetry}>
               Try again
             </Button>
+          </>
+        ) : finishing && !stale ? (
+          <>
+            <Matrix state="busy" className="size-5 text-foreground/70" />
+            <p role="status" className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
+              Signing you in
+            </p>
           </>
         ) : !ready ? (
           <AsciiBar fraction={null} cells={16} showPct={false} className="text-muted-foreground" />

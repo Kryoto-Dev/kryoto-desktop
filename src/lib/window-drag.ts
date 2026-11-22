@@ -13,12 +13,29 @@ import { isTauri } from '@/lib/window'
  * swallowed the second click of a double-click), and a double press on an
  * area marked `data-maximize` maximizes or restores.
  */
+/**
+ * A touch screen (a ROG Ally, a Legion Go, a touch laptop): no `app-region`
+ * at all (styles.css `[data-touch]`). Chromium on Windows does not deliver a
+ * tap to a control inside a `drag` region, even one marked `no-drag`: on a
+ * ROG Ally, Sign in and the close button did nothing to a finger, while the
+ * pet (a window with no drag region) answered (KB-0369). Dragging the window
+ * by its title bar is then this file's, as on Linux.
+ */
+export function markTouchScreen() {
+  try {
+    if (navigator.maxTouchPoints > 0) document.documentElement.dataset.touch = '1'
+  } catch {
+    /* only a styling hint */
+  }
+}
+
 const CONTROL = '.drag, .no-drag, button, a[href], input, textarea, select, [role="button"], [contenteditable="true"]'
 /** How far the pointer moves with the button down before the window follows. */
 const SLOP = 4
 
 export function installWindowDrag() {
   if (!isTauri()) return
+  markTouchScreen()
   let armed: { x: number; y: number } | null = null
 
   window.addEventListener('mousedown', (e) => {

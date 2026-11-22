@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ArrowUpRight, RotateCw } from '@/ui/pixel-icons'
 import { AsciiBar, Busy, Button, Caption, Modal } from '@/ui'
-import { explainUpdateError, updateFraction, updates, useUpdates } from '@/lib/updates'
+import { DIRECT_DOWNLOAD, explainUpdateError, updateFraction, updates, useUpdates } from '@/lib/updates'
 import { openExternal } from '@/lib/window'
 import { errorText } from '@/lib/bridge'
 import { usePromptTurn } from '@/lib/prompts'
@@ -33,8 +33,44 @@ export function UpdatePrompt({ busy }: { busy: { games: number; downloads: numbe
 
   const { update } = state
   const working = state.status === 'downloading' || state.status === 'ready'
-  const turn = usePromptTurn('update', !!update && (!dismissed || working))
-  if (!update || !turn) return null
+  // The check at launch reached neither GitHub nor kryo.to: said once in a few
+  // days, with the download by hand, rather than never (KB-0352).
+  const [unreachableSeen, setUnreachableSeen] = useState(() => recentlyTold())
+  const unreachable = !update && state.status === 'failed' && state.unreachable && !unreachableSeen
+  const turn = usePromptTurn('update', (!!update && (!dismissed || working)) || unreachable)
+  if (!turn) return null
+  if (unreachable) {
+    const close = () => {
+      remember()
+      setUnreachableSeen(true)
+    }
+    return (
+      <Modal
+        title="Could not check for updates"
+        onClose={close}
+        footer={
+          <>
+            <Button onClick={close}>Later</Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                close()
+                void openExternal(DIRECT_DOWNLOAD).catch(() => {})
+              }}
+            >
+              Download page <ArrowUpRight className="size-3" aria-hidden />
+            </Button>
+          </>
+        }
+      >
+        <p className="text-xs leading-relaxed text-foreground">
+          This network lets Kryoto Desktop reach neither GitHub nor kryo.to, so it cannot tell whether a new version is out. Your library and
+          games still work. The newest version is always on its download page.
+        </p>
+      </Modal>
+    )
+  }
+  if (!update) return null
   const problem = state.status === 'failed' ? explainUpdateError(state.error) : null
 
   return (
@@ -78,7 +114,12 @@ export function UpdatePrompt({ busy }: { busy: { games: number; downloads: numbe
           </div>
         ) : null}
         {state.status === 'failed' ? (
-          <p className="text-[11px] leading-relaxed text-destructive">{problem?.headline ?? state.error}</p>
+          <div className="grid gap-2">
+            <p role="alert" className="text-[11px] leading-relaxed text-destructive">
+              {problem?.headline ?? state.error}
+            </p>
+            {problem?.manual ? <ManualDownload /> : null}
+          </div>
         ) : null}
       </div>
     </Modal>
@@ -123,8 +164,37 @@ export function UpdateCheck({ onInstall }: { onInstall: () => void }) {
         ) : null}
       </div>
       {line ? <p className="max-w-xs text-[11px] leading-relaxed text-muted-foreground">{line}</p> : null}
+      {problem?.manual ? <ManualDownload /> : null}
     </div>
   )
+}
+
+/** The newest version's download page, for when the app cannot update itself. */
+function ManualDownload() {
+  return (
+    <Button size="sm" className="justify-self-start" onClick={() => void openExternal(DIRECT_DOWNLOAD).catch(() => {})}>
+      Download it yourself <ArrowUpRight className="size-3" aria-hidden />
+    </Button>
+  )
+}
+
+const TOLD_KEY = 'kryoto.update-unreachable-told'
+const TOLD_EVERY_MS = 3 * 24 * 3600 * 1000
+
+function recentlyTold(): boolean {
+  try {
+    return Date.now() - Number(localStorage.getItem(TOLD_KEY) ?? 0) < TOLD_EVERY_MS
+  } catch {
+    return false
+  }
+}
+
+function remember() {
+  try {
+    localStorage.setItem(TOLD_KEY, String(Date.now()))
+  } catch {
+    /* only a reminder */
+  }
 }
 
 function Row({ k, v, strong = false }: { k: string; v: string; strong?: boolean }) {

@@ -338,6 +338,17 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     [go, guest],
   )
   const signIn = useCallback(() => openWeb('/login?next=/'), [openWeb])
+  // A download that needs an account (a guest's): Sign in opens, and the
+  // download carries on by itself afterwards (src-tauri phone.rs).
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on('sign-in-for-download', () => signIn()).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [signIn])
   // Pages deep in the app ask for a Store page or a Settings section by event
   // (lib/window.ts), so the view switches instead of loading behind it.
   useEffect(() => {

@@ -135,6 +135,16 @@ export function useBrowserPage(homeUrl: string = BROWSER_HOME) {
         setState((current) => ({ ...current, loading: false, retrying: false, error: { kind: 'failed', message: fatalMessage(reason, url), url } }))
       }),
     )
+    // kryo.to's address loaded something that is not Kryoto: a network's block
+    // page, or the web view's own error page (src-tauri lib.rs
+    // `watch_store_is_kryoto`). The shell's own screen goes over it; the next
+    // load clears it.
+    keep(
+      listen<BrowserErrorPayload>('store-unreached', (event) => {
+        const url = event.payload.url ?? stateRef.current.url
+        setState((current) => ({ ...current, loading: false, retrying: false, error: { kind: 'blocked', message: event.payload.reason ?? 'kryo.to did not load.', url } }))
+      }),
+    )
     // Where the view already is (the window was reloaded).
     void catalogUrl()
       .then((url) => !cancelled && url && setState((c) => (c.url === url ? c : { ...c, url })))

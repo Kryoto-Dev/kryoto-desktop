@@ -291,7 +291,8 @@ pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>) -> Re
     if library::is_running(&app, &game.id) {
         return Err(format!("Close {} first: its files are in use.", game.title));
     }
-    let Ok(session) = crate::phone::session(&app) else {
+    // Only a signed-in app can mint them (KB-0326): a guest gets the window.
+    let Some(session) = crate::phone::session(&app).ok().filter(|s| s.signed_in()) else {
         return Ok(AddonsGot { queued: Vec::new(), store: true });
     };
     let listing = crate::phone::listing(&session, &slug).await?;

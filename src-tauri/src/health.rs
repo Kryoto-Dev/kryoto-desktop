@@ -358,6 +358,9 @@ async fn ask_site(client: &reqwest::Client, endpoint: &str) -> Result<Site, Stri
             Err(e) => why = crate::logging::why(&e),
         }
     }
+    // A block page answering for kryo.to on this network's DNS: the next look
+    // asks a public resolver where kryo.to is (net.rs `note_failure`).
+    crate::net::note_failure(endpoint, &why);
     Err(why)
 }
 
