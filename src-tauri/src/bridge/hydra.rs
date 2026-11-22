@@ -44,6 +44,7 @@ impl From<HydraGame> for Incoming {
             custom_hero: h.custom_hero,
             developer: h.developer,
             year: h.year,
+            cannot: None,
         }
     }
 }

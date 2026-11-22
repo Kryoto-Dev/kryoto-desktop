@@ -16,6 +16,8 @@ export type Launcher = {
   running: boolean
   /** Its games stay in it, and it can be read while it runs. */
   keeps: boolean
+  /** Its games can be brought in while it is open. */
+  openOk: boolean
   /** Games can go out to it too. */
   exports: boolean
 }
@@ -29,8 +31,10 @@ export type BridgeRow = {
   lastPlayed: number | null
   executable: string | null
   cover: string | null
-  /** `matched` (Kryoto has it), `own` (it does not), `ask` (maybe), `stays` (remains in its launcher), `missing` (not on this PC), `imported` (brought over before). */
-  kind: 'matched' | 'own' | 'ask' | 'stays' | 'missing' | 'imported'
+  /** `matched` (Kryoto has it), `own` (it does not), `ask` (maybe), `stays` (remains in its launcher), `missing` (not on this PC), `skipped` (its launcher starts it in a way Kryoto cannot), `imported` (brought over before: updated). */
+  kind: 'matched' | 'own' | 'ask' | 'stays' | 'missing' | 'skipped' | 'imported'
+  /** For `missing` and `skipped`: why. */
+  why: string | null
   options: BridgeChoice[]
   /** What made the match sure. */
   how: 'steamAppid' | 'executable' | 'folder' | 'title' | null
@@ -44,7 +48,18 @@ export type BridgeScan = { dir: string | null; running: boolean; catalog: boolea
 /** What a row becomes: a kryo.to game, or the player's own (`slug: null`). */
 export type BridgeDecision = { key: string; slug: string | null }
 
-export type BridgeImported = { linked: number; own: number; joined: number; seconds: number; /** Save versions are on: the games' saves are being kept now. */ saves: boolean }
+export type BridgeImported = {
+  linked: number
+  own: number
+  joined: number
+  seconds: number
+  /** Save versions are on: the games' saves are being kept now. */
+  saves: boolean
+  /** Brought over before, and brought up to date now. */
+  updated: number
+  /** The launcher's games that did not come over, and why. */
+  skipped: { title: string; why: string }[]
+}
 
 export type ExportGame = { id: string; title: string; cover: string | null; nsfw: boolean; /** Already there, from an earlier send. */ sent: boolean }
 
