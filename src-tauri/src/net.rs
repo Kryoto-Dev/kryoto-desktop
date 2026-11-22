@@ -166,6 +166,13 @@ impl reqwest::dns::Resolve for Resolver {
     }
 }
 
+/// Where `host` is, as every client here would look it up (`Resolver`): for a
+/// client this app does not build itself, the updater's, to be told outright.
+pub async fn lookup(host: &str, port: u16) -> Vec<SocketAddr> {
+    let system = tokio::net::lookup_host((host, port)).await.map(|a| a.collect::<Vec<_>>()).map_err(|e| e.to_string());
+    settle(host, system).await.map(|addrs| addrs.into_iter().map(|a| SocketAddr::new(a.ip(), port)).collect()).unwrap_or_default()
+}
+
 /// Every HTTP client in the app starts here.
 pub fn builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().dns_resolver(std::sync::Arc::new(Resolver))
@@ -187,7 +194,7 @@ pub fn kryoto_tls(url: &str, builder: reqwest::ClientBuilder) -> reqwest::Client
 }
 
 /// The config `kryoto_tls` would use for `url`, if any.
-fn ech_for(url: &str) -> Option<std::sync::Arc<rustls::ClientConfig>> {
+pub fn ech_for(url: &str) -> Option<std::sync::Arc<rustls::ClientConfig>> {
     let host = url::Url::parse(url).ok().filter(|u| u.scheme() == "https")?.host_str()?.to_ascii_lowercase();
     if !ours(&host) {
         return None;

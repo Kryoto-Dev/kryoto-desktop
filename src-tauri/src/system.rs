@@ -380,6 +380,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .tooltip(crate::channel::APP_NAME)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
+            crate::logging::step("menu pick");
             let id = event.id().as_ref();
             // Every menu's clicks arrive here, the pet's right-click menu
             // included: only the tray's own items bring Kryoto up.
@@ -403,7 +404,14 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 position,
                 ..
             } = event {
-                show_tray_panel(tray.app_handle(), position);
+                crate::logging::step("tray click");
+                // Not from inside the tray's event: making the panel's web view
+                // the first time runs Windows' message loop, which handed tao
+                // its next event while this one was still being handled ("event
+                // handler is re-entrant", KB-0370). From a thread, the window is
+                // made the way every other window is, through the event loop.
+                let app = tray.app_handle().clone();
+                std::thread::spawn(move || show_tray_panel(&app, position));
             }
             #[cfg(not(windows))]
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {

@@ -2133,6 +2133,11 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
                 unreachable = Some(e);
                 continue;
             }
+            // A guest: Sign in opens, and the row goes again once signed in.
+            Err(crate::phone::MintError::Other(e)) if e == crate::phone::SIGN_IN_FIRST => {
+                crate::phone::wait_for_sign_in(app, id);
+                return Err(e);
+            }
             Err(crate::phone::MintError::Other(e)) => return Err(e),
             // Cloudflare's check, which only the game's download window can
             // pass: it opens, and the link its Download mints carries this

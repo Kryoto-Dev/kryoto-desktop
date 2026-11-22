@@ -63,6 +63,25 @@ fn log_path(dir: &std::path::Path) -> PathBuf {
     dir.join("kryoto-desktop.log")
 }
 
+/// The last few things the window loop handled (a window event, a tray
+/// click, a menu pick), for a crash report: short labels, never content.
+static TRAIL: Mutex<std::collections::VecDeque<&'static str>> = Mutex::new(std::collections::VecDeque::new());
+const TRAIL_LEN: usize = 8;
+
+/// Note one step of the window loop, for the next crash report.
+pub fn step(what: &'static str) {
+    if let Ok(mut t) = TRAIL.try_lock() {
+        if t.len() == TRAIL_LEN {
+            t.pop_front();
+        }
+        t.push_back(what);
+    }
+}
+
+fn trail() -> String {
+    TRAIL.try_lock().map(|t| t.iter().copied().collect::<Vec<_>>().join(" > ")).unwrap_or_default()
+}
+
 /// Start logging. Call once, first thing in `setup`.
 pub fn init<R: Runtime>(app: &AppHandle<R>) {
     let dir = app
@@ -94,7 +113,14 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
             .map(|s| s.to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic".into());
-        let text = format!("v{} {payload}{location}", env!("CARGO_PKG_VERSION"));
+        // What the window loop was doing just before (KB-0370: tao's
+        // "event handler is re-entrant" comes with no stack of ours).
+        let trail = trail();
+        let text = if trail.is_empty() {
+            format!("v{} {payload}{location}", env!("CARGO_PKG_VERSION"))
+        } else {
+            format!("v{} {payload}{location} (just before: {trail})", env!("CARGO_PKG_VERSION"))
+        };
         write_line("crash", "panic", &text);
         if let Some(l) = LOGGER.get() {
             let _ = std::fs::write(l.dir.join("last-crash.txt"), &text);

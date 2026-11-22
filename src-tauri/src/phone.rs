@@ -722,6 +722,9 @@ pub struct Session {
     pub client: reqwest::Client,
     pub endpoint: String,
     cookie: String,
+    /// The Store holds kryo.to's session cookie: without it kryo.to cannot
+    /// count a mint as this install's (a guest), and only the check can.
+    signed_in: bool,
 }
 
 impl Session {
@@ -741,20 +744,69 @@ pub fn session<R: Runtime>(app: &AppHandle<R>) -> Result<Session, String> {
 pub fn session_over<R: Runtime>(app: &AppHandle<R>, local: Option<std::net::IpAddr>) -> Result<Session, String> {
     let endpoint = settings::catalog_endpoint(&settings::load(app));
     let base = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
-    let cookie = app
-        .get_webview(crate::STORE)
-        .and_then(|view| view.cookies_for_url(base.clone()).ok())
-        .map(|jar| jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
-        .filter(|c| !c.is_empty())
-        .ok_or("Sign in to kryo.to in Kryoto Desktop first.".to_string())?;
+    let jar = app.get_webview(crate::STORE).and_then(|view| view.cookies_for_url(base.clone()).ok()).unwrap_or_default();
+    let signed_in = jar.iter().any(|c| c.name() == SESSION_COOKIE && !c.value().is_empty());
+    // A guest has none of kryo.to's cookies: a mint then says to sign in
+    // (`mint_release`), and its download waits for it.
+    let cookie = jar.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; ");
     let client = crate::net::builder()
-        .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(app_user_agent())
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .local_address(local)
         .build()
         .map_err(|e| e.to_string())?;
-    Ok(Session { client, endpoint, cookie })
+    Ok(Session { client, endpoint, cookie, signed_in })
+}
+
+/// What a download that needs an account says while it waits for one.
+pub const SIGN_IN_FIRST: &str = "Sign in to kryo.to in Kryoto Desktop first.";
+
+/// Downloads that stopped for a sign-in, retried once there is one.
+static WAITING_FOR_SIGN_IN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Download `id` needs an account: the shell opens Sign in (once for a batch),
+/// and the download carries on by itself when kryo.to reports one
+/// (`signed_in_again`), instead of sitting on an error.
+pub fn wait_for_sign_in<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    let first = {
+        let Ok(mut waiting) = WAITING_FOR_SIGN_IN.lock() else { return };
+        let first = waiting.is_empty();
+        if !waiting.iter().any(|w| w == id) {
+            waiting.push(id.to_string());
+        }
+        first
+    };
+    if first {
+        let _ = tauri::Emitter::emit_to(app, "main", "sign-in-for-download", ());
+    }
+}
+
+/// kryo.to reports an account: the downloads that waited for one go again.
+pub fn signed_in_again(app: &AppHandle) {
+    let ids = WAITING_FOR_SIGN_IN.lock().map(|mut w| std::mem::take(&mut *w)).unwrap_or_default();
+    for id in ids {
+        if let Err(e) = crate::downloads::download_resume(app.clone(), id.clone()) {
+            logging::info("download", &format!("{id}: not retried after signing in: {e}"));
+        }
+    }
+}
+
+/// kryo.to's session cookie (kryo.to lib/session.ts `SESSION_COOKIE`).
+const SESSION_COOKIE: &str = "kryo_session";
+
+/// This app's user agent for kryo.to, with the system in it the way a
+/// browser's has: kryo.to's download check logs and counts by it, and
+/// `KryotoDesktop/x.y.z` alone read as "an unrecognised OS".
+pub fn app_user_agent() -> String {
+    let system = if cfg!(windows) {
+        "Windows NT 10.0; Win64; x64"
+    } else if cfg!(target_os = "linux") {
+        "X11; Linux x86_64"
+    } else {
+        "Unknown"
+    };
+    format!("Mozilla/5.0 ({system}) KryotoDesktop/{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// `/api/games/<slug>/downloads` as the signed-in app, which kryo.to answers
@@ -777,6 +829,12 @@ pub async fn listing(session: &Session, slug: &str) -> Result<serde_json::Value,
 pub async fn mint_release<R: Runtime>(app: &AppHandle<R>, session: &Session, release_id: &str, turnstile_token: Option<&str>) -> Result<String, MintError> {
     if release_id.is_empty() || !release_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err("kryo.to sent a release without an ID.".to_string().into());
+    }
+    // Signed out (a guest): kryo.to mints for this app only for an account
+    // (it answers 401 sign_in_required). Said without a request it would
+    // refuse and log; the download waits for the sign-in (`wait_for_sign_in`).
+    if !session.signed_in && turnstile_token.is_none() {
+        return Err(MintError::Other(SIGN_IN_FIRST.into()));
     }
     let install = logging::install_id(app);
     let (mut status, mut body) = post_mint(session, release_id, &install, turnstile_token, None).await?;
@@ -837,7 +895,7 @@ fn mint_refusal(status: u16, body: &serde_json::Value) -> MintError {
         (403, Some("supporter_required")) => MintError::Other(crate::downloads::SUPPORTER_REQUIRED.to_string()),
         (403, error) if is_proof_request(error) => MintError::Other("kryo.to did not take this PC's proof. Retry in a moment.".into()),
         (403, _) => MintError::Challenge,
-        (401, _) => MintError::Other("Sign in to kryo.to in Kryoto Desktop first.".into()),
+        (401, _) => MintError::Other(SIGN_IN_FIRST.into()),
         (429, _) => MintError::Other("Too many downloads started. Wait a moment.".into()),
         (404, _) => MintError::Other("That build is no longer on Kryoto's filehost.".into()),
         (_, Some(text)) => MintError::Other(text.to_string()),
@@ -1185,6 +1243,19 @@ pub fn phone_revoke(app: AppHandle, id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// kryo.to's download check tells the app and its system by the user agent
+    /// (kryo.to lib/client.ts, osOf in the download route).
+    #[test]
+    fn the_app_says_what_it_runs_on() {
+        let ua = app_user_agent();
+        assert!(ua.contains(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION"))), "{ua}");
+        if cfg!(windows) {
+            assert!(ua.contains("Windows"), "{ua}");
+        } else if cfg!(target_os = "linux") {
+            assert!(ua.contains("Linux"), "{ua}");
+        }
+    }
 
     /// The proof kryo.to's download gate checks: SHA-256 of `<nonce>.<counter>`
     /// starting with `bits` zero bits (lib/download-gate.ts hasLeadingZeroBits).
