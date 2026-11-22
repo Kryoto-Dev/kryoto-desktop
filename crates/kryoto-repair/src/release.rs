@@ -224,10 +224,7 @@ pub async fn install<F: Fn(&str, Option<u8>)>(
         output.write_all(&chunk).map_err(|e| e.to_string())?;
         let percent = ((done * 100 / asset.size).min(100)) as u8;
         if last != Some(percent) {
-            progress(
-                &format!("Downloading {} latest release", source.label()),
-                Some(percent),
-            );
+            progress(&fetching_line(source.label(), done, asset.size), Some(percent));
             last = Some(percent);
         }
     }
@@ -248,10 +245,14 @@ pub async fn install<F: Fn(&str, Option<u8>)>(
             );
         }
     }
-    progress("Unpacking the emulator", None);
+    progress(&format!("Unpacking {}, once: Kryoto keeps it for next time", source.label()), None);
     let unpacked = stage.join("files");
     std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
-    unpack(&archive, &unpacked)?;
+    // Its files as they come out, so a slow disk or a big archive never
+    // looks stuck (the first switch sat on one line for minutes).
+    unpack(&archive, &unpacked, &|files| {
+        progress(&format!("Unpacking {}, once: {files} files so far", source.label()), None)
+    })?;
     let _ = locate(&unpacked, source)?;
     let mut files = BTreeMap::new();
     for entry in walkdir::WalkDir::new(&unpacked)
@@ -292,12 +293,26 @@ pub async fn install<F: Fn(&str, Option<u8>)>(
     })
 }
 
-fn unpack(archive: &Path, root: &Path) -> Result<(), String> {
+/// What the player reads while an emulator comes from its upstream release:
+/// that it happens once, and how far it is.
+fn fetching_line(label: &str, done: u64, size: u64) -> String {
+    let mb = |b: u64| b as f64 / 1_048_576.0;
+    format!(
+        "Getting {label}, once (Kryoto keeps it for next time): {:.1} of {:.1} MB",
+        mb(done),
+        mb(size)
+    )
+}
+
+fn unpack(archive: &Path, root: &Path, files_out: &dyn Fn(u32)) -> Result<(), String> {
     let mut total = 0u64;
     let mut count = 0u32;
     if archive.extension().is_some_and(|e| e == "7z") {
         sevenz_rust::decompress_file_with_extract_fn(archive, root, |entry, reader, _| {
             count += 1;
+            if count.is_multiple_of(10) {
+                files_out(count);
+            }
             total = total.saturating_add(entry.size());
             if count > 10000 || total > 1024 * 1024 * 1024 {
                 return Err(sevenz_rust::Error::other(
@@ -324,6 +339,9 @@ fn unpack(archive: &Path, root: &Path) -> Result<(), String> {
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
             count += 1;
+            if count.is_multiple_of(10) {
+                files_out(count);
+            }
             total = total.saturating_add(entry.size());
             if count > 10000
                 || total > 1024 * 1024 * 1024
@@ -401,4 +419,13 @@ pub fn locate(root: &Path, source: Emulator) -> Result<ToolPaths, String> {
         return Err("The emulator archive is missing required files.".into());
     }
     Ok(paths)
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    #[test]
+    fn the_emulator_download_says_it_happens_once_and_how_far_it_is() {
+        let line = super::fetching_line("gbe_fork", 3 * 1_048_576, 12 * 1_048_576);
+        assert_eq!(line, "Getting gbe_fork, once (Kryoto keeps it for next time): 3.0 of 12.0 MB");
+    }
 }
