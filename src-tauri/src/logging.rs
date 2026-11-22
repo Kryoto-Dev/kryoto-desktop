@@ -261,9 +261,22 @@ fn benign(message: &str) -> bool {
     message.trim_start().starts_with("ResizeObserver loop")
 }
 
+/// A network that blocks or filters kryo.to, as `hint` reads it: the
+/// connection cut on the way, a certificate that is not the site's (a block
+/// page answering in its place), or the name not looked up. Not a fault in this
+/// app: the player is shown what to do (the Store's blocked screen, health.rs),
+/// and it stays in this PC's log rather than being reported as an app error.
+pub fn network_block(message: &str) -> bool {
+    let t = message.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+    has(&["os error 10053", "os error 10054", "connection reset", "connection aborted", "forcibly closed"])
+        || has(&["unknownissuer", "invalid peer certificate", "certificate verify failed", "invalidcertificate", "self signed", "self-signed"])
+        || has(&["dns error", "no such host", "failed to lookup", "name or service not known", "os error 11001", "temporary failure in name resolution"])
+}
+
 /// Written to the log, and queued for kryo.to.
 pub fn error(scope: &str, message: &str) {
-    if benign(message) {
+    if benign(message) || network_block(message) {
         write_line("warn", scope, message);
         return;
     }
@@ -416,6 +429,23 @@ mod tests {
         assert!(super::why(&E("received fatal alert: HandshakeFailure", None)).contains("secure connection was refused"));
         assert!(super::why(&E("dns error: No such host is known. (os error 11001)", None)).contains("DNS blocking"));
         assert_eq!(super::why(&E("something else", None)), "something else");
+    }
+
+    /// A network that blocks kryo.to is the player's network, not an app error
+    /// (46 installs on 0.3.11 reported these as errors): kept in the log only.
+    #[test]
+    fn a_blocked_network_is_not_an_app_error() {
+        for message in [
+            "kryo.to answers the Store but not this app's own requests: error sending request: invalid peer certificate: UnknownIssuer",
+            "could not reach kryo.to: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "dns error: No such host is known. (os error 11001)",
+            "error trying to connect: failed to lookup address information: Name or service not known",
+        ] {
+            assert!(super::network_block(message), "{message}");
+        }
+        for message in ["TypeError: x is undefined", "operation timed out", "could not write the library: Access is denied. (os error 5)"] {
+            assert!(!super::network_block(message), "{message}");
+        }
     }
 
     /// KB-0251: from any window, however the page words its report.

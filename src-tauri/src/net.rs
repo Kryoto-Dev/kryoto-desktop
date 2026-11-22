@@ -103,9 +103,38 @@ async fn ask_public(host: &str) -> Vec<IpAddr> {
     found
 }
 
+/// One of our names, looked up on this network's DNS, led to a certificate
+/// that is not the site's: a DNS block that points kryo.to at a block page (on
+/// a public address, so `usable` cannot tell), which shows up as `invalid peer
+/// certificate: UnknownIssuer`. Such a block covers every name under kryo.to,
+/// so all of them are looked up with the public resolvers from then on, this
+/// run. The certificate is checked as always: only where it is asked changes.
+static MISLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A request to `url` failed with `error`: when it was a certificate that is
+/// not the site's on one of our names, stop trusting this network's DNS for them.
+pub fn note_failure(url: &str, error: &str) {
+    let Some(host) = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)) else { return };
+    if !ours(&host) || !wrong_certificate(error) {
+        return;
+    }
+    if !MISLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        crate::logging::warn("net", &format!("{host} answered with a certificate that is not its own on this network; Kryoto's names are looked up with a public resolver instead"));
+    }
+}
+
+fn wrong_certificate(error: &str) -> bool {
+    let t = error.to_ascii_lowercase();
+    ["unknownissuer", "invalid peer certificate", "notvalidforname", "certificate verify failed"].iter().any(|n| t.contains(n))
+}
+
+fn misled() -> bool {
+    MISLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// The addresses to use for `host`, given what the system's DNS said.
 async fn settle(host: &str, system: Result<Vec<SocketAddr>, String>) -> Result<Vec<SocketAddr>, String> {
-    if !ours(host) || usable(&system) {
+    if !ours(host) || (usable(&system) && !misled()) {
         return system;
     }
     let public = ask_public(host).await;
@@ -476,6 +505,21 @@ mod tests {
         let body = r#"{"Status":0,"Answer":[{"name":"kryo.to","type":1,"TTL":300,"data":"104.21.5.9"},{"name":"kryo.to","type":5,"data":"x.example."},{"name":"kryo.to","type":28,"data":"2606:4700:3030::6815:509"},{"name":"kryo.to","type":1,"data":"0.0.0.0"}]}"#;
         assert_eq!(addresses_in(body), vec!["104.21.5.9".parse::<IpAddr>().unwrap(), "2606:4700:3030::6815:509".parse().unwrap()]);
         assert!(addresses_in("<html>blocked</html>").is_empty());
+    }
+
+    /// A block page on a public address shows itself by its certificate:
+    /// from then on Kryoto's names are looked up elsewhere; other sites and
+    /// other failures change nothing.
+    #[test]
+    fn a_certificate_that_is_not_ours_stops_trusting_this_networks_dns() {
+        note_failure("https://github.com/x", "invalid peer certificate: UnknownIssuer");
+        note_failure("https://kryo.to/api/health", "operation timed out");
+        assert!(!misled());
+        assert!(wrong_certificate("error sending request: invalid peer certificate: UnknownIssuer"));
+        assert!(!wrong_certificate("connection reset by peer"));
+        note_failure("https://kryo.to/api/health", "error sending request: invalid peer certificate: UnknownIssuer");
+        assert!(misled());
+        MISLED.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Another site's lookup is never touched, whatever the system said.
