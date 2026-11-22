@@ -1595,10 +1595,8 @@ fn take_catalog_report(app: &tauri::AppHandle, state: BrowserReport) -> Result<(
             // Remote follows the signed-in account's own answer; signed out is off.
             remote::set_consent(&app, account.as_ref().map(|a| (a.remote, a.remote_decided)));
             chat::follow_account(&app, account.as_ref().map(|a| a.id.as_str()));
-            // Downloads that stopped for a sign-in go again.
-            if account.is_some() {
-                phone::signed_in_again(&app);
-            }
+            // Downloads that stopped for a sign-in go again once there is one.
+            phone::account_reported(&app, account.is_some());
             if account.is_none() {
                 collections::signed_out(&app);
             }

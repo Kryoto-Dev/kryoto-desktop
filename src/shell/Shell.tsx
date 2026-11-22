@@ -672,8 +672,9 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
 
   // What the library reports as an error goes in the log too.
   useEffect(() => {
-    if (lib.error && !lib.errorQuiet) logError('library', lib.error)
-  }, [lib.error, lib.errorQuiet])
+    // A launch failure names its catalog game (useLibrary.ts `reportSlug`).
+    if (lib.error && !lib.errorQuiet) logError('library', lib.errorSlug ? `${lib.error} [game ${lib.errorSlug}]` : lib.error)
+  }, [lib.error, lib.errorQuiet, lib.errorSlug])
 
   const gameById = (id: string) => lib.games.find((g) => g.id === id) ?? null
 

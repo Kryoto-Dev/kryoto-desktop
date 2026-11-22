@@ -983,6 +983,11 @@ fn enqueue_item<R: Runtime>(
     release: Option<String>,
     remote_id: Option<String>,
 ) -> Result<(), String> {
+    // A Download pressed for the game means kryo.to has it (again): its
+    // "gone" mark goes, so its row asks about it (catalog_gone.rs).
+    if let Some(slug) = slug.as_deref() {
+        crate::catalog_gone::set(app, slug, false);
+    }
     let state = app.state::<Downloads>();
     if let Some(id) = &remote_id {
         if state.list.lock().map_err(|_| "download list lock poisoned")?.iter().any(|d| &d.id == id) {
@@ -1653,6 +1658,22 @@ pub(crate) async fn find_slug(client: &reqwest::Client, endpoint: &str, name: &s
         .map(str::to_ascii_lowercase)
 }
 
+/// `GET <base>/api/games/<slug><rest>` for a download row's game, through the
+/// app's memory of games taken off kryo.to (catalog_gone.rs): a game that
+/// answered 404 or 410 in the last day is not asked again, and a new such
+/// answer is remembered. `None` for a removed game or an unreachable site.
+async fn ask_about_game<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, base: &str, slug: &str, rest: &str) -> Option<reqwest::Response> {
+    if crate::catalog_gone::is_gone(app, slug) {
+        return None;
+    }
+    let res = client.get(format!("{base}/api/games/{slug}{rest}")).send().await.ok()?;
+    if crate::catalog_gone::says_gone(res.status().as_u16()) {
+        crate::catalog_gone::set(app, slug, true);
+        return None;
+    }
+    Some(res)
+}
+
 pub(crate) async fn fetch_meta(client: &reqwest::Client, endpoint: &str, slug: &str) -> Option<CatalogMeta> {
     let res = client.get(format!("{endpoint}/api/games/{slug}")).send().await.ok()?;
     if !res.status().is_success() {
@@ -1869,7 +1890,8 @@ async fn fill_meta<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::C
         return;
     }
     let Some(slug) = &item.slug else { return };
-    if let Some(meta) = fetch_meta(client, endpoint, slug).await {
+    let Some(res) = ask_about_game(app, client, endpoint, slug, "").await.filter(|r| r.status().is_success()) else { return };
+    if let Some(meta) = res.json::<serde_json::Value>().await.ok().map(|json| meta_from_api(&json)) {
         edit(app, id, |d| {
             // The current release's size says nothing about another's.
             if d.release.is_none() {
@@ -1900,7 +1922,7 @@ async fn already_installed<R: Runtime>(app: &AppHandle<R>, id: &str, client: &re
     if installed.is_none() && d.mirror.is_none() {
         return false;
     }
-    let json = downloads_json(client, endpoint, &d).await;
+    let json = downloads_json(app, client, endpoint, &d).await;
     // The same build number, but kryo.to's file is another one now (replaced,
     // or a new upload that has no number): that is an update, not a second press.
     let installed = installed.filter(|g| !json.as_ref().is_some_and(|j| replaced(j, g.build_sha.as_deref(), d.release.as_deref())));
@@ -2057,9 +2079,9 @@ fn file_kind(json: &serde_json::Value, file: Option<&str>, page: Option<&str>) -
 
 /// What this row fetches. A DLC's link says so; anything else is asked of kryo.to.
 /// `/api/games/<slug>/downloads` for this row's game, when it names one.
-async fn downloads_json(client: &reqwest::Client, endpoint: &str, d: &Download) -> Option<serde_json::Value> {
+async fn downloads_json<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, endpoint: &str, d: &Download) -> Option<serde_json::Value> {
     let slug = d.slug.as_deref()?;
-    let res = client.get(format!("{endpoint}/api/games/{slug}/downloads")).send().await.ok()?;
+    let res = ask_about_game(app, client, endpoint, slug, "/downloads").await?;
     res.json::<serde_json::Value>().await.ok()
 }
 
@@ -2862,6 +2884,9 @@ fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<Strin
 async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8, settings: &crate::settings::Settings) -> Result<(reqwest::Client, u32, String), String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let slug = d.slug.clone().ok_or("no game to ask kryo.to about")?;
+    if crate::catalog_gone::is_gone(app, &slug) {
+        return Err("the game is no longer on kryo.to".into());
+    }
     let total = d.total.ok_or("the file's size is not known yet")?;
     let endpoint = crate::settings::catalog_endpoint(settings);
     let listing = match crate::phone::session(app) {
@@ -3003,7 +3028,7 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
             base = format!("http://{dev}");
         }
     }
-    let Ok(res) = client.get(format!("{base}/api/games/{slug}/downloads")).send().await else { return };
+    let Some(res) = ask_about_game(app, client, &base, &slug, "/downloads").await else { return };
     let Ok(json) = res.json::<serde_json::Value>().await else { return };
     let hint = FileHint {
         size: d.total,

@@ -429,7 +429,7 @@ export type CatalogGame = {
   /** VR only, VR as well as flat, or neither (null). */
   vr: VrKind | null
   /** Set when kryo.to says the auto-fixer cannot fix this release (lib/autofix.ts): its notice, shown instead. */
-  noAutofix: { notice: string } | null
+  noAutofix: { notice: string; reason: string | null } | null
 }
 
 /** A kryo.to game page link or a bare slug, as a slug. */
@@ -470,7 +470,8 @@ export async function fetchCatalogGame(slug: string, { ask = false }: { ask?: bo
   }
   if (!res.ok) throw new Error(`kryo.to answered ${res.status}.`)
   if (ask) void catalogGone(slug, false)
-  const { game, art } = (await res.json()) as { game: Record<string, unknown>; art?: Record<string, unknown> }
+  const answer = (await res.json()) as { game: Record<string, unknown>; art?: Record<string, unknown> } & Record<string, unknown>
+  const { game, art } = answer
   const artUrl = (k: string) => (typeof art?.[k] === 'string' && (art[k] as string).trim() ? (art[k] as string).trim() : null)
   const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null)
   const available = (game.game_launch_options as { available?: LaunchEntry[] } | null)?.available
@@ -499,7 +500,8 @@ export async function fetchCatalogGame(slug: string, { ask = false }: { ask?: bo
     developer: str(game.developer),
     nsfw: game.nsfw === true,
     vr: vrKind(game.vr),
-    noAutofix: autofixBlock(game),
+    // kryo.to puts `hypervisor` and `autofix` beside `game`, not in it.
+    noAutofix: autofixBlock(answer),
   }
 }
 

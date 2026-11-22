@@ -809,8 +809,22 @@ pub fn wait_for_sign_in<R: Runtime>(app: &AppHandle<R>, id: &str, open_sign_in: 
     }
 }
 
+/// Whether the Store's last report had an account (`account_reported`).
+static REPORTED_SIGNED_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Store's page said who is signed in, or that nobody is. On a sign-in
+/// (nobody before, an account now) the downloads that waited for one go
+/// again. Only then: a row whose session kryo.to does not take while the page
+/// shows an account would otherwise be minted and refused on every report.
+pub fn account_reported(app: &AppHandle, signed_in: bool) {
+    let before = REPORTED_SIGNED_IN.swap(signed_in, std::sync::atomic::Ordering::SeqCst);
+    if signed_in && !before {
+        signed_in_again(app);
+    }
+}
+
 /// kryo.to reports an account: the downloads that waited for one go again.
-pub fn signed_in_again(app: &AppHandle) {
+fn signed_in_again(app: &AppHandle) {
     let ids = WAITING_FOR_SIGN_IN.lock().map(|mut w| std::mem::take(&mut *w).0).unwrap_or_default();
     for id in ids {
         if let Err(e) = crate::downloads::download_resume(app.clone(), id.clone()) {

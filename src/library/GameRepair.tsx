@@ -25,7 +25,7 @@ export function GameRepair({ gameId, slug = null, initialOnline = false, purpose
     listen: (handler) => on<RepairProgress>('repair-progress', (progress) => { if (progress.gameId === gameId) handler(progress) }),
   }), [gameId])
   // Undefined while kryo.to is asked; null for a normal release (or no answer: the auto-fixer stays).
-  const [blocked, setBlocked] = useState<{ notice: string } | null | undefined>(slug ? undefined : null)
+  const [blocked, setBlocked] = useState<{ notice: string; reason: string | null } | null | undefined>(slug ? undefined : null)
   useEffect(() => {
     if (!slug) return setBlocked(null)
     let cancelled = false
@@ -54,6 +54,7 @@ export function GameRepair({ gameId, slug = null, initialOnline = false, purpose
       <section aria-label="Repair game" className="grid justify-items-center gap-3 text-center">
         <TriangleAlert className="size-6 text-warning" aria-hidden />
         <p className="max-w-sm text-xs leading-relaxed text-foreground">{blocked.notice}</p>
+        {blocked.reason ? <p className="max-w-sm text-[11px] leading-relaxed text-foreground">Why: {blocked.reason}</p> : null}
         <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">Kryoto&apos;s repair is off for this release. Still stuck? Ask on its kryo.to page or in support.</p>
         {slug ? (
           <Button size="sm" variant="outline" onClick={() => { onLeave?.(); openStorePage(`/game/${slug}`) }}>

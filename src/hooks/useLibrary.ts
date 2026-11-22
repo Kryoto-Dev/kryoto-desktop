@@ -42,11 +42,18 @@ export function useLibrary() {
   const [errorQuiet, setErrorQuiet] = useState(false)
   /** The game it is about, whose page may say it; none is for a notice. */
   const [errorGame, setErrorGame] = useState<string | null>(null)
-  const setError = useCallback((message: string | null, quiet = false, game: string | null = null) => {
+  /** A launch failure's catalog slug, for the logged line only (`reportSlug`). */
+  const [errorSlug, setErrorSlug] = useState<string | null>(null)
+  const setError = useCallback((message: string | null, quiet = false, game: string | null = null, slug: string | null = null) => {
     setErrorState(message)
     setErrorQuiet(quiet)
     setErrorGame(game)
+    setErrorSlug(slug)
   }, [])
+  const gamesRef = useRef<LibraryGame[]>([])
+  useEffect(() => {
+    gamesRef.current = games
+  }, [games])
 
   const reload = useCallback(async () => {
     const request = ++generation.current
@@ -102,7 +109,7 @@ export function useLibrary() {
           // leaving a Play button that silently did nothing.
           if (!event.stopped && !stopWhenUp.current.has(event.id) && (event.seconds ?? 0) < 5) {
             const [message, quiet] = quickExit(event.code, event.detail)
-            setError(message, quiet, event.id)
+            setError(message, quiet, event.id, reportSlug(gamesRef.current.find((g) => g.id === event.id)))
           }
           stopWhenUp.current.delete(event.id)
         }
@@ -230,7 +237,18 @@ export function useLibrary() {
     return () => window.clearInterval(timer)
   }, [live.size, confirmRunning])
 
-  return { games, running: live, loaded, error: error ?? refreshError, errorQuiet: error ? errorQuiet : false, errorGame: error ? errorGame : null, setError, reload, play, stop: stopGame, upsert, drop }
+  return { games, running: live, loaded, error: error ?? refreshError, errorQuiet: error ? errorQuiet : false, errorGame: error ? errorGame : null, errorSlug: error ? errorSlug : null, setError, reload, play, stop: stopGame, upsert, drop }
+}
+
+/**
+ * The slug a logged launch failure carries, so "It closed again straight
+ * away" reports can be grouped by game. Only a kryo.to catalog game's: none
+ * for a game the player added themselves or brought from another launcher,
+ * and none for one they keep hidden.
+ */
+export function reportSlug(game: Pick<LibraryGame, 'slug' | 'origin' | 'launcher' | 'hidden'> | undefined): string | null {
+  if (!game?.slug || game.origin || game.launcher || game.hidden) return null
+  return /^[a-z0-9-]{1,160}$/.test(game.slug) ? game.slug : null
 }
 
 const RUNTIMES_HINT = 'Install everything under Settings > Game runtimes, then press Play again.'
