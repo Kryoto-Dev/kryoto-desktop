@@ -1408,6 +1408,16 @@ mod tests {
         assert!(is_proof_request(Some("pow_required")) && !is_proof_request(Some("challenge_failed")) && !is_proof_request(None));
     }
 
+    /// Only `listing`'s answer for a game taken off kryo.to (404 or 410) marks
+    /// it gone (catalog_gone.rs); a site having trouble does not.
+    #[test]
+    fn only_a_missing_game_reads_as_gone_from_its_listing() {
+        assert!(listing_says_gone(NO_SUCH_GAME));
+        for other in ["kryo.to answered 500.", "kryo.to answered 403.", "Could not reach kryo.to: timed out"] {
+            assert!(!listing_says_gone(other), "{other}");
+        }
+    }
+
     /// kryo.to's `challenge_failed` for an app it does not know the account
     /// of (`attested: no_session`, every such refusal logged in the four
     /// days to 2026-11-21) is a sign-in, not the window's check; Cloudflare's

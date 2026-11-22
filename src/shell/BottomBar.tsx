@@ -37,7 +37,10 @@ export function BottomBar({
   const bits = !!useSettings()?.speedInBits
   const active = downloads.find(isWorking)
   const count = (status: Dl['status']) => downloads.filter((d) => d.status === status).length
-  const waiting = [`${count('failed')} failed`, `${count('paused')} paused`, `${count('queued')} queued`].filter((s) => !s.startsWith('0 '))
+  // A row stopped only for a sign-in carries on by itself once there is one
+  // (src-tauri downloads.rs `signed_out`): waiting, not failed.
+  const forSignIn = downloads.filter((d) => d.status === 'failed' && /once you are signed in|Sign in and it carries on/i.test(d.error ?? '')).length
+  const waiting = [`${count('failed') - forSignIn} failed`, `${forSignIn} waiting for a sign-in`, `${count('paused')} paused`, `${count('queued')} queued`].filter((s) => !s.startsWith('0 '))
   return (
     <footer className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-t border-border bg-background px-2">
       <div className="flex">
