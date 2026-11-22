@@ -55,6 +55,9 @@ pub struct LibraryGame {
     pub apply_overrides: bool,
     /// Windows: Play starts it elevated, with Windows' own prompt.
     pub run_as_admin: bool,
+    /// Linux: MangoHud's overlay for this game. None follows Settings >
+    /// Compatibility; true or false is this game's own choice.
+    pub mangohud: Option<bool>,
     /// The player changed its files (a mod, an online fix) and wants them left
     /// alone: no update is offered or fetched for it, and a repair left
     /// unfinished no longer stops Play. Reinstalling it clears this.
@@ -1553,7 +1556,8 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
         if settings.linux_gamemode {
             wrappers.extend(crate::compat::on_path("gamemoderun").map(|p| p.to_string_lossy().into_owned()));
         }
-        if settings.linux_mangohud {
+        // The game's own choice in Properties, else the one in Settings.
+        if game.mangohud.unwrap_or(settings.linux_mangohud) {
             wrappers.extend(crate::compat::on_path("mangohud").map(|p| p.to_string_lossy().into_owned()));
         }
         if settings.linux_fsr {

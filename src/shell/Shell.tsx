@@ -101,6 +101,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { logError, logWarn } from '@/lib/log'
 import { flushPlays, isExpectedReportError, reportPlay } from '@/lib/play-reports'
 import { syncPlaytime } from '@/lib/playtime-sync'
+import { usePersisted } from '@/hooks/usePersisted'
 import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
 import { entryIsVr, entryLabel, folderName, gameLogs, isWindowsHost, knowsBuild, library, plainPath, playTarget, type LibraryGame } from '@/lib/library'
 import {
@@ -905,7 +906,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     ...hideItems(g),
     { label: 'Remove from Library', icon: <Trash2 />, danger: true, onSelect: () => setOverlay({ kind: 'uninstall', id: g.id }) },
   ] : [
-    { label: 'Repair', icon: <Wrench />, disabled: lib.running.has(g.id), onSelect: () => setOverlay({ kind: 'props', id: g.id, tab: 'repair' }) },
+    { label: 'Emulator & fixes', icon: <Wrench />, disabled: lib.running.has(g.id), onSelect: () => setOverlay({ kind: 'props', id: g.id, tab: 'repair' }) },
     { label: 'Properties', icon: <SettingsIcon />, onSelect: () => setOverlay({ kind: 'props', id: g.id }) },
     ...hideItems(g),
     ...discordItem(g),
@@ -1187,7 +1188,10 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
 
   const newSettings = useNewSettings(guest)
   // The window's one row folds on a narrow window; what left it is here instead.
-  const { row, fold } = useRowFold([account.displayName, account.username, account.kryos, news?.version, online, view.kind === 'web' ? view.url : ''].join('|'))
+  // View > Compact menu bar: Kryoto, View, Games and Help stay in the menu on
+  // the K// whatever the room, as they fold on a narrow window (suggestion #103).
+  const [compactMenus, setCompactMenus] = usePersisted<'on' | 'off'>('kryoto.menus.compact', 'off', (v): v is 'on' | 'off' => v === 'on' || v === 'off')
+  const { row, fold } = useRowFold([account.displayName, account.username, account.kryos, news?.version, online, compactMenus, view.kind === 'web' ? view.url : ''].join('|'))
   const folded: MenuEntry[] = [
     ...(fold >= FOLD.fullscreen ? [{ label: 'Full screen', hint: 'F11', onSelect: () => void toggleFullscreen() }] : []),
   ]
@@ -1240,6 +1244,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         { label: 'Reload page', hint: 'Ctrl R', disabled: view.kind !== 'web', onSelect: () => web.reload() },
         { label: 'Full screen', hint: 'F11', onSelect: () => void toggleFullscreen().catch(() => {}) },
         ...(account.controller ? [{ label: 'Big Picture', onSelect: () => setBigPicture(true) }] : []),
+        { separator: true },
+        { label: 'Compact menu bar', checked: compactMenus === 'on', onSelect: () => setCompactMenus(compactMenus === 'on' ? 'off' : 'on') },
       ],
     },
     {
@@ -1527,6 +1533,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         newSettings={newSettings.length > 0}
         rowRef={row}
         fold={fold}
+        compactMenus={compactMenus === 'on'}
         onNews={() => openWeb('/changelog')}
         onOpenNotification={openNotification}
         onMarkRead={markAllRead}

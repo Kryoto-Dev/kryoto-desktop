@@ -59,6 +59,8 @@ export type LibraryGame = {
   applyOverrides: boolean
   /** Windows: Play starts it as administrator. */
   runAsAdmin?: boolean
+  /** Linux: MangoHud for this game; null follows Settings > Compatibility. */
+  mangohud?: boolean | null
   /** The player changed its files: Kryoto stops offering updates and asking to repair it. */
   keepFiles?: boolean
   playtimeSeconds: number
@@ -386,7 +388,24 @@ export const library = {
   onlineApply: (gameId: string) => call<LibraryGame>('online_apply', { gameId }),
   /** All clients share the same emulator repair/undo engine. */
   repairApply: (gameId: string, source: string) => call('repair_apply', { gameId, source }),
+  /** Which emulator the game uses and which it can switch to (src-tauri repair.rs `game_emulators`). */
+  emulators: (gameId: string) => call<GameEmulators>('game_emulators', { gameId }),
+  /** Switch in one go: what Kryoto put in before comes out, then this one goes in (repair.rs `repair_switch`). */
+  switchEmulator: (gameId: string, source: string) => call<{ source: string; version: string; warnings: string[] }>('repair_switch', { gameId, source }),
   onlineUndo: (gameId: string) => call<LibraryGame>('online_undo', { gameId }),
+}
+
+/** One emulator a game can switch to (repair.rs `EmulatorChoice`). */
+export type EmulatorChoice = { id: string; label: string; online: boolean; purpose: string }
+/** A game's emulator now, what it came with, and its choices (repair.rs `Emulators`). */
+export type GameEmulators = {
+  current: string | null
+  switched: string | null
+  original: string | null
+  choices: EmulatorChoice[]
+  undo: boolean
+  interrupted: boolean
+  blocked: string | null
 }
 
 /* ── kryo.to ─────────────────────────────────────────────── */

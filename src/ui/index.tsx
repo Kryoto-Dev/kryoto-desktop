@@ -344,7 +344,8 @@ export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry
                 : 'text-foreground hover:bg-primary hover:text-primary-foreground focus:bg-primary focus:text-primary-foreground',
             )}
           >
-            {item.icon ? <span className="grid size-3.5 place-items-center [&>svg]:size-3.5">{item.icon}</span> : null}
+            {/* A checked row without an icon of its own shows a check, as the menu view does (lib/popup.ts). */}
+            {item.icon || item.checked ? <span className="grid size-3.5 place-items-center [&>svg]:size-3.5">{item.icon ?? <CheckIcon />}</span> : null}
             <span className="min-w-0 grow truncate">{item.label}</span>
             {item.hint ? <span className="text-[10px] tracking-wider opacity-60">{item.hint}</span> : null}
           </button>

@@ -77,6 +77,7 @@ export function TitleBar({
   nav,
   rowRef,
   fold = 0,
+  compactMenus = false,
   onNews,
   onOpenNotification,
   onMarkRead,
@@ -99,6 +100,8 @@ export function TitleBar({
   rowRef: RefObject<HTMLElement | null>
   /** How much has folded away (`useRowFold`). */
   fold?: number
+  /** View > Compact menu bar: the menus stay in the one on the mark at any width. */
+  compactMenus?: boolean
   onNews: () => void
   /** `id`: the notification opened, so it is marked read (KB-0291). */
   onOpenNotification: (url: string | null, id?: string) => void
@@ -115,7 +118,7 @@ export function TitleBar({
 
   return (
     <header ref={rowRef} className="relative z-50 flex h-13 shrink-0 select-none items-stretch border-b border-border bg-background">
-      {fold >= FOLD.menus ? (
+      {fold >= FOLD.menus || compactMenus ? (
         <div className="no-drag flex shrink-0 items-center pl-2 pr-1">
           <MenuButton
             native="title:menus"

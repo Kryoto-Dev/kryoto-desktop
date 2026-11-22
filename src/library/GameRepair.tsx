@@ -5,14 +5,16 @@ import { openExternal, openStorePage } from '@/lib/window'
 import { ExternalLink, TriangleAlert } from '@/ui/pixel-icons'
 import { Busy, Button } from '@/ui'
 import { RepairPanel, type RepairBackend, type RepairProgress } from './RepairPanel'
+import { EmulatorRow } from './EmulatorRow'
 
 /**
  * The auto-fixer for one installed game. With `slug`, kryo.to is asked first
  * whether its release is one the auto-fixer cannot fix (lib/autofix.ts): then
  * the release's notice shows instead, and nothing offers to repair it.
  * `onLeave` closes whatever holds this before its kryo.to page opens.
+ * `view="row"`: Properties' Emulator row (EmulatorRow.tsx) instead of the panel.
  */
-export function GameRepair({ gameId, slug = null, initialOnline = false, purpose = 'repair', onLeave }: { gameId: string; slug?: string | null; initialOnline?: boolean; purpose?: 'repair' | 'achievements'; onLeave?: () => void }) {
+export function GameRepair({ gameId, slug = null, initialOnline = false, purpose = 'repair', onLeave, view = 'panel' }: { gameId: string; slug?: string | null; initialOnline?: boolean; purpose?: 'repair' | 'achievements'; onLeave?: () => void; view?: 'panel' | 'row' }) {
   const backend = useMemo<RepairBackend>(() => ({
     sources: () => call('repair_sources'),
     state: () => call('repair_state', { gameId }),
@@ -61,5 +63,6 @@ export function GameRepair({ gameId, slug = null, initialOnline = false, purpose
       </section>
     )
   }
+  if (view === 'row') return <EmulatorRow gameId={gameId} backend={backend} />
   return <RepairPanel backend={backend} initialOnline={initialOnline} purpose={purpose} />
 }

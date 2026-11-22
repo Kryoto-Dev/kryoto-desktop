@@ -2194,6 +2194,8 @@ pub fn run() {
             repair::repair_state,
             repair::repair_apply,
             repair::repair_undo,
+            repair::repair_switch,
+            repair::game_emulators,
             repair::repair_support,
             repair::repair_support_url,
             links::take_pending_link,
