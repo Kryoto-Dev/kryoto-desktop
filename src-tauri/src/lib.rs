@@ -43,6 +43,8 @@ mod linux_overlay;
 mod linux_store_downloads;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux_open;
+#[cfg(target_os = "linux")]
+mod linux_pick;
 mod logging;
 mod net;
 mod menus;
@@ -2616,6 +2618,8 @@ pub fn run() {
             system::window_state_get,
             pet::pet_menu,
             pet::pet_drag,
+            pet::pet_hit,
+            pet::pet_shown,
             addons::addons_list,
             addons::addons_get,
             pet::pet_mascot,

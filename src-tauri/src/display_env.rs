@@ -97,6 +97,19 @@ pub struct Facts {
     pub appimage: bool,
 }
 
+/// The way in when the window cannot be used to reach Settings > Graphics
+/// (KB-0377: black unless something moves, on NVIDIA): start with
+/// `kryoto-desktop --safe-graphics`, or with `KRYOTO_SAFE_GRAPHICS=1`, and this
+/// start is Compatible. The saved choice is not changed.
+pub const SAFE_FLAG: &str = "--safe-graphics";
+
+/// The mode the environment asks for: the safe-graphics flag or variable,
+/// else `KRYOTO_GPU`. Pure, for the tests.
+pub fn env_mode(args: &[String], gpu: Option<String>, safe: Option<String>) -> Option<String> {
+    let safe = args.iter().any(|a| a == SAFE_FLAG) || safe.is_some_and(|v| !v.trim().is_empty() && v.trim() != "0");
+    if safe { Some("compatible".into()) } else { gpu }
+}
+
 /// What to set, and why, in words for the log and Settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -592,11 +605,16 @@ mod linux {
         }
         migrate();
         let saved = saved_mode();
-        let env_mode = std::env::var("KRYOTO_GPU").ok();
+        let args: Vec<String> = std::env::args().collect();
+        let safe_var = std::env::var("KRYOTO_SAFE_GRAPHICS").ok();
+        let safe = env_mode(&args, None, safe_var.clone()).is_some();
+        let asked = env_mode(&args, std::env::var("KRYOTO_GPU").ok(), safe_var);
         let is_set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
         let facts = facts();
-        let mut p = plan(saved, env_mode.as_deref(), is_set, facts);
-        if !p.healed && p.mode == Mode::Compatible && healed_file().is_some_and(|f| f.exists()) {
+        let mut p = plan(saved, asked.as_deref(), is_set, facts);
+        if safe {
+            p.reason = "Compatible: started in compatible graphics (this start only; Settings > Graphics keeps your choice)".into();
+        } else if !p.healed && p.mode == Mode::Compatible && healed_file().is_some_and(|f| f.exists()) {
             p.reason = p.reason.replace("as chosen", "chosen by Kryoto after a start that could not draw (pick Automatic in Settings to try the GPU again)");
         }
         shim_fonts(facts.appimage);
@@ -846,6 +864,19 @@ pub fn display_set_mode(mode: Mode) -> Result<(), String> {
     Err("Only the Linux build has graphics modes.".into())
 }
 
+/// The tray's "Start in compatible graphics" (KB-0377): for a window that
+/// stays black, so Settings cannot be reached. Saves Compatible, as if picked
+/// in Settings > Graphics, and starts again.
+#[cfg(target_os = "linux")]
+pub fn restart_compatible<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Err(e) = display_set_mode(Mode::Compatible) {
+        crate::logging::error("display", &format!("could not save Compatible: {e}"));
+        return;
+    }
+    crate::logging::info("display", "Start in compatible graphics, from the tray: restarting with hardware rendering off");
+    app.restart();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,6 +886,20 @@ mod tests {
     }
     fn vars(p: &Plan) -> Vec<&str> {
         p.set.iter().map(|(k, _)| *k).collect()
+    }
+
+    /// KB-0377: a window too black to reach Settings starts in Compatible
+    /// with the flag or the variable, over KRYOTO_GPU, for that start.
+    #[test]
+    fn the_safe_graphics_flag_starts_compatible() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(env_mode(&args(&["kryoto-desktop", "--safe-graphics"]), Some("full".into()), None).as_deref(), Some("compatible"));
+        assert_eq!(env_mode(&args(&["kryoto-desktop"]), None, Some("1".into())).as_deref(), Some("compatible"));
+        assert_eq!(env_mode(&args(&["kryoto-desktop"]), Some("full".into()), Some("0".into())).as_deref(), Some("full"));
+        assert_eq!(env_mode(&args(&["kryoto-desktop", "--tray"]), None, None), None);
+        let p = plan(Mode::Auto, env_mode(&args(&["x", SAFE_FLAG]), None, None).as_deref(), none, Facts { nvidia: true, render_node: true, ..Facts::default() });
+        assert_eq!(p.mode, Mode::Compatible);
+        assert_eq!(vars(&p), ["WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE"]);
     }
 
     #[test]

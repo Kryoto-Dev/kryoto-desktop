@@ -295,7 +295,25 @@ pub async fn pick_path(
             })
             .map_err(|e| format!("The file window could not open: {e}"))?;
     }
-    #[cfg(not(windows))]
+    // Linux: made and answered on Tauri's own GTK thread, the desktop's
+    // portal first, never rfd's second GTK loop (KB-0042, linux_pick.rs).
+    #[cfg(target_os = "linux")]
+    {
+        let ask = crate::linux_pick::Ask {
+            title: title.unwrap_or_else(|| if directory { "Choose a folder".into() } else { "Choose a file".into() }),
+            directory,
+            folder: directory_ok,
+            extensions: extensions.unwrap_or_default(),
+            filter_name: filter_name.unwrap_or_else(|| "Games".into()),
+        };
+        window
+            .run_on_main_thread(move || {
+                let gtk_parent = parent.gtk_window().ok().map(|w| gtk::prelude::Cast::upcast::<gtk::Window>(w));
+                crate::linux_pick::open(gtk_parent, ask, tx);
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         // Built on the main thread (GTK insists), awaited off it.
         window
@@ -411,6 +429,14 @@ pub fn tray_action(app: AppHandle, action: String) -> Result<(), String> {
         }
         return Ok(());
     }
+    // From the tray, which opens when nothing else can be clicked (KB-0369).
+    if action == "hide-pet" {
+        crate::pet::hide(&app);
+        if let Some(panel) = app.get_webview_window(TRAY_PANEL_LABEL) {
+            let _ = panel.hide();
+        }
+        return Ok(());
+    }
     show_main(&app);
     if action != "open" {
         app.emit_to("main", "tray-go", action).map_err(|e| e.to_string())?;
@@ -438,9 +464,14 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         let downloads = MenuItem::with_id(app, "tray-downloads", "Downloads", true, None::<&str>)?;
         let settings = MenuItem::with_id(app, "tray-settings", "Settings", true, None::<&str>)?;
         let sep = PredefinedMenuItem::separator(app)?;
+        // For when the window cannot be used: the pet in the way (KB-0369),
+        // or a window that stays black on NVIDIA (KB-0377).
+        let hide_pet = MenuItem::with_id(app, "tray-hide-pet", "Hide the pet", true, None::<&str>)?;
+        let safe = MenuItem::with_id(app, "tray-safe-graphics", "Start in compatible graphics", true, None::<&str>)?;
+        let sep_safe = PredefinedMenuItem::separator(app)?;
         let exit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
         let sep_top = PredefinedMenuItem::separator(app)?;
-        Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &exit])?
+        Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &hide_pet, &safe, &sep_safe, &exit])?
     };
     let mut builder = TrayIconBuilder::with_id("kryoto")
         // The channel keeps the name right in a dev or Preview build (channel.rs).
@@ -456,6 +487,15 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
             if id == "tray-exit" {
                 quit(app);
+                return;
+            }
+            if id == "tray-hide-pet" {
+                crate::pet::hide(app);
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            if id == "tray-safe-graphics" {
+                crate::display_env::restart_compatible(app);
                 return;
             }
             show_main(app);

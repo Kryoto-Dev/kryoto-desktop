@@ -19,7 +19,7 @@ commands.allow = [
   "take_pending_link",
   "update_check_mirror",
   "preview_report_screenshot", "preview_report_send", "preview_reports_mine",
-  "pet_menu", "pet_drag", "pet_mascot", "pet_size",
+  "pet_menu", "pet_drag", "pet_mascot", "pet_size", "pet_hit", "pet_shown",
   "display_rendered",
   "game_logs",
   "game_log_read",
