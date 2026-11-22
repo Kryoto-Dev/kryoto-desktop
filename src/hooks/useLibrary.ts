@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { errorText } from '@/lib/bridge'
+import { errorText, isTauri } from '@/lib/bridge'
 import { library, type LibraryGame } from '@/lib/library'
+import { notify } from '@/lib/notify'
+import { alarms, plainSummary } from '@/lib/release-files'
 
 /**
  * The Library's live state: the saved games, which are running, and the last
@@ -110,6 +112,7 @@ export function useLibrary() {
           if (!event.stopped && !stopWhenUp.current.has(event.id) && (event.seconds ?? 0) < 5) {
             const [message, quiet] = quickExit(event.code, event.detail)
             setError(message, quiet, event.id, reportSlug(gamesRef.current.find((g) => g.id === event.id)))
+            checkFilesAfterFailure(gamesRef.current.find((g) => g.id === event.id))
           }
           stopWhenUp.current.delete(event.id)
         }
@@ -149,7 +152,11 @@ export function useLibrary() {
         // Started from somewhere else (the phone, the Store): that is what was
         // wanted, and the button only has to catch up.
         if (errorText(e).includes('already running')) void reload()
-        else if (!request.cancelled) setError(errorText(e), false, id)
+        else if (!request.cancelled) {
+          setError(errorText(e), false, id)
+          // Its file gone or blocked (library.rs start_failure): which ones, exactly.
+          if (FILE_TROUBLE.test(errorText(e))) checkFilesAfterFailure(gamesRef.current.find((g) => g.id === id))
+        }
       }
     } finally {
       if (pendingLaunches.current.get(id) === request) pendingLaunches.current.delete(id)
@@ -249,6 +256,29 @@ export function useLibrary() {
 export function reportSlug(game: Pick<LibraryGame, 'slug' | 'origin' | 'launcher' | 'hidden'> | undefined): string | null {
   if (!game?.slug || game.origin || game.launcher || game.hidden) return null
   return /^[a-z0-9-]{1,160}$/.test(game.slug) ? game.slug : null
+}
+
+/** library.rs `start_failure`'s words for a file that is gone or that an antivirus blocked. */
+const FILE_TROUBLE = /gone from the game's folder|antivirus blocked/i
+
+/**
+ * A start that failed within seconds: the game's files checked against its
+ * release's own list (src-tauri release_files.rs), which names on the game's
+ * page any file an antivirus took. With the window in the background, the
+ * system notification says it too, as for the app's other news (lib/notify.ts).
+ * A release with no list is left as it was: nothing is checked or said.
+ */
+function checkFilesAfterFailure(game: LibraryGame | undefined) {
+  if (!game?.slug || game.launcher || !isTauri()) return
+  void library
+    .filesCheck(game.id)
+    .then((s) => {
+      const found = alarms([...(s.report?.missing ?? []), ...(s.report?.broken ?? [])])
+      if (!found.length || document.hasFocus()) return
+      const missing = found.some((f) => f.problem === 'missing')
+      void notify(`${game.title} ${missing ? 'is missing files' : 'has damaged files'}`, `${plainSummary(found, 2)} Open the game to get them back.`)
+    })
+    .catch(() => {})
 }
 
 const RUNTIMES_HINT = 'Install everything under Settings > Game runtimes, then press Play again.'

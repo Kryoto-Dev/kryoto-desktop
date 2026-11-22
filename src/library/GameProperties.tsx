@@ -26,6 +26,7 @@ import { cn } from '@/lib/utils'
 import { openSettingsSection } from '@/lib/window'
 import { VersionsList, type GetOurs } from '@/library/Versions'
 import { GameRepair } from '@/library/GameRepair'
+import { FilesRow } from '@/library/FilesRow'
 import { GameLogs } from '@/library/GameLogs'
 import { GameController } from '@/library/GameController'
 import { usePadStore } from '@/hooks/usePads'
@@ -445,6 +446,15 @@ export function GameProperties({
         {tab === 'repair' ? (
           <>
             <GameRepair gameId={game.id} slug={game.slug} onLeave={onClose} view="row" />
+            {/* Outside GameRepair: a release the auto-fixer is off for still has its files checked. */}
+            <FilesRow
+              game={game}
+              running={false}
+              onGetFiles={() => {
+                onClose()
+                onOurs(null)
+              }}
+            />
             {/* kryo.to's own fix for this game (an online fix), applied the same way and undone the same way. */}
             {game.slug ? <KryoFix gameId={game.id} slug={game.slug} onGet={() => onOurs(null)} /> : null}
           </>

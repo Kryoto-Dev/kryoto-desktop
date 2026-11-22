@@ -1408,6 +1408,9 @@ Object.assign(HANDLERS, {
       undo: !!saved,
       interrupted: false,
       blocked,
+      release: null,
+      releaseOff: false,
+      keptOwn: [],
     }
   },
   repair_switch: (a: Record<string, unknown>) => {

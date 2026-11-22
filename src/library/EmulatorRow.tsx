@@ -42,6 +42,8 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
     }).then(keep)
     // A fix from kryo.to applied below, or a switch made elsewhere: read again.
     void on('library-changed', () => { if (!inFlight.current) load() }).then(keep)
+    // The release's file list arrived (Files, below): what it came with.
+    void on<string>('files-checked', (id) => { if (id === gameId && !inFlight.current) load() }).then(keep)
     return () => {
       cancelled = true
       stops.forEach((f) => f())
@@ -101,7 +103,22 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
         </p>
         {state.switched ? (
           <p className="text-[11px] text-muted-foreground">
-            Put in by Kryoto. {state.original ? `The release came with ${state.original.replace(/^Steam \+ /, '')}.` : 'Back puts the release\'s own files back.'}
+            Put in by Kryoto.{' '}
+            {state.release
+              ? `This release came with ${state.release}.`
+              : state.original
+                ? `The release came with ${state.original.replace(/^Steam \+ /, '')}.`
+                : "Back puts the release's own files back."}
+          </p>
+        ) : state.release ? (
+          <p className="text-[11px] text-muted-foreground">This release came with {state.release}.</p>
+        ) : null}
+        {state.releaseOff ? <p className="text-[11px] text-muted-foreground">The uploader left the emulator out of this release.</p> : null}
+        {state.keptOwn.length ? (
+          <p className="text-[11px] text-muted-foreground">
+            The uploader kept this game&apos;s own Steam {state.keptOwn.length === 1 ? 'file' : 'files'}:{' '}
+            <span className="select-text break-all font-mono">{state.keptOwn.slice(0, 3).join(', ')}</span>
+            {state.keptOwn.length > 3 ? ` and ${state.keptOwn.length - 3} more` : ''}.
           </p>
         ) : null}
       </div>

@@ -3,6 +3,7 @@ import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { automaticArtwork, coverFor } from '@/lib/game-artwork'
 import { autofixBlock } from '@/lib/autofix'
+import type { FilesRestored, FilesState } from '@/lib/release-files'
 
 /**
  * The Library: games on this PC and how each one starts.
@@ -392,6 +393,15 @@ export const library = {
   emulators: (gameId: string) => call<GameEmulators>('game_emulators', { gameId }),
   /** Switch in one go: what Kryoto put in before comes out, then this one goes in (repair.rs `repair_switch`). */
   switchEmulator: (gameId: string, source: string) => call<{ source: string; version: string; warnings: string[] }>('repair_switch', { gameId, source }),
+  /** The release's file list and the last check, without asking kryo.to (src-tauri release_files.rs). */
+  filesState: (gameId: string) => call<FilesState>('game_files_state', { gameId }),
+  /** The same, with the list fetched first when it is due (opening Properties). */
+  filesFetch: (gameId: string) => call<FilesState>('game_files_fetch', { gameId }),
+  /** Check files: `full` hashes every file (`files-check-progress`, and Cancel). */
+  filesCheck: (gameId: string, full = false) => call<FilesState>('game_files_check', { gameId, full }),
+  filesCheckCancel: (gameId: string) => call<void>('game_files_check_cancel', { gameId }),
+  /** Get the files back from this PC (another copy, the kept download); says what is left. */
+  filesRestore: (gameId: string) => call<FilesRestored>('game_files_restore', { gameId }),
   onlineUndo: (gameId: string) => call<LibraryGame>('online_undo', { gameId }),
 }
 
@@ -406,6 +416,12 @@ export type GameEmulators = {
   undo: boolean
   interrupted: boolean
   blocked: string | null
+  /** The emulator the release came with, from its file list: "gbe_fork (experimental)". */
+  release: string | null
+  /** The uploader left the emulator out of this release. */
+  releaseOff: boolean
+  /** Steam files the uploader kept as the game shipped them. */
+  keptOwn: string[]
 }
 
 /* ── kryo.to ─────────────────────────────────────────────── */
