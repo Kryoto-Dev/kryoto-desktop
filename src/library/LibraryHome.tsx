@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { gameContext } from './context'
-import { ChevronDown, ChevronLeft, ChevronRight, Download as DownloadIcon, Play, Square } from '@/ui/pixel-icons'
+import { ChevronDown, ChevronLeft, ChevronRight, Download as DownloadIcon, HardDrive, Play, Square } from '@/ui/pixel-icons'
+import { openSettingsSection } from '@/lib/window'
 import { Button, Check, Label, MenuButton, Segmented } from '@/ui'
 import { capsulesFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
@@ -244,6 +245,15 @@ export function LibraryHome({
           </Label>
           {sort === 'size' && measuring > 0 ? <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Measuring {measuring} more</span> : null}
           <span className="h-px grow bg-border" />
+          {/* The drives, their free space and the folders' tools, a press from the games on them (abraxas.777). */}
+          <button
+            type="button"
+            onClick={() => openSettingsSection('storage')}
+            className="kryo-pill flex h-7 items-center gap-1.5 border border-border px-3 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+          >
+            <HardDrive className="size-3" aria-hidden />
+            Storage
+          </button>
           <MenuButton
             align="right"
             className="kryo-pill flex h-7 items-center gap-1.5 border border-border px-3 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground"

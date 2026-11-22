@@ -236,6 +236,117 @@ pub(crate) async fn apply<R: Runtime>(
     Ok(report)
 }
 
+/// One emulator a game can be switched to, and what it is good for.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmulatorChoice {
+    pub id: Emulator,
+    pub label: &'static str,
+    pub online: bool,
+    /// One line, in a player's words.
+    pub purpose: &'static str,
+}
+
+/// A game's emulator: what it uses now, what it came with, and what it can be
+/// switched to. Properties > Emulator draws exactly this (EmulatorRow.tsx), so
+/// anything else that learns about a game's Steam files (a file check against
+/// the build's recorded list, the files an emulator added) belongs in here too.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Emulators {
+    /// What the game's Steam files are now: "gbe_fork / Goldberg", "Kryoto
+    /// Online", "Steam's own files"; None when they cannot be told.
+    pub current: Option<String>,
+    /// The emulator Kryoto put in (Repair, Kryoto Online, the achievements
+    /// switch), when it did: Undo puts the release's own files back.
+    pub switched: Option<String>,
+    /// The release's own label from before Kryoto changed it.
+    pub original: Option<String>,
+    /// What it can be switched to, one press each, the one in use left out.
+    pub choices: Vec<EmulatorChoice>,
+    /// Kryoto has a copy of the files it replaced.
+    pub undo: bool,
+    /// A switch stopped halfway: Undo first.
+    pub interrupted: bool,
+    /// Why nothing is offered, when nothing is.
+    pub blocked: Option<String>,
+}
+
+fn purpose(e: Emulator) -> &'static str {
+    match e {
+        Emulator::GbeFork => "Plays offline, with achievements. Right for almost every game.",
+        Emulator::Online => "Plays online with friends through Kryoto Online. Steam has to be running.",
+        Emulator::Rune => "Plays offline, with achievements. Try it when gbe_fork does not start the game.",
+        Emulator::RuneSteak | Emulator::RuneSteamclient => "Another RUNE setup, for a game the first one does not start.",
+        Emulator::Custom => "",
+    }
+}
+
+/// The switchable emulators for a game, given what was put in (`switched`, a
+/// label) and whether it can be switched at all (`blocked`).
+fn choices_for(switched: Option<&str>, blocked: bool) -> Vec<EmulatorChoice> {
+    if blocked {
+        return Vec::new();
+    }
+    release::sources()
+        .into_iter()
+        .filter(|s| Some(s.label) != switched)
+        .map(|s| EmulatorChoice { id: s.id, label: s.label, online: s.online, purpose: purpose(s.id) })
+        .collect()
+}
+
+/// The one place that says which emulator a game uses and which it can use.
+/// Off the UI thread: it reads the game's Steam files, often on a hard disk.
+#[tauri::command(async)]
+pub fn game_emulators(app: AppHandle, game_id: String) -> Result<Emulators, String> {
+    let game = game(&app, &game_id)?;
+    let record = root(&app, &game).ok().map(|r| journal::load(&r)).transpose()?.flatten();
+    let (tracking, name) = crate::achievements::tracking_of(&game);
+    use crate::achievements::Tracking;
+    let current = match tracking {
+        Tracking::Fixable => Some("Steam's own files (no emulator)".to_string()),
+        Tracking::Absent => None,
+        _ => name.filter(|n| n != "Native achievements"),
+    };
+    let blocked = if game.launcher.is_some() {
+        Some("This game belongs to another launcher, which keeps its files as they are.".to_string())
+    } else if game.slug.is_none() {
+        Some("Link this game to its kryo.to page first, in the kryo.to tab.".to_string())
+    } else if tracking == Tracking::Absent {
+        Some("This game has no Steam file, so there is no emulator to change.".to_string())
+    } else {
+        None
+    };
+    let switched = game.repair.as_ref().map(|r| r.source.clone());
+    Ok(Emulators {
+        choices: choices_for(switched.as_deref(), blocked.is_some()),
+        current,
+        original: game.repair.as_ref().and_then(|r| r.previous_source.clone()),
+        switched,
+        undo: record.as_ref().is_some_and(|j| j.state != "undone") || game.online.is_some(),
+        interrupted: record.as_ref().is_some_and(|j| j.state == "pending"),
+        blocked,
+    })
+}
+
+/// Switch a game to another emulator in one go: what Kryoto put in before
+/// comes out first (Undo, from its copies), then the new one goes in through
+/// the same `apply` as Repair, which copies every file it replaces.
+#[tauri::command]
+pub async fn repair_switch(app: AppHandle, game_id: String, source: Emulator) -> Result<repair::RepairReport, String> {
+    let before = game(&app, &game_id)?;
+    let applied = journal::load(&root(&app, &before)?)?.is_some_and(|j| j.state != "undone");
+    if applied {
+        progress(&app, &game_id, "Putting the game's own files back first", None);
+        repair_undo(app.clone(), game_id.clone())?;
+    } else if before.online.is_some() {
+        // Kryoto Online from before it went through Repair.
+        progress(&app, &game_id, "Taking Kryoto Online out first", None);
+        crate::online::online_undo(app.clone(), game_id.clone())?;
+    }
+    apply(&app, &game_id, source, false).await
+}
+
 #[tauri::command(async)]
 pub fn repair_undo(app: AppHandle, game_id: String) -> Result<(), String> {
     let before = game(&app, &game_id)?;
@@ -300,4 +411,25 @@ pub fn repair_support_url(app: AppHandle, game_id: String) -> Result<String, Str
         url.query_pairs_mut().append_pair("game", slug);
     }
     Ok(url.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_emulator_in_use_is_not_offered_again_and_each_says_what_it_is_for() {
+        let all = choices_for(None, false);
+        assert_eq!(all.len(), release::sources().len());
+        assert!(all.iter().all(|c| !c.purpose.is_empty()));
+        let after = choices_for(Some("RUNE"), false);
+        assert!(after.iter().all(|c| c.label != "RUNE"));
+        assert!(after.iter().any(|c| c.id == Emulator::GbeFork));
+        assert!(after.iter().any(|c| c.online));
+    }
+
+    #[test]
+    fn a_game_that_cannot_be_switched_offers_nothing() {
+        assert!(choices_for(None, true).is_empty());
+    }
 }

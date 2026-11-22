@@ -11,7 +11,7 @@ import { downloads, isActive, phaseOf, progressOf, useDownloads } from '@/lib/do
  * it for this game right here, like an add-on from the game's Add-ons & DLC
  * card (addons.rs `addons_get`), and the download runner applies it as a
  * repair (`install_fix`): checked against this game and copied with backups,
- * so Undo below puts back what it replaced. Only when the app cannot fetch it
+ * so Back to the release's own files (the Emulator row) puts back what it replaced. Only when the app cannot fetch it
  * itself does it open the game's download window.
  */
 export function KryoFix({ gameId, slug, onGet }: { gameId: string; slug: string; onGet: () => void }) {
@@ -59,7 +59,7 @@ export function KryoFix({ gameId, slug, onGet }: { gameId: string; slug: string;
               <b className="text-foreground">{f.label ?? 'Fix'}</b>
               {f.download_size ? <span className="text-muted-foreground"> · {f.download_size}</span> : null}
               {moving ? <span className="block text-muted-foreground" aria-live="polite">{d.status === 'queued' ? 'Waiting its turn in Downloads' : phaseOf(d)}</span> : null}
-              {d?.status === 'installed' ? <span className="block text-muted-foreground">Applied. Undo below puts the game's own files back.</span> : null}
+              {d?.status === 'installed' ? <span className="block text-muted-foreground">Applied. Back to the release's own files, above, takes it out.</span> : null}
               {d?.status === 'failed' && d.error ? <span className="block text-destructive">{d.error}</span> : null}
               {!moving && f.note && d?.status !== 'failed' ? <span className="block text-muted-foreground">{f.note}</span> : null}
             </span>

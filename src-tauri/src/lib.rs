@@ -4,6 +4,7 @@ mod achievements_cloud;
 mod appimage_tls;
 mod addons;
 mod art;
+mod catalog_gone;
 mod managed_art;
 mod chat;
 mod collections;
@@ -644,6 +645,14 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   let account = null;
   let savedAt = 0;
   let listsAt = 0;
+  // The friends list: not asked before this time, and why. kryo.to refuses it
+  // to an account in Anonymous mode (403) or one the feature is not on for
+  // (404); asked every minute regardless, that was 74,402 refusals in a week
+  // (2026-11-21). A refusal waits for the account to change (sign-in, Anonymous
+  // mode turned off) or half an hour; other errors back off, 2 to 30 minutes.
+  let friendsAt = 0;
+  let friendsWait = 0;
+  let friendsFor = '';
   // The wallet on kryo.to's perks page moves the balance after a claim, an
   // exchange or a purchase (it sends this event); pass it on so the coin
   // beside the account keeps up.
@@ -728,9 +737,17 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           send({ account });
         }
         if (!u) return;
-        if (u.features && u.features.friends) {
+        const friendsKey = id + (u.isAnonymous ? ':anonymous' : '');
+        if (friendsKey !== friendsFor) { friendsFor = friendsKey; friendsAt = 0; friendsWait = 0; }
+        if (u.features && u.features.friends && !u.isAnonymous && Date.now() >= friendsAt) {
           const face = (p) => ({ id: p.id, username: p.username, displayName: p.displayName || null, avatarUrl: p.avatarUrl || null, supporter: !!p.supporter, rank: typeof p.rank === 'string' ? p.rank : null });
           Promise.all([json('/api/friends'), json('/api/blocks/hidden').catch(() => ({ usernames: [] }))])
+            .then(([f, h]) => { friendsWait = 0; friendsAt = 0; return [f, h]; }, (e) => {
+              const code = Number(e && e.message);
+              if (code === 403 || code === 404) friendsAt = Date.now() + 1800000;
+              else { friendsWait = Math.min(friendsWait ? friendsWait * 2 : 120000, 1800000); friendsAt = Date.now() + friendsWait; }
+              throw e;
+            })
             .then(([f, h]) => send({ friends: {
               hidden: (h.usernames || []).slice(0, 5000).map(String),
               friends: (f.friends || []).slice(0, 500).map((p) => Object.assign(face(p), { favourite: !!p.favourite, nickname: p.nickname || null, muted: !!p.muted, online: !!p.online, playing: p.playing && typeof p.playing.slug === 'string' ? { slug: p.playing.slug, title: String(p.playing.title || p.playing.slug), cover: p.playing.cover || null } : null })),
@@ -974,7 +991,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     const rules = [
       ['', 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647'],
       [' *:not(svg):not(svg *):not(style)', 'all:unset;box-sizing:border-box'],
-      [' .panel', `position:fixed;display:block;min-width:max(208px,${p.minWidth || 0}px);max-width:min(420px,calc(100vw - 12px));padding:4px 0;overflow:hidden;
+      [' .panel', `position:fixed;display:block;min-width:max(208px,${p.minWidth || 0}px);max-width:min(420px,calc(100vw - 12px));max-height:calc(100vh - 12px);padding:4px 0;overflow:hidden auto;scrollbar-width:thin;
         background:${c.popover};color:${c.foreground};border:1px solid ${c.border};border-radius:${r};
         box-shadow:0 25px 50px -12px rgba(0,0,0,.6);font:12px/16px ${c.font || 'system-ui,sans-serif'};
         animation:__kryo-pop .18s cubic-bezier(.2,.8,.2,1) both;user-select:none`],
@@ -1028,7 +1045,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     });
     menuHost.append(style, panel);
     document.documentElement.append(menuHost);
-    // Under the anchor, kept inside the page.
+    // Under the anchor, kept inside the page; taller than the page, it scrolls.
     const w = panel.offsetWidth, h = panel.offsetHeight;
     const left = Math.max(6, Math.min(p.right ? p.anchorRight - w : p.x, innerWidth - w - 6));
     const top = Math.max(0, Math.min(p.y, innerHeight - h - 6));
@@ -2327,6 +2344,8 @@ pub fn run() {
             repair::repair_state,
             repair::repair_apply,
             repair::repair_undo,
+            repair::repair_switch,
+            repair::game_emulators,
             repair::repair_support,
             repair::repair_support_url,
             links::take_pending_link,
@@ -2376,6 +2395,7 @@ pub fn run() {
             library::library_relocate,
             library::library_plain_folder,
             library::folder_exists,
+            catalog_gone::catalog_gone,
             library::storage_leftover_prefixes,
             library::storage_delete_prefix,
             pad::pad_start,

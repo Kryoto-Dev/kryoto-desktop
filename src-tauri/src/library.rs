@@ -55,6 +55,9 @@ pub struct LibraryGame {
     pub apply_overrides: bool,
     /// Windows: Play starts it elevated, with Windows' own prompt.
     pub run_as_admin: bool,
+    /// Linux: MangoHud's overlay for this game. None follows Settings >
+    /// Compatibility; true or false is this game's own choice.
+    pub mangohud: Option<bool>,
     /// The player changed its files (a mod, an online fix) and wants them left
     /// alone: no update is offered or fetched for it, and a repair left
     /// unfinished no longer stops Play. Reinstalling it clears this.
@@ -778,7 +781,21 @@ pub fn fill_branches<R: Runtime>(app: &AppHandle<R>) {
         let Ok(client) = crate::net::builder().timeout(std::time::Duration::from_secs(20)).build() else { return };
         let mut found: Vec<(String, String)> = Vec::new();
         for (id, slug) in missing {
-            if let Some(branch) = crate::downloads::fetch_meta(&client, &endpoint, &slug).await.and_then(|m| m.steam_branch) {
+            // A game taken off kryo.to never gets a branch: it was asked at
+            // every start, and 404'd every time (catalog_gone.rs).
+            if crate::catalog_gone::is_gone(&app, &slug) {
+                continue;
+            }
+            let Ok(res) = client.get(format!("{endpoint}/api/games/{slug}")).send().await else { continue };
+            if crate::catalog_gone::says_gone(res.status().as_u16()) {
+                crate::catalog_gone::set(&app, &slug, true);
+                continue;
+            }
+            if !res.status().is_success() {
+                continue;
+            }
+            let Ok(json) = res.json::<serde_json::Value>().await else { continue };
+            if let Some(branch) = crate::downloads::meta_from_api(&json).steam_branch {
                 found.push((id, branch));
             }
         }
@@ -1539,7 +1556,8 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
         if settings.linux_gamemode {
             wrappers.extend(crate::compat::on_path("gamemoderun").map(|p| p.to_string_lossy().into_owned()));
         }
-        if settings.linux_mangohud {
+        // The game's own choice in Properties, else the one in Settings.
+        if game.mangohud.unwrap_or(settings.linux_mangohud) {
             wrappers.extend(crate::compat::on_path("mangohud").map(|p| p.to_string_lossy().into_owned()));
         }
         if settings.linux_fsr {

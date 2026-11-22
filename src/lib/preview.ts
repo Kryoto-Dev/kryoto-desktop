@@ -1331,6 +1331,34 @@ Object.assign(HANDLERS, {
     previewBus.emit('library-changed', null)
     return report
   },
+  game_emulators: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined
+    if (!g) throw new Error('That game is no longer in the library.')
+    const saved = previewRepairs.get(id)
+    const switched = saved?.report.source ?? null
+    const purpose: Record<string, string> = {
+      gbe_fork: 'Plays offline, with achievements. Right for almost every game.',
+      online: 'Plays online with friends through Kryoto Online. Steam has to be running.',
+      rune: 'Plays offline, with achievements. Try it when gbe_fork does not start the game.',
+    }
+    const blocked = g.slug ? null : 'Link this game to its kryo.to page first, in the kryo.to tab.'
+    const sources = HANDLERS.repair_sources!({}) as { id: string; label: string; online: boolean }[]
+    return {
+      current: switched ?? (String(g.source ?? '').replace(/^Steam \+ /, '') || 'gbe_fork / Goldberg'),
+      switched,
+      original: saved ? (saved.source as string | null) ?? null : null,
+      choices: blocked ? [] : sources.filter((s) => s.label !== switched).map((s) => ({ ...s, purpose: purpose[s.id] ?? 'Another RUNE setup, for a game the first one does not start.' })),
+      undo: !!saved,
+      interrupted: false,
+      blocked,
+    }
+  },
+  repair_switch: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    if (previewRepairs.has(id)) HANDLERS.repair_undo!({ gameId: id })
+    return HANDLERS.repair_apply!({ gameId: id, source: a.source })
+  },
   repair_undo: (a: Record<string, unknown>) => {
     const id = String(a.gameId)
     const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined

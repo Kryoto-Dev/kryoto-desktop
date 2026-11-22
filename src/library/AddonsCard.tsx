@@ -312,7 +312,7 @@ export function AddonsCard({
       ) : null}
 
       {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
-      {repairOpen ? <Modal title="Repair game" onClose={() => setRepairOpen(false)}><GameRepair gameId={game.id} initialOnline /></Modal> : null}
+      {repairOpen ? <Modal title="Repair game" onClose={() => setRepairOpen(false)}><GameRepair gameId={game.id} slug={game.slug} initialOnline onLeave={() => setRepairOpen(false)} /></Modal> : null}
 
       {confirm ? (
         <Modal

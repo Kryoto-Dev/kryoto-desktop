@@ -174,6 +174,19 @@ fn original(dll: &Path, root: &Path) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
+/// Why a source cannot be set up without Valve's own Steam file, in a player's
+/// words. It used to say "The original Steam API backup is missing", which told
+/// a player on CoD MW 2019 neither what was missing nor what to do (2026-11-21).
+fn missing_original(dll: &Path) -> String {
+    let name = dll
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "steam_api64.dll".into());
+    format!(
+        "This source needs the game's original {name} (the one Steam ships) to set itself up, and this copy of the game no longer has it, only the replaced one. Nothing was changed. Try another source, or install the game again from kryo.to and repair it before changing any files. If it still says this, ask support on the game's page."
+    )
+}
+
 /// All Forge mutation paths, including its own sidecars, are journalled before use.
 fn plan(root: &Path, evidence: &Evidence) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut files = BTreeSet::new();
@@ -284,7 +297,7 @@ pub async fn apply<F: Fn(&str, Option<u8>) + Send + Sync>(
                         .join("steam_settings/steam_interfaces.txt")
                         .is_file())
         {
-            return Err("The original Steam API backup is missing. This source needs it to configure the game's interfaces safely. Re-extract the Kryoto release or contact support.".into());
+            return Err(missing_original(dll));
         }
         originals.push((dll.clone(), original));
     }
@@ -408,4 +421,17 @@ pub fn support_text(game: Option<&GameIdentity>, source: &str, logs: &[String]) 
         text.push('\n');
     }
     text.chars().take(3900).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_original_says_which_file_and_what_to_do() {
+        let text = missing_original(Path::new("C:/Games/MW/steam_api64.dll"));
+        assert!(text.contains("steam_api64.dll"));
+        assert!(text.contains("Nothing was changed"));
+        assert!(text.contains("Try another source"));
+    }
 }

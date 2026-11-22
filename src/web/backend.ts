@@ -9,6 +9,7 @@ import { api, GATEWAY_HTTP, saveFile } from './api'
 import { parseTarget, WebChat, type ChatStatus, type Person } from './engine'
 import { Store } from './store'
 import { EMBEDDED, sitePermission } from './embed'
+import { FRIENDS_EVERY_MS, friendsNext } from './friends-poll'
 
 type Handler = (payload: unknown) => void
 
@@ -51,9 +52,23 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
     return c
   }
 
-  // The friends list, like the Store page reports it on the desktop.
+  // The friends list, like the Store page reports it on the desktop. Asked
+  // every half minute while kryo.to answers. kryo.to refuses it to an account
+  // in Anonymous mode (403) or one the feature is not on for (404): then not
+  // again for half an hour, or until the list is asked for (a friends action,
+  // the account refreshed, which is what leaving Anonymous mode does). Asked
+  // every 30 s regardless, those refusals were 74,402 in a week (2026-11-21).
+  // Other errors back off, 1 to 15 minutes.
   let friendsTimer: number | undefined
+  let friendsWait = 0
+  /** Chat was removed here: nothing is asked again. */
+  let stopped = false
+  const later = (ms: number) => {
+    window.clearTimeout(friendsTimer)
+    if (!stopped) friendsTimer = window.setTimeout(() => void refreshFriends(), ms)
+  }
   const refreshFriends = async () => {
+    window.clearTimeout(friendsTimer)
     try {
       const [f, h] = await Promise.all([
         api<Record<string, any>>(token, 'GET', '/api/friends'),
@@ -72,12 +87,17 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
           accepted: (f.messageRequests?.accepted ?? []).map(face),
         },
       })
+      friendsWait = 0
+      later(FRIENDS_EVERY_MS)
     } catch (e) {
-      if (e instanceof Error && 'status' in e && (e as { status: number }).status === 401) onSignedOut()
+      const status = e instanceof Error && 'status' in e ? (e as { status: number }).status : 0
+      if (status === 401) return onSignedOut()
+      const next = friendsNext(status, friendsWait)
+      friendsWait = next.wait
+      later(next.delay)
     }
   }
   void refreshFriends()
-  friendsTimer = window.setInterval(() => void refreshFriends(), 30_000)
 
   const pickFile = (): Promise<File | null> =>
     new Promise((resolve) => {
@@ -102,7 +122,8 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
       // Chat that never opened here (another account's, still stored) has nothing to sign out of.
       if (c) await c.removeDevice(!onRemoved)
       else await Store.wipe()
-      window.clearInterval(friendsTimer)
+      window.clearTimeout(friendsTimer)
+      stopped = true
       ;(onRemoved ?? onSignedOut)()
     },
     // Without a chat device: a browser or phone turned away at the limit makes room with these.

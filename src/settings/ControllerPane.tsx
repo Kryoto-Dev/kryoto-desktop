@@ -25,6 +25,7 @@ import {
 } from '@/lib/pad'
 import { PAD_FAMILIES, type PadControl, type PadFamily } from '@/lib/pad-art'
 import { cn } from '@/lib/utils'
+import { SCREENSAVER_WAITS, screensaverOn, screensaverWait, setScreensaverOn, setScreensaverWait } from '@/bigpicture/Screensaver'
 
 /**
  * Settings > Devices, Controller (kryo.to feature flag `controller`): the pads that are
@@ -374,7 +375,37 @@ export function ControllerPane() {
           {config.navigate ? <NavLegend family={family} /> : null}
         </Section>
       ) : null}
+      <BigPictureSection />
     </>
+  )
+}
+
+/** Big Picture's screensaver (bigpicture/Screensaver.tsx): on, and after how long. */
+function BigPictureSection() {
+  const [on, setOn] = useState(screensaverOn)
+  const [wait, setWait] = useState(screensaverWait)
+  return (
+    <Section title="Big Picture" hint="Left alone, Big Picture dims to Kryoto's start screen, moving now and then so nothing marks a TV. Any button brings it back. Never while a game runs.">
+      <Check
+        checked={on}
+        onChange={(v) => {
+          setOn(v)
+          setScreensaverOn(v)
+        }}
+        label="Show a screensaver when Big Picture is left alone"
+      />
+      {on ? (
+        <Segmented
+          label="Start the screensaver after"
+          value={String(wait)}
+          options={SCREENSAVER_WAITS.map((m) => ({ value: String(m), label: `${m} min` }))}
+          onChange={(v) => {
+            setWait(Number(v))
+            setScreensaverWait(Number(v))
+          }}
+        />
+      ) : null}
+    </Section>
   )
 }
 

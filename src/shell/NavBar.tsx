@@ -123,7 +123,17 @@ export function NavBar({
           />
         ))}
       </div>
-      {right ? <div className={cn('flex w-xl items-center gap-2', fold >= FOLD.address ? 'min-w-40' : 'min-w-56')}>{right}</div> : null}
+      {/* The address's room is kept on every page, empty off the Store, so the
+          row folds the same way everywhere: going from the Store to the Library
+          moved the tabs and brought the menus back, at any window short of
+          full screen (suggestion #103). Empty, it drags the window like the rest. */}
+      <div
+        data-maximize={right ? undefined : ''}
+        aria-hidden={right ? undefined : true}
+        className={cn('flex w-xl items-center gap-2 self-stretch', fold >= FOLD.address ? 'min-w-40' : 'min-w-56', !right && 'drag')}
+      >
+        {right}
+      </div>
     </nav>
   )
 }
