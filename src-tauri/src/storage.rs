@@ -752,7 +752,10 @@ pub fn check_download_room(archive_dir: &Path, library: &Path, archive_left: u64
                 if listed.is_some() { " as kryo.to lists it" } else { ", taken as the archive size" },
             ),
         );
-        return check_room(library, needed, what);
+        // Said plainly when the download and the game must sit side by side:
+        // a player with "500 GB free" read the bare total as a wrong reading
+        // (KB-0329).
+        return check_room(library, needed, what).map_err(|e| if in_place { e } else { side_by_side(library, needed, archive_total, unpacked, what) });
     }
     check_room(archive_dir, archive_left, what)?;
     check_room(library, unpacked, what)
@@ -764,6 +767,35 @@ pub fn check_download_room(archive_dir: &Path, library: &Path, archive_left: u64
 /// solid blocks: 82 in a 3.6 GB one at its default level).
 fn in_place_extra(archive: u64) -> u64 {
     (3 << 29) + archive / 50
+}
+
+/// "Not enough space" for a game unpacked the usual way on the drive that
+/// holds its download: 7-Zip writes the game beside the download, so the
+/// drive needs room for both at once. Names the drive and both sizes.
+fn side_by_side(folder: &Path, needed: u64, archive: u64, game: u64, what: &str) -> String {
+    let free = disk_space(folder).map(|(_, f)| human(f)).unwrap_or_else(|| "less".into());
+    format!(
+        "Not enough space on {drive} for {what}: it is unpacked with 7-Zip (the standard unpacker), which needs the download ({}) and the game ({}) on {drive} at the same time, about {} in all, and {free} is free. Free some space or choose another folder, then press Retry.",
+        human(archive),
+        human(game),
+        human(needed),
+        drive = drive_of(folder),
+    )
+}
+
+/// Before 7-Zip unpacks a download that is already on `folder`'s drive (the
+/// usual way, after unpacking in place stood aside): room for the game beside
+/// it. The download is kept, so Retry needs no new download.
+pub fn check_room_beside(folder: &Path, game: u64, archive: u64, what: &str) -> Result<(), String> {
+    check_room(folder, game, what).map_err(|_| {
+        let free = disk_space(folder).map(|(_, f)| human(f)).unwrap_or_else(|| "less".into());
+        format!(
+            "Not enough space on {drive} for {what}: 7-Zip (the standard unpacker) writes the game ({}) beside its download ({}), which stays on {drive} until it is done, and {free} is free. The download is kept: free some space or choose another folder, then press Retry.",
+            human(game),
+            human(archive),
+            drive = drive_of(folder),
+        )
+    })
 }
 
 /// Before a download lands: is there room for the archive and what it unpacks
@@ -804,6 +836,21 @@ mod tests {
         assert!(check_download_room(&dir, &dir, archive / 4, archive, Some(archive / 10 * 11), true, "a game").is_ok());
         // A listing far under the archive is ignored.
         assert!(check_download_room(&dir, &dir, archive, archive, Some(1), true, "a game").is_ok());
+    }
+
+    /// KB-0329: when the download and the game must sit side by side, the
+    /// message says so, names the drive and both sizes, and says what 7-Zip is.
+    #[test]
+    fn room_for_both_says_both_and_the_drive() {
+        let dir = std::env::temp_dir();
+        let Some((_, free)) = disk_space(&dir) else { return };
+        let archive = free / 10 * 6;
+        let e = check_download_room(&dir, &dir, archive, archive, None, false, "a game").unwrap_err();
+        assert!(e.starts_with(&format!("Not enough space on {}", drive_of(&dir))), "{e}");
+        assert!(e.contains("7-Zip (the standard unpacker)") && e.contains("at the same time") && e.contains(&human(archive)), "{e}");
+        let e = check_room_beside(&dir, free + (1 << 30), archive, "a game").unwrap_err();
+        assert!(e.starts_with("Not enough space on") && e.contains("beside its download") && e.contains("The download is kept"), "{e}");
+        assert!(check_room_beside(&dir, 1, archive, "a game").is_ok());
     }
 
     #[test]

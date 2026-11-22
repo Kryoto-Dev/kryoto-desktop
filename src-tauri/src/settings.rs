@@ -65,6 +65,9 @@ pub struct Settings {
     pub connections: u32,
     /// Download speed cap in MB/s; 0 is no cap.
     pub speed_limit_mb: u32,
+    /// Speeds shown in megabits a second (Mbps, as internet plans are sold)
+    /// instead of megabytes a second (suggestion #105). Display only.
+    pub speed_in_bits: bool,
     /// Optional local or staging Kryo.to origin for development.
     pub catalog_endpoint: String,
     /// Linux: MangoHud's overlay on every Windows game (when it is installed).
@@ -268,6 +271,7 @@ impl Default for Settings {
             share_playtime: true,
             connections: 16,
             speed_limit_mb: 0,
+            speed_in_bits: false,
             catalog_endpoint: String::new(),
             linux_mangohud: false,
             linux_gamemode: false,

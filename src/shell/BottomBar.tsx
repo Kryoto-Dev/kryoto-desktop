@@ -1,6 +1,7 @@
 import { Bell, Download, Play, Plus, Users } from '@/ui/pixel-icons'
 import { asciiTrack } from '@/ui'
-import { formatBytes, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
+import { formatBytes, formatSpeed, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
+import { useSettings } from '@/lib/settings'
 import { ToastActionButton, type Toast } from '@/shell/Toasts'
 import { useSocialBadge } from '@/hooks/useSocialBadge'
 
@@ -33,6 +34,7 @@ export function BottomBar({
   friendsActive?: boolean
 }) {
   const waitingSocial = useSocialBadge().total
+  const bits = !!useSettings()?.speedInBits
   const active = downloads.find(isWorking)
   const count = (status: Dl['status']) => downloads.filter((d) => d.status === status).length
   const waiting = [`${count('failed')} failed`, `${count('paused')} paused`, `${count('queued')} queued`].filter((s) => !s.startsWith('0 '))
@@ -57,7 +59,7 @@ export function BottomBar({
             {/* A fixed width: the whole group is centred, so a figure changing length would slide it. */}
             <span className="w-32 text-left tabular-nums">
               {Math.round(progressOf(active) * 100)}%
-              {active.status === 'downloading' && active.speed ? ` · ${formatBytes(active.speed)}/s` : ''}
+              {active.status === 'downloading' && active.speed ? ` · ${formatSpeed(active.speed, bits)}` : ''}
             </span>
           </>
         ) : (
