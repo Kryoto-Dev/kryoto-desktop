@@ -3271,7 +3271,7 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
         if d.mirror.is_some() {
             return Err(format!("The archive from {source} doesn't match kryo.to's checksum: that copy is not the right file. Take another mirror or Kryoto's own copy, or Install it anyway."));
         }
-        return Err("The archive doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.".into());
+        return Err(format!("The archive from {source} doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again."));
     }
     edit(app, id, |d| {
         d.verified = true;
@@ -3921,6 +3921,11 @@ async fn transfer<R: Runtime>(
         return Err(Transfer::Restart(format!("the server has {total:?} bytes and {on_disk} are here")));
     }
     check_status(status.as_u16())?;
+    // Never written as the archive: a page where the file should be. A host
+    // that answers ranges with a page falls back to this one stream first.
+    if is_web_page(&response) {
+        return Err(Transfer::Fatal(web_page_sent(&source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str())))));
+    }
     let resumed = status.as_u16() == 206;
     let range = content_range_of(&response);
     let etag = etag_of(&response);
@@ -4137,11 +4142,38 @@ fn range_not_satisfiable(from: u64, expected: Option<u64>, server: Option<u64>) 
 /// Who served `url`, for the player and the reports: a mirror's name, or
 /// Kryoto's own server. Never the address itself (signed links).
 fn source_of(url: &str) -> String {
-    let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
+    let parsed = url::Url::parse(url).ok();
+    let host = parsed.as_ref().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
     if host == "kryo.to" || host.ends_with(".kryo.to") {
-        return "Kryoto's own server".into();
+        return OWN_HOST.into();
+    }
+    // Debug builds only: the local stand-in for dl.kryo.to (`is_ours`).
+    #[cfg(debug_assertions)]
+    if let Ok(dev) = std::env::var("KRYOTO_DEV_DOWNLOAD_HOST") {
+        let port = parsed.as_ref().and_then(|u| u.port()).map(|p| format!(":{p}")).unwrap_or_default();
+        if !dev.is_empty() && format!("{host}{port}") == dev {
+            return OWN_HOST.into();
+        }
     }
     crate::resolvers::classify(url).map(|(_, name)| name.to_string()).unwrap_or(host)
+}
+
+/// A host answered with a web page where the file should be.
+fn web_page_sent(source: &str) -> String {
+    format!("{source} sent a web page instead of the file. {}", another_source(source))
+}
+
+/// What the player reads for our own file host (dl.kryo.to).
+const OWN_HOST: &str = "Kryoto's file host (dl.kryo.to)";
+
+/// What to do when `source` sent the wrong thing: our own host is worth a
+/// retry and then a mirror; a mirror is not, and our own copy is the way.
+fn another_source(source: &str) -> &'static str {
+    if source == OWN_HOST {
+        "Retry in a few minutes, or download it from one of the game's mirrors on its page."
+    } else {
+        "Take another mirror, or Kryoto's own copy."
+    }
 }
 
 /// An answer that is a web page (a host's "file removed" or wait page, a
@@ -4197,14 +4229,12 @@ fn check_head(name: &str, head: &[u8], total: u64, source: &str) -> Result<(), S
         return Ok(());
     }
     match seven_z_length(head) {
-        None => Err(format!(
-            "{source} sent {} instead of the game's archive. Take another mirror, or Kryoto's own copy.",
-            looks_like(head)
-        )),
+        None => Err(format!("{source} sent {} instead of the game's archive. {}", looks_like(head), another_source(source))),
         Some(len) if len > total => Err(format!(
-            "{source}'s copy of this file is cut short: {} of {}. Take another mirror, or Kryoto's own copy.",
+            "{source}'s copy of this file is cut short: {} of {}. {}",
             crate::storage::human_size(total),
-            crate::storage::human_size(len)
+            crate::storage::human_size(len),
+            another_source(source)
         )),
         Some(_) => Ok(()),
     }
@@ -4254,15 +4284,17 @@ async fn transfer_parallel<R: Runtime>(
         let Some(probe) = unless_stopped(flag, probe).await else { return Ok(false) };
         let probe = probe?;
         check_status(probe.status().as_u16())?;
+        let source = source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str()));
+        // Before the one-stream fallback: a page answers a range with 200,
+        // and was then downloaded as the archive (2026-11-22, a block page).
+        if is_web_page(&probe) {
+            return Err(Transfer::Fatal(web_page_sent(&source)));
+        }
         let total = (probe.status().as_u16() == 206).then(|| content_range_of(&probe).and_then(|r| r.total)).flatten();
         let Some(total) = total.filter(|t| *t > 0) else {
             drop(probe);
             return transfer(app, id, flag, client, settings, limiter).await;
         };
-        let source = source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str()));
-        if is_web_page(&probe) {
-            return Err(Transfer::Fatal(format!("{source} sent a web page instead of the file. Take another mirror, or Kryoto's own copy.")));
-        }
         let etag = etag_of(&probe);
         let name = probe
             .headers()
@@ -4695,7 +4727,7 @@ async fn fetch_range(
     check_status(res.status().as_u16())?;
     // Never written into the archive: a page where the bytes should be.
     if is_web_page(&res) {
-        return Err(Transfer::Fatal(format!("{} sent a web page instead of the file. Take another mirror, or Kryoto's own copy.", source_of(url))));
+        return Err(Transfer::Fatal(web_page_sent(&source_of(url))));
     }
     if res.status().as_u16() != 206 {
         return Err(Transfer::NoRanges);
@@ -6476,7 +6508,13 @@ mod tests {
         assert_eq!(looks_like(&[0u8; 32]), "zeros");
         // Not a 7z by name: nothing to read in its head.
         assert!(check_head("Game.zip", &page, 5_000, "Pixeldrain").is_ok());
-        assert_eq!(source_of("https://dl.kryo.to/d/abc.sig"), "Kryoto's own server");
+        assert_eq!(source_of("https://dl.kryo.to/d/abc.sig"), OWN_HOST);
+        // Our own host is named, and offered a retry and the mirrors; a
+        // mirror is told to take another one, or our own copy.
+        assert!(web_page_sent(OWN_HOST).starts_with("Kryoto's file host (dl.kryo.to) sent a web page"));
+        assert!(web_page_sent(OWN_HOST).contains("one of the game's mirrors"));
+        assert!(!web_page_sent(OWN_HOST).contains("Kryoto's own copy"));
+        assert!(web_page_sent("VikingFile").ends_with("Take another mirror, or Kryoto's own copy."));
     }
 
     /// KB-0117: the mirrors that can carry on a download our server keeps

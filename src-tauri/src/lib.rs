@@ -352,6 +352,15 @@ fn mirror_hosts(urls: Vec<String>) -> Vec<Option<MirrorHost>> {
 
 /// Only plain web navigation stays inside the web view. Everything else
 /// (file:, javascript:, data:, custom schemes) is blocked and reported.
+/// A file of ours (dl.kryo.to's signed `/d/<token>` links, or the debug
+/// stand-in for it), not one of kryo.to's pages.
+fn is_our_file_link(url: &url::Url, settings: &settings::Settings) -> bool {
+    // Not the site's own origin (its pages), which `is_catalog_origin` widens
+    // to every kryo.to host, dl.kryo.to included.
+    let site = url::Url::parse(&settings::catalog_endpoint(settings)).map(|u| u.origin()).ok();
+    url.path().starts_with("/d/") && site.as_ref() != Some(&url.origin()) && downloads::is_ours(url, settings)
+}
+
 fn allowed_browser_url(url: &url::Url) -> bool {
     (url.scheme() == "https" || url.scheme() == "http") && !url.host_str().unwrap_or("").is_empty()
 }
@@ -2237,8 +2246,24 @@ pub fn run() {
                         });
                         return false;
                     }
+                    // One of our own files (the page's Download, a signed
+                    // dl.kryo.to link): the app fetches it, before the web view
+                    // does. Left to the web view, a link refused on its first
+                    // fetch (made for another network, run out, a block page)
+                    // was not a download, so its raw answer replaced the Store's
+                    // page. Fetched here, any refusal is the download row's to
+                    // say, in words, and the Store stays on the game's page.
+                    let settings = settings::load(webview.app_handle());
+                    if is_our_file_link(url, &settings) {
+                        let (slug, title) = download_game(webview.app_handle(), url, webview.url().ok(), &settings);
+                        let mut clean_url = url.clone();
+                        clean_url.set_fragment(None);
+                        logging::info("download", "Store download handed to the installer before the web view fetched it");
+                        let app = webview.app_handle().clone();
+                        std::thread::spawn(move || downloads::enqueue(&app, clean_url.to_string(), slug, title));
+                        return false;
+                    }
                     if allowed_browser_url(url) {
-                        let settings = settings::load(webview.app_handle());
                         let endpoint = settings::catalog_endpoint(&settings);
                         match map_catalog_url(url.clone(), &endpoint) {
                             Ok(mapped) if mapped != *url => {
@@ -2799,6 +2824,18 @@ mod tests {
         assert_eq!(game_slug(&u("https://kryo.to/browse?q=x&game=Hades-II"), &settings).as_deref(), Some("hades-ii"));
         assert_eq!(game_slug(&u("https://kryo.to/?game=../x"), &settings), None);
         assert_eq!(game_slug(&u("https://evil.example/?game=x"), &settings), None);
+    }
+
+    /// Only our own signed file links are fetched by the app before the Store
+    /// opens them: never one of kryo.to's pages, nor another host's file.
+    #[test]
+    fn only_our_own_file_links_are_taken_from_the_store() {
+        let settings = settings::Settings::default();
+        let u = |s: &str| s.parse::<url::Url>().unwrap();
+        assert!(is_our_file_link(&u("https://dl.kryo.to/d/abc.sig#kryoto-game=hades"), &settings));
+        for not in ["https://kryo.to/game/hades", "https://kryo.to/d/abc", "https://dl.kryo.to/upload", "https://files.catbox.moe/d/x.7z", "http://dl.kryo.to/d/x"] {
+            assert!(!is_our_file_link(&u(not), &settings), "{not}");
+        }
     }
 
     #[test]

@@ -287,7 +287,7 @@ const downloadList: Record<string, unknown>[] = [
     total: 2_075_315_145,
     speed: 0,
     hashMismatch: true,
-    error: "The archive doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.",
+    error: "The archive from Kryoto's file host (dl.kryo.to) doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.",
     meta: {
       ...dl({}).meta,
       title: 'Schedule I',
