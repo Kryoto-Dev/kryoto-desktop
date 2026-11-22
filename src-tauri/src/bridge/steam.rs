@@ -109,15 +109,6 @@ fn back_up(app: &AppHandle, user: &str, file: &Path) -> Result<Option<String>, S
     Ok(Some(copy.to_string_lossy().into_owned()))
 }
 
-/// The program a shortcut starts: this app, as Steam can reach it.
-fn this_app() -> Result<PathBuf, String> {
-    // The AppImage, not the temporary mount it runs from.
-    if let Some(p) = env_path("APPIMAGE") {
-        return Ok(p);
-    }
-    std::env::current_exe().map_err(|e| e.to_string())
-}
-
 /// What the shortcut hands Kryoto. Library ids are lower case letters, digits
 /// and dashes, which is what a link can carry.
 fn link_to(g: &LibraryGame) -> String {
@@ -168,8 +159,7 @@ fn put(grid: &Path, name: &str, bytes: &[u8], ours: &[String], out: &mut Vec<Str
 }
 
 fn eligible(g: &LibraryGame) -> bool {
-    let linkable = crate::links::parse(&link_to(g)).is_some_and(|l| l.slug == g.id);
-    g.launcher.is_none() && linkable && !g.install_dir.is_empty() && (!g.executable.is_empty() || !g.entries.is_empty())
+    super::sendable(g)
 }
 
 impl Provider for Steam {
@@ -273,7 +263,7 @@ impl Export for Steam {
         let mut shortcuts = read_shortcuts(&file)?;
         let backup = back_up(app, user, &file)?;
         let mut ledger = load_ledger(app);
-        let exe = this_app()?;
+        let exe = super::this_app()?;
         let grid = config.join("grid");
         let mut out = Sent { backup, ..Default::default() };
         let mut seen = std::collections::HashSet::new();

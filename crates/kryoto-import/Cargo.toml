@@ -3,8 +3,13 @@ name = "kryoto-import"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Reading other launchers' libraries (Hydra) read-only, and matching their games to Kryoto's catalog."
+description = "Reading other launchers' libraries (Hydra, Steam, Playnite, Lutris) without changing them, matching their games to Kryoto's catalog, and adding games to Lutris."
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Lutris keeps its library in SQLite (pga.db). The same rusqlite as the chat
+# store, so the app links one SQLite; `bundled` lets this crate build alone.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# Lutris's per-game settings are YAML.
+serde_yaml = "0.9"
