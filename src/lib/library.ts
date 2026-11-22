@@ -3,6 +3,8 @@ import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { automaticArtwork, coverFor } from '@/lib/game-artwork'
 import { autofixBlock } from '@/lib/autofix'
+import type { FilesRestored, FilesState } from '@/lib/release-files'
+import type { OnlineFixState } from '@/lib/online-fix'
 
 /**
  * The Library: games on this PC and how each one starts.
@@ -268,7 +270,17 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
   })
 }
 
-export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null; stopped?: boolean; /** Linux: the launcher's last lines, when it failed at once. */ detail?: string }
+export type GameStateEvent = {
+  id: string
+  running: boolean
+  seconds: number | null
+  code: number | null
+  stopped?: boolean
+  /** Linux: the launcher's last lines, when it failed at once. */
+  detail?: string
+  /** Why it sent the player to Steam ("No licenses"), when it ended at once and its folder says why (src-tauri steam_check.rs). */
+  steam?: string
+}
 
 export const BLANK_GAME: LibraryGame = {
   id: '',
@@ -393,7 +405,25 @@ export const library = {
   emulators: (gameId: string) => call<GameEmulators>('game_emulators', { gameId }),
   /** Switch in one go: what Kryoto put in before comes out, then this one goes in (repair.rs `repair_switch`). */
   switchEmulator: (gameId: string, source: string) => call<{ source: string; version: string; warnings: string[] }>('repair_switch', { gameId, source }),
+  /** The release's file list and the last check, without asking kryo.to (src-tauri release_files.rs). */
+  filesState: (gameId: string) => call<FilesState>('game_files_state', { gameId }),
+  /** The same, with the list fetched first when it is due (opening Properties). */
+  filesFetch: (gameId: string) => call<FilesState>('game_files_fetch', { gameId }),
+  /** Check files: `full` hashes every file (`files-check-progress`, and Cancel). */
+  filesCheck: (gameId: string, full = false) => call<FilesState>('game_files_check', { gameId, full }),
+  filesCheckCancel: (gameId: string) => call<void>('game_files_check_cancel', { gameId }),
+  /** Get the files back from this PC (another copy, the kept download); says what is left. */
+  filesRestore: (gameId: string) => call<FilesRestored>('game_files_restore', { gameId }),
   onlineUndo: (gameId: string) => call<LibraryGame>('online_undo', { gameId }),
+  /** Online-Fix's fix from online-fix.me (src-tauri online_fix.rs): what is known, asking nobody. */
+  onlineFixState: (gameId: string) => call<OnlineFixState>('online_fix_state', { gameId }),
+  /** The same, with online-fix.me asked what it has (once a run, unless `fresh`). */
+  onlineFixLookup: (gameId: string, fresh = false) => call<OnlineFixState>('online_fix_lookup', { gameId, fresh }),
+  /** online-fix.me's folder opens in a window; the player clicks the file; Kryoto checks it and puts it in. */
+  onlineFixGet: (gameId: string) => call<OnlineFixState>('online_fix_get', { gameId }),
+  /** "I have the file": an archive the player downloaded, checked and put in the same way. */
+  onlineFixFromFile: (gameId: string, path: string) => call<OnlineFixState>('online_fix_from_file', { gameId, path }),
+  onlineFixOpenPage: (gameId: string) => call<void>('online_fix_open_page', { gameId }),
 }
 
 /** One emulator a game can switch to (repair.rs `EmulatorChoice`). */
@@ -407,6 +437,12 @@ export type GameEmulators = {
   undo: boolean
   interrupted: boolean
   blocked: string | null
+  /** The emulator the release came with, from its file list: "gbe_fork (experimental)". */
+  release: string | null
+  /** The uploader left the emulator out of this release. */
+  releaseOff: boolean
+  /** Steam files the uploader kept as the game shipped them. */
+  keptOwn: string[]
 }
 
 /* ── kryo.to ─────────────────────────────────────────────── */

@@ -163,6 +163,10 @@ struct GameEvent {
     /// Linux: the last lines its launcher printed, when it failed at once.
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// Why it would have sent the player to Steam ("No licenses"), when it
+    /// ended at once and its folder says why (steam_check.rs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steam: Option<String>,
 }
 
 /// A Steam branch's name the way people say it ("Public beta", "GB27"), or None
@@ -1875,7 +1879,7 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
     let open_session = OpenSession::start(&app, &id, started_at);
     crate::presence::beat(&app);
     crate::discord_rpc::started(&app, &id, started);
-    let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None, stopped: false, detail: None });
+    let _ = app.emit("game-state", GameEvent { id: id.clone(), running: true, seconds: None, code: None, stopped: false, detail: None, steam: None });
     crate::achievements::watch(app.clone(), &game, crate::achievements::roots_for(&plan.env).with_game(Path::new(&game.install_dir)));
     // A community update's playtest: its screenshots, taken from the game itself.
     crate::community_offer::during_play(&app, &game, pid);
@@ -1888,6 +1892,8 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
     }
 
     let install_dir = PathBuf::from(&game.install_dir);
+    let started_exe = plan.exe.clone();
+    let kryoto_online = game.online.is_some() || game.repair.as_ref().is_some_and(|r| r.source == kryoto_repair::settings::Emulator::Online.label());
     std::thread::spawn(move || {
         let status = child.wait().ok();
         let exited_after = started_at.elapsed().as_secs();
@@ -1922,7 +1928,15 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
                 log.as_ref().and_then(|l| l.last_words())
             })
             .flatten();
+        // Gone at once and nothing followed it: a game that asked Steam
+        // whether this account owns it ("No licenses") says why in its folder.
+        let steam = (!session.stopped() && followed.is_none() && seconds < 5)
+            .then(|| crate::steam_check::why_steam_asked(&install_dir, &started_exe, kryoto_online))
+            .flatten();
         if let Some(log) = &log {
+            if let Some(why) = &steam {
+                log.note(why);
+            }
             log.finish(code, seconds, followed);
         }
         if let Some(state) = app.try_state::<Running>() {
@@ -1945,7 +1959,10 @@ fn launch_reserved(app: AppHandle, id: String, entry: Option<usize>, join_lobby:
         crate::community_offer::after_play(&install_dir, seconds, code);
         crate::presence::beat(&app);
         crate::discord_rpc::ended(&app, &id);
-        let _ = app.emit("game-state", GameEvent { id: id.clone(), running: false, seconds: Some(seconds), code, stopped: session.stopped(), detail });
+        if let Some(why) = &steam {
+            crate::logging::info("library", &format!("{id}: ended at once; {why}"));
+        }
+        let _ = app.emit("game-state", GameEvent { id: id.clone(), running: false, seconds: Some(seconds), code, stopped: session.stopped(), detail, steam });
         // Learn where it saved, then back the saves up.
         crate::saves::after_exit(app.clone(), id, tracer);
     });

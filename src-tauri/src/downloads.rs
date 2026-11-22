@@ -5360,7 +5360,7 @@ fn needs_newer_7zip(tried: &[String]) -> String {
 /// Where 7-Zip's console might be: an installed 7-Zip, then the standalone
 /// `7zr.exe` this client keeps (which reads only .7z), or on Linux whatever
 /// the distribution calls it. Missing ones are skipped when they fail to start.
-fn seven_zip_tools(is_7z: bool) -> Vec<PathBuf> {
+pub(crate) fn seven_zip_tools(is_7z: bool) -> Vec<PathBuf> {
     #[cfg(windows)]
     let list = {
         let mut list: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
@@ -5397,9 +5397,43 @@ pub fn seven_zip_percent(line: &str) -> Option<u64> {
     line[..digits].parse().ok().filter(|p| *p <= 100)
 }
 
+/// Just `names` (as the archive itself lists them) out of a kept archive into
+/// `dest`, with the same 7-Zip an install uses: "Get the files back" in
+/// release_files.rs. `Ok(false)` when there is no 7-Zip on this PC. A solid
+/// archive is read up to the last file asked for, so its progress is honest.
+pub fn extract_named(archive: &Path, dest: &Path, names: &[String], progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Result<bool, String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("Cannot create {}: {e}", dest.display()))?;
+    let list = dest.with_extension("names");
+    std::fs::write(&list, names.join("\n")).map_err(|e| e.to_string())?;
+    let is_7z = archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+    let mut errors = Vec::new();
+    for tool in seven_zip_tools(is_7z) {
+        match run_7zip(&tool, archive, dest, Some(&list), progress, stop) {
+            None => continue,
+            Some(Ok(_)) => {
+                let _ = std::fs::remove_file(&list);
+                return Ok(true);
+            }
+            Some(Err(e)) => errors.push(e),
+        }
+    }
+    let _ = std::fs::remove_file(&list);
+    if errors.is_empty() {
+        Ok(false)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 /// Unpack with 7-Zip's console, following its progress. `None` when the tool
 /// is not there; otherwise what it reported damaged, or why it failed.
 fn extract_with_7zip(tool: &Path, archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Option<Result<Vec<String>, String>> {
+    run_7zip(tool, archive, dest, None, progress, stop)
+}
+
+/// `extract_with_7zip`, or with `names` (a list file, one of the archive's
+/// own names per line, taken as written) only those files.
+fn run_7zip(tool: &Path, archive: &Path, dest: &Path, names: Option<&Path>, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Option<Result<Vec<String>, String>> {
     use std::io::Read;
     // The bar counts unpacked bytes when the archive says how many there are
     // (a .7z's headers do), and the archive's own size otherwise.
@@ -5407,6 +5441,10 @@ fn extract_with_7zip(tool: &Path, archive: &Path, dest: &Path, progress: &dyn Fn
     let mut cmd = std::process::Command::new(tool);
     // -bso0: no listing. -bsp1: progress on stdout. -bse2: errors on stderr.
     cmd.arg("x").arg("-y").arg("-bso0").arg("-bsp1").arg("-bse2").arg(format!("-o{}", dest.display())).arg(archive);
+    if let Some(list) = names {
+        // -spd: no wildcards in the names; the list is UTF-8.
+        cmd.arg("-spd").arg("-scsUTF-8").arg(format!("@{}", list.display()));
+    }
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     // Inside the AppImage, never hand 7-Zip the AppImage's own library paths (KB-0311).
     crate::launch::clean_appimage_env(&mut cmd);

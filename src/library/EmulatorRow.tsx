@@ -24,6 +24,8 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
   const [answer, setAnswer] = useState<'working' | 'broken' | null>(null)
+  /** What the switch noted, in a player's words (repair.rs `plain_warning`): a DRM wrapper it could not take off. */
+  const [notes, setNotes] = useState<string[]>([])
   const inFlight = useRef(false)
 
   const load = useCallback(() => {
@@ -42,6 +44,8 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
     }).then(keep)
     // A fix from kryo.to applied below, or a switch made elsewhere: read again.
     void on('library-changed', () => { if (!inFlight.current) load() }).then(keep)
+    // The release's file list arrived (Files, below): what it came with.
+    void on<string>('files-checked', (id) => { if (id === gameId && !inFlight.current) load() }).then(keep)
     return () => {
       cancelled = true
       stops.forEach((f) => f())
@@ -56,6 +60,7 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
     setDone(null)
     setAnswer(null)
     setStatus(null)
+    setNotes([])
     try {
       await work()
       setDone(after)
@@ -69,7 +74,11 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
     }
   }
   const switchTo = (id: string, label: string) =>
-    act(label, () => library.switchEmulator(gameId, id), `Now using ${label}. Start the game to check that it works.`)
+    act(
+      label,
+      async () => setNotes((await library.switchEmulator(gameId, id)).warnings.filter((w) => /No licenses|DRM wrapper/.test(w))),
+      `Now using ${label}. Start the game to check that it works.`,
+    )
   const restore = () => act('restore', () => backend.undo(), "The release's own files are back.")
   const report = async () => {
     setAnswer('broken')
@@ -101,7 +110,22 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
         </p>
         {state.switched ? (
           <p className="text-[11px] text-muted-foreground">
-            Put in by Kryoto. {state.original ? `The release came with ${state.original.replace(/^Steam \+ /, '')}.` : 'Back puts the release\'s own files back.'}
+            Put in by Kryoto.{' '}
+            {state.release
+              ? `This release came with ${state.release}.`
+              : state.original
+                ? `The release came with ${state.original.replace(/^Steam \+ /, '')}.`
+                : "Back puts the release's own files back."}
+          </p>
+        ) : state.release ? (
+          <p className="text-[11px] text-muted-foreground">This release came with {state.release}.</p>
+        ) : null}
+        {state.releaseOff ? <p className="text-[11px] text-muted-foreground">The uploader left the emulator out of this release.</p> : null}
+        {state.keptOwn.length ? (
+          <p className="text-[11px] text-muted-foreground">
+            The uploader kept this game&apos;s own Steam {state.keptOwn.length === 1 ? 'file' : 'files'}:{' '}
+            <span className="select-text break-all font-mono">{state.keptOwn.slice(0, 3).join(', ')}</span>
+            {state.keptOwn.length > 3 ? ` and ${state.keptOwn.length - 3} more` : ''}.
           </p>
         ) : null}
       </div>
@@ -133,6 +157,11 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
           {done}
         </p>
       ) : null}
+      {notes.map((n) => (
+        <p key={n} className="text-[11px] leading-snug text-warning">
+          {n}
+        </p>
+      ))}
       {done && state.switched && !answer && !busy ? (
         <div className="flex flex-wrap gap-2">
           <Button size="sm" onClick={() => { setAnswer('working'); setDone('Good. The copy of the old files stays, in case you want to go back.') }}>

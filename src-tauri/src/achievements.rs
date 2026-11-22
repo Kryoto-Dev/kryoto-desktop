@@ -347,7 +347,7 @@ impl GameAchievements {
 
 /// The game's Steam AppID: what its files say, else what kryo.to lists for it.
 /// A release published DRM-free has no emulator file to say it.
-async fn appid_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<String> {
+pub(crate) async fn appid_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<String> {
     if let Some(id) = appid_of(Path::new(&game.install_dir)) {
         return Some(id);
     }

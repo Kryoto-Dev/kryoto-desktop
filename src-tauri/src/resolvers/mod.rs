@@ -37,6 +37,7 @@ use std::sync::LazyLock;
 use tauri::{AppHandle, Runtime};
 
 pub use browser::cancel as cancel_browser;
+pub use browser::save_in_window;
 
 /// The user agent resolvers present, a current desktop Chrome: hosts that
 /// sniff for a browser get one, and it is replayed on the download itself.

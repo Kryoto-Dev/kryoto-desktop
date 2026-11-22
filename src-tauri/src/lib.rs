@@ -47,7 +47,10 @@ mod logging;
 mod net;
 mod menus;
 mod online;
+mod online_fix;
+mod steam_check;
 mod repair;
+mod release_files;
 mod joycons;
 mod pad;
 mod pad_games;
@@ -2345,6 +2348,11 @@ pub fn run() {
             repair::repair_undo,
             repair::repair_switch,
             repair::game_emulators,
+            online_fix::online_fix_state,
+            online_fix::online_fix_lookup,
+            online_fix::online_fix_get,
+            online_fix::online_fix_from_file,
+            online_fix::online_fix_open_page,
             repair::repair_support,
             repair::repair_support_url,
             links::take_pending_link,
@@ -2550,6 +2558,11 @@ pub fn run() {
             defender::defender_status,
             antivirus::game_antivirus,
             antivirus::game_restore_files,
+            release_files::game_files_state,
+            release_files::game_files_fetch,
+            release_files::game_files_check,
+            release_files::game_files_check_cancel,
+            release_files::game_files_restore,
             defender::defender_script,
             defender::defender_exclude,
             library::game_disk_size,

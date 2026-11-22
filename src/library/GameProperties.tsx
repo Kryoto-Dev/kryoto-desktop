@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { KryoFix } from '@/library/KryoFix'
 import { pickPath } from '@/lib/pick'
 import { FolderOpen, Glasses, Play, Trash2 } from '@/ui/pixel-icons'
 import { Button, Check, CommandLine, Dropdown, Modal, Panes, Section, Segmented, inputCls } from '@/ui'
@@ -26,6 +25,7 @@ import { cn } from '@/lib/utils'
 import { openSettingsSection } from '@/lib/window'
 import { VersionsList, type GetOurs } from '@/library/Versions'
 import { GameRepair } from '@/library/GameRepair'
+import { FilesRow } from '@/library/FilesRow'
 import { GameLogs } from '@/library/GameLogs'
 import { GameController } from '@/library/GameController'
 import { usePadStore } from '@/hooks/usePads'
@@ -444,9 +444,17 @@ export function GameProperties({
 
         {tab === 'repair' ? (
           <>
-            <GameRepair gameId={game.id} slug={game.slug} onLeave={onClose} view="row" />
-            {/* kryo.to's own fix for this game (an online fix), applied the same way and undone the same way. */}
-            {game.slug ? <KryoFix gameId={game.id} slug={game.slug} onGet={() => onOurs(null)} /> : null}
+            {/* Emulator and Online fix (kryo.to's own fix first, then online-fix.me's), off with the auto-fixer. */}
+            <GameRepair gameId={game.id} slug={game.slug} onLeave={onClose} view="row" onGetFix={() => onOurs(null)} />
+            {/* Outside GameRepair: a release the auto-fixer is off for still has its files checked. */}
+            <FilesRow
+              game={game}
+              running={false}
+              onGetFiles={() => {
+                onClose()
+                onOurs(null)
+              }}
+            />
           </>
         ) : null}
         {tab === 'versions' ? (

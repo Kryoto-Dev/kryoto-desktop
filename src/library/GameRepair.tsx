@@ -6,15 +6,18 @@ import { ExternalLink, TriangleAlert } from '@/ui/pixel-icons'
 import { Busy, Button } from '@/ui'
 import { RepairPanel, type RepairBackend, type RepairProgress } from './RepairPanel'
 import { EmulatorRow } from './EmulatorRow'
+import { OnlineFixRow } from './OnlineFixRow'
+import { KryoFix } from './KryoFix'
 
 /**
  * The auto-fixer for one installed game. With `slug`, kryo.to is asked first
  * whether its release is one the auto-fixer cannot fix (lib/autofix.ts): then
  * the release's notice shows instead, and nothing offers to repair it.
  * `onLeave` closes whatever holds this before its kryo.to page opens.
- * `view="row"`: Properties' Emulator row (EmulatorRow.tsx) instead of the panel.
+ * `view="row"`: Properties' Emulator row (EmulatorRow.tsx) and Online fix row
+ * (OnlineFixRow.tsx) instead of the panel.
  */
-export function GameRepair({ gameId, slug = null, initialOnline = false, purpose = 'repair', onLeave, view = 'panel' }: { gameId: string; slug?: string | null; initialOnline?: boolean; purpose?: 'repair' | 'achievements'; onLeave?: () => void; view?: 'panel' | 'row' }) {
+export function GameRepair({ gameId, slug = null, initialOnline = false, purpose = 'repair', onLeave, view = 'panel', onGetFix }: { gameId: string; slug?: string | null; initialOnline?: boolean; purpose?: 'repair' | 'achievements'; onLeave?: () => void; view?: 'panel' | 'row'; /** Row view: kryo.to's fix needs the game's download window. */ onGetFix?: () => void }) {
   const backend = useMemo<RepairBackend>(() => ({
     sources: () => call('repair_sources'),
     state: () => call('repair_state', { gameId }),
@@ -50,7 +53,7 @@ export function GameRepair({ gameId, slug = null, initialOnline = false, purpose
     )
   }
   if (blocked) {
-    return (
+    const notice = (
       <section aria-label="Repair game" className="grid justify-items-center gap-3 text-center">
         <TriangleAlert className="size-6 text-warning" aria-hidden />
         <p className="max-w-sm text-xs leading-relaxed text-foreground">{blocked.notice}</p>
@@ -63,7 +66,25 @@ export function GameRepair({ gameId, slug = null, initialOnline = false, purpose
         ) : null}
       </section>
     )
+    // kryo.to's own fix, published by staff, stays offered as before; the
+    // online-fix.me row goes with the auto-fixer.
+    if (view === 'row' && slug) {
+      return (
+        <>
+          {notice}
+          <KryoFix gameId={gameId} slug={slug} onGet={onGetFix ?? (() => {})} />
+        </>
+      )
+    }
+    return notice
   }
-  if (view === 'row') return <EmulatorRow gameId={gameId} backend={backend} />
+  if (view === 'row') {
+    return (
+      <>
+        <EmulatorRow gameId={gameId} backend={backend} />
+        <OnlineFixRow gameId={gameId} slug={slug} backend={backend} onGet={onGetFix ?? (() => {})} />
+      </>
+    )
+  }
   return <RepairPanel backend={backend} initialOnline={initialOnline} purpose={purpose} />
 }
