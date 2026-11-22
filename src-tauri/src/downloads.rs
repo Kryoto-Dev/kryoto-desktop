@@ -1402,8 +1402,9 @@ fn start<R: Runtime>(app: AppHandle<R>, id: String) {
                 let e = explain_os_error(e);
                 // A full disk is the player's to fix and the message says how:
                 // in this PC's log, not in the reports to kryo.to, where it was
-                // a third of everything sent. So is a game still running.
-                if e.starts_with("Not enough space") || e.ends_with(KEPT_FOR_RETRY) {
+                // a third of everything sent. So is a game still running, and
+                // so is a row waiting for a sign-in, which carries on by itself.
+                if e.starts_with("Not enough space") || e.ends_with(KEPT_FOR_RETRY) || waits_for_sign_in(&e) {
                     crate::logging::warn("download", &format!("{id}: {e}"));
                 } else {
                     crate::logging::error("download", &format!("{id}: {e}"));
@@ -2201,6 +2202,11 @@ fn signed_out<R: Runtime>(app: &AppHandle<R>, d: &Download) -> String {
     ADDON_SIGNED_OUT.into()
 }
 
+/// A row stopped only to wait for a sign-in (`signed_out`): not an app error.
+fn waits_for_sign_in(error: &str) -> bool {
+    error == crate::phone::SIGNED_OUT || error == ADDON_SIGNED_OUT
+}
+
 /// An add-on row while nobody is signed in to kryo.to here (see `signed_out`).
 pub const ADDON_SIGNED_OUT: &str =
     "You are signed out of kryo.to, so the app cannot fetch this add-on by itself. Sign in and it carries on, or press Download on it in the game's download window.";
@@ -2922,6 +2928,13 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
             return Err("stopped".into());
         }
         let host = crate::resolvers::classify(&page).map(|(_, h)| h.to_string()).unwrap_or_default();
+        // filez.stream sends its file sealed, chunk by chunk (`fetch_filez`):
+        // its bytes cannot fill the ranges of a plain download. Left out before
+        // it is asked: resolving it opens its page for its own check.
+        if crate::resolvers::filez::matches(&page) {
+            why.push(format!("{host}: sealed, cannot carry on a plain download"));
+            continue;
+        }
         let resolved = match crate::resolvers::resolve(app, &page).await {
             Ok(r) => r,
             Err(e) => {
@@ -2929,12 +2942,6 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
                 continue;
             }
         };
-        // filez.stream sends its file sealed, chunk by chunk (`fetch_filez`):
-        // its bytes cannot fill the ranges of a plain download.
-        if crate::resolvers::filez::file_for(&resolved.url).is_some() {
-            why.push(format!("{host}: sealed, cannot carry on a plain download"));
-            continue;
-        }
         if resolved.size.is_some_and(|s| s != total) {
             why.push(format!("{host}: another size ({} bytes, ours {total})", resolved.size.unwrap_or(0)));
             continue;
@@ -6702,6 +6709,16 @@ mod tests {
         assert!(root.join(&exe).is_file());
         assert_eq!(std::fs::read(root.join("Data/level.bin")).unwrap().len(), 300_000);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A row that only waits for a sign-in carries on by itself: it stays in
+    /// this PC's log as a warning and is never reported as an app error.
+    #[test]
+    fn a_wait_for_a_sign_in_is_not_an_app_error() {
+        assert!(waits_for_sign_in(crate::phone::SIGNED_OUT));
+        assert!(waits_for_sign_in(ADDON_SIGNED_OUT));
+        assert!(!waits_for_sign_in("The connection kept dropping (timed out). Resume to try again."));
+        assert!(!waits_for_sign_in("kryo.to wants a check only its page can pass. Press Download on X's page, or Retry later."));
     }
 
     #[test]
