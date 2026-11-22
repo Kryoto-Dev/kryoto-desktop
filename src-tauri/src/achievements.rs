@@ -352,8 +352,16 @@ async fn appid_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option
         return Some(id);
     }
     let slug = game.slug.as_deref()?;
+    // Taken off kryo.to: asked again tomorrow at the earliest (catalog_gone.rs).
+    if crate::catalog_gone::is_gone(app, slug) {
+        return None;
+    }
     let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(app));
     let res = kryoto_client(&endpoint).get(format!("{endpoint}/api/games/{slug}")).timeout(Duration::from_secs(15)).send().await.ok()?;
+    if crate::catalog_gone::says_gone(res.status().as_u16()) {
+        crate::catalog_gone::set(app, slug, true);
+        return None;
+    }
     let json: serde_json::Value = res.error_for_status().ok()?.json().await.ok()?;
     let id: String = json["game"]["steam_appid"].as_str()?.chars().take_while(char::is_ascii_digit).collect();
     (!id.is_empty() && id != "480").then_some(id)

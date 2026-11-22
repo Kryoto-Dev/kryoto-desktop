@@ -146,7 +146,7 @@ export function GameProperties({
     }
     setBusy(true)
     try {
-      const c = await fetchCatalogGame(slug)
+      const c = await fetchCatalogGame(slug, { ask: true })
       setDraft((d) => ({
         ...d,
         slug,
@@ -430,7 +430,7 @@ export function GameProperties({
         {tab === 'repair' ? (
           <>
             {game.slug ? <KryoFix gameId={game.id} slug={game.slug} onGet={() => onOurs(null)} /> : null}
-            <GameRepair gameId={game.id} />
+            <GameRepair gameId={game.id} slug={game.slug} onLeave={onClose} />
           </>
         ) : null}
         {tab === 'versions' ? (

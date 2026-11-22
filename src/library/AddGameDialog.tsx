@@ -63,7 +63,7 @@ export function AddGameDialog({
     setLooking(true)
     setError(null)
     try {
-      setFound(await fetchCatalogGame(slug))
+      setFound(await fetchCatalogGame(slug, { ask: true }))
     } catch (e) {
       setError(errorText(e))
     } finally {
@@ -102,6 +102,9 @@ export function AddGameDialog({
     }
   }, [query, retry])
 
+  // Nothing here waits on the file window but this call: Cancel (null) and a
+  // window that cannot open (an error) both leave every button as it was, so
+  // the next press opens it again (KB-0020).
   async function chooseExe() {
     setError(null)
     let picked: string | null

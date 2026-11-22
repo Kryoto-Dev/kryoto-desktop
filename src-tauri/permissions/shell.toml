@@ -22,6 +22,7 @@ commands.allow = [
   "game_log_read",
   "game_logs_folder",
   "library_prefix_folder", "library_relocate", "library_plain_folder", "folder_exists", "storage_leftover_prefixes", "storage_delete_prefix",
+  "catalog_gone",
   "pad_start",
   "shell_theme", "system_dark", "store_notifications_shown",
   "phone_status", "phone_set_lan", "phone_new_code", "phone_revoke", "phone_report_look",

@@ -1,7 +1,8 @@
-import { call, errorText, on } from '@/lib/bridge'
+import { call, errorText, isTauri, isWeb, on } from '@/lib/bridge'
 import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { automaticArtwork, coverFor } from '@/lib/game-artwork'
+import { autofixBlock } from '@/lib/autofix'
 
 /**
  * The Library: games on this PC and how each one starts.
@@ -408,6 +409,8 @@ export type CatalogGame = {
   nsfw: boolean
   /** VR only, VR as well as flat, or neither (null). */
   vr: VrKind | null
+  /** Set when kryo.to says the auto-fixer cannot fix this release (lib/autofix.ts): its notice, shown instead. */
+  noAutofix: { notice: string } | null
 }
 
 /** A kryo.to game page link or a bare slug, as a slug. */
@@ -419,15 +422,35 @@ export function slugFrom(input: string): string | null {
   return /^[a-z0-9-]+$/i.test(text) ? text.toLowerCase() : null
 }
 
+const goneText = (slug: string) => `kryo.to has no game at /game/${slug}.`
+
+/**
+ * kryo.to's answer for a game was 404 or 410 less than a day ago (src-tauri
+ * catalog_gone.rs); with `gone`, remember or forget that first. False where
+ * there is no such memory (the browser preview, an app without the command).
+ */
+async function catalogGone(slug: string, gone?: boolean): Promise<boolean> {
+  if (!isTauri() || isWeb()) return false
+  return call<boolean>('catalog_gone', { slug, gone: gone ?? null }).catch(() => false)
+}
+
 /**
  * A release's facts from kryo.to's public game API: Steam's launch entries,
  * the exe and arguments staff picked, art, version, and the source label
  * (which says whether Wine needs DLL overrides).
  */
-export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
+export async function fetchCatalogGame(slug: string, { ask = false }: { ask?: boolean } = {}): Promise<CatalogGame> {
+  // A game kryo.to took off is not asked about again for a day (src-tauri
+  // catalog_gone.rs): the Library, update checks and the adult flags asked for
+  // removed games over and over. `ask`: the player asked for this one by name.
+  if (!ask && (await catalogGone(slug))) throw new Error(goneText(slug))
   const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}`))
-  if (res.status === 404) throw new Error(`kryo.to has no game at /game/${slug}.`)
+  if (res.status === 404 || res.status === 410) {
+    void catalogGone(slug, true)
+    throw new Error(goneText(slug))
+  }
   if (!res.ok) throw new Error(`kryo.to answered ${res.status}.`)
+  if (ask) void catalogGone(slug, false)
   const { game, art } = (await res.json()) as { game: Record<string, unknown>; art?: Record<string, unknown> }
   const artUrl = (k: string) => (typeof art?.[k] === 'string' && (art[k] as string).trim() ? (art[k] as string).trim() : null)
   const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null)
@@ -457,6 +480,7 @@ export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
     developer: str(game.developer),
     nsfw: game.nsfw === true,
     vr: vrKind(game.vr),
+    noAutofix: autofixBlock(game),
   }
 }
 

@@ -778,7 +778,21 @@ pub fn fill_branches<R: Runtime>(app: &AppHandle<R>) {
         let Ok(client) = crate::net::builder().timeout(std::time::Duration::from_secs(20)).build() else { return };
         let mut found: Vec<(String, String)> = Vec::new();
         for (id, slug) in missing {
-            if let Some(branch) = crate::downloads::fetch_meta(&client, &endpoint, &slug).await.and_then(|m| m.steam_branch) {
+            // A game taken off kryo.to never gets a branch: it was asked at
+            // every start, and 404'd every time (catalog_gone.rs).
+            if crate::catalog_gone::is_gone(&app, &slug) {
+                continue;
+            }
+            let Ok(res) = client.get(format!("{endpoint}/api/games/{slug}")).send().await else { continue };
+            if crate::catalog_gone::says_gone(res.status().as_u16()) {
+                crate::catalog_gone::set(&app, &slug, true);
+                continue;
+            }
+            if !res.status().is_success() {
+                continue;
+            }
+            let Ok(json) = res.json::<serde_json::Value>().await else { continue };
+            if let Some(branch) = crate::downloads::meta_from_api(&json).steam_branch {
                 found.push((id, branch));
             }
         }
