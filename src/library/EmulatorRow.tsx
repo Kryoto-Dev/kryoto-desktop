@@ -3,7 +3,7 @@ import { Check, LifeBuoy, RotateCcw, X } from '@/ui/pixel-icons'
 import { Busy, Button, Section } from '@/ui'
 import { errorText, on } from '@/lib/bridge'
 import { library, type GameEmulators } from '@/lib/library'
-import type { RepairBackend, RepairProgress } from './RepairPanel'
+import { OpenStuckCache, type RepairBackend, type RepairProgress } from './RepairPanel'
 
 /**
  * Properties > Emulator: which Steam emulator the game uses now, in plain
@@ -178,6 +178,7 @@ export function EmulatorRow({ gameId, backend }: { gameId: string; backend: Repa
             <RotateCcw className="size-3.5" aria-hidden /> Back to the release&apos;s own files
           </Button>
         ) : null}
+        <OpenStuckCache error={error} backend={backend} />
         {answer === 'broken' || error ? (
           <Button size="sm" variant="ghost" onClick={() => backend.openSupport().catch((e: unknown) => setError(errorText(e)))}>
             <LifeBuoy className="size-3.5" aria-hidden /> Contact support

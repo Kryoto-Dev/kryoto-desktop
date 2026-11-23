@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { call, on } from '@/lib/bridge'
-import { fetchCatalogGame } from '@/lib/library'
+import { fetchCatalogGame, library } from '@/lib/library'
 import { openExternal, openStorePage } from '@/lib/window'
 import { ExternalLink, TriangleAlert } from '@/ui/pixel-icons'
 import { Busy, Button } from '@/ui'
@@ -26,6 +26,7 @@ export function GameRepair({ gameId, slug = null, initialOnline = false, purpose
     support: () => call('repair_support', { gameId }),
     openSupport: async () => { await openExternal(await call<string>('repair_support_url', { gameId })) },
     listen: (handler) => on<RepairProgress>('repair-progress', (progress) => { if (progress.gameId === gameId) handler(progress) }),
+    openFolder: (path) => library.openFolder(path),
   }), [gameId])
   // Undefined while kryo.to is asked; null for a normal release (or no answer: the auto-fixer stays).
   const [blocked, setBlocked] = useState<{ notice: string; reason: string | null } | null | undefined>(slug ? undefined : null)
