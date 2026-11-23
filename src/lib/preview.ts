@@ -813,6 +813,21 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     if (i >= 0) games.splice(i, 1)
     return false
   },
+  library_uninstall_plan: (a) => {
+    const g = games.find((x) => x.id === a.id)
+    return {
+      kind: 'delete',
+      reason: null,
+      folder: g ? String(g.installDir) : null,
+      whole: true,
+      files: 1284,
+      bytes: 12.4 * 1024 ** 3,
+      keptFiles: 0,
+      keptBytes: 0,
+      bin: true,
+      binNote: null,
+    }
+  },
   game_launch: (a) => {
     const id = String(a.id)
     running.add(id)

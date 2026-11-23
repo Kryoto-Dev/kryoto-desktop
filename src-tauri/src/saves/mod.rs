@@ -19,6 +19,7 @@ pub mod api;
 mod known;
 pub(crate) mod local;
 pub mod precise;
+mod steam_id;
 mod sync;
 pub mod tracer;
 #[cfg(windows)]
@@ -481,6 +482,9 @@ pub struct GameState {
     /// The backup when the game closed did not get through: tried again when
     /// kryo.to next answers (`sync::catch_up`).
     pub owed: bool,
+    /// "Your earlier saves are in another folder" was answered (KB-0376,
+    /// steam_id.rs): it is not asked again.
+    pub id_moved_answered: bool,
 }
 
 impl GameState {

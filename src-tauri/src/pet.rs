@@ -8,13 +8,29 @@
 //! (src/pet). On or off, which mascot and where it stands are settings
 //! (`pet`, `pet_mascot`, `pet_pos`); its right-click menu is native, so it is
 //! never clipped by the pet's tiny window.
+//!
+//! It must never stand in anyone's way (KB-0369: on a ROG Ally it sat top
+//! left and nothing else on the screen took a click or a tap until it was
+//! hidden). Its window took input on every pixel, see-through ones included,
+//! and nothing held it to its size: a shell that stretches new windows over
+//! the screen (a handheld's full screen mode) made it a sheet over
+//! everything, with the 144 px page drawn in its top left corner. Now:
+//! - on Windows the window lets every click and tap through
+//!   (`set_ignore_cursor_events`) except while the pointer is on the pet's
+//!   drawn pixels, which the page tells it (`pet_hit`);
+//! - it is held to 144 px and put back if anything stretches it, and kept
+//!   inside the work area of a monitor that exists, wherever its monitor
+//!   query fails;
+//! - it steps below another app's full screen window (Windows);
+//! - "Hide the pet" is in the tray too, which opens when nothing else can be
+//!   clicked.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::window::Color;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 pub const LABEL: &str = "pet";
 
@@ -51,7 +67,11 @@ fn create<R: Runtime>(app: &AppHandle<R>, saved: Option<[i32; 2]>) -> Result<(),
     let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::default())
         .title("Kryoto pet")
         .inner_size(SIZE, SIZE)
+        .min_inner_size(SIZE, SIZE)
+        .max_inner_size(SIZE, SIZE)
         .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
         .decorations(false)
         .transparent(true)
         .background_color(Color(0, 0, 0, 0))
@@ -73,10 +93,17 @@ fn create<R: Runtime>(app: &AppHandle<R>, saved: Option<[i32; 2]>) -> Result<(),
             top.set_skip_pager_hint(true);
         }
     });
+    // Windows: every click and tap goes through until the page says the
+    // pointer is on the pet itself (`pet_hit`). Not on Linux, where the
+    // pointer cannot be asked for under Wayland and the pet would never take
+    // a click again; its small window there is held to its size all the same.
+    #[cfg(windows)]
+    let _ = window.set_ignore_cursor_events(true);
     let pos = saved.filter(|p| on_a_monitor(app, *p)).or_else(|| corner(app));
     if let Some([x, y]) = pos {
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
+    keep_in(&window);
     let handle = app.clone();
     window.on_menu_event(move |_, event| on_menu(&handle, event.id().as_ref()));
     watch_memory(app);
@@ -103,10 +130,15 @@ pub fn full_now(was_full: bool, used: u64, total: u64) -> bool {
     if was_full { share >= EASED } else { share >= FULL }
 }
 
-/// While the pet is open, read memory every few seconds on a thread of its
-/// own (one cheap system call, no process list) and tell the pet when it is
-/// nearly full: `pet-hungry` on the way in, then again now and then while it
-/// stays full. Ends by itself when the pet is put away.
+/// How often the pet looks for another app's full screen window.
+const TICK: Duration = Duration::from_secs(1);
+
+/// While the pet is open, on a thread of its own: every second, whether
+/// another app has a full screen window in front (Windows; the pet then stops
+/// being always on top), and every few seconds the memory (one cheap system
+/// call, no process list), telling the pet when it is nearly full:
+/// `pet-hungry` on the way in, then again now and then while it stays full.
+/// Ends by itself when the pet is put away.
 fn watch_memory<R: Runtime>(app: &AppHandle<R>) {
     if WATCHING.swap(true, Ordering::SeqCst) {
         return;
@@ -118,19 +150,74 @@ fn watch_memory<R: Runtime>(app: &AppHandle<R>) {
         let mut sys = sysinfo::System::new();
         let mut full = false;
         let mut fed: Option<Instant> = None;
+        let mut read_at: Option<Instant> = None;
+        let mut on_top = true;
         while let Some(w) = app.get_webview_window(LABEL) {
-            sys.refresh_memory();
-            full = pretend || full_now(full, sys.used_memory(), sys.total_memory());
-            if !full {
-                fed = None;
-            } else if fed.is_none_or(|at| at.elapsed() >= SNACK_EVERY) {
-                fed = Some(Instant::now());
-                let _ = w.emit_to(LABEL, "pet-hungry", ());
+            let top = !someone_else_full_screen();
+            if top != on_top {
+                on_top = top;
+                let _ = w.set_always_on_top(top);
             }
-            std::thread::sleep(MEMORY_EVERY);
+            if read_at.is_none_or(|at| at.elapsed() >= MEMORY_EVERY) {
+                read_at = Some(Instant::now());
+                sys.refresh_memory();
+                full = pretend || full_now(full, sys.used_memory(), sys.total_memory());
+                if !full {
+                    fed = None;
+                } else if fed.is_none_or(|at| at.elapsed() >= SNACK_EVERY) {
+                    fed = Some(Instant::now());
+                    let _ = w.emit_to(LABEL, "pet-hungry", ());
+                }
+            }
+            std::thread::sleep(TICK);
         }
         WATCHING.store(false, Ordering::SeqCst);
     });
+}
+
+/// The window in front is another app's and covers its whole monitor (a game,
+/// a video, a handheld's full screen shell). The desktop itself does not count.
+#[cfg(windows)]
+fn someone_else_full_screen() -> bool {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId};
+    // SAFETY: plain queries on the foreground window, with out-pointers to
+    // locals of the sizes given.
+    unsafe {
+        let w = GetForegroundWindow();
+        if w.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(w, &mut pid);
+        if pid == std::process::id() {
+            return false;
+        }
+        let mut class = [0u16; 64];
+        let n = GetClassNameW(w, class.as_mut_ptr(), class.len() as i32);
+        let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+        if class == "Progman" || class == "WorkerW" {
+            return false;
+        }
+        let monitor = MonitorFromWindow(w, MONITOR_DEFAULTTONULL);
+        if monitor.is_null() {
+            return false;
+        }
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let mut r: RECT = std::mem::zeroed();
+        if GetMonitorInfoW(monitor, &mut info) == 0 || GetWindowRect(w, &mut r) == 0 {
+            return false;
+        }
+        let m = info.rcMonitor;
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+#[cfg(not(windows))]
+fn someone_else_full_screen() -> bool {
+    false
 }
 
 /// A remembered spot is only used while a monitor still covers it.
@@ -142,20 +229,81 @@ fn on_a_monitor<R: Runtime>(app: &AppHandle<R>, [x, y]: [i32; 2]) -> bool {
     })
 }
 
+/// The primary monitor, or any monitor at all when Windows names none.
+fn some_monitor<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::Monitor> {
+    app.primary_monitor().ok().flatten().or_else(|| app.available_monitors().ok()?.into_iter().next())
+}
+
 /// First run: the bottom-right corner of the screen, above the taskbar.
 fn corner<R: Runtime>(app: &AppHandle<R>) -> Option<[i32; 2]> {
-    let m = app.primary_monitor().ok().flatten()?;
+    let m = some_monitor(app)?;
     let area = m.work_area();
     let size = (SIZE * m.scale_factor()) as i32;
     Some([area.position.x + area.size.width as i32 - size - 24, area.position.y + area.size.height as i32 - size])
 }
 
+/// `at` moved so a `size` square stands wholly inside the work area at
+/// `area` (its corner) of `area_size`. A work area smaller than the pet (a
+/// monitor that reports nonsense) keeps its top left corner. Pure, for the tests.
+pub fn clamped(at: [i32; 2], size: i32, area: [i32; 2], area_size: [i32; 2]) -> [i32; 2] {
+    let fit = |v: i32, lo: i32, len: i32| if len <= size { lo } else { v.clamp(lo, lo + len - size) };
+    [fit(at[0], area[0], area_size[0]), fit(at[1], area[1], area_size[1])]
+}
+
+/// Hold the pet to its size and inside the work area of the monitor it is
+/// on (else the primary one, else any): whatever stretched it or put it
+/// off screen, it goes back.
+fn keep_in<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let app = window.app_handle();
+    let Some(m) = window.current_monitor().ok().flatten().or_else(|| some_monitor(app)) else { return };
+    let scale = m.scale_factor();
+    let size = (SIZE * scale).round() as i32;
+    if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+        let _ = window.set_fullscreen(false);
+        let _ = window.unmaximize();
+    }
+    let now = window.outer_size().ok();
+    if now.is_none_or(|s| (s.width as i32 - size).abs() > 2 || (s.height as i32 - size).abs() > 2) {
+        let _ = window.set_size(LogicalSize::new(SIZE, SIZE));
+    }
+    let area = m.work_area();
+    let at = window.outer_position().map(|p| [p.x, p.y]).unwrap_or([area.position.x, area.position.y]);
+    let to = clamped(at, size, [area.position.x, area.position.y], [area.size.width as i32, area.size.height as i32]);
+    if to != at {
+        let _ = window.set_position(PhysicalPosition::new(to[0], to[1]));
+    }
+}
+
+/// Put back at most this often: a shell that keeps stretching it is not
+/// fought in a loop (it lets clicks through anyway).
+static KEPT_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
 static LAST_POS: Mutex<Option<[i32; 2]>> = Mutex::new(None);
 static SAVING: AtomicBool = AtomicBool::new(false);
 static MOVED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Remember where it was put: once the moving stops, not on every pixel of a drag.
+/// Remember where it was put: once the moving stops, not on every pixel of a
+/// drag. Stretched (KB-0369), it goes back to its size and place.
 pub fn on_window_event<R: Runtime>(window: &tauri::Window<R>, event: &WindowEvent) {
+    if let WindowEvent::Resized(size) = event {
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let want = (SIZE * scale).round() as i32;
+        let stretched = (size.width as i32 - want).abs() > 2 || (size.height as i32 - want).abs() > 2;
+        let due = KEPT_AT.lock().map(|mut at| {
+            let due = at.is_none_or(|t| t.elapsed() > Duration::from_millis(500));
+            if due {
+                *at = Some(Instant::now());
+            }
+            due
+        });
+        if stretched && due.unwrap_or(false) {
+            crate::logging::warn("pet", &format!("its window was made {}x{}; put back to {want}x{want}", size.width, size.height));
+            if let Some(w) = window.app_handle().get_webview_window(LABEL) {
+                keep_in(&w);
+            }
+        }
+        return;
+    }
     let WindowEvent::Moved(p) = event else { return };
     if let Ok(mut at) = MOVED_AT.lock() {
         *at = Some(Instant::now());
@@ -200,12 +348,40 @@ fn on_menu<R: Runtime>(app: &AppHandle<R>, id: &str) {
     } else {
         return;
     }
-    if let Err(e) = crate::settings::write(app, &s) {
+    save_and_sync(app, &s);
+}
+
+fn save_and_sync<R: Runtime>(app: &AppHandle<R>, s: &crate::settings::Settings) {
+    if let Err(e) = crate::settings::write(app, s) {
         crate::logging::error("pet", &e);
     }
     // Settings may be open in the main window: it shows the new choice.
     let _ = app.emit("pet-settings", serde_json::json!({ "pet": s.pet, "petMascot": s.pet_mascot }));
     sync(app);
+}
+
+/// Put the pet away, as Settings' switch does: for the tray, which opens
+/// when nothing else on the screen can be clicked (KB-0369).
+pub fn hide<R: Runtime>(app: &AppHandle<R>) {
+    let mut s = crate::settings::load(app);
+    s.pet = false;
+    save_and_sync(app, &s);
+}
+
+/// The pet is out, for the tray's "Hide the pet".
+#[tauri::command]
+pub fn pet_shown(app: AppHandle) -> bool {
+    app.get_webview_window(LABEL).is_some()
+}
+
+/// The pointer is on the pet's drawn pixels (`over`), or not: only then does
+/// its window take clicks; otherwise they go to whatever is under it.
+#[tauri::command]
+pub fn pet_hit(window: tauri::WebviewWindow, over: bool) -> Result<(), String> {
+    if window.label() != LABEL {
+        return Err("Not the pet.".into());
+    }
+    window.set_ignore_cursor_events(!over).map_err(|e| e.to_string())
 }
 
 /// The right-click menu: which mascot, open Kryoto, or put the pet away.
@@ -236,6 +412,10 @@ pub fn pet_drag(window: tauri::WebviewWindow) -> Result<(), String> {
     std::thread::spawn(move || {
         wait_for_release();
         let _ = app.emit_to(LABEL, "pet-dropped", ());
+        // Dropped half off the screen: back inside it.
+        if let Some(w) = app.get_webview_window(LABEL) {
+            keep_in(&w);
+        }
     });
     Ok(())
 }
@@ -284,7 +464,21 @@ pub fn pet_size(app: AppHandle) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::full_now;
+    use super::{clamped, full_now};
+
+    /// KB-0369: wherever it was put or found, it stands inside the work area.
+    #[test]
+    fn the_pet_is_kept_inside_the_work_area() {
+        // A 1080p handheld at 150%: the pet is 216 px, the taskbar 72.
+        let (area, size) = ([0, 0], [1920, 1008]);
+        assert_eq!(clamped([1680, 792], 216, area, size), [1680, 792]);
+        assert_eq!(clamped([-500, -40], 216, area, size), [0, 0]);
+        assert_eq!(clamped([5000, 5000], 216, area, size), [1704, 792]);
+        // A second monitor to the left, and a portrait panel.
+        assert_eq!(clamped([-100, 300], 216, [-1080, 0], [1080, 1920]), [-216, 300]);
+        // A work area smaller than the pet (a monitor reporting nonsense).
+        assert_eq!(clamped([300, 300], 216, [0, 0], [0, 0]), [0, 0]);
+    }
 
     #[test]
     fn eats_when_nearly_full_and_stops_once_eased() {

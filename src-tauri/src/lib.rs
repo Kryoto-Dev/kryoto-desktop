@@ -43,6 +43,8 @@ mod linux_overlay;
 mod linux_store_downloads;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux_open;
+#[cfg(target_os = "linux")]
+mod linux_pick;
 mod logging;
 mod net;
 mod menus;
@@ -61,6 +63,7 @@ mod presence;
 mod preview_report;
 mod resolvers;
 mod runtimes;
+mod safe_delete;
 mod saves;
 mod settings;
 mod shortcuts;
@@ -2555,6 +2558,7 @@ pub fn run() {
             library::library_save,
             library::library_set_hidden,
             library::library_remove,
+            library::library_uninstall_plan,
             library::game_launch,
             achievements::game_achievements,
             achievements::achievements_turn_on,
@@ -2639,6 +2643,8 @@ pub fn run() {
             system::window_state_get,
             pet::pet_menu,
             pet::pet_drag,
+            pet::pet_hit,
+            pet::pet_shown,
             addons::addons_list,
             addons::addons_get,
             pet::pet_mascot,

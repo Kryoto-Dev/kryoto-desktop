@@ -646,6 +646,11 @@ function GraphicsSection() {
         {state.healed ? 'The last start did not draw its window, so Kryoto switched to Compatible. ' : ''}
         Now: {state.reason}.{picked && picked !== state.mode ? ' Restart Kryoto to use the new setting.' : ''}
       </p>
+      {/* KB-0377: a window that turns black cannot reach this page. */}
+      <p className="text-[11px] text-muted-foreground">
+        Window black or flickering? The tray icon&apos;s menu has Start in compatible graphics, or start Kryoto with{' '}
+        <code className="select-text">--safe-graphics</code>.
+      </p>
       {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
     </Section>
   )

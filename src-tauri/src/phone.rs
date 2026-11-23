@@ -581,11 +581,12 @@ pub fn check_removable(app: &AppHandle, id: &str) -> Result<(), String> {
 }
 
 /// Take a game out of the library; with `delete_files`, uninstall it too. Says
-/// whether files were deleted (a game that was added from a folder Kryoto did
-/// not install into is only unlisted).
+/// whether files were deleted (a game Kryoto did not install is only
+/// unlisted). Never deletes for good: what the Recycle Bin cannot take is
+/// refused here, and asked about in Kryoto on the PC (safe_delete.rs).
 pub async fn remove_game(app: &AppHandle, id: &str, delete_files: bool) -> Result<bool, String> {
     check_removable(app, id)?;
-    library::library_remove(app.clone(), id.to_string(), delete_files, None, None).await
+    library::library_remove(app.clone(), id.to_string(), delete_files, None, None, None).await
 }
 
 async fn downloads_control(AxumState(app): AxumState<AppHandle>, headers: HeaderMap, body: String) -> Reply {

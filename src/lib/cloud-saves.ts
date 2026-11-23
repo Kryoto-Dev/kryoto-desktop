@@ -111,13 +111,28 @@ export type GameSaves = {
   localBackups: { file: string; createdAt: number; size: number }[]
 }
 
-export type SavesPrompt = {
-  gameId: string
-  title: string
-  kind: 'conflict' | 'restore'
-  cloud: { machine: string | null; createdAt: number; size: number; files: number }
-  local: { files: number; bytes: number; lastBackupAt: number | null; changedAt: number | null }
-}
+export type SavesPrompt =
+  | {
+      gameId: string
+      title: string
+      kind: 'conflict' | 'restore'
+      cloud: { machine: string | null; createdAt: number; size: number; files: number }
+      local: { files: number; bytes: number; lastBackupAt: number | null; changedAt: number | null }
+    }
+  | {
+      gameId: string
+      title: string
+      /** The game plays as the account's Steam id; its earlier saves are under another (KB-0376, steam_id.rs). */
+      kind: 'idMoved'
+      earlier: IdFolder
+      current: IdFolder
+    }
+
+/** A save folder named after a Steam id. */
+export type IdFolder = { path: string; files: number; bytes: number; changedAt: number | null }
+
+/** Answers to a saves question: the cloud ones, and the Steam id one's (`bring`, `never`). */
+export type SavesAnswer = 'cloud' | 'local' | 'later' | 'bring' | 'never'
 
 export const cloudSaves = {
   status: () => call<CloudSavesStatus>('cloud_saves_status'),
@@ -134,7 +149,7 @@ export const cloudSaves = {
   versions: (id: string) => call<SaveVersion[]>('cloud_saves_versions', { id }),
   restore: (id: string, versionId: string) => call<string>('cloud_saves_restore', { id, versionId }),
   restoreLocal: (id: string, file: string) => call<string>('cloud_saves_restore_local', { id, file }),
-  answer: (id: string, choice: 'cloud' | 'local' | 'later') => call<void>('cloud_saves_answer', { id, choice }),
+  answer: (id: string, choice: SavesAnswer) => call<void>('cloud_saves_answer', { id, choice }),
   library: () =>
     call<{ id: string; title: string; lastBackupAt: number | null; conflict: boolean; error: string | null; tooBig: boolean }[]>('cloud_saves_library'),
 }

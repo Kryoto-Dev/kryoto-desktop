@@ -3501,12 +3501,25 @@ fn clear_leftovers(archive: Option<String>, staging: Option<String>) {
 /// Delete a folder without making anyone wait. It changes name first, so a
 /// Retry pressed straight after unpacks into a folder of its own and not into
 /// one being deleted under it.
+///
+/// Only ever an unpack's own staging folder (`.Title.installing`): the row's
+/// `staging` is read back from a file, and a damaged one must never name a
+/// player's folder (KB-0375).
 fn throw_away(dir: PathBuf) {
+    if !is_staging(&dir) {
+        crate::logging::warn("download", &format!("not deleting {}: not an unpack's staging folder", dir.display()));
+        return;
+    }
     let gone = dir.with_extension(format!("gone-{}", now()));
     let target = if std::fs::rename(&dir, &gone).is_ok() { gone } else { dir };
     std::thread::spawn(move || {
         let _ = std::fs::remove_dir_all(target);
     });
+}
+
+/// An unpack's staging folder by its name: `.<name>.installing`.
+fn is_staging(dir: &Path) -> bool {
+    dir.file_name().map(|n| n.to_string_lossy().into_owned()).is_some_and(|n| n.starts_with('.') && n.ends_with(".installing") && n.len() > ".installing".len() + 1)
 }
 
 fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Result<(), String> {
@@ -6626,6 +6639,15 @@ mod tests {
         assert_eq!(plain_name("ドラゴンクエスト", Some("dragon-quest")), "dragon-quest");
         assert_eq!(plain_name("ドラゴンクエスト", None), "Game");
         assert_eq!(plain_name("Half-Life: Alyx?", None), "Half-Life Alyx");
+    }
+
+    /// A cancelled or failed unpack throws away only its own staging folder.
+    #[test]
+    fn only_a_staging_folder_is_thrown_away() {
+        assert!(is_staging(Path::new("D:/Kryoto Games/.Hades.installing")));
+        for not in ["D:/Kryoto Games", "D:/", "D:/Games/Hades", "D:/Games/.installing", "D:/Games/Hades.installing"] {
+            assert!(!is_staging(Path::new(not)), "{not}");
+        }
     }
 
     #[test]
