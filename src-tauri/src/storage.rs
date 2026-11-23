@@ -77,32 +77,110 @@ fn drive_of(path: &Path) -> String {
 /// else, and is not ours to move or delete - or when that folder holds another
 /// library folder, as `D:\Games\Steam` does with `D:\Games\Steam\Library` added.
 ///
-/// KB-0375: a game found a level down by its marker ("Find games Kryoto
-/// installed", Play on a moved game) sits in a folder that is not its own
-/// when other games Kryoto installed are beside it there (`X:\Games\Foo` with
-/// `X:\` a library folder): its own folder is then where it is, so neither a
-/// move, a rename, an update nor Repair takes the others along.
-pub fn game_folder(folders: &[String], install_dir: &str) -> Option<PathBuf> {
-    let dir = PathBuf::from(install_dir).canonicalize().ok()?;
-    let (_, folder) = own_folder(&canonical_roots(folders), &dir)?;
-    if folder != dir && marked_beside(&folder, &dir) {
-        return Some(dir);
-    }
-    Some(folder)
-}
-
-/// `folder`, or one of the folders in it that `dir` is not in, has a game
-/// marker (`.kryoto-game.json`) of its own.
-fn marked_beside(folder: &Path, dir: &Path) -> bool {
-    let marker = |d: &Path| d.join(crate::library::MARKER).is_file();
-    if marker(folder) {
-        return true;
-    }
-    let Ok(read) = std::fs::read_dir(folder) else { return false };
-    read.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).any(|d| !dir.starts_with(&d) && marker(&d))
+/// KB-0375: the first folder under the library folder is not the game's when
+/// the game sits deeper (`X:\Games\Foo` with `X:\` a library folder, `Games`
+/// holding other folders too). The game's folder is exact, so neither a move,
+/// a rename, an update nor Repair takes anything else along:
+/// - that first folder, when it is provably a wrapper of this game alone: it
+///   carries the game's install record or marker at its top, or it is named
+///   for the game and holds nothing but the way down to the game;
+/// - else the highest folder down to the game carrying the game's own install
+///   record (`.kryoto-release.json`, listing the game's files), else its own
+///   marker (`.kryoto-game.json`);
+/// - else the game's install folder itself.
+pub fn game_folder(folders: &[String], game: &LibraryGame) -> Option<PathBuf> {
+    let dir = PathBuf::from(&game.install_dir).canonicalize().ok()?;
+    game_folder_in(&canonical_roots(folders), &dir, game).map(|(_, f)| f)
 }
 
 /// `game_folder` on paths already canonical, with which of `roots` it is in.
+fn game_folder_in(roots: &[Option<PathBuf>], dir: &Path, game: &LibraryGame) -> Option<(usize, PathBuf)> {
+    let (at, first) = own_folder(roots, dir)?;
+    exact_folder(roots[at].as_ref()?, first, dir, game).map(|f| (at, f))
+}
+
+/// `game_folder`'s rules from `first`, the first folder under `library`.
+fn exact_folder(library: &Path, first: PathBuf, dir: &Path, game: &LibraryGame) -> Option<PathBuf> {
+    let dir = dir.to_path_buf();
+    if first == dir {
+        return Some(dir);
+    }
+    // From the game's folder up to the first folder under the library folder.
+    let chain: Vec<&Path> = dir.ancestors().take_while(|a| a.starts_with(&first)).collect();
+    if carries_own(game, &first, &dir) || crate::safe_delete::named_for(game, &first, library) && only_way_down(game, &first, &dir) {
+        return Some(first);
+    }
+    let by_record = chain.iter().rev().find(|a| own_record(a, &dir));
+    let by_marker = || chain.iter().rev().find(|a| own_marker(game, a));
+    Some(by_record.or_else(by_marker).map_or(dir.clone(), |a| a.to_path_buf()))
+}
+
+/// `folder` carries this game's install record or marker at its top.
+fn carries_own(game: &LibraryGame, folder: &Path, dir: &Path) -> bool {
+    own_record(folder, dir) || own_marker(game, folder)
+}
+
+/// `folder` carries the game's install record: the installer wrote it where
+/// the game is (`dir`), and one above lists the files down there.
+fn own_record(folder: &Path, dir: &Path) -> bool {
+    use crate::community_offer::{read_json, ReleaseRecord, RELEASE_RECORD};
+    let Some(record) = read_json::<ReleaseRecord>(&folder.join(RELEASE_RECORD)).filter(|r| !r.files.is_empty()) else { return false };
+    if folder == dir {
+        return true;
+    }
+    let Ok(rel) = dir.strip_prefix(folder) else { return false };
+    let down = format!("{}/", crate::safe_delete::key(&rel.to_string_lossy()));
+    record.files.keys().any(|f| crate::safe_delete::key(f).starts_with(&down))
+}
+
+/// `folder` carries the marker Kryoto wrote for this game.
+fn own_marker(game: &LibraryGame, folder: &Path) -> bool {
+    crate::library::read_marker(folder).is_some_and(|m| crate::safe_delete::same_game(&m, game))
+}
+
+/// Every folder from `top` down to `dir` holds nothing but the way down, or
+/// files and folders the game's install record lists.
+fn only_way_down(game: &LibraryGame, top: &Path, dir: &Path) -> bool {
+    use crate::community_offer::{read_json, ReleaseRecord, RELEASE_RECORD};
+    let levels: Vec<&Path> = dir.ancestors().skip(1).take_while(|a| a.starts_with(top)).collect();
+    levels.iter().all(|level| {
+        let Ok(read) = std::fs::read_dir(level) else { return false };
+        // A record above lists this level's other entries by their path from it.
+        let records: Vec<(PathBuf, Vec<String>)> = level
+            .ancestors()
+            .take_while(|a| a.starts_with(top))
+            .filter(|a| own_record(a, dir))
+            .filter_map(|a| read_json::<ReleaseRecord>(&a.join(RELEASE_RECORD)).map(|r| (a.to_path_buf(), r.files.keys().map(|k| crate::safe_delete::key(k)).collect())))
+            .collect();
+        read.flatten().all(|e| {
+            let path = e.path();
+            if dir.starts_with(&path) {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if (name == crate::library::MARKER && own_marker(game, level)) || (name == RELEASE_RECORD && own_record(level, dir)) {
+                return true;
+            }
+            records.iter().any(|(at, files)| {
+                let Ok(rel) = path.strip_prefix(at) else { return false };
+                let rel = crate::safe_delete::key(&rel.to_string_lossy());
+                let down = format!("{rel}/");
+                files.iter().any(|f| *f == rel || f.starts_with(&down))
+            })
+        })
+    })
+}
+
+/// The game's folder is its own by `game_folder`'s rules, for a folder found
+/// some other way (`outside_root` climbing out of `bin`): the game's folder
+/// itself, one carrying its record or marker, or one holding nothing but the
+/// way down to it.
+fn is_own_top(game: &LibraryGame, top: &Path, dir: &Path) -> bool {
+    top == dir || carries_own(game, top, dir) || only_way_down(game, top, dir)
+}
+
+/// The first folder under the innermost library folder that holds the
+/// canonical `dir`, with which of `roots` that is: where `game_folder` starts.
 fn own_folder(roots: &[Option<PathBuf>], dir: &Path) -> Option<(usize, PathBuf)> {
     let at = innermost_root(roots, dir)?;
     let root = roots[at].as_ref()?;
@@ -189,7 +267,8 @@ pub fn outside_root(games: &[LibraryGame], folders: &[String], game: &LibraryGam
 /// `game_dirs`, the library folders from `canonical_roots`, and the home folder.
 fn outside_root_in(games: &[LibraryGame], dirs: &[Option<PathBuf>], roots: &[Option<PathBuf>], home: Option<&Path>, game: &LibraryGame) -> Result<PathBuf, String> {
     const INNER: &[&str] = &["bin", "bin64", "bin32", "x64", "x86", "win64", "win32", "binaries", "retail", "_retail_", "release"];
-    let mut root = PathBuf::from(&game.install_dir).canonicalize().map_err(|_| "Its folder is not there any more.".to_string())?;
+    let dir = PathBuf::from(&game.install_dir).canonicalize().map_err(|_| "Its folder is not there any more.".to_string())?;
+    let mut root = dir.clone();
     while root.file_name().is_some_and(|n| INNER.contains(&n.to_string_lossy().to_ascii_lowercase().as_str())) {
         match root.parent() {
             Some(p) if p.parent().is_some() => root = p.to_path_buf(),
@@ -213,6 +292,10 @@ fn outside_root_in(games: &[LibraryGame], dirs: &[Option<PathBuf>], roots: &[Opt
         }
     }
     if holds_other_games_in(games, dirs, &[game.id.as_str()], &root) {
+        return not_own();
+    }
+    // Out of `bin` only into a folder that is plainly the game's (KB-0375).
+    if !is_own_top(game, &root, &dir) {
         return not_own();
     }
     Ok(root)
@@ -352,7 +435,7 @@ fn overview<R: Runtime>(app: &AppHandle<R>) -> Result<StorageOverview, String> {
             elsewhere.push(stored(g, PathBuf::from(&g.install_dir), Some(who)));
             continue;
         }
-        match dir.as_deref().and_then(|dir| own_folder(&roots, dir)) {
+        match dir.as_deref().and_then(|dir| game_folder_in(&roots, dir, g)) {
             // Listed under the innermost library folder that holds it, as game_folder finds it.
             Some((at, folder)) => out[at].games.push(stored(g, folder, None)),
             None => elsewhere.push(match outside_root_in(&games, &dirs, &roots, home.as_deref(), g) {
@@ -646,11 +729,18 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
         return Err(who);
     }
     // A game added from elsewhere moves in with its whole own folder.
-    let from = match game_folder(&folders, &game.install_dir) {
+    let from = match game_folder(&folders, &game) {
         Some(from) if holds_other_games(&games, &[game.id.as_str()], &from) => return Err(NOT_OWN.into()),
         Some(from) => from,
         None => outside_root(&games, &folders, &game)?,
     };
+    // Whatever found it, only a folder that is the game's own moves (KB-0375):
+    // `guard` below says nothing else of the library's is in it, this says
+    // nothing else at all is.
+    match PathBuf::from(&game.install_dir).canonicalize() {
+        Ok(dir) if is_own_top(&game, &from, &dir) => {}
+        _ => return Err(NOT_OWN.into()),
+    }
     let name = from.file_name().ok_or("That game folder has no name.")?.to_owned();
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
     let target_root = PathBuf::from(to).canonicalize().map_err(|e| e.to_string())?;
@@ -666,7 +756,7 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     }
     // The old folder is deleted once copied: only one that holds this game
     // alone (safe_delete.rs, the same checks as an uninstall; KB-0375).
-    let known = crate::safe_delete::Known { games: &games, folders: &folders, home: crate::safe_delete::home(), release_list: None };
+    let known = crate::safe_delete::Known { games: &games, folders: &folders, home: crate::safe_delete::home(), release_list: None, downloaded: Vec::new() };
     let from_disk = dunce::canonicalize(&from).map_err(|e| e.to_string())?;
     let found = crate::safe_delete::guard(&known, &game, &[game.id.as_str()], &from_disk).map_err(|why| why.replace("so Kryoto deletes nothing in it.", "so Kryoto does not move it."))?;
     let total: u64 = found.iter().map(|(_, size)| size).sum();
@@ -1073,17 +1163,159 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A library entry called `title` at `dir`.
+    fn titled(title: &str, dir: &Path) -> LibraryGame {
+        LibraryGame { id: title.to_lowercase(), title: title.into(), install_dir: dir.to_string_lossy().into_owned(), ..Default::default() }
+    }
+
+    /// Kryoto's install record at `at`, listing `files` (relative to it).
+    fn record_at(at: &Path, files: &[&str]) {
+        let files: std::collections::BTreeMap<String, kryoto_repair::community::Stamp> =
+            files.iter().map(|f| (f.to_string(), kryoto_repair::community::Stamp { size: 1, modified_ms: 0 })).collect();
+        let record = crate::community_offer::ReleaseRecord { version: Some("1.0".into()), source: None, at: 1, files };
+        std::fs::write(at.join(crate::community_offer::RELEASE_RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    /// The marker Kryoto writes for `game` in its folder.
+    fn marker_at(at: &Path, game: &LibraryGame) {
+        std::fs::write(at.join(crate::library::MARKER), serde_json::to_vec(game).unwrap()).unwrap();
+    }
+
     #[test]
     fn a_game_folder_is_the_first_folder_under_the_library() {
         let root = std::env::temp_dir().join("kryoto-storage-test");
+        let _ = std::fs::remove_dir_all(&root);
         let deep = root.join("Hades").join("bin");
         std::fs::create_dir_all(&deep).unwrap();
         let folders = vec![root.to_string_lossy().into_owned()];
-        let found = game_folder(&folders, &deep.to_string_lossy()).unwrap();
+        // D:\Kryoto Games\Hades\bin: Hades is named for it and holds nothing else.
+        let found = game_folder(&folders, &titled("Hades", &deep)).unwrap();
         assert_eq!(found, root.canonicalize().unwrap().join("Hades"));
         // The library folder itself is never a game's folder.
-        assert!(game_folder(&folders, &root.to_string_lossy()).is_none());
-        assert!(game_folder(&folders, &std::env::temp_dir().to_string_lossy()).is_none());
+        assert!(game_folder(&folders, &titled("Hades", &root)).is_none());
+        assert!(game_folder(&folders, &titled("Hades", &std::env::temp_dir())).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// KB-0375, the hole left after the first fix: library `D:\`, the game in
+    /// `D:\Games\Foo`, `D:\Games` also holding unrelated folders with no
+    /// marker. The first folder (`Games`) is not the game's: a move takes only
+    /// the game, and an update goes into the game's own folder.
+    #[test]
+    fn a_game_in_a_container_of_unmarked_folders_is_only_its_own_folder() {
+        let root = std::env::temp_dir().join(format!("kryoto-storage-container-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let games_dir = root.join("Games");
+        let (foo, photos, notes) = (games_dir.join("Foo"), games_dir.join("Photos"), games_dir.join("notes.txt"));
+        std::fs::create_dir_all(foo.join("bin")).unwrap();
+        std::fs::create_dir_all(&photos).unwrap();
+        std::fs::write(photos.join("a.jpg"), b"x").unwrap();
+        std::fs::write(&notes, b"x").unwrap();
+        std::fs::write(foo.join("Foo.exe"), b"x").unwrap();
+        let folders = vec![root.to_string_lossy().into_owned()];
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        let game = titled("Foo", &foo);
+        // No marker, no record: the game's install folder itself.
+        assert_eq!(game_folder(&folders, &game), Some(canon(&foo)));
+        // With its record (a download): the same, never Games.
+        record_at(&foo, &["Foo.exe"]);
+        assert_eq!(game_folder(&folders, &game), Some(canon(&foo)));
+        // Its root a level down (Foo\bin) with the record at Foo listing it: Foo.
+        let deeper = titled("Foo", &foo.join("bin"));
+        record_at(&foo, &["Foo.exe", "bin/Foo.exe"]);
+        assert_eq!(game_folder(&folders, &deeper), Some(canon(&foo)));
+        // Only the marker, at Foo: Foo.
+        std::fs::remove_file(foo.join(crate::community_offer::RELEASE_RECORD)).unwrap();
+        marker_at(&foo, &deeper);
+        assert_eq!(game_folder(&folders, &deeper), Some(canon(&foo)));
+        // A marker of another game does not count as this one's.
+        marker_at(&foo, &titled("Other", &foo));
+        assert_eq!(game_folder(&folders, &deeper), Some(canon(&foo.join("bin"))));
+        // Games is named for nothing, and even named for the game it holds more.
+        let games_named = titled("Games", &foo);
+        assert_eq!(game_folder(&folders, &games_named), Some(canon(&foo)));
+
+        // The update's destination is the game's own folder.
+        let s = crate::settings::Settings { library_dir: root.to_string_lossy().into_owned(), ..Default::default() };
+        let entry = LibraryGame { slug: Some("foo".into()), ..game.clone() };
+        let item = crate::downloads::Download { slug: Some("foo".into()), ..Default::default() };
+        let dest = crate::downloads::install_dest_for_tests(std::slice::from_ref(&entry), &s, &item, "Foo");
+        assert_eq!(canon(&dest), canon(&foo));
+
+        // A move takes only the game: the folder it would move is Foo, and
+        // Games is never the game's own by these rules.
+        assert!(is_own_top(&game, &canon(&foo), &canon(&foo)));
+        assert!(!is_own_top(&game, &canon(&games_dir), &canon(&foo)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The first folder is a wrapper of this one game: it carries the game's
+    /// record or marker at its top, or holds nothing but the way down (and
+    /// files the record lists).
+    #[test]
+    fn a_wrapper_folder_of_one_game_is_its_folder() {
+        let root = std::env::temp_dir().join(format!("kryoto-storage-wrapper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folders = vec![root.to_string_lossy().into_owned()];
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        // A download: Library\Celeste\Celeste (the archive's own top folder).
+        let outer = root.join("Celeste");
+        let inner = outer.join("Celeste");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("Celeste.exe"), b"x").unwrap();
+        let game = titled("Celeste", &inner);
+        record_at(&inner, &["Celeste.exe"]);
+        marker_at(&inner, &game);
+        assert_eq!(game_folder(&folders, &game), Some(canon(&outer)));
+        // Something of the player's beside it: no longer only the way down.
+        std::fs::write(outer.join("mine.txt"), b"x").unwrap();
+        assert_eq!(game_folder(&folders, &game), Some(canon(&inner)));
+        // ...unless the game's record at the top lists it.
+        record_at(&outer, &["mine.txt", "Celeste/Celeste.exe"]);
+        assert_eq!(game_folder(&folders, &game), Some(canon(&outer)));
+        // Its marker at the top, whatever the folder is called.
+        let other = root.join("Stuff").join("Game");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(root.join("Stuff").join("readme.txt"), b"x").unwrap();
+        let g = titled("Hollow", &other);
+        assert_eq!(game_folder(&folders, &g), Some(canon(&other)));
+        marker_at(&root.join("Stuff"), &g);
+        assert_eq!(game_folder(&folders, &g), Some(canon(&root.join("Stuff"))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A game right under the library folder is its own folder.
+    #[test]
+    fn a_game_directly_under_the_library_is_its_folder() {
+        let root = std::env::temp_dir().join(format!("kryoto-storage-direct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let foo = root.join("Foo");
+        std::fs::create_dir_all(&foo).unwrap();
+        std::fs::create_dir_all(root.join("Bar")).unwrap();
+        let folders = vec![root.to_string_lossy().into_owned()];
+        assert_eq!(game_folder(&folders, &titled("Foo", &foo)), Some(foo.canonicalize().unwrap()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Out of `bin` only into a folder that is plainly the game's: a hand-added
+    /// game at `X:\Stuff\bin` with the player's other files in `Stuff` is not
+    /// moved, nor its update placed, as `Stuff`.
+    #[test]
+    fn a_game_outside_the_library_climbs_out_of_bin_only_into_its_own_folder() {
+        let root = std::env::temp_dir().join(format!("kryoto-storage-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let stuff = root.join("Place").join("Stuff");
+        let bin = stuff.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let game = titled("Stuff", &bin);
+        let games = vec![game.clone()];
+        let dirs = game_dirs(&games);
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        assert_eq!(outside_root_in(&games, &dirs, &[], None, &game), Ok(canon(&stuff)));
+        std::fs::write(stuff.join("holiday.mp4"), b"x").unwrap();
+        assert_eq!(outside_root_in(&games, &dirs, &[], None, &game), Err(NOT_OWN.to_string()));
+        marker_at(&stuff, &game);
+        assert_eq!(outside_root_in(&games, &dirs, &[], None, &game), Ok(canon(&stuff)));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1105,10 +1337,10 @@ mod tests {
         let canon = |p: &Path| p.canonicalize().unwrap();
         // Both orders: the default comes first, and it can be the outer or the inner one.
         for folders in [vec![text(&root), text(&inner), text(&steam_library)], vec![text(&steam_library), text(&inner), text(&root)]] {
-            assert_eq!(game_folder(&folders, &text(&hades)), Some(canon(&inner).join("Hades")));
-            assert_eq!(game_folder(&folders, &text(&other)), Some(canon(&root).join("Other")));
+            assert_eq!(game_folder(&folders, &titled("Hades", &hades)), Some(canon(&inner).join("Hades")));
+            assert_eq!(game_folder(&folders, &titled("Other", &other)), Some(canon(&root).join("Other")));
             // Steam holds a library folder: it is not this game's to delete.
-            assert_eq!(game_folder(&folders, &text(&celeste)), None);
+            assert_eq!(game_folder(&folders, &titled("Celeste", &celeste)), None);
         }
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1125,16 +1357,18 @@ mod tests {
         for d in [&foo, &bar, &hades] {
             std::fs::create_dir_all(d).unwrap();
         }
-        std::fs::write(foo.join(crate::library::MARKER), b"{}").unwrap();
+        let (foo_g, bar_g, hades_g) = (titled("Foo", &foo), titled("Bar", &bar), titled("Hades", &hades));
+        marker_at(&foo, &foo_g);
         let folders = vec![root.to_string_lossy().into_owned()];
         let canon = |p: &Path| p.canonicalize().unwrap();
-        // Alone in Games, it is still Games (as before).
-        assert_eq!(game_folder(&folders, &foo.to_string_lossy()), Some(canon(&root.join("Games"))));
-        std::fs::write(bar.join(crate::library::MARKER), b"{}").unwrap();
-        assert_eq!(game_folder(&folders, &foo.to_string_lossy()), Some(canon(&foo)));
-        assert_eq!(game_folder(&folders, &bar.to_string_lossy()), Some(canon(&bar)));
-        std::fs::write(hades.join(crate::library::MARKER), b"{}").unwrap();
-        assert_eq!(game_folder(&folders, &hades.to_string_lossy()), Some(canon(&root.join("Hades"))));
+        // Alone in Games it is still Foo: Games is not named for it, and from
+        // 0.4.0 a folder that only might be a wrapper is not taken for one.
+        assert_eq!(game_folder(&folders, &foo_g), Some(canon(&foo)));
+        marker_at(&bar, &bar_g);
+        assert_eq!(game_folder(&folders, &foo_g), Some(canon(&foo)));
+        assert_eq!(game_folder(&folders, &bar_g), Some(canon(&bar)));
+        marker_at(&hades, &hades_g);
+        assert_eq!(game_folder(&folders, &hades_g), Some(canon(&root.join("Hades"))));
         let _ = std::fs::remove_dir_all(root);
     }
 

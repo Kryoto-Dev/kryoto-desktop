@@ -699,6 +699,18 @@ fn edit<R: Runtime>(app: &AppHandle<R>, id: &str, f: impl FnOnce(&mut Download))
     Some(item.clone())
 }
 
+/// The games a row in Downloads says Kryoto installed (and where): how an
+/// uninstall tells an install from before 0.3.0, which wrote no record of its
+/// files, from a game the player added by hand.
+pub fn installed_rows<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, String)> {
+    let state = app.state::<Downloads>();
+    let Ok(list) = state.list.lock() else { return Vec::new() };
+    list.iter()
+        .filter(|d| d.status == Status::Installed)
+        .filter_map(|d| Some((d.game_id.clone()?, d.install_dir.clone().unwrap_or_default())))
+        .collect()
+}
+
 /// The download as it stands (for the add-on installer).
 /// The game's row in Downloads goes with the game: its Play and Open folder had
 /// nothing to open any more.
@@ -4876,11 +4888,16 @@ fn install_dest(games: &[LibraryGame], settings: &crate::settings::Settings, ite
         .as_ref()
         .and_then(|slug| games.iter().find(|g| g.slug.as_deref() == Some(slug.as_str())))
         .filter(|g| g.launcher.is_none())
-        .and_then(|g| crate::storage::game_folder(&folders, &g.install_dir).or_else(|| crate::storage::outside_root(games, &folders, g).ok()))
+        .and_then(|g| crate::storage::game_folder(&folders, g).or_else(|| crate::storage::outside_root(games, &folders, g).ok()))
         // Those are canonical, \\?\D:\..., which a .bat cannot start from and
         // Properties would show.
         .map(|dir| dunce::simplified(&dir).to_path_buf())
         .unwrap_or_else(|| Path::new(&settings.library_dir).join(plain_name(title, item.slug.as_deref())))
+}
+
+#[cfg(test)]
+pub(crate) fn install_dest_for_tests(games: &[LibraryGame], settings: &crate::settings::Settings, item: &Download, title: &str) -> PathBuf {
+    install_dest(games, settings, item, title)
 }
 
 /// The folder whose drive the game lands on (`install_dest`'s parent), for

@@ -1102,7 +1102,7 @@ impl Driver {
                 .iter()
                 .filter_map(|(id, _)| {
                     let game = games.iter().find(|g| g.id == *id)?;
-                    let dir = crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir));
+                    let dir = crate::storage::game_folder(&folders, game).unwrap_or_else(|| PathBuf::from(&game.install_dir));
                     Some((id.clone(), dir))
                 })
                 .collect();
@@ -1407,7 +1407,7 @@ pub struct GameView {
 pub fn pad_game_get(app: AppHandle, game_id: String) -> Result<GameView, String> {
     let game = crate::library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     let folders = crate::settings::all_folders(&crate::settings::load(&app));
-    let dir = crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir));
+    let dir = crate::storage::game_folder(&folders, &game).unwrap_or_else(|| PathBuf::from(&game.install_dir));
     let anti_cheat = anti_cheat_in(&dir);
     if let Ok(mut scans) = SCANS.lock() {
         scans.get_or_insert_with(HashMap::new).insert(dir, Some(anti_cheat));

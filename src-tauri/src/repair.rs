@@ -47,7 +47,7 @@ pub(crate) fn game<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<LibraryGa
 }
 pub(crate) fn root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Result<PathBuf, String> {
     let folders = crate::settings::all_folders(&crate::settings::load(app));
-    crate::storage::game_folder(&folders, &game.install_dir)
+    crate::storage::game_folder(&folders, game)
         .unwrap_or_else(|| PathBuf::from(&game.install_dir))
         .canonicalize()
         .map_err(|_| "The installed game folder cannot be found.".into())

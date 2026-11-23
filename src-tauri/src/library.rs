@@ -635,13 +635,19 @@ fn marked_games(games: &[LibraryGame], roots: &[PathBuf]) -> Vec<LibraryGame> {
             if dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with('_')) {
                 continue;
             }
-            let hit = read_marker(&dir).map(|g| (dir.clone(), g)).or_else(|| subdirs(&dir).into_iter().find_map(|d| read_marker(&d).map(|g| (d, g))));
-            let Some((dir, mut game)) = hit else { continue };
-            game.install_dir = dir.to_string_lossy().into_owned();
-            if listed(&game.install_dir, game.slug.as_deref()) || found.iter().any(|f| f.install_dir == game.install_dir || (game.slug.is_some() && f.slug == game.slug)) {
-                continue;
+            // Every game a level down: `D:\Games\Foo` and `D:\Games\Bar` with
+            // `D:\` the library folder (KB-0375) are two games, not the first.
+            let hits: Vec<(PathBuf, LibraryGame)> = match read_marker(&dir) {
+                Some(g) => vec![(dir.clone(), g)],
+                None => subdirs(&dir).into_iter().filter_map(|d| read_marker(&d).map(|g| (d, g))).collect(),
+            };
+            for (dir, mut game) in hits {
+                game.install_dir = dir.to_string_lossy().into_owned();
+                if listed(&game.install_dir, game.slug.as_deref()) || found.iter().any(|f| f.install_dir == game.install_dir || (game.slug.is_some() && f.slug == game.slug)) {
+                    continue;
+                }
+                found.push(game);
             }
-            found.push(game);
         }
     }
     found.sort_by_key(|g| g.title.to_lowercase());
@@ -977,7 +983,7 @@ pub fn library_plain_folder(app: AppHandle, id: String) -> Result<LibraryGame, S
 /// place.
 fn rename_target(games: &[LibraryGame], folders: &[String], game: &LibraryGame) -> Result<(PathBuf, PathBuf), String> {
     let full = PathBuf::from(&game.install_dir).canonicalize().map_err(|_| "The game's folder is not there any more.".to_string())?;
-    let top = crate::storage::game_folder(folders, &game.install_dir).unwrap_or_else(|| full.clone());
+    let top = crate::storage::game_folder(folders, game).unwrap_or_else(|| full.clone());
     // Checked before shortening: `holds_other_games` compares the long \\?\ form.
     if crate::storage::holds_other_games(games, &[game.id.as_str()], &top) {
         return Err(format!("{} also holds other games in your library, so Kryoto does not rename it.", dunce::simplified(&top).display()));
@@ -1435,7 +1441,7 @@ fn uninstall_verdict<R: Runtime>(app: &AppHandle<R>, id: &str, leaving: &[&str])
     let game = games.iter().find(|g| g.id == id).cloned().ok_or("That game is no longer in the library.")?;
     let folders = crate::settings::all_folders(&crate::settings::load(app));
     let release_list = crate::release_files::cached_list(app, &game).map(|l| l.listed().iter().map(|f| (f.path.clone(), f.size)).collect());
-    let known = crate::safe_delete::Known { games: &games, folders: &folders, home: crate::safe_delete::home(), release_list };
+    let known = crate::safe_delete::Known { games: &games, folders: &folders, home: crate::safe_delete::home(), release_list, downloaded: crate::downloads::installed_rows(app) };
     let verdict = crate::safe_delete::plan(&known, &game, leaving);
     Ok((game, verdict))
 }
@@ -2490,6 +2496,9 @@ mod tests {
         mark(&root.join("Celeste"), "celeste", "Celeste");
         // Its files one level down, as some archives unpack.
         mark(&root.join("Hollow Knight").join("Hollow Knight"), "hollow-knight", "Hollow Knight");
+        // Two games moved into one folder a level down: both are found.
+        mark(&root.join("Games").join("Foo"), "foo", "Foo");
+        mark(&root.join("Games").join("Bar"), "bar", "Bar");
         // Already in the library, by folder and by page.
         mark(&root.join("Hades"), "hades", "Hades");
         mark(&root.join("Moved Tunic"), "tunic", "Tunic");
@@ -2504,7 +2513,8 @@ mod tests {
         ];
         let found = marked_games(&library, &[root.clone(), root.join("missing")]);
         let titles: Vec<&str> = found.iter().map(|g| g.title.as_str()).collect();
-        assert_eq!(titles, ["Celeste", "Hollow Knight"]);
+        assert_eq!(titles, ["Bar", "Celeste", "Foo", "Hollow Knight"]);
+        let found: Vec<LibraryGame> = found.into_iter().filter(|g| g.title != "Foo" && g.title != "Bar").collect();
         assert!(found[1].install_dir.ends_with("Hollow Knight") && found[1].install_dir.contains(&format!("Hollow Knight{}Hollow Knight", std::path::MAIN_SEPARATOR)));
         assert_eq!(found[0].playtime_seconds, 60);
         let _ = std::fs::remove_dir_all(&root);

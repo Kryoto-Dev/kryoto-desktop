@@ -20,7 +20,9 @@
 //!   release's files: those files and Kryoto's own, then folders left empty.
 //!   Anything else stays.
 //! - Without either (installs before 0.3.0): the folder that holds this game's
-//!   own `.kryoto-game.json`, inside a library folder and named for the game.
+//!   own `.kryoto-game.json`, inside a library folder and named for the game,
+//!   and only when something says Kryoto installed it (the archive's hash, a
+//!   row in Downloads): a game added by hand before 0.4.0 carries a marker too.
 //! - Never: a drive, the home folder or its usual folders, a system folder, a
 //!   library folder or a folder holding one, a folder holding another game
 //!   (its marker, a library entry even one whose folder is gone, another
@@ -45,6 +47,8 @@ pub struct Known<'a> {
     /// kryo.to's list of the installed release's files, when one is kept
     /// (release_files.rs): relative paths and sizes.
     pub release_list: Option<Vec<(String, u64)>>,
+    /// The games Downloads lists as installed by Kryoto (game id, folder).
+    pub downloaded: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -100,6 +104,14 @@ pub fn plan(known: &Known, game: &LibraryGame, leaving: &[&str]) -> Verdict {
         } else {
             format!("It came from {}, so its files stay where they are. Only its place in your Kryoto Library goes.", origin_name(game.origin.as_deref()))
         });
+    }
+    // No record of its files and nothing saying Kryoto installed it: a game
+    // added by hand before 0.4.0 flagged those (it may carry a marker, written
+    // on Play), so it is taken for one.
+    if record.is_none() && !installed_by_kryoto(known, game) {
+        return Verdict::ListOnly(
+            "Kryoto has no record of installing this game (it was probably added by hand), so its files stay where they are. Only its place in your Kryoto Library goes.".into(),
+        );
     }
     let roots: Vec<PathBuf> = known.folders.iter().filter_map(|f| dunce::canonicalize(f).ok()).collect();
     let library = roots.iter().filter(|r| folder.starts_with(r)).max_by_key(|r| r.components().count()).cloned();
@@ -200,6 +212,14 @@ pub fn guard(known: &Known, game: &LibraryGame, leaving: &[&str], folder: &Path)
     walk(folder, game, known.games, leaving)
 }
 
+/// Something says Kryoto installed `game`, beyond the fields "Add a game"
+/// also fills in (title, slug, source, version, art): the archive it was
+/// installed from (`build_sha`, the player's own file `unverified`), both
+/// only ever set by an install, or a row in Downloads for it.
+fn installed_by_kryoto(known: &Known, game: &LibraryGame) -> bool {
+    game.build_sha.is_some() || game.unverified || known.downloaded.iter().any(|(id, _)| *id == game.id)
+}
+
 /// A folder of `total` bytes is far bigger than the `listed` installed in it.
 fn far_bigger(total: u64, listed: u64) -> bool {
     total > listed.saturating_mul(BIGGER) && total - listed > SLACK
@@ -220,7 +240,7 @@ pub fn home() -> Option<PathBuf> {
 }
 
 /// The same game: a marker written for this entry.
-fn same_game(marker: &LibraryGame, game: &LibraryGame) -> bool {
+pub(crate) fn same_game(marker: &LibraryGame, game: &LibraryGame) -> bool {
     (!game.id.is_empty() && marker.id == game.id) || (game.slug.is_some() && marker.slug == game.slug)
 }
 
@@ -237,7 +257,7 @@ fn kryotos_own(game: &LibraryGame) -> Vec<String> {
 }
 
 /// Paths compared as Windows does: case and slashes aside.
-fn key(path: &str) -> String {
+pub(crate) fn key(path: &str) -> String {
     let p = path.replace('\\', "/");
     if cfg!(windows) { p.to_lowercase() } else { p }
 }
@@ -394,7 +414,7 @@ fn saves_in(folder: &Path) -> Vec<PathBuf> {
 
 /// The folder is called after the game: its own folder Kryoto made, or one of
 /// those above it inside the library folder.
-fn named_for(game: &LibraryGame, folder: &Path, library: &Path) -> bool {
+pub(crate) fn named_for(game: &LibraryGame, folder: &Path, library: &Path) -> bool {
     let plain = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
     let mut names: Vec<String> = vec![plain(&game.title), plain(&crate::downloads::plain_name(&game.title, game.slug.as_deref()))];
     names.extend(game.slug.as_deref().map(plain));
@@ -700,7 +720,7 @@ mod tests {
     }
 
     fn known<'a>(games: &'a [LibraryGame], folders: &'a [String]) -> Known<'a> {
-        Known { games, folders, home: None, release_list: None }
+        Known { games, folders, home: None, release_list: None, downloaded: games.iter().map(|g| (g.id.clone(), g.install_dir.clone())).collect() }
     }
 
     fn text(p: &Path) -> String {
@@ -885,6 +905,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    /// A game added by hand before `added_by_hand` existed: in its own folder
+    /// named for it, with the marker Play wrote, it looks like an install from
+    /// before 0.3.0. With nothing saying Kryoto installed it (no archive hash,
+    /// no row in Downloads) it only leaves the Library; with one, it goes.
+    #[test]
+    fn a_game_added_by_hand_before_the_flag_only_leaves_the_library() {
+        let base = scratch("handold");
+        let hades = base.join("Hades");
+        put(&hades.join("Hades.exe"), b"hades");
+        let mut g = game("hades", &hades);
+        g.title = "Hades".into();
+        // What "Add a game" linked to kryo.to fills in, like an install does.
+        g.source = Some("gog".into());
+        g.version = Some("1.0".into());
+        mark(&g);
+        let folders = vec![text(&base)];
+        let games = vec![g.clone()];
+        let nothing = Known { games: &games, folders: &folders, home: None, release_list: None, downloaded: Vec::new() };
+        assert!(matches!(plan(&nothing, &g, &[]), Verdict::ListOnly(why) if why.contains("added by hand")));
+        // A row in Downloads for another game says nothing about this one.
+        let other_row = Known { downloaded: vec![("celeste".into(), String::new())], ..nothing };
+        assert!(matches!(plan(&other_row, &g, &[]), Verdict::ListOnly(_)));
+        assert!(hades.join("Hades.exe").exists());
+        // The archive's hash only an install sets.
+        let mut hashed = g.clone();
+        hashed.build_sha = Some("ab".repeat(32));
+        assert!(matches!(plan(&other_row, &hashed, &[]), Verdict::Delete(_)));
+        // Its row in Downloads.
+        let row = Known { downloaded: vec![("hades".into(), text(&hades))], ..other_row };
+        let p = uninstall(plan(&row, &g, &[]));
+        assert!(p.whole && !hades.exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// With the install record: the files it lists and Kryoto's own go,
     /// anything else (a mod, saves the emulator keeps) stays, and so does the folder.
     #[test]
@@ -1011,10 +1065,10 @@ mod tests {
         let folders = vec![text(&base)];
         let games = vec![g.clone()];
         let listed = vec![("game.exe".into(), 1), ("data.pak".into(), 4)];
-        let k = Known { games: &games, folders: &folders, home: None, release_list: Some(listed) };
+        let k = Known { games: &games, folders: &folders, home: None, release_list: Some(listed), downloaded: vec![("hades".into(), String::new())] };
         assert!(matches!(plan(&k, &g, &[]), Verdict::Refused(_)));
         mark(&g);
-        let other = Known { games: &games, folders: &folders, home: None, release_list: Some(vec![("game.exe".into(), 1), ("bin/missing.dll".into(), 9)]) };
+        let other = Known { games: &games, folders: &folders, home: None, release_list: Some(vec![("game.exe".into(), 1), ("bin/missing.dll".into(), 9)]), downloaded: k.downloaded.clone() };
         assert!(matches!(plan(&other, &g, &[]), Verdict::Refused(_)));
         let p = uninstall(plan(&k, &g, &[]));
         assert_eq!(p.files.len(), 3, "{p:?}");

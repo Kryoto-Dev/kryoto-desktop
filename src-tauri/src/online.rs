@@ -131,7 +131,7 @@ pub fn ini(appid: &str, dlc: &[String]) -> String {
 
 fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
     let folders = crate::settings::all_folders(&crate::settings::load(app));
-    crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir))
+    crate::storage::game_folder(&folders, game).unwrap_or_else(|| PathBuf::from(&game.install_dir))
 }
 
 /// Put `from` at `to`, first saving whatever is at `to` beside it.
