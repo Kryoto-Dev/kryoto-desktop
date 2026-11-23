@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FolderOpen, HardDrive, HeartHandshake, Moon, Pause, Play, Plus, Power, RotateCw, ShieldAlert, X } from '@/ui/pixel-icons'
+import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FileArchive, FolderOpen, HardDrive, HeartHandshake, Moon, Pause, Play, Plus, Power, RotateCw, ShieldAlert, X } from '@/ui/pixel-icons'
 import { settingsApi, useSettings } from '@/lib/settings'
 import { HatchZipExplainer } from '@/ui/FeatureNotice'
 import { AsciiBar, AsciiSpark, Busy, Button, Caption, Dropdown, IconButton, Label, Matrix, Modal, Stat, type MatrixState } from '@/ui'
@@ -34,6 +34,8 @@ export function DownloadsPage({
   loading,
   error,
   onRetry,
+  onInstallFile,
+  onFileForAnotherGame,
 }: {
   list: Dl[]
   onOpenGame: (id: string) => void
@@ -47,6 +49,10 @@ export function DownloadsPage({
   loading: boolean
   error: string | null
   onRetry: () => void
+  /** A game's .7z already on this PC: the file picker, then Install from a file. `slug` for that game's own row. */
+  onInstallFile: (slug: string | null) => void
+  /** The player's own file matched nothing for the game it was added as: pick another game for it. */
+  onFileForAnotherGame: (path: string) => void
 }) {
   const [listError, setListError] = useState<string | null>(null)
   const current = list.find(isWorking)
@@ -68,9 +74,13 @@ export function DownloadsPage({
   }
   if (list.length === 0) {
     return (
-      <EmptyState art={INBOX} title="No downloads" body="Press Download on a game in the store. It installs itself and appears in your library.">
+      <EmptyState art={INBOX} title="No downloads" body="Press Download on a game in the store. It installs itself and appears in your library. Already downloaded a game's .7z? Install it from the file, or drop it here.">
         <Button variant="primary" onClick={onStore}>
           Browse the store
+        </Button>
+        <Button onClick={() => onInstallFile(null)}>
+          <FileArchive className="size-3.5" />
+          Install from a file
         </Button>
       </EmptyState>
     )
@@ -80,6 +90,13 @@ export function DownloadsPage({
     <div className="grid min-h-0 grow content-start gap-8 overflow-auto p-6">
       {error ? <div role="alert" className="flex items-center gap-3 text-xs text-destructive"><p>{error}</p><Button size="sm" onClick={onRetry}>Retry</Button></div> : null}
       {listError ? <p role="alert" className="text-xs text-destructive">{listError}</p> : null}
+      {/* Already downloaded (a browser, a mirror): installed from the file instead. A drop on this page does the same. */}
+      <div className="-mb-4 flex justify-end">
+        <Button size="sm" variant="ghost" onClick={() => onInstallFile(null)} title="A game's .7z you already downloaded. You can also drop it on this page.">
+          <FileArchive className="size-3" />
+          Install from a file
+        </Button>
+      </div>
       {onDonate ? <Donate onDonate={onDonate} /> : null}
       {whenDone.at ? <Countdown state={whenDone} onError={setListError} /> : null}
       {current ? <Current d={current} open={openFor(current, onOpenGame, onOpenCatalog)} /> : null}
@@ -104,7 +121,7 @@ export function DownloadsPage({
             ) : null}
           </div>
           {waiting.map((d, i) => (
-            <Row key={d.id} d={d} open={openFor(d, onOpenGame, onOpenCatalog)} onOpenGame={onOpenGame} onRepair={onRepair} queue={{ first: i === 0, last: i === waiting.length - 1 }} />
+            <Row key={d.id} d={d} open={openFor(d, onOpenGame, onOpenCatalog)} onOpenGame={onOpenGame} onRepair={onRepair} onInstallFile={onInstallFile} onFileForAnotherGame={onFileForAnotherGame} queue={{ first: i === 0, last: i === waiting.length - 1 }} />
           ))}
         </section>
       ) : null}
@@ -126,7 +143,7 @@ export function DownloadsPage({
             </Button>
           </div>
           {(allDone ? done : done.slice(0, FINISHED_ROWS)).map((d) => (
-            <Row key={d.id} d={d} open={openFor(d, onOpenGame, onOpenCatalog)} onOpenGame={onOpenGame} onRepair={onRepair} />
+            <Row key={d.id} d={d} open={openFor(d, onOpenGame, onOpenCatalog)} onOpenGame={onOpenGame} onRepair={onRepair} onInstallFile={onInstallFile} onFileForAnotherGame={onFileForAnotherGame} />
           ))}
           {done.length > FINISHED_ROWS ? (
             <Button size="sm" variant="ghost" className="w-fit" onClick={() => setAllDone(!allDone)} aria-expanded={allDone}>
@@ -267,9 +284,10 @@ function ShortOnSpace({ d }: { d: Dl }) {
   }
   return (
     <div className="kryo-radius grid gap-3 border border-border bg-background/40 p-3">
-      <HatchZipExplainer compact />
+      {/* The player's own file is never unpacked in place: that would eat it. */}
+      {d.fromFile ? null : <HatchZipExplainer compact />}
       <div className="flex flex-wrap gap-2">
-        {!settings.extractInPlace && /^Not enough space/.test(d.error ?? '') ? (
+        {!d.fromFile && !settings.extractInPlace && /^Not enough space/.test(d.error ?? '') ? (
           <Button size="sm" disabled={busy} onClick={() => turnOn()} className="w-fit">
             <HardDrive className="size-3" />
             Extract in place and retry
@@ -565,12 +583,16 @@ function Row({
   open,
   onOpenGame,
   onRepair,
+  onInstallFile,
+  onFileForAnotherGame,
   queue,
 }: {
   d: Dl
   open: (() => void) | null
   onOpenGame: (id: string) => void
   onRepair: (id: string) => void
+  onInstallFile: (slug: string | null) => void
+  onFileForAnotherGame: (path: string) => void
   /** Set for rows in the queue: where it is, for the arrows. */
   queue?: { first: boolean; last: boolean }
 }) {
@@ -602,13 +624,20 @@ function Row({
           <StatusGlyph d={d} className="size-2.5" />
           {status}
           {d.mirror ? ` · ${d.mirror.host}` : ''}
+          {d.fromFile ? ' · from your file' : ''}
           {d.release ? ` · build ${d.release}` : ''}
-          {d.total ? ` · ${formatBytes(d.status === 'installed' ? d.total : d.received)}${d.status === 'installed' ? '' : ` of ${formatBytes(d.total)}`}` : ''}
+          {d.total ? ` · ${formatBytes(d.status === 'installed' || d.fromFile ? d.total : d.received)}${d.status === 'installed' || d.fromFile ? '' : ` of ${formatBytes(d.total)}`}` : ''}
         </span>
         {d.status === 'paused' || d.status === 'queued' ? <AsciiBar fraction={pct} cells={30} /> : null}
         {failed ?? d.error ? <span role={failed ? 'alert' : undefined} className="text-xs text-destructive">{failed ?? d.error}</span> : null}
         {d.error && isSupporterLocked(d.error) && d.slug ? <SupporterLocked d={d} slug={d.slug} /> : null}
         {d.error && d.status === 'failed' && isShortOnRoom(d.error) ? <ShortOnSpace d={d} /> : null}
+        {/* A download of a game that would not come through: the same file from the site or a mirror installs here. */}
+        {d.status === 'failed' && !d.fromFile && !d.addon && !d.addonRelease && d.slug && !isShortOnRoom(d.error ?? '') ? (
+          <button type="button" onClick={() => onInstallFile(d.slug)} className="kryo-square w-fit text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
+            Already have the file? Install it from your PC
+          </button>
+        ) : null}
         {d.warning ? (
           <span className="flex flex-wrap items-center gap-x-2 text-xs leading-relaxed text-warning">
             {d.warning}
@@ -653,6 +682,12 @@ function Row({
           <Button size="sm" variant="outline" disabled={Boolean(pending)} onClick={() => run('anyway', () => api.installAnyway(d.id))}>
             {pending === 'anyway' ? <Busy className="size-3" /> : <ShieldAlert className="size-3" />}
             Install anyway
+          </Button>
+        ) : null}
+        {/* The player's file matched nothing for this game: maybe it is another one. */}
+        {d.status === 'failed' && d.hashMismatch && d.fromFile ? (
+          <Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => onFileForAnotherGame(d.archivePath)}>
+            Another game
           </Button>
         ) : null}
         {d.status === 'paused' || d.status === 'failed' ? (

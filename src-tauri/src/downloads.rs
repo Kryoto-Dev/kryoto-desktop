@@ -177,6 +177,24 @@ pub struct Download {
     /// ranged path has `checkpoint` for the same). None: an older row, which
     /// goes by the length as before.
     pub synced: Option<u64>,
+    /// The archive is the player's own file, installed from where it is
+    /// (from_file.rs): never moved, deleted or unpacked in place, and Retry
+    /// checks it again instead of downloading anything.
+    pub from_file: bool,
+    /// That file's SHA-256 once read, so another game picked for it is
+    /// matched without reading it a second time.
+    pub file_sha: Option<String>,
+    /// That file passed 7-Zip's own test of the archive.
+    pub tested: bool,
+    /// The player chose to install it although it matches no file kryo.to
+    /// lists: it goes in marked "not verified against Kryoto's copy".
+    pub not_verified: bool,
+}
+
+/// The archive this row may delete: one the app downloaded. A player's own
+/// file (`from_file`) is theirs and stays where it is.
+pub(crate) fn own_archive(d: &Download) -> Option<String> {
+    (!d.from_file && !d.archive_path.is_empty()).then(|| d.archive_path.clone())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -627,6 +645,17 @@ pub fn taskbar_state(list: &[Download]) -> (u8, u64) {
 fn overall_progress(d: &Download) -> f64 {
     let part = d.extract_total.filter(|t| *t > 0).map(|t| (d.extracted as f64 / t as f64).min(1.0)).unwrap_or(0.0);
     match d.status {
+        // The player's own file (from_file.rs): nothing to fetch, so checking
+        // it is the first part of the bar and unpacking the rest.
+        Status::Verifying if d.from_file => 0.4 * part,
+        Status::Extracting if d.from_file => {
+            if d.extract_total.is_some() {
+                0.4 + 0.6 * part
+            } else {
+                0.7
+            }
+        }
+        _ if d.from_file => 0.0,
         Status::Verifying => 0.85 + 0.05 * part,
         Status::Extracting => {
             if d.extract_total.is_some() {
@@ -1991,7 +2020,9 @@ fn already_had<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     let Some(game) = installed_build_in(&games, &d).filter(|g| Path::new(&g.install_dir).is_dir()) else { return false };
     let body = format!("{} is already in your Library, on this build.", game.title);
     let _ = app.emit("notify", Notice::new("Already installed", &body, Some(game.id.clone())));
-    let _ = std::fs::remove_file(&d.archive_path);
+    if let Some(path) = own_archive(&d) {
+        let _ = std::fs::remove_file(path);
+    }
     drop_row(app, id);
     true
 }
@@ -2031,7 +2062,7 @@ fn is_dlc_link(url: &str) -> bool {
 }
 
 /// The label kryo.to gives a DLC, from its file's name.
-fn dlc_label(file: &str) -> Option<String> {
+pub(crate) fn dlc_label(file: &str) -> Option<String> {
     dlc_parts(file).map(|(_, name)| format!("DLC: {name}"))
 }
 
@@ -2283,6 +2314,24 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
             return Ok(());
         }
         mint_link(app, id).await?;
+    }
+
+    // The player's own archive: nothing to fetch. Checked where it is, then
+    // installed exactly as a finished download is.
+    if item.from_file {
+        match check_own_file(app, id, flag, &client).await {
+            Ok(()) => {}
+            Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
+            Err(e) => return Err(e),
+        }
+        edit(app, id, |d| d.notice = None);
+        if edit(app, id, |_| {}).and_then(|d| d.addon).is_some() {
+            return crate::addons::install(app, id, &settings).await;
+        }
+        return match install(app, id, &settings, flag).await {
+            Err(_) if flag.load(Ordering::SeqCst) != RUN => settle_stopped(app, id, flag),
+            done => done,
+        };
     }
 
     let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
@@ -3001,11 +3050,9 @@ fn received_now<R: Runtime>(app: &AppHandle<R>, id: &str) -> u64 {
 
 /// Throw away what was fetched so far, so the next try starts from zero.
 fn discard<R: Runtime>(app: &AppHandle<R>, id: &str) {
-    if let Some(d) = edit(app, id, |_| {}) {
-        if !d.archive_path.is_empty() {
-            let _ = std::fs::remove_file(&d.archive_path);
-            crate::hatchzip::forget(Path::new(&d.archive_path));
-        }
+    if let Some(path) = edit(app, id, |_| {}).as_ref().and_then(own_archive) {
+        let _ = std::fs::remove_file(&path);
+        crate::hatchzip::forget(Path::new(&path));
     }
     edit(app, id, |d| {
         d.received = 0;
@@ -3017,14 +3064,8 @@ fn discard<R: Runtime>(app: &AppHandle<R>, id: &str) {
     persist(app);
 }
 
-/// What kryo.to says about this exact file: its SHA-256, and whether it is
-/// one of the game's add-ons. Matched by the name it downloads as.
-async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client) {
-    let Some(d) = edit(app, id, |_| {}) else { return };
-    let Some(slug) = d.slug.clone() else { return };
-    if d.file_name.is_empty() {
-        return;
-    }
+/// Where a game's `/downloads` listing is asked for its files' hashes.
+pub(crate) fn listing_base<R: Runtime>(app: &AppHandle<R>) -> String {
     #[allow(unused_mut)]
     let mut base = crate::settings::catalog_endpoint(&crate::settings::load(app));
     // Debug builds only, beside KRYOTO_DEV_DOWNLOAD_HOST: the stand-in filehost
@@ -3035,6 +3076,27 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
             base = format!("http://{dev}");
         }
     }
+    base
+}
+
+/// A game's `/api/games/<slug>/downloads` listing, read whatever the status:
+/// signed out it still carries every file's hash (only links are withheld).
+pub(crate) async fn game_listing<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, slug: &str) -> Option<serde_json::Value> {
+    let res = ask_about_game(app, client, &listing_base(app), slug, "/downloads").await?;
+    // An error page or a busy answer is no listing: "matches nothing" must
+    // only ever be said from a real one.
+    res.json::<serde_json::Value>().await.ok().filter(|j| j["releases"].is_array() || j["hashes"].is_array())
+}
+
+/// What kryo.to says about this exact file: its SHA-256, and whether it is
+/// one of the game's add-ons. Matched by the name it downloads as.
+async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client) {
+    let Some(d) = edit(app, id, |_| {}) else { return };
+    let Some(slug) = d.slug.clone() else { return };
+    if d.file_name.is_empty() {
+        return;
+    }
+    let base = listing_base(app);
     let Some(res) = ask_about_game(app, client, &base, &slug, "/downloads").await else { return };
     let Ok(json) = res.json::<serde_json::Value>().await else { return };
     let hint = FileHint {
@@ -3190,20 +3252,10 @@ pub fn match_file_with(json: &serde_json::Value, file: &str, hint: &FileHint) ->
     FileMatch::default()
 }
 
-/// Check the archive against the SHA-256 kryo.to lists for it. A mismatch
-/// keeps the archive and marks it (`hash_mismatch`): Install anyway uses it,
-/// Retry deletes it and downloads it again.
-async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<(), String> {
+/// The SHA-256 of this row's archive, read off the window's thread with the
+/// row's progress (Checked x of y). `Err(STOPPED)` on Pause or Cancel.
+async fn hash_archive<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<String, String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
-    let Some(expected) = d.sha256.clone() else { return Ok(()) };
-    // Partly unpacked in place, what is left of it can only fail the check.
-    if d.verified || crate::hatchzip::resumes(Path::new(&d.archive_path)) {
-        return Ok(());
-    }
-    if flag.load(Ordering::SeqCst) != RUN {
-        return Err(STOPPED.into());
-    }
-    set_status(app, id, Status::Verifying, None);
     let stop = flag.clone();
     let path = PathBuf::from(&d.archive_path);
     let total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -3242,6 +3294,25 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
     if flag.load(Ordering::SeqCst) != RUN {
         return Err(STOPPED.into());
     }
+    Ok(actual)
+}
+
+/// Check the archive against the SHA-256 kryo.to lists for it. A mismatch
+/// keeps the archive and marks it (`hash_mismatch`): Install anyway uses it,
+/// Retry deletes it and downloads it again.
+async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<(), String> {
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let Some(expected) = d.sha256.clone() else { return Ok(()) };
+    // Partly unpacked in place, what is left of it can only fail the check.
+    if d.verified || crate::hatchzip::resumes(Path::new(&d.archive_path)) {
+        return Ok(());
+    }
+    if flag.load(Ordering::SeqCst) != RUN {
+        return Err(STOPPED.into());
+    }
+    set_status(app, id, Status::Verifying, None);
+    let total = std::fs::metadata(&d.archive_path).map(|m| m.len()).unwrap_or(0);
+    let actual = hash_archive(app, id, flag).await?;
     if actual != expected {
         // Who served it and what it is, so the reports can tell a host's bad
         // copy from a torn transfer (KB-0367: the same wrong file on several
@@ -3279,6 +3350,209 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
         d.extract_total = None;
     });
     Ok(())
+}
+
+/// The player's own archive (from_file.rs), at its turn: still there, read
+/// once for its SHA-256 (the same check a download gets), and that matched
+/// against every file kryo.to lists for the game. A match is Kryoto's copy,
+/// verified, of that build or add-on. No match: 7-Zip tests the archive
+/// itself, and it installs only at the player's word, marked not verified.
+async fn check_own_file<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>, client: &reqwest::Client) -> Result<(), String> {
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let path = PathBuf::from(&d.archive_path);
+    let Some(size) = std::fs::metadata(&path).ok().filter(|m| m.is_file()).map(|m| m.len()) else {
+        return Err(format!("Your file is not at {} any more. Put it back and press Retry, or install it from where it is now.", path.display()));
+    };
+    // Another file under the same name since (a fresh download over it): read anew.
+    if Some(size) != d.total {
+        edit(app, id, |d| {
+            d.file_sha = None;
+            d.tested = false;
+            d.verified = false;
+            d.sha256 = None;
+            d.total = Some(size);
+            d.received = size;
+        });
+    }
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    if d.verified {
+        return Ok(());
+    }
+    if flag.load(Ordering::SeqCst) != RUN {
+        return Err(STOPPED.into());
+    }
+    let sha = match d.file_sha.clone() {
+        Some(sha) => sha,
+        None => {
+            set_status(app, id, Status::Verifying, None);
+            let sha = hash_archive(app, id, flag).await?;
+            edit(app, id, |d| d.file_sha = Some(sha.clone()));
+            persist(app);
+            sha
+        }
+    };
+    let slug = d.slug.clone().ok_or("Pick the game this file is for first.")?;
+    let listing = game_listing(app, client, &slug).await;
+    if let Some(found) = listing.as_ref().and_then(|json| crate::from_file::match_sha(json, &sha)) {
+        crate::logging::info("download", &format!("{id}: {} is kryo.to's file for {slug} {}", d.file_name, found.what()));
+        edit(app, id, |d| {
+            d.sha256 = Some(sha.clone());
+            d.verified = true;
+            d.hash_mismatch = false;
+            d.not_verified = false;
+            d.addon = found.addon.clone();
+            d.repair = found.repair;
+            // That build, not pinned: kryo.to's newer one is offered as an update.
+            if found.addon.is_none() {
+                d.meta.version = found.version.clone().or(d.meta.version.take());
+            }
+            d.extracted = 0;
+            d.extract_total = None;
+        });
+        persist(app);
+        return Ok(());
+    }
+    // Matched nothing: the archive answers for itself before anything is written.
+    if !d.tested {
+        set_status(app, id, Status::Verifying, None);
+        edit(app, id, |d| d.notice = Some("Testing the archive".into()));
+        emit(app, true);
+        let (progress_app, pid, stop, archive) = (app.clone(), id.to_string(), flag.clone(), path.clone());
+        #[cfg(windows)]
+        ensure_7zr(app).await;
+        let tested = tauri::async_runtime::spawn_blocking(move || {
+            crate::from_file::test_archive(
+                &archive,
+                &|done, total| {
+                    edit(&progress_app, &pid, |d| {
+                        d.extracted = done;
+                        d.extract_total = total;
+                    });
+                    emit(&progress_app, false);
+                },
+                &stop,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        edit(app, id, |d| {
+            d.notice = None;
+            d.extracted = 0;
+            d.extract_total = None;
+        });
+        match tested {
+            Err(_) if flag.load(Ordering::SeqCst) != RUN => return Err(STOPPED.into()),
+            Err(e) => return Err(format!("{} is damaged: {e}. Nothing was installed, and your file stays where it is. Download it again.", d.file_name)),
+            Ok(by_tool) => {
+                if !by_tool {
+                    crate::logging::warn("download", &format!("{id}: no 7-Zip to test {} with; its headers were checked", d.file_name));
+                }
+                edit(app, id, |d| d.tested = true);
+                persist(app);
+            }
+        }
+    }
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    if d.not_verified {
+        crate::logging::warn("download", &format!("{id}: installing {} for {slug}, matching no file kryo.to lists, at the player's word", d.file_name));
+        edit(app, id, |d| {
+            d.sha256 = None;
+            // Its own name's build, if it says one: never kryo.to's current one.
+            d.meta.version = crate::from_file::version_in_name(&d.file_name);
+            if d.addon.is_none() {
+                d.addon = dlc_label(&d.file_name);
+            }
+        });
+        return Ok(());
+    }
+    edit(app, id, |d| d.hash_mismatch = true);
+    persist(app);
+    let title = if is_placeholder(&d.meta.title, d.slug.as_deref()) { title_from_file(&d.file_name) } else { d.meta.title.clone() };
+    Err(match listing {
+        None => format!("Could not reach kryo.to to check {} against its copy. Retry once you are online, or Install anyway: it goes in marked as not verified against Kryoto's copy.", d.file_name),
+        Some(_) => format!(
+            "{} is not a copy of any file kryo.to lists for {title}: an older build, a re-pack or a changed copy. Install anyway, marked as not verified against Kryoto's copy, or pick another game for it.",
+            d.file_name
+        ),
+    })
+}
+
+/// Queue the player's own archive `path` for the game `slug`: checked and
+/// installed from where it is, as a finished download is (`check_own_file`,
+/// then `install`). `not_verified`: the player already agreed to install it
+/// if it matches nothing on kryo.to. The same file added again takes over
+/// its stopped row, and keeps what was read of it. Its download id.
+pub fn enqueue_file<R: Runtime>(app: &AppHandle<R>, path: &Path, size: u64, slug: String, title: Option<String>, not_verified: bool) -> Result<String, String> {
+    let state = app.state::<Downloads>();
+    let archive_path = path.to_string_lossy().into_owned();
+    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let running = state.controls.lock().map(|c| c.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+    let same = |d: &Download| d.from_file && crate::settings::same_path(&d.archive_path, &archive_path);
+    let found = state.list.lock().ok().and_then(|list| {
+        list.iter().find(|d| same(d) && !matches!(d.status, Status::Installed | Status::Canceled)).map(|d| (d.id.clone(), running.contains(&d.id)))
+    });
+    if let Some((id, true)) = found {
+        let _ = app.emit("notify", Notice::new("Already installing", "That file is already in Downloads.", None));
+        return Ok(id);
+    }
+    if let Some((id, false)) = found {
+        // Another game picked for it, or the same one again: what was read of
+        // the file stays (its hash, its test), what was said of a game goes.
+        let keep_title = title.filter(|t| !is_placeholder(t, Some(&slug)));
+        edit(app, &id, |d| {
+            if d.slug.as_deref() != Some(slug.as_str()) {
+                d.meta = CatalogMeta { title: keep_title.clone().unwrap_or_else(|| title_from_file(&d.file_name)), ..Default::default() };
+                d.addon = None;
+                d.repair = false;
+            }
+            d.slug = Some(slug.clone());
+            d.sha256 = None;
+            d.verified = false;
+            d.hash_mismatch = false;
+            d.not_verified = not_verified;
+            d.error = None;
+        });
+        persist(app);
+        requeue(app, &id)?;
+        return Ok(id);
+    }
+    let id = format!("dl-{}-file", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+    let queue_order = state.list.lock().map(|l| l.iter().map(|d| d.queue_order).max().unwrap_or(0) + 1).unwrap_or(1);
+    let ask_folder = {
+        let settings = crate::settings::load(app);
+        let installed = library::load(app).is_ok_and(|games| games.iter().any(|g| g.slug.as_deref() == Some(slug.as_str())));
+        asks_for_folder(&settings, installed)
+    };
+    let named = title.filter(|t| !is_placeholder(t, Some(&slug))).or_else(|| title_in_file_name(&file_name));
+    let item = Download {
+        id: id.clone(),
+        queue_order,
+        ask_folder,
+        from_file: true,
+        not_verified,
+        slug: Some(slug.clone()),
+        file_name,
+        archive_path,
+        total: Some(size),
+        received: size,
+        added_at: now(),
+        meta: CatalogMeta { title: named.unwrap_or(slug), ..Default::default() },
+        ..Default::default()
+    };
+    state.list.lock().map_err(|_| "download list lock poisoned")?.insert(0, item);
+    emit(app, true);
+    if let Err(e) = persist_checked(app) {
+        if let Ok(mut list) = state.list.lock() {
+            list.retain(|d| d.id != id);
+        }
+        emit(app, true);
+        return Err(format!("Could not save the download queue: {e}"));
+    }
+    let _ = app.emit("download-started", id.clone());
+    if !ask_folder {
+        start(app.clone(), id.clone());
+    }
+    Ok(id)
 }
 
 /* ── full speed behind other windows (KB-0306) ─────────────── */
@@ -3464,7 +3738,10 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     edit(app, id, |d| {
         // Retry on an archive that failed its check: that copy is thrown away
         // and the download starts over (Install anyway clears the flag first).
-        if d.hash_mismatch {
+        // The player's own file is checked again where it is instead.
+        if d.hash_mismatch && d.from_file {
+            d.hash_mismatch = false;
+        } else if d.hash_mismatch {
             let _ = std::fs::remove_file(&d.archive_path);
             d.hash_mismatch = false;
             d.received = 0;
@@ -3524,8 +3801,12 @@ fn is_staging(dir: &Path) -> bool {
 
 fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Result<(), String> {
     if flag.load(Ordering::SeqCst) == CANCEL {
-        let row = edit(app, id, |d| d.received = 0);
-        let (archive, staging) = row.map(|d| (Some(d.archive_path).filter(|p| !p.is_empty()), d.staging)).unwrap_or_default();
+        let row = edit(app, id, |d| {
+            if !d.from_file {
+                d.received = 0;
+            }
+        });
+        let (archive, staging) = row.map(|d| (own_archive(&d), d.staging)).unwrap_or_default();
         edit(app, id, |d| d.staging = None);
         set_status(app, id, Status::Canceled, None);
         clear_leftovers(archive, staging);
@@ -4199,10 +4480,10 @@ fn is_web_page(res: &reqwest::Response) -> bool {
 }
 
 /// The 7z signature every 7z archive starts with.
-const SEVEN_Z_MAGIC: [u8; 6] = [b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
+pub(crate) const SEVEN_Z_MAGIC: [u8; 6] = [b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
 
 /// What the first bytes of a download are, in words, for a report.
-fn looks_like(head: &[u8]) -> &'static str {
+pub(crate) fn looks_like(head: &[u8]) -> &'static str {
     let text = String::from_utf8_lossy(&head[..head.len().min(64)]).trim_start().to_ascii_lowercase();
     if head.starts_with(&SEVEN_Z_MAGIC) {
         "a 7z archive"
@@ -4224,7 +4505,7 @@ fn looks_like(head: &[u8]) -> &'static str {
 /// How long a 7z archive says it is, from its 32-byte start header: the
 /// header, then everything up to and including its end header. `None` when
 /// `head` is not a 7z start header.
-fn seven_z_length(head: &[u8]) -> Option<u64> {
+pub(crate) fn seven_z_length(head: &[u8]) -> Option<u64> {
     if head.len() < 32 || !head.starts_with(&SEVEN_Z_MAGIC) {
         return None;
     }
@@ -4619,8 +4900,9 @@ fn install_size(d: &Download) -> Option<u64> {
 
 /// Whether this download's archive can be unpacked in place (HatchZip), so the
 /// drive needs room for the game, not for the game and its archive side by side.
+/// Never the player's own file: unpacking in place eats the archive.
 fn unpacks_in_place(d: &Download) -> bool {
-    crate::hatchzip::supported() && !d.unpack_whole && !d.slug.as_deref().is_some_and(unpacks_whole)
+    crate::hatchzip::supported() && !d.from_file && !d.unpack_whole && !d.slug.as_deref().is_some_and(unpacks_whole)
 }
 
 /// Games HatchZip could not unpack on this PC after it had eaten part of the
@@ -5036,33 +5318,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .into_iter()
         .filter_map(|(rel, size)| Some((dest.join(&rel).strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/"), size)))
         .collect();
-    let game = library::upsert_installed(
-        app,
-        LibraryGame {
-            title: title.clone(),
-            slug: item.slug.clone(),
-            cover: item.meta.cover.clone(),
-            hero: item.meta.hero.clone(),
-            logo: item.meta.logo.clone(),
-            header: item.meta.header.clone(),
-            install_dir: root.to_string_lossy().into_owned(),
-            executable,
-            default_args: item.meta.default_args.clone(),
-            entries: item.meta.entries.clone(),
-            source: item.meta.source.clone(),
-            version: item.meta.version.clone(),
-            // What the archive was, so a replaced upload reads as an update.
-            build_sha: item.sha256.clone().filter(|_| item.verified),
-            // An older build keeps itself; the current one follows updates.
-            pinned_version: item.release.clone(),
-            short: item.meta.short.clone(),
-            developer: item.meta.developer.clone(),
-            nsfw: item.meta.nsfw,
-            steam_branch: item.meta.steam_branch.clone(),
-            vr: item.meta.vr.clone(),
-            ..Default::default()
-        },
-    )?;
+    let game = library::upsert_installed(app, installed_entry(&item, &title, &root, executable))?;
     // Only now, with the library saying so, is the update done; until here a
     // crash leaves the journal at "applying" and the next start rolls it back.
     if let Some(mut j) = journal {
@@ -5070,8 +5326,8 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let _ = j.save();
         crate::game_update::drop_previous(&j);
     }
-    if settings.delete_archives {
-        let _ = std::fs::remove_file(&item.archive_path);
+    if let Some(path) = own_archive(&item).filter(|_| settings.delete_archives) {
+        let _ = std::fs::remove_file(path);
     }
     // Its art on disk now, so the Library shows it with no connection.
     crate::art::prefetch(app, [&game.cover, &game.hero, &game.logo, &game.header].into_iter().flatten().cloned().collect());
@@ -5101,6 +5357,12 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let _ = app.emit(
             "notify",
             match &warning {
+                None if item.from_file => Notice::new(
+                    &format!("{title} is ready to play"),
+                    if item.verified { "Installed from your file, which matches Kryoto's copy. Your file stays where it is." } else { "Installed from your file, not verified against Kryoto's copy. Your file stays where it is." },
+                    Some(game.id),
+                )
+                .sound("ready"),
                 None => Notice::new(&format!("{title} is ready to play"), "Installed and added to your library.", Some(game.id)).sound("ready"),
                 Some(_) => Notice::new(
                     &format!("{title} is installed, with a warning"),
@@ -5112,6 +5374,38 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         );
     }
     Ok(())
+}
+
+/// The library entry an install writes (and with it the folder's own record,
+/// `.kryoto-game.json`): what the download was, which build, and whether it
+/// is Kryoto's copy. Pure, for the tests.
+pub(crate) fn installed_entry(item: &Download, title: &str, root: &Path, executable: String) -> LibraryGame {
+    LibraryGame {
+        title: title.to_string(),
+        slug: item.slug.clone(),
+        cover: item.meta.cover.clone(),
+        hero: item.meta.hero.clone(),
+        logo: item.meta.logo.clone(),
+        header: item.meta.header.clone(),
+        install_dir: root.to_string_lossy().into_owned(),
+        executable,
+        default_args: item.meta.default_args.clone(),
+        entries: item.meta.entries.clone(),
+        source: item.meta.source.clone(),
+        version: item.meta.version.clone(),
+        // What the archive was, so a replaced upload reads as an update.
+        build_sha: item.sha256.clone().filter(|_| item.verified),
+        // The player's own file that matched nothing kryo.to lists.
+        unverified: item.from_file && !item.verified,
+        // An older build keeps itself; the current one follows updates.
+        pinned_version: item.release.clone(),
+        short: item.meta.short.clone(),
+        developer: item.meta.developer.clone(),
+        nsfw: item.meta.nsfw,
+        steam_branch: item.meta.steam_branch.clone(),
+        vr: item.meta.vr.clone(),
+        ..Default::default()
+    }
 }
 
 /// Unpack in place with HatchZip (hatchzip.rs). `Ok(None)` when its check
@@ -5568,7 +5862,7 @@ fn run_7zip(tool: &Path, archive: &Path, dest: &Path, names: Option<&Path>, prog
 /// libarchive (Windows' tar.exe, bsdtar): `Game.pck: 7-Zip bad CRC 0x... should
 /// be 0x...` then `Error exit delayed from previous errors.` 7-Zip: `ERROR: CRC
 /// Failed : Game.pck` or `ERROR: Data Error : Game.pck`, plus its summary lines.
-fn damaged_files(stderr: &str) -> Option<Vec<String>> {
+pub(crate) fn damaged_files(stderr: &str) -> Option<Vec<String>> {
     let mut damaged = Vec::new();
     for line in stderr.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let lower = line.to_ascii_lowercase();
@@ -5878,7 +6172,14 @@ pub fn download_install_anyway(app: AppHandle, id: String) -> Result<(), String>
     crate::logging::warn("download", &format!("{id}: installing {} without a matching checksum, at the player's word", d.file_name));
     edit(&app, &id, |d| {
         d.hash_mismatch = false;
-        d.verified = true;
+        // The player's own file goes in marked as not verified, never as
+        // the copy it did not match.
+        if d.from_file {
+            d.not_verified = true;
+            d.sha256 = None;
+        } else {
+            d.verified = true;
+        }
     });
     persist(&app);
     requeue(&app, &id)
@@ -5955,10 +6256,12 @@ pub fn download_cancel(app: AppHandle, state: State<'_, Downloads>, id: String) 
     // Not running (paused or failed): tidy up here, the files in the background.
     let (archive, staging) = edit(&app, &id, |_| {})
         .filter(|d| d.status != Status::Installed)
-        .map(|d| (Some(d.archive_path).filter(|p| !p.is_empty()), d.staging))
+        .map(|d| (own_archive(&d), d.staging))
         .unwrap_or_default();
     edit(&app, &id, |d| {
-        d.received = 0;
+        if !d.from_file {
+            d.received = 0;
+        }
         d.staging = None;
     });
     set_status(&app, &id, Status::Canceled, None);

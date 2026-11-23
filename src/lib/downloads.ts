@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { call, on } from '@/lib/bridge'
 import type { LaunchEntry } from '@/lib/library'
+import type { ArchiveLook } from '@/lib/from-file'
 
 /** Mirrors `src-tauri/src/downloads.rs`. */
 export type DownloadStatus =
@@ -59,6 +60,10 @@ export type Download = {
   libraryDir?: string | null
   /** Waiting for the player to say which library folder it goes in. */
   askFolder?: boolean
+  /** The archive is the player's own file, installed from where it is (from_file.rs). */
+  fromFile?: boolean
+  /** The player agreed to install their file although it matches nothing on kryo.to. */
+  notVerified?: boolean
   meta: {
     title: string
     cover: string | null
@@ -106,6 +111,10 @@ export const downloads = {
   /** Download a game from one of its mirrors. `release` names a build other than the current one. */
   mirror: (url: string, slug: string, title: string | null, release: string | null) =>
     call<void>('download_mirror', { url, slug, title, release }),
+  /** An archive the player already has: checked, and which game it is for (`slug` when they picked it). */
+  look: (path: string, slug: string | null) => call<ArchiveLook>('archive_look', { path, slug }),
+  /** Install it from where it is, as a finished download; `anyway` when it will go in not verified. Its row's id. */
+  installFile: (path: string, slug: string, title: string | null, anyway: boolean) => call<string>('archive_install', { path, slug, title, anyway }),
 }
 
 export const isActive = (d: Download) =>
@@ -119,6 +128,13 @@ export const isWorking = (d: Download) =>
 export function progressOf(d: Download): number {
   if (d.status === 'installed') return 1
   const part = d.extractTotal ? Math.min(1, d.extracted / d.extractTotal) : 0
+  // The player's own file: nothing to download, so checking it is the first
+  // part of the bar and unpacking the rest (src-tauri downloads.rs `overall_progress`).
+  if (d.fromFile) {
+    if (d.status === 'verifying') return 0.4 * part
+    if (d.status === 'extracting') return d.extractTotal ? 0.4 + 0.6 * part : 0.7
+    return 0
+  }
   if (d.status === 'verifying') return 0.85 + 0.05 * part
   if (d.status === 'extracting') return d.extractTotal ? 0.9 + 0.1 * part : 0.95
   return d.total ? Math.min(1, d.received / d.total) * 0.85 : 0
@@ -127,7 +143,7 @@ export function progressOf(d: Download): number {
 /** What the download is doing, in one word, for labels. */
 export function phaseOf(d: Download): string {
   if (d.status === 'resolving') return d.mirror ? `Asking ${d.mirror.host}` : 'Starting'
-  if (d.status === 'verifying') return 'Checking'
+  if (d.status === 'verifying') return d.fromFile ? 'Checking the file' : 'Checking'
   if (d.status === 'extracting') return d.addon ? 'Applying' : 'Installing'
   return 'Downloading'
 }
