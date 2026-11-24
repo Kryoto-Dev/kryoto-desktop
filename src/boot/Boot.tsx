@@ -12,6 +12,8 @@ import { RuntimesPrompt, useStartupRuntimes } from '@/boot/RuntimesPrompt'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { isTauri, exitApp, mountStore, navigateCatalog, openExternal, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
 import { isOutage, pokeHealth, useServiceHealth } from '@/lib/health'
+import { BLOCKED_LINE } from '@/shell/NetworkBlocked'
+import { HelpButton } from '@/shell/WebView'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
@@ -132,6 +134,8 @@ export function Welcome({
   // Try again shows it is trying, until kryo.to answers or the wait runs out.
   const health = useServiceHealth()
   const outage = isOutage(health)
+  // This network, not Kryoto: said here as the Store says it, and before "down".
+  const blocked = !!health.blocked || page.error?.kind === 'blocked'
   const [retrying, setRetrying] = useState(false)
   const [noAnswer, setNoAnswer] = useState(false)
   const retry = useRef(onRetry)
@@ -216,30 +220,37 @@ export function Welcome({
                 <p role="status" className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
                   {retrying
                     ? 'Trying again'
-                    : health.state === 'down'
-                      ? 'Kryoto is down right now'
-                      : noAnswer
-                        ? 'Still no answer from kryo.to'
-                        : page.error || outage
-                          ? 'kryo.to is not answering'
-                          : slow
-                            ? 'kryo.to is slow to answer'
-                            : 'Checking your account'}
+                    : blocked
+                      ? 'kryo.to did not load here'
+                      : health.state === 'down'
+                        ? 'Kryoto is down right now'
+                        : noAnswer
+                          ? 'Still no answer from kryo.to'
+                          : page.error || outage
+                            ? 'kryo.to is not answering'
+                            : slow
+                              ? 'kryo.to is slow to answer'
+                              : 'Checking your account'}
                 </p>
-                {page.error || slow || outage ? (
+                {page.error || slow || outage || blocked ? (
                   <>
+                    {blocked ? <BlockedLine /> : null}
                     <Button size="sm" busy={retrying} busyLabel="Trying again" onClick={tryAgain}>
                       <RotateCw className="size-3" />
                       Try again
                     </Button>
                     <GuestButton onGuest={onGuest} />
-                    <button
-                      type="button"
-                      onClick={() => void openExternal(health.statusUrl)}
-                      className="kryo-pill px-2 text-[10px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
-                    >
-                      See what is happening on the status page
-                    </button>
+                    {blocked ? (
+                      <HelpButton />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void openExternal(health.statusUrl)}
+                        className="kryo-pill px-2 text-[10px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                      >
+                        See what is happening on the status page
+                      </button>
+                    )}
                   </>
                 ) : null}
               </>
@@ -269,6 +280,12 @@ export function Welcome({
                   Sign in with kryo.to
                 </Button>
                 <GuestButton onGuest={onGuest} />
+                {blocked ? (
+                  <>
+                    <BlockedLine />
+                    <HelpButton />
+                  </>
+                ) : null}
               </>
             )}
           </div>
@@ -279,6 +296,11 @@ export function Welcome({
       </p>
     </Box>
   )
+}
+
+/** This network blocks kryo.to, and what gets around it. */
+function BlockedLine() {
+  return <p className="max-w-72 text-center text-[11px] leading-relaxed text-muted-foreground">{BLOCKED_LINE}</p>
 }
 
 /** Into the client without an account. */

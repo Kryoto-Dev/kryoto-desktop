@@ -189,6 +189,8 @@ struct Watch {
     first_fail: Option<Instant>,
     oks: u32,
     feed: Option<Feed>,
+    /// Since when the status page has said the site is fine, while it does.
+    feed_fine: Option<Instant>,
     state: State,
     parts: Vec<String>,
     seen_parts: Vec<String>,
@@ -202,6 +204,12 @@ struct Watch {
 impl Watch {
     fn step(&mut self, site: Site, feed: Option<Feed>, now: Instant) {
         if feed.is_some() {
+            match &feed {
+                Some(Feed::Says { site_bad: false, .. }) => {
+                    self.feed_fine.get_or_insert(now);
+                }
+                _ => self.feed_fine = None,
+            }
             self.feed = feed;
         }
         let failed = site == Site::Failed;
@@ -228,9 +236,16 @@ impl Watch {
                         self.state = State::Down;
                         self.parts.clear();
                     }
-                    // Its word is taken once it has had time to notice, or
-                    // once an outage is already called: then it stays called.
-                    Some(Feed::Says { site_bad: false, .. }) if long < FEED_LAG || self.state == State::Down => {}
+                    // Its word is taken once it has had time to notice, and
+                    // after an outage once it has said "fine" that long: "down"
+                    // has to go then even when nothing answers here, as nothing
+                    // ever does on a network that cuts kryo.to.
+                    Some(Feed::Says { site_bad: false, .. }) => {
+                        if self.said_fine(since, now) >= FEED_LAG {
+                            self.state = State::Unreachable;
+                            self.parts.clear();
+                        }
+                    }
                     _ => {
                         if self.state != State::Down {
                             self.state = State::Unreachable;
@@ -277,6 +292,13 @@ impl Watch {
     ///   outage and still says the site is fine, or cannot be reached either
     ///   (it is under kryo.to too, so a block takes both).
     ///
+    /// How long this PC has failed while the status page said "fine": not how
+    /// long it has failed, or the first "fine" after a long outage would count
+    /// the outage too and call Kryoto coming back a block.
+    fn said_fine(&self, failing_since: Instant, now: Instant) -> Duration {
+        self.feed_fine.map_or(Duration::ZERO, |fine| now.duration_since(fine.max(failing_since)))
+    }
+
     /// The status page saying the site is bad is Kryoto down, never a block;
     /// and before it has had time to notice, nobody is blamed (0.3.10 said
     /// "blocked" through the first minutes of every real outage, KB-0328).
@@ -288,7 +310,8 @@ impl Watch {
             return false;
         }
         self.own_fails += 1;
-        let long = now.duration_since(*self.own_first_fail.get_or_insert(now));
+        let since = *self.own_first_fail.get_or_insert(now);
+        let long = now.duration_since(since);
         if self.own_fails < FAILS || long < GRACE {
             return false;
         }
@@ -300,8 +323,9 @@ impl Watch {
         }
         match &self.feed {
             Some(Feed::Says { site_bad: true, .. }) => false,
-            Some(Feed::Says { site_bad: false, .. }) => long >= FEED_LAG,
-            Some(Feed::Dead) | None => true,
+            Some(Feed::Says { site_bad: false, .. }) => self.said_fine(since, now) >= FEED_LAG,
+            // Gone quiet in an outage it had reported: still that outage.
+            Some(Feed::Dead) | None => self.state != State::Down,
         }
     }
 
@@ -706,6 +730,53 @@ mod tests {
             assert!(!look(&mut w, t, at, "<html>", true).1, "at {at}");
         }
         assert!(look(&mut w, t, 30, "<html>", true).1);
+    }
+
+    /// The status page said "down" once (a short outage, or its own mistake)
+    /// on a network that cuts kryo.to: no good answer ever comes there, so
+    /// "down" has to go once the page has said "fine" long enough. It stayed,
+    /// with `blocked` true beside it (the 0.4.0 Linux matrix, Arch).
+    #[test]
+    fn down_does_not_stick_on_a_network_that_cuts_kryoto() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in (0..=50).step_by(10) {
+            look(&mut w, t, at, SITE_DOWN, true);
+        }
+        assert_eq!(w.state, State::Down);
+        for at in (60..=170).step_by(10) {
+            assert_eq!(look(&mut w, t, at, FINE, true), (State::Down, false), "at {at}: too soon to say");
+        }
+        for at in (180..=600).step_by(10) {
+            assert_eq!(look(&mut w, t, at, FINE, true), (State::Unreachable, true), "at {at}");
+        }
+    }
+
+    /// A long real outage ending: the status page sees kryo.to back a moment
+    /// before this PC does. That moment is not this network blocking it.
+    #[test]
+    fn kryoto_coming_back_is_never_called_blocked() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in (0..=600).step_by(10) {
+            assert!(!look(&mut w, t, at, SITE_DOWN, true).1, "at {at}");
+        }
+        for at in (610..=720).step_by(10) {
+            assert_eq!(look(&mut w, t, at, FINE, true), (State::Down, false), "at {at}");
+        }
+        assert_eq!(run(&mut w, t, 721, Site::Fine, Some(FINE)), State::Down);
+        assert_eq!(run(&mut w, t, 731, Site::Fine, Some(FINE)), State::Ok);
+    }
+
+    /// The status page goes quiet in the middle of an outage it had reported:
+    /// still that outage, not a block.
+    #[test]
+    fn an_outage_that_takes_the_status_page_along_is_still_down() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in (0..=60).step_by(10) {
+            look(&mut w, t, at, SITE_DOWN, true);
+        }
+        for at in (70..=400).step_by(10) {
+            assert_eq!(look(&mut w, t, at, "<html>", true), (State::Down, false), "at {at}");
+        }
     }
 
     #[test]
