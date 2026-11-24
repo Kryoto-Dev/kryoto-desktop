@@ -2504,6 +2504,8 @@ pub fn run() {
             chat::chat_ice_servers,
             chat::room_post,
             chat::room_delete,
+            chat::room_edit,
+            chat::room_react,
             chat::chat_file_save,
             chat::chat_file_preview,
             chat::chat_groups,
