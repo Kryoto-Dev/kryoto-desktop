@@ -976,11 +976,11 @@ pub fn library_plain_folder(app: AppHandle, id: String) -> Result<LibraryGame, S
     Ok(game)
 }
 
-/// The game's folder and the folder Manage > Rename folder renames: the one
-/// the game is in at the top of a library folder, so a game whose root is a
-/// level down is renamed where the name was given. Refused when other games
-/// in the library are in it too: renamed under them, they would lose their
-/// place.
+/// The game's folder and the folder Manage > Rename folder renames: the
+/// game's own folder as Move finds it (storage::game_folder), so a game whose
+/// root is a level down is renamed where its name was given. Refused when it
+/// holds another game in any way `safe_delete::guard` knows: renamed under
+/// them, they would lose their place.
 fn rename_target(games: &[LibraryGame], folders: &[String], game: &LibraryGame) -> Result<(PathBuf, PathBuf), String> {
     let full = PathBuf::from(&game.install_dir).canonicalize().map_err(|_| "The game's folder is not there any more.".to_string())?;
     let top = crate::storage::game_folder(folders, game).unwrap_or_else(|| full.clone());
@@ -988,6 +988,13 @@ fn rename_target(games: &[LibraryGame], folders: &[String], game: &LibraryGame) 
     if crate::storage::holds_other_games(games, &[game.id.as_str()], &top) {
         return Err(format!("{} also holds other games in your library, so Kryoto does not rename it.", dunce::simplified(&top).display()));
     }
+    // The same checks as Move and an uninstall (safe_delete::guard): never a
+    // folder holding another game, by a library entry (its folder there or
+    // not), another game's marker or install record, or another launcher's
+    // game; never a drive, a library folder or the home folder (KB-0375).
+    let known = crate::safe_delete::Known { games, folders, home: crate::safe_delete::home(), release_list: None, downloaded: Vec::new() };
+    let top_disk = dunce::canonicalize(&top).map_err(|e| e.to_string())?;
+    crate::safe_delete::guard(&known, game, &[game.id.as_str()], &top_disk).map_err(|why| why.replace("so Kryoto deletes nothing in it.", "so Kryoto does not rename it."))?;
     Ok((dunce::simplified(&full).to_path_buf(), dunce::simplified(&top).to_path_buf()))
 }
 
@@ -2461,26 +2468,48 @@ mod tests {
 
     /// Manage > Rename folder renamed a folder other games were in too, and
     /// only the one game followed it.
+    /// Rename takes the game's own folder, exactly as Move does
+    /// (storage::game_folder), and never one that holds another game.
     #[test]
     fn rename_folder_leaves_a_folder_other_games_share() {
         let root = std::env::temp_dir().join(format!("kryoto-rename-shared-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (lib, loose) = (root.join("Library"), root.join("Loose"));
-        for dir in [lib.join("Pack").join("A"), lib.join("Pack").join("B").join("bin"), loose.join("C")] {
+        let pack = lib.join("Pack");
+        for dir in [pack.join("A"), pack.join("B").join("bin"), loose.join("C"), lib.join("Shared").join("Y"), lib.join("Holder").join("Other")] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let game = |id: &str, dir: std::path::PathBuf| LibraryGame { id: id.into(), install_dir: dir.to_string_lossy().into_owned(), ..Default::default() };
-        let games = vec![game("a", lib.join("Pack").join("A")), game("b", lib.join("Pack").join("B").join("bin")), game("loose", loose.clone()), game("c", loose.join("C"))];
+        let game = |id: &str, dir: std::path::PathBuf| LibraryGame { id: id.into(), title: id.into(), install_dir: dir.to_string_lossy().into_owned(), ..Default::default() };
+        let mark = |at: std::path::PathBuf, g: &LibraryGame| std::fs::write(at.join(MARKER), serde_json::to_vec(g).unwrap()).unwrap();
+        let (a, b) = (game("a", pack.join("A")), game("b", pack.join("B").join("bin")));
+        // b's own marker is at the top of its folder, a level above its exe.
+        mark(pack.join("B"), &b);
+        let games = vec![a.clone(), b.clone(), game("loose", loose.clone()), game("c", loose.join("C"))];
         let folders = vec![lib.to_string_lossy().into_owned()];
-        // Both are in Pack at the top of the library folder.
-        assert!(rename_target(&games, &folders, &games[0]).is_err());
-        assert!(rename_target(&games, &folders, &games[1]).is_err());
+        let plain = |p: std::path::PathBuf| dunce::canonicalize(p).unwrap();
+        // Two games in Pack: each renames its own folder, never Pack.
+        assert_eq!(rename_target(&games, &folders, &a), Ok((plain(pack.join("A")), plain(pack.join("A")))));
+        assert_eq!(rename_target(&games, &folders, &b), Ok((plain(pack.join("B").join("bin")), plain(pack.join("B")))));
+        // Alone in Pack, it is still its own folder.
+        assert_eq!(rename_target(&games[1..2], &folders, &b), Ok((plain(pack.join("B").join("bin")), plain(pack.join("B")))));
         // A game in no library folder: its own folder, which c is in too.
         assert!(rename_target(&games, &folders, &games[2]).is_err());
-        let plain = |p: std::path::PathBuf| dunce::canonicalize(p).unwrap();
         assert_eq!(rename_target(&games, &folders, &games[3]), Ok((plain(loose.join("C")), plain(loose.join("C")))));
-        // Alone in Pack, a game a level down renames Pack.
-        assert_eq!(rename_target(&games[1..], &folders, &games[1]), Ok((plain(lib.join("Pack").join("B").join("bin")), plain(lib.join("Pack")))));
+        // A folder two games really share: one entry's folder inside another's.
+        let (x, y) = (game("x", lib.join("Shared")), game("y", lib.join("Shared").join("Y")));
+        mark(lib.join("Shared"), &x);
+        let shared = vec![x.clone(), y];
+        assert!(rename_target(&shared, &folders, &x).unwrap_err().contains("also holds"));
+        // ...even when that other entry's folder is gone.
+        let gone_inside = vec![x.clone(), game("z", lib.join("Shared").join("Gone"))];
+        assert!(rename_target(&gone_inside, &folders, &x).is_err());
+        // Another game's marker inside, not in this library at all.
+        let h = game("h", lib.join("Holder"));
+        mark(lib.join("Holder"), &h);
+        mark(lib.join("Holder").join("Other"), &game("other", lib.join("Holder").join("Other")));
+        assert!(rename_target(std::slice::from_ref(&h), &folders, &h).unwrap_err().contains("so Kryoto does not rename it"));
+        // The library folder itself, and a folder that is gone.
+        assert!(rename_target(&games, &folders, &game("lib", lib.clone())).is_err());
         assert!(rename_target(&games, &folders, &game("gone", root.join("Gone"))).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
