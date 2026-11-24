@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { BookOpen, Lock, LockOpen, Plus, RotateCw, ShieldBan, X, Library } from '@/ui/pixel-icons'
+import { BookOpen } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Matrix, Modal } from '@/ui'
 import { SceneMotion } from '@/ui/ascii/SceneMotion'
 import { ADSWEEP } from '@/ui/ascii/motion'
@@ -8,8 +8,6 @@ import { logWarn } from '@/lib/log'
 import { isTauri, mountStore, openExternal, setMainPlacer, STORE_HOME } from '@/lib/window'
 import type { ServiceHealth } from '@/lib/health'
 import { WAYS_AROUND } from '@/shell/NetworkBlocked'
-import { resolveUserInputToUrl } from '@/lib/browser'
-import { cn } from '@/lib/utils'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 
 /**
@@ -159,113 +157,6 @@ export function WebSlot({
         </>
       )}
     </div>
-  )
-}
-
-/**
- * A thin line along the pill's foot while a page loads. The web view only
- * says "started" and "finished", so it eases towards 90% and then completes;
- * it animates here, so a load redraws this line and not the whole client.
- */
-function LoadLine({ loading }: { loading: boolean }) {
-  const [progress, setProgress] = useState<number | null>(null)
-  useEffect(() => {
-    if (!loading) {
-      setProgress((p) => (p === null ? null : 100))
-      const t = window.setTimeout(() => setProgress(null), 250)
-      return () => window.clearTimeout(t)
-    }
-    setProgress(8)
-    const t = window.setInterval(() => setProgress((p) => Math.min(90, (p ?? 8) + Math.max(0.5, (90 - (p ?? 8)) * 0.08))), 120)
-    return () => window.clearInterval(t)
-  }, [loading])
-  if (progress === null) return null
-  return (
-    <span
-      className="absolute bottom-0 left-0 h-px bg-foreground transition-[width,opacity] duration-200"
-      style={{ width: `${progress}%`, opacity: progress >= 100 ? 0 : 1 }}
-    />
-  )
-}
-
-/**
- * The Store's address, as a pill in the nav row: secure or not, the address
- * (editable - a search falls back to a search engine), reload or stop, a thin
- * load line, the ad blocker's switch, and "Add to Library" on a kryo.to game
- * page.
- */
-export function UrlPill({
-  page,
-  actions,
-  onLibrary,
-  inLibrary,
-  onAdblock,
-  compact = false,
-  narrow = false,
-}: {
-  page: BrowserPageState
-  actions: { navigate: (url: string) => void; reload: () => void; stop: () => void }
-  onLibrary: (() => void) | null
-  inLibrary: boolean
-  /** Opens `AdblockDialog`. */
-  onAdblock: () => void
-  /** The row has folded all it can: Add to library is its icon alone. */
-  compact?: boolean
-  /** Short of room: the address may be narrower than it likes. */
-  narrow?: boolean
-}) {
-  const [draft, setDraft] = useState<string | null>(null)
-  const blocking = useSettings()?.blockAds ?? true
-  const secure = page.url.startsWith('https://')
-  const shown = draft ?? page.url.replace(/^https:\/\//, '')
-  return (
-    <>
-      <div className={cn('kryo-pill relative flex h-9 grow items-center gap-2 overflow-hidden border border-border bg-card pl-3 pr-1', narrow ? 'min-w-40' : 'min-w-56')}>
-        {secure ? <Lock className="size-3 shrink-0 text-muted-foreground" /> : <LockOpen className="size-3 shrink-0 text-warning" />}
-        <input
-          aria-label="Address"
-          spellCheck={false}
-          value={shown}
-          onFocus={(e) => {
-            setDraft(page.url)
-            requestAnimationFrame(() => e.target.select())
-          }}
-          onBlur={() => setDraft(null)}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && draft) {
-              actions.navigate(resolveUserInputToUrl(draft))
-              ;(e.target as HTMLInputElement).blur()
-            } else if (e.key === 'Escape') (e.target as HTMLInputElement).blur()
-          }}
-          className="kryo-square min-w-0 grow truncate bg-transparent text-[11px] tracking-wide text-muted-foreground outline-none focus:text-foreground"
-        />
-        <button
-          type="button"
-          aria-label={blocking ? 'Ad blocker: on' : 'Ad blocker: off'}
-          title={blocking ? 'Ad blocker: on' : 'Ad blocker: off'}
-          onClick={onAdblock}
-          className={`kryo-pill grid size-7 shrink-0 place-items-center transition-colors hover:bg-secondary hover:text-foreground ${blocking ? 'text-primary' : 'text-muted-foreground'}`}
-        >
-          <ShieldBan className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          aria-label={page.loading ? 'Stop' : 'Reload'}
-          onClick={page.loading ? actions.stop : actions.reload}
-          className="kryo-pill grid size-7 shrink-0 place-items-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-        >
-          {page.loading ? <X className="size-3.5" /> : <RotateCw className="size-3.5" />}
-        </button>
-        <LoadLine loading={page.loading} />
-      </div>
-      {onLibrary ? (
-        <Button variant={inLibrary ? 'outline' : 'primary'} className="shrink-0" onClick={onLibrary} title={compact ? (inLibrary ? 'In your library' : 'Add to library') : undefined}>
-          {inLibrary ? <Library className="size-3.5" /> : <Plus className="size-3.5" />}
-          {compact ? null : inLibrary ? 'In your library' : 'Add to library'}
-        </Button>
-      ) : null}
-    </>
   )
 }
 

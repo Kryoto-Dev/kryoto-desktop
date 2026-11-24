@@ -1,32 +1,31 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, Library, Store, User, Users, type LucideIcon } from '@/ui/pixel-icons'
-import { Floating, IconButton, MENU_PANEL, MenuList, useDismiss, useNativeOpen, type MenuEntry } from '@/ui'
-import { isTauri } from '@/lib/bridge'
-import { closeMenu, onPopupHover, openMenu, popupOpen } from '@/lib/popup'
+import { ArrowLeft, ArrowRight, Library, Store, Users, type LucideIcon } from '@/ui/pixel-icons'
+import { IconButton } from '@/ui'
 import { cn } from '@/lib/utils'
 import { FOLD } from '@/shell/TitleBar'
 
 export type TopTab = 'store' | 'library' | 'community' | 'profile'
 
-/** The tab icons: Store, Library and User are the mobile app's; Community has no tab there. */
-const TAB_ICONS: Record<TopTab, LucideIcon> = { store: Store, library: Library, community: Users, profile: User }
+/** Store and Library are the mobile app's icons; Community has its own. */
+const TAB_ICONS: Record<TopTab, LucideIcon> = { store: Store, library: Library, community: Users, profile: Users }
+
+/** A tab's few pages, shown as a small panel. */
+export type NavTabPanel = {
+  heading: string
+  items: { label: string; icon?: ReactNode; onSelect: () => void }[]
+}
 
 export type NavTabSpec = {
   id: TopTab
   label: string
   onOpen: () => void
-  items: MenuEntry[]
+  /** Shown on hover as a small panel. */
+  panel?: NavTabPanel
 }
 
 /**
- * Back / forward, then STORE · LIBRARY · COMMUNITY · <NAME> as kryo.to's
- * segmented pill - the white segment is where you are. Each tab opens its
- * section on click and shows its pages on hover, after a short pause so a
- * pointer sweeping across does not flash menus. Local pages keep menus in
- * the shell; over the Store they use the native menu view. Then whatever the
- * current page adds: the Store's address, which is the first thing to give up
- * room on a narrow window. This is the left part of the window's one row
- * (`TitleBar`), and takes no more of it than it uses: the rest drags the window.
+ * Back / forward, then Store · Library · Community as one sliding pill. A tab
+ * with its own pages (Community) shows them in a small panel on hover.
  */
 export function NavBar({
   current,
@@ -35,8 +34,9 @@ export function NavBar({
   canForward,
   onBack,
   onForward,
-  overStore = false,
   right,
+  slotClass = 'w-xl',
+  overStore = false,
   fold = 0,
 }: {
   current: TopTab
@@ -45,15 +45,15 @@ export function NavBar({
   canForward: boolean
   onBack: () => void
   onForward: () => void
-  /** Only the visible Store needs menus in a separate native web view. */
-  overStore?: boolean
   right?: ReactNode
+  /** The row's field width. */
+  slotClass?: string
+  /** The Store's web view would cover a panel. */
+  overStore?: boolean
   /** How much of the row has folded away (`useRowFold`). */
   fold?: number
 }) {
-  // The pill follows a press at once and stays on it while the page loads, so
-  // the selection never lags behind the click; it lets go when the page has
-  // caught up (or after a few seconds, if the press went nowhere).
+  // The pill moves on press and holds until the page catches up.
   const [target, setTarget] = useState<TopTab | null>(null)
   useEffect(() => {
     if (!target) return
@@ -87,7 +87,8 @@ export function NavBar({
       ro.disconnect()
     }
   }, [measure, tabs.length])
-  const shownTabs = fold >= FOLD.profile ? tabs.filter((t) => t.id !== 'profile') : tabs
+
+  const iconOnly = fold >= FOLD.labels
 
   return (
     <nav aria-label="Main" className="no-drag flex min-w-0 items-center gap-2">
@@ -107,23 +108,27 @@ export function NavBar({
             style={{ left: pill.left, width: pill.width }}
           />
         ) : null}
-        {shownTabs.map((t) => (
+        {tabs.map((t) => (
           <NavTab
             key={t.id}
             tab={t}
-            iconOnly={fold >= FOLD.labels}
-            noIcon={fold >= FOLD.tabIcons && fold < FOLD.labels}
+            iconOnly={iconOnly}
+            noIcon={fold >= FOLD.tabIcons && !iconOnly}
             current={active === t.id}
-            native={overStore && isTauri()}
+            panel={!overStore && !iconOnly && t.panel ? t.panel : undefined}
             slot={(el) => {
               if (el) slots.current.set(t.id, el)
               else slots.current.delete(t.id)
             }}
-            onPress={() => setTarget(t.id)}
+            onPress={() => {
+              // The pill follows the press; the press opens the place.
+              setTarget(t.id)
+              t.onOpen()
+            }}
           />
         ))}
       </div>
-      {right ? <div className={cn('flex w-xl items-center gap-2', fold >= FOLD.address ? 'min-w-40' : 'min-w-56')}>{right}</div> : null}
+      {right ? <div className={cn('flex min-w-0 items-center gap-2', slotClass)}>{right}</div> : null}
     </nav>
   )
 }
@@ -133,121 +138,108 @@ function NavTab({
   iconOnly,
   noIcon,
   current,
-  native,
+  panel,
   slot,
   onPress,
 }: {
   tab: NavTabSpec
+  /** Short of room: the icon alone. */
   iconOnly: boolean
   /** Short of room: the label alone. */
   noIcon: boolean
   current: boolean
-  native: boolean
+  /** Its few pages, when they can be shown here. */
+  panel?: NavTabPanel
   slot: (el: HTMLElement | null) => void
   onPress: () => void
 }) {
   const TabIcon = TAB_ICONS[tab.id]
-  const menuId = `tab:${tab.id}`
-  const [domOpen, setDomOpen] = useState(false)
-  /** Opened from the keyboard: the first row is lit. Opened by the pointer: nothing is. */
-  const [byKeyboard, setByKeyboard] = useState(false)
-  const nativeOpen = useNativeOpen(native ? menuId : undefined)
-  const open = native ? nativeOpen : domOpen
+  const [open, setOpen] = useState(false)
+  const button = useRef<HTMLButtonElement | null>(null)
+  const panelEl = useRef<HTMLDivElement | null>(null)
   const timer = useRef<number | null>(null)
   const onTab = useRef(false)
-  const inPopup = useRef(false)
-  const button = useRef<HTMLButtonElement | null>(null)
-  const wrapper = useRef<HTMLDivElement | null>(null)
-  const closeLocal = () => {
-    setDomOpen(false)
-    // The menu floats outside the tab (`Floating`), so focus in it counts too.
-    const at = document.activeElement
-    if (wrapper.current?.contains(at) || at?.closest('[data-kryo-float]')) button.current?.focus({ preventScroll: true })
-  }
-  useDismiss(!native && domOpen, wrapper, closeLocal)
+  const inPanel = useRef(false)
 
   const clear = () => {
     if (timer.current) window.clearTimeout(timer.current)
     timer.current = null
   }
-  const show = (keyboard = false) => {
-    if (!tab.items.length) return
-    if (!native) return setDomOpen(true)
-    const r = button.current?.getBoundingClientRect()
-    if (r) void openMenu(menuId, r, tab.items, 'left', undefined, keyboard)
+  const show = (delay: number, focusFirst = false) => {
+    clear()
+    timer.current = window.setTimeout(() => {
+      if (!onTab.current && !inPanel.current && !focusFirst) return
+      setOpen(true)
+      if (focusFirst) requestAnimationFrame(() => panelEl.current?.querySelector<HTMLButtonElement>('button')?.focus())
+    }, delay)
   }
   const hideSoon = (delay: number) => {
     clear()
     timer.current = window.setTimeout(() => {
-      if (onTab.current || inPopup.current) return
-      if (!native) closeLocal()
-      else if (popupOpen() === menuId) closeMenu()
+      if (onTab.current || inPanel.current) return
+      setOpen(false)
     }, delay)
   }
 
-  // Leaving the menu (not into the tab) closes it, like leaving the tab.
+  useEffect(() => () => clear(), [])
+  // Away from it, or the tab went: the panel goes.
   useEffect(() => {
-    if (!native) return
-    return onPopupHover((inside) => {
-      if (popupOpen() !== menuId) return
-      inPopup.current = inside
-      if (!inside) hideSoon(220)
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [native, menuId])
-  useEffect(() => () => {
-    clear()
-    if (native && popupOpen() === menuId) closeMenu()
-  }, [native, menuId])
-  useEffect(() => { if (!open) inPopup.current = false }, [open])
-  useEffect(() => { setDomOpen(false) }, [native])
+    if (!open) return
+    const away = (e: PointerEvent) => {
+      if (panelEl.current?.contains(e.target as Node) || button.current?.contains(e.target as Node)) return
+      setOpen(false)
+    }
+    window.addEventListener('pointerdown', away)
+    return () => window.removeEventListener('pointerdown', away)
+  }, [open])
+  useEffect(() => {
+    if (!panel) setOpen(false)
+  }, [panel])
+  // Escape closes it from anywhere.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setOpen(false)
+      button.current?.focus()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
 
   return (
-    <div
-      ref={(el) => {
-        wrapper.current = el
-        slot(el)
-      }}
-      className="relative"
-      onPointerEnter={() => {
-        onTab.current = true
-        clear()
-        if (open) return
-        // Moving over from another tab's open menu switches straight away.
-        const other = native && popupOpen()?.startsWith('tab:')
-        timer.current = window.setTimeout(() => {
-          setByKeyboard(false)
-          show()
-        }, other ? 0 : 280)
-      }}
-      onPointerLeave={() => {
-        onTab.current = false
-        // Time to cross the gap into the menu.
-        hideSoon(native ? 350 : 160)
-      }}
-    >
+    // Measure the wrapper: offsetLeft is read against the positioned parent, so
+    // the button's own box would say 0.
+    <div className="relative" ref={slot}>
       <button
         ref={button}
         type="button"
-        data-menu={native ? menuId : undefined}
         aria-current={current ? 'page' : undefined}
-        aria-haspopup={tab.items.length ? 'menu' : undefined}
-        aria-expanded={tab.items.length ? open : undefined}
+        aria-haspopup={panel ? 'menu' : undefined}
+        aria-expanded={panel ? open : undefined}
         aria-label={iconOnly ? tab.label : undefined}
         title={iconOnly ? tab.label : undefined}
+        onPointerEnter={() => {
+          onTab.current = true
+          if (panel && !open) show(240)
+        }}
+        onPointerLeave={() => {
+          onTab.current = false
+          if (panel && open) hideSoon(180)
+        }}
         onKeyDown={(e) => {
-          if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
-          e.preventDefault()
-          clear()
-          setByKeyboard(true)
-          show(true)
+          if (e.key === 'ArrowDown' && panel) {
+            e.preventDefault()
+            onTab.current = true
+            show(0, true)
+          } else if (e.key === 'Escape' && open) {
+            setOpen(false)
+          }
         }}
         onClick={() => {
           clear()
-          if (native) closeMenu()
-          else setDomOpen(false)
+          setOpen(false)
           onPress()
-          tab.onOpen()
         }}
         className={cn(
           'kryo-pill relative flex h-9 max-w-56 items-center gap-2 text-xs font-bold uppercase tracking-[0.16em] transition-colors duration-300',
@@ -258,10 +250,55 @@ function NavTab({
         {noIcon ? null : <TabIcon className="size-3.5 shrink-0" />}
         {iconOnly ? null : <span className="truncate">{tab.label}</span>}
       </button>
-      {!native && domOpen ? (
-        <Floating role="menu" anchor={() => button.current?.getBoundingClientRect()} gap={8} className={MENU_PANEL}>
-          <MenuList items={tab.items} onDone={() => setDomOpen(false)} autoFocus={byKeyboard} />
-        </Floating>
+      {panel && open ? (
+        <div
+          ref={panelEl}
+          role="menu"
+          aria-label={`${tab.label} pages`}
+          onPointerEnter={() => {
+            inPanel.current = true
+            clear()
+          }}
+          onPointerLeave={() => {
+            inPanel.current = false
+            hideSoon(180)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              setOpen(false)
+              button.current?.focus()
+              return
+            }
+            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+            e.preventDefault()
+            const items = [...(panelEl.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+            if (!items.length) return
+            const at = items.indexOf(document.activeElement as HTMLButtonElement)
+            const step = e.key === 'ArrowDown' ? 1 : -1
+            items[(at + step + items.length) % items.length]?.focus()
+          }}
+          className="kryo-radius absolute left-0 top-[calc(100%+8px)] z-50 w-[19rem] border border-border bg-popover p-1 shadow-2xl shadow-black/40"
+        >
+          <p className="px-2 pb-1 pt-1.5 text-[9px] uppercase tracking-[0.18em] text-muted-foreground">{panel.heading}</p>
+          <div className="grid grid-cols-2 gap-1">
+            {panel.items.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false)
+                  item.onSelect()
+                }}
+                className="kryo-radius flex items-center gap-2 px-2 py-1.5 text-left text-[11px] text-foreground transition-colors hover:bg-secondary focus-visible:bg-secondary"
+              >
+                {item.icon ? <span className="shrink-0 text-muted-foreground">{item.icon}</span> : null}
+                <span className="truncate">{item.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
       ) : null}
     </div>
   )
