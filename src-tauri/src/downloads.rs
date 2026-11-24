@@ -1012,6 +1012,8 @@ fn enqueue_item<R: Runtime>(
     release: Option<String>,
     remote_id: Option<String>,
 ) -> Result<(), String> {
+    // A version kryo.to no longer allows (required.rs) starts nothing new.
+    crate::required::refuse()?;
     // A Download pressed for the game means kryo.to has it (again): its
     // "gone" mark goes, so its row asks about it (catalog_gone.rs).
     if let Some(slug) = slug.as_deref() {

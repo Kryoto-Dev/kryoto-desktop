@@ -1495,6 +1495,8 @@ pub async fn library_uninstall_plan(app: AppHandle, id: String, together: Option
 #[tauri::command]
 pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, delete_prefix: Option<bool>, together: Option<Vec<String>>, permanent: Option<bool>) -> Result<bool, String> {
     use crate::safe_delete::{bin_for, Bin, Verdict};
+    // A version kryo.to no longer allows (required.rs): never, from anywhere.
+    crate::required::refuse()?;
     // Its files are in use: the delete would stop partway, leaving half a game.
     if is_running(&app, &id) {
         return Err("Stop the game first.".into());

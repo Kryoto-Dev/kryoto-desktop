@@ -44,7 +44,7 @@ function BoxControls() {
 }
 
 /** The box is the whole window; Windows rounds it and draws its shadow. A night scene in every theme. */
-function Box({ children, className }: { children: ReactNode; className?: string }) {
+export function Box({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <main className={cn('kryo-night drag kryo-square relative h-full overflow-hidden bg-background text-foreground', className)}>
       <BoxControls />
