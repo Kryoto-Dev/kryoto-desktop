@@ -12,10 +12,11 @@
  *   in hard steps, so a frame is usually a few dozen copies.
  * - At most `fps` frames a second (20 full screen), and none at all while the
  *   window is hidden.
- * - The whole picture wanders slowly as one piece: the canvas is a little
- *   larger than the screen and is moved by a transform in whole pixels, which
- *   the compositor does without redrawing anything. With the screensavers'
- *   own moves, nothing stays lit on the same pixels for long.
+ * - Nothing slides. The grid holds perfectly still, every cell on whole
+ *   device pixels at any screen scale. What is lit moves only by going out
+ *   dot by dot and coming back a whole number of cells away, every minute
+ *   or two, so nothing stays lit on the same pixels for long; the trace dots
+ *   are too dim to mark a screen.
  * - With motion reduced, one still frame, changed every few minutes.
  *
  * Kept free of imports from the app (and of the DOM at load time) so the pure
@@ -36,8 +37,17 @@ export const FULL = 4
  * belongs to a shape.
  */
 export const FAINT = 5
-/** components/ui/matrix.tsx: full, half, low and the trace that keeps the grid legible; then FAINT. */
-export const INK_ALPHA = [0, 0.14, 0.3, 0.55, 1, 0.065] as const
+/**
+ * Brighter than full: the light of a sweep passing, and nothing else, so the
+ * passing light is the brightest thing on screen and a large lit shape is not.
+ */
+export const PEAK = 6
+/**
+ * components/ui/matrix.tsx's inks (full, half, low, trace), set a little
+ * lower for a TV in a dark room: full is the foreground at 0.8, and only PEAK
+ * reaches the foreground itself. Then FAINT and PEAK.
+ */
+export const INK_ALPHA = [0, 0.12, 0.26, 0.48, 0.8, 0.06, 1] as const
 
 const LEVEL_MASK = 7
 const ACCENT = 8
@@ -108,7 +118,7 @@ export type Grid = {
   rows: number
   /** One value per cell, row by row (`dot`, `glyph`): what the cell shows this frame. */
   cells: Uint32Array
-  /** The cells on screen before any wandering: what is kept inside stays in sight. */
+  /** The cells wholly on screen. */
   view: { c0: number; r0: number; c1: number; r1: number }
   /** A row's height as a share of a column's width. */
   rowPitch: number
@@ -150,24 +160,44 @@ export type VariantSpec = {
 
 /** With motion reduced, a new still this often. */
 export const STILL_MS = 180_000
-/** How far the whole picture wanders, in cells, and how slowly (seconds per sway). */
-const DRIFT_CELLS = 1.6
-const DRIFT_X_S = 263
-const DRIFT_Y_S = 197
-/** Ink at full is this bright: a TV left on shows as little lit as it can. */
-const BRIGHTNESS = 0.9
 /** Rows a little closer than columns, as the mark's dots are (mark-data.ts). */
 export const ROW_PITCH = 0.885
 /** A dot's side as a share of a column (the matrix's 14% gaps: 0.62). */
 const DOT = 0.62
 
-/** Where the picture has wandered to after `t` ms, in CSS pixels. */
-export function driftAt(t: number, amplitude: number): { x: number; y: number } {
-  const s = t / 1000
-  return {
-    x: amplitude * Math.sin((2 * Math.PI * s) / DRIFT_X_S + 0.7),
-    y: amplitude * Math.sin((2 * Math.PI * s) / DRIFT_Y_S),
+/**
+ * The largest backing-store size, in device pixels, that fits `css` pixels and
+ * whose CSS size the browser can lay out exactly (it works in 64ths of a CSS
+ * pixel): then canvas and screen pixels match one to one at 125%, 150% or any
+ * scale, and nothing is resampled into a shimmer.
+ */
+export function wholeBacking(css: number, dpr: number): number {
+  let b = Math.max(1, Math.floor(css * dpr + 1e-6))
+  for (let i = 0; i < 64 && b > 1; i++, b--) {
+    const units = (b / dpr) * 64
+    if (Math.abs(units - Math.round(units)) < 1e-6) return b
   }
+  return Math.max(1, Math.floor(css * dpr + 1e-6))
+}
+
+/**
+ * Five resting places for a block of `w` x `h` cells: the middle first, then
+ * four a modest step from it (a `share` of the room there is), in whole cells.
+ * A screensaver goes out and comes back at the next one, so the picture never
+ * sits hard in a corner and never slides.
+ */
+export function restSpots(view: Grid['view'], w: number, h: number, share = 0.35): { c0: number; r0: number }[] {
+  const c0 = Math.floor((view.c0 + view.c1 - w) / 2)
+  const r0 = Math.floor((view.r0 + view.r1 - h) / 2)
+  const dx = Math.max(0, Math.floor(((view.c1 - view.c0 - w) / 2) * share))
+  const dy = Math.max(0, Math.floor(((view.r1 - view.r0 - h) / 2) * share))
+  return [
+    [0, 0],
+    [-1, -1],
+    [1, 1],
+    [1, -1],
+    [-1, 1],
+  ].map(([a, b]) => ({ c0: c0 + a! * dx, r0: r0 + b! * dy }))
 }
 
 /* ── The engine ────────────────────────────────────────────── */
@@ -176,8 +206,6 @@ export type MountOptions = {
   fps: number
   titles: () => readonly string[]
   lastPlayed: () => string | null
-  /** Wander as a whole (full screen); a thumbnail stays put. */
-  drift: boolean
   thumb?: boolean
   onUnderlay?: (kind: 'splash' | null) => void
   /** Measured for performance checks: the work of each frame, in ms. */
@@ -190,7 +218,7 @@ function reducedMotion() {
 
 /**
  * Draw `spec` into `canvas`, which must sit inside a positioned box: the
- * canvas is sized to that box (a little past it, to wander). Returns the stop.
+ * canvas is sized to that box in whole device pixels. Returns the stop.
  */
 export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: MountOptions): () => void {
   const ctx = canvas.getContext('2d', { alpha: true })
@@ -207,7 +235,6 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
   let ph = 2
   let ox = 0
   let oy = 0
-  let margin = 0 // CSS px the canvas reaches past the box on every side
   let grid: Grid = { cols: 0, rows: 0, cells: new Uint32Array(0), view: { c0: 0, r0: 0, c1: 0, r1: 0 }, rowPitch }
   let shown = new Uint32Array(0)
 
@@ -243,7 +270,7 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
     const x = (slot % SLOTS_X) * pw
     const y = Math.floor(slot / SLOTS_X) * ph
     sctx.clearRect(x, y, pw, ph)
-    sctx.globalAlpha = INK_ALPHA[levelOf(cell)]! * BRIGHTNESS
+    sctx.globalAlpha = INK_ALPHA[levelOf(cell)]!
     sctx.fillStyle = cell & ACCENT ? accent : ink
     const code = cell >>> 4
     if (!code) {
@@ -289,27 +316,21 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
     dpr = window.devicePixelRatio || 1
     pw = pitchFor(w * dpr, h * dpr, scale)
     ph = Math.max(2, Math.round(pw * rowPitch))
-    margin = opts.drift && !reduced ? Math.ceil(((DRIFT_CELLS + 0.5) * pw) / dpr) : 0
-    const cw = w + margin * 2
-    const chh = h + margin * 2
-    Object.assign(canvas.style, { position: 'absolute', left: `${-margin}px`, top: `${-margin}px`, width: `${cw}px`, height: `${chh}px` })
-    canvas.width = Math.round(cw * dpr)
-    canvas.height = Math.round(chh * dpr)
+    // Whole device pixels: the canvas is exactly as many CSS pixels as its
+    // backing store allows, so the browser never resamples it (no shimmer at
+    // 125% or 150%).
+    canvas.width = wholeBacking(w, dpr)
+    canvas.height = wholeBacking(h, dpr)
+    Object.assign(canvas.style, { position: 'absolute', left: '0px', top: '0px', width: `${canvas.width / dpr}px`, height: `${canvas.height / dpr}px` })
     const cols = Math.floor(canvas.width / pw)
     const rows = Math.floor(canvas.height / ph)
     ox = Math.floor((canvas.width - cols * pw) / 2)
     oy = Math.floor((canvas.height - rows * ph) / 2)
-    const m = margin * dpr
     grid = {
       cols,
       rows,
       cells: new Uint32Array(cols * rows),
-      view: {
-        c0: Math.ceil((m - ox) / pw),
-        r0: Math.ceil((m - oy) / ph),
-        c1: Math.floor((m + w * dpr - ox) / pw),
-        r1: Math.floor((m + h * dpr - oy) / ph),
-      },
+      view: { c0: 0, r0: 0, c1: cols, r1: rows },
       rowPitch,
     }
     shown = new Uint32Array(cols * rows)
@@ -331,18 +352,6 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
       const slot = sprite(v)
       ctx.drawImage(sheet, (slot % SLOTS_X) * pw, Math.floor(slot / SLOTS_X) * ph, pw, ph, x, y, pw, ph)
     }
-  }
-
-  let lastDrift = ''
-  const wander = (t: number) => {
-    if (!margin) return
-    const d = driftAt(t, (DRIFT_CELLS * pw) / dpr)
-    const x = Math.round(d.x * dpr) / dpr
-    const y = Math.round(d.y * dpr) / dpr
-    const key = `${x},${y}`
-    if (key === lastDrift) return
-    lastDrift = key
-    canvas.style.transform = `translate3d(${x}px, ${y}px, 0)`
   }
 
   layout()
@@ -367,7 +376,6 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
     const t = Math.max(0, now - t0)
     runner.frame(t)
     paint()
-    wander(t)
     opts.onFrame?.(performance.now() - began)
     schedule()
   }

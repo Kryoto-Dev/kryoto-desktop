@@ -13,10 +13,26 @@ function countFrame(ms: number) {
   s.longest = Math.max(s.longest, ms)
 }
 
-/** Field's start-screen scene starts over somewhere else this often (as the first screensaver did). */
-const SPLASH_MOVE_MS = 40_000
-/** Somewhere new on the screen, within a tenth of it from the middle. */
-const place = () => ({ x: Math.round((Math.random() - 0.5) * 20), y: Math.round((Math.random() - 0.5) * 16) })
+/** Field's start-screen scene starts over somewhere else this often, in whole pixels. */
+const SPLASH_MOVE_MS = 90_000
+/**
+ * Where it starts over: the middle, then four places a modest step from it,
+ * in turn (vw, vh). Field's names sit in the bands above and below, clear of
+ * the mark wherever it is.
+ */
+const SPLASH_PLACES: readonly [number, number][] = [
+  [0, 0],
+  [-5, -4],
+  [5, 4],
+  [5, -4],
+  [-5, 4],
+]
+/**
+ * As a screensaver, the start screen's scene draws half as often as the
+ * cells around it: it redraws its whole picture each frame, and its shimmer
+ * reads the same at 10. The start screen itself is unchanged.
+ */
+const SPLASH_FPS_SHARE = 0.5
 
 /**
  * One screensaver drawn into the box it is put in: full screen in Big Picture,
@@ -50,7 +66,6 @@ export function SaverCanvas({
     return mountSaver(el, saverSpec(id), {
       fps,
       thumb,
-      drift: !thumb,
       titles: () => data.current.titles,
       lastPlayed: () => data.current.lastPlayed,
       onUnderlay: setUnderlay,
@@ -61,7 +76,7 @@ export function SaverCanvas({
 
   return (
     <div className={cn('absolute inset-0 overflow-hidden', className)}>
-      {underlay === 'splash' ? <Splash fps={fps} moves={!thumb} /> : null}
+      {underlay === 'splash' ? <Splash fps={Math.max(1, Math.round(fps * SPLASH_FPS_SHARE))} moves={!thumb} /> : null}
       <canvas ref={canvas} aria-hidden className="pointer-events-none text-foreground" />
     </div>
   )
@@ -70,17 +85,14 @@ export function SaverCanvas({
 /** The start screen's scene, dimmed, starting over somewhere new now and then. */
 function Splash({ fps, moves }: { fps: number; moves: boolean }) {
   const [turn, setTurn] = useState(0)
-  const [at, setAt] = useState({ x: 0, y: 0 })
   useEffect(() => {
     if (!moves) return
-    const t = window.setInterval(() => {
-      setTurn((n) => n + 1)
-      setAt(place())
-    }, SPLASH_MOVE_MS)
+    const t = window.setInterval(() => setTurn((n) => n + 1), SPLASH_MOVE_MS)
     return () => window.clearInterval(t)
   }, [moves])
+  const [x, y] = SPLASH_PLACES[turn % SPLASH_PLACES.length]!
   return (
-    <div className="absolute inset-0 opacity-45" style={{ transform: `translate(${at.x}vw, ${at.y}vh)` }}>
+    <div className="absolute inset-0 opacity-45" style={{ transform: `translate(${Math.round((x * window.innerWidth) / 100)}px, ${Math.round((y * window.innerHeight) / 100)}px)` }}>
       <SplashScene key={turn} fps={fps} fit={0.7} onRevealed={() => {}} />
     </div>
   )

@@ -1,41 +1,36 @@
-import { dot, FULL, HALF, hash, LOW, OFF, STILL_MS, TRACE, type Scene, type VariantSpec } from './engine.ts'
+import { dot, FULL, HALF, hash, LOW, OFF, PEAK, restSpots, STILL_MS, TRACE, type Scene, type VariantSpec } from './engine.ts'
 import { MARK_COLS, MARK_DOTS, MARK_ROW_PITCH, MARK_ROWS } from './mark-data.ts'
 
 /**
  * Mark: the Kryoto Discord server icon made big. The K// in matrix dots
- * (traced from kryo.to's own image, mark-data.ts) on a field of trace dots;
- * diagonal light sweeps pass through it in alternating directions, leaving a
- * wake that steps down the inks. Every minute it goes out dot by dot and
- * resolves in another corner; every other time the matrix's busy snake runs
- * round the place first, and the K// resolves after it, dot by dot.
+ * (traced from kryo.to's own image, mark-data.ts) on its own board of trace
+ * dots, about two thirds of the screen's height; slow diagonal light sweeps
+ * pass through it in alternating directions, the brightest thing on screen,
+ * leaving a wake that steps down the inks. Every minute and a half it goes out
+ * dot by dot and resolves at the next of five balanced places (the middle,
+ * then four a modest step from it); every other time the matrix's busy snake
+ * runs round the board first, and the K// resolves after it, dot by dot.
  */
 
-/** Dots a little smaller than the default: the mark and its board take about four tenths of the screen's width. */
-const SCALE = 0.85
-/** A new corner this often. */
-const MOVE_MS = 60_000
-/** Going out at the end of a minute, dot by dot. */
+/** Cell size against the default: the board is about two thirds of the screen's height. */
+const SCALE = 1.1
+/** A new resting place this often (the middle, then four a modest step from it). */
+const MOVE_MS = 90_000
+/** Going out at the end of a stay, dot by dot. */
 const LEAVE_MS = 1_600
 /** Coming in, dot by dot. */
 const RESOLVE_MS = 2_200
-/** A sweep starts this often, and takes this long to cross. */
-const SWEEP_EVERY_MS = 9_000
-const SWEEP_MS = 4_200
-/** How far past the mark a sweep lights the field, in dots. */
+/** A sweep starts this often, and takes this long to cross: slow enough to follow. */
+const SWEEP_EVERY_MS = 18_000
+const SWEEP_MS = 6_500
+/** How far past the mark the board reaches (and a sweep lights), in dots. */
 const SWEEP_MARGIN = 3
 /** The slant of a sweep: the mark's diagonal strokes (build.py: 0.55 per character row). */
 const SLANT = 0.55 * (2 / 4)
 /** Every this many moves, the busy snake runs round before the mark resolves. */
 const SNAKE_EVERY = 2
-/** The snake moves one block this often, the matrix's own orbit step; one round. */
-const SNAKE_STEP_MS = 110
-/** Where the mark's middle sits, as shares of the screen: the four corners in turn. */
-const CORNERS: readonly [number, number][] = [
-  [0.33, 0.36],
-  [0.67, 0.64],
-  [0.67, 0.36],
-  [0.33, 0.64],
-]
+/** The snake moves one block this often (a calm version of the matrix's 110 ms orbit); one round. */
+const SNAKE_STEP_MS = 150
 /** The board of trace dots comes in, and goes out after the mark, over this long. */
 const BOARD_MS = 900
 /** One step down the inks takes this long when a dot goes out. */
@@ -76,19 +71,13 @@ const RING: readonly [number, number][] = (() => {
 function make(scene: Scene) {
   const grid = scene.grid
   const { view, cols } = grid
-  const jitter = Math.floor(scene.rand() * 4)
 
+  // The board's resting places, in turn from a random one.
+  const spots = restSpots(view, MARK_COLS + 2 * SWEEP_MARGIN, MARK_ROWS + 2 * SWEEP_MARGIN)
+  const first = Math.floor(scene.rand() * spots.length)
   const placeOf = (n: number) => {
-    const [fx, fy] = CORNERS[(((n + jitter) % CORNERS.length) + CORNERS.length) % CORNERS.length]!
-    const w = view.c1 - view.c0
-    const h = view.r1 - view.r0
-    const c0 = Math.round(view.c0 + fx * w - MARK_COLS / 2)
-    const r0 = Math.round(view.r0 + fy * h - MARK_ROWS / 2)
-    // Kept on screen, two dots in, whatever the screen's shape.
-    return {
-      c0: Math.max(view.c0 + 2, Math.min(view.c1 - MARK_COLS - 2, c0)),
-      r0: Math.max(view.r0 + 2, Math.min(view.r1 - MARK_ROWS - 2, r0)),
-    }
+    const spot = spots[(n + first) % spots.length]!
+    return { c0: spot.c0 + SWEEP_MARGIN, r0: spot.r0 + SWEEP_MARGIN }
   }
 
   /**
@@ -183,7 +172,8 @@ function make(scene: Scene) {
           if (out >= 0) level = Math.max(TRACE, d.level - 1 - Math.floor(out / STEP_MS))
         } else if (crossing && local >= appear) {
           const dist = head - along(d.x, d.y)
-          if (d.level === FULL) level = dist >= 1 && dist < 3.5 ? HALF : FULL
+          // The light is the brightest thing on screen; behind it the stroke dips a step.
+          if (d.level === FULL) level = dist >= -1 && dist < 1 ? PEAK : dist >= 1.5 && dist < 3 ? HALF : FULL
           else level = dist >= -1 && dist < 1 ? FULL : dist < 2.5 && dist >= 1 ? HALF : LOW
         }
         // A dot out (or not in yet) shows the board beneath, whatever it is doing.

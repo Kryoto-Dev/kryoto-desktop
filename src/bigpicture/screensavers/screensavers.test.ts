@@ -1,7 +1,7 @@
 // `pnpm test`: node's own runner, which reads TypeScript as it is.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { capDelay, capReady, dot, FULL, glyph, HALF, isGlyph, levelOf, LOW, pitchFor, seeded, TRACE } from './engine.ts'
+import { capDelay, capReady, dot, FULL, glyph, HALF, INK_ALPHA, isGlyph, levelOf, LOW, PEAK, pitchFor, restSpots, seeded, TRACE, wholeBacking } from './engine.ts'
 import { MARK_CELLS, MARK_COLS, MARK_DOTS, MARK_ROWS } from './mark-data.ts'
 import { cellInk } from './matrix-ink.ts'
 import { clockDigits, COLON, NUMERAL_H, NUMERAL_W, NUMERALS } from './numerals.ts'
@@ -129,4 +129,38 @@ test('titles are set in capitals, plain ASCII, and cut to fit', () => {
   assert.equal(saverText('Baldur’s Gate 3', 40), "BALDUR'S GATE 3")
   assert.equal(saverText('The Elder Scrolls V: Skyrim Special Edition', 16), 'THE ELDER SCR...')
   assert.ok(saverText('A very long game title indeed', 10).length <= 10)
+})
+
+test('a picture rests in the middle or a modest step from it, whole cells, never at an edge', () => {
+  const view = { c0: 0, r0: 0, c1: 80, r1: 51 }
+  const spots = restSpots(view, 46, 30)
+  assert.equal(spots.length, 5)
+  assert.deepEqual(spots[0], { c0: 17, r0: 10 }, 'the middle first')
+  for (const s of spots) {
+    assert.ok(Number.isInteger(s.c0) && Number.isInteger(s.r0))
+    assert.ok(s.c0 >= 5 && s.c0 + 46 <= 75, `clear of the sides: ${s.c0}`)
+    assert.ok(s.r0 >= 3 && s.r0 + 30 <= 48, `clear of top and bottom: ${s.r0}`)
+  }
+  // A picture as big as the screen simply sits in the middle.
+  for (const s of restSpots(view, 80, 51)) assert.deepEqual(s, { c0: 0, r0: 0 })
+})
+
+test('full ink stays below the foreground itself; only the passing light reaches it', () => {
+  assert.ok(INK_ALPHA[FULL] < 1)
+  assert.equal(INK_ALPHA[PEAK], 1)
+  assert.ok(INK_ALPHA[TRACE] < INK_ALPHA[LOW] && INK_ALPHA[LOW] < INK_ALPHA[HALF] && INK_ALPHA[HALF] < INK_ALPHA[FULL])
+})
+
+test('the canvas is a whole number of device pixels the browser can lay out exactly, at any screen scale', () => {
+  assert.equal(wholeBacking(1920, 1), 1920)
+  assert.equal(wholeBacking(1536, 1.25), 1920)
+  assert.equal(wholeBacking(1920, 2), 3840)
+  for (const dpr of [1, 1.25, 1.5, 1.75, 2, 2.25]) {
+    for (const css of [719, 864, 1080, 1277, 1366]) {
+      const b = wholeBacking(css, dpr)
+      assert.ok(b <= css * dpr + 1e-6 && b > css * dpr - 8, `${css}@${dpr}: ${b}`)
+      const units = (b / dpr) * 64
+      assert.ok(Math.abs(units - Math.round(units)) < 1e-6, `${css}@${dpr}: ${b} is not exact`)
+    }
+  }
 })

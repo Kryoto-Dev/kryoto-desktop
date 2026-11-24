@@ -174,7 +174,8 @@ export function Saver({ games, onWake, variant }: { games: readonly LibraryGame[
     }
     const keys = ['keydown', 'pointerdown', 'wheel'] as const
     const pad = ['kryo-pad-back', 'kryo-pad-confirm', 'kryo-pad-tab', 'kryo-pad-leave', 'kryo-pad-guide'] as const
-    keys.forEach((k) => window.addEventListener(k, swallow, { capture: true }))
+    // Not passive: the wheel that wakes it must not also scroll what is behind.
+    keys.forEach((k) => window.addEventListener(k, swallow, { capture: true, passive: false }))
     pad.forEach((k) => window.addEventListener(k, swallow, { capture: true }))
     window.addEventListener('pointermove', moved, { capture: true })
     const stops: (() => void)[] = []

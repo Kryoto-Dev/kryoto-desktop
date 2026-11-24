@@ -41,10 +41,11 @@ function make(scene: Scene) {
     const w = view.c1 - view.c0
     const h = view.r1 - view.r0
     // The mark sits a little above the middle: names go in the band above it or the one below.
+    // Centred across the screen, in a band well clear of the mark and of the edges.
     const above = hash(k, offset) < 0.5
-    const band = above ? [0.1, 0.24] : [0.68, 0.86]
+    const band = above ? [0.16, 0.22] : [0.72, 0.78]
     const r = view.r0 + Math.round(h * (band[0]! + hash(offset, k) * (band[1]! - band[0]!)))
-    const c = view.c0 + 2 + Math.floor(hash(k * 3, offset + 1) * Math.max(0, w - name.length - 4))
+    const c = view.c0 + Math.floor((w - name.length) / 2)
     return { name, span, c, r }
   }
 

@@ -9,10 +9,10 @@ import { saverText } from './titles.ts'
  */
 
 /** Columns falling at once, per hundred columns of screen. */
-const DROPS_PER_100 = 9
+const DROPS_PER_100 = 7
 /** Rows a second, slowest and fastest. */
-const SPEED_MIN = 1.1
-const SPEED_MAX = 3.0
+const SPEED_MIN = 0.9
+const SPEED_MAX = 2.2
 /** Trail length in cells, shortest and longest. */
 const TRAIL_MIN = 6
 const TRAIL_MAX = 14
@@ -20,7 +20,7 @@ const TRAIL_MAX = 14
 const REST_MAX_MS = 6_000
 /** A column resolves into a word this often, holds it this long, then lets it go. */
 const WORD_EVERY_MS = 20_000
-const WORD_HOLD_MS = 3_500
+const WORD_HOLD_MS = 6_500
 const WORD_LEAVE_MS = 1_400
 /** A word's column falls from this many rows above it, at this many rows a second. */
 const WORD_LEAD = 8
@@ -28,7 +28,7 @@ const WORD_SPEED = 3.2
 /** A trail glyph changes now and then: this often, at the fastest. */
 const MUTATE_MS = 1_400
 /** Cells this much larger than the default, so a glyph reads from the couch. */
-const SCALE = 1.3
+const SCALE = 1.6
 /** Kryoto's ASCII, and its letters. */
 export const RAIN_GLYPHS = '/\\.:_-=<>+*KRYOTO'
 

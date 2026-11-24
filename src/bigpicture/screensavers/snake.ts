@@ -1,22 +1,23 @@
-import { dot, FULL, HALF, hash, LOW, OFF, STILL_MS, TRACE, type Scene, type VariantSpec } from './engine.ts'
+import { dot, FULL, HALF, hash, LOW, OFF, TRACE, type Scene, type VariantSpec } from './engine.ts'
 import { MARK_COLS, MARK_DOTS, MARK_ROWS } from './mark-data.ts'
 import { cellInk, LOOP_MS, type WallState } from './matrix-ink.ts'
 
 /**
  * Snake: a wall of Kryoto's 3x3 matrices, every dot a trace at rest. Waves of
  * the matrix's own states travel across it, each matrix playing the state for
- * two rounds as the wave passes (orbit, sync, scan, signal, checker, fill),
- * and every few waves the lit dots of many matrices together spell the K//
- * (mark-data.ts, the same traced mark), hold, and let go.
+ * two rounds as the wave passes (orbit, scan, sync, signal, fill; never the
+ * checker, which flickers across a wall), slowly enough to follow. Every few
+ * waves the dots of many matrices together spell the K// (mark-data.ts, the
+ * same traced mark) in the middle of the wall, hold, and let go.
  */
 
 /** Dots per matrix side, and the gap after each, in dots. */
 const SIDE = 3
 const STRIDE = SIDE + 1
 /** The waves, in turn. */
-const WAVES: readonly WallState[] = ['busy', 'scan', 'sync', 'connect', 'process', 'download']
+const WAVES: readonly WallState[] = ['busy', 'scan', 'sync', 'connect', 'download']
 /** Matrices a second the front moves; how many rounds each matrix plays. */
-const WAVE_SPEED = 2.4
+const WAVE_SPEED = 1.8
 const WAVE_ROUNDS = 2
 /** The quiet between two waves. */
 const WAVE_GAP_MS = 3_500
@@ -35,8 +36,7 @@ const DIRECTIONS: readonly [number, number][] = [
   [0.8, -0.6],
 ]
 
-type Episode = { kind: 'wave'; state: WallState; dir: [number, number]; ms: number } | { kind: 'spell'; ms: number; mc: number; mr: number }
-
+type Episode = { kind: 'wave'; state: WallState; dir: [number, number]; ms: number } | { kind: 'spell'; ms: number }
 
 function make(scene: Scene) {
   const grid = scene.grid
@@ -47,17 +47,15 @@ function make(scene: Scene) {
   const mc1 = Math.floor((view.c1 + 1) / STRIDE)
   const mr1 = Math.floor((view.r1 + 1) / STRIDE)
   // The K// is drawn dot for dot on the wall's own grid, lighting the gaps it
-  // crosses too, so the matrices join into one board for it and it keeps its shape.
-  const markW = Math.ceil(MARK_COLS / STRIDE)
-  const markH = Math.ceil(MARK_ROWS / STRIDE)
+  // crosses too, so the matrices join into one board for it and it keeps its
+  // shape; always in the middle of the wall.
+  const kc = Math.floor((view.c0 + view.c1 - MARK_COLS) / 2)
+  const kr = Math.floor((view.r0 + view.r1 - MARK_ROWS) / 2)
   const offset = Math.floor(scene.rand() * 1000)
 
   const episode = (k: number): Episode => {
     if (k % (SPELL_EVERY + 1) === SPELL_EVERY) {
-      // A matrix of wall kept clear round it, so it never touches an edge.
-      const mc = mc0 + 1 + Math.floor(hash(k, offset) * Math.max(1, mc1 - mc0 - markW - 1))
-      const mr = mr0 + 1 + Math.floor(hash(offset, k) * Math.max(1, mr1 - mr0 - markH - 1))
-      return { kind: 'spell', ms: SPELL_RESOLVE_MS + SPELL_HOLD_MS + SPELL_LEAVE_MS + WAVE_GAP_MS, mc, mr }
+      return { kind: 'spell', ms: SPELL_RESOLVE_MS + SPELL_HOLD_MS + SPELL_LEAVE_MS + WAVE_GAP_MS }
     }
     const state = WAVES[(k - Math.floor(k / (SPELL_EVERY + 1)) + offset) % WAVES.length]!
     const dir = DIRECTIONS[Math.floor(hash(k + offset, 5) * DIRECTIONS.length)]!
@@ -78,7 +76,7 @@ function make(scene: Scene) {
     }
   }
 
-  const spell = (mc: number, mr: number, local: number, still: boolean) => {
+  const spell = (local: number, still: boolean) => {
     const leaveFrom = SPELL_RESOLVE_MS + SPELL_HOLD_MS
     MARK_DOTS.forEach((line, y) => {
       for (let x = 0; x < line.length; x++) {
@@ -86,7 +84,7 @@ function make(scene: Scene) {
         if (ch === '.') continue
         const lit = ch === '#' ? FULL : LOW
         let level = lit
-        const inGap = x % STRIDE === SIDE || y % STRIDE === SIDE
+        const inGap = (kc + x) % STRIDE === SIDE || (kr + y) % STRIDE === SIDE
         if (!still) {
           const order = 0.7 * (x / MARK_COLS) + 0.3 * hash(x, y)
           if (local < order * SPELL_RESOLVE_MS) level = TRACE
@@ -95,8 +93,8 @@ function make(scene: Scene) {
             if (out >= 0) level = Math.max(TRACE, lit - 1 - Math.floor(out / STEP_MS))
           }
         }
-        const c = mc * STRIDE + x
-        const r = mr * STRIDE + y
+        const c = kc + x
+        const r = kr + y
         // A gap stays dark until the K// lights it.
         if (c < cols && r < rows) grid.cells[r * cols + c] = inGap && level === TRACE ? OFF : dot(level)
       }
@@ -107,10 +105,7 @@ function make(scene: Scene) {
     frame(t: number) {
       wall(dot(TRACE))
       if (scene.reduced) {
-        const n = Math.floor(t / STILL_MS)
-        const mc = mc0 + 1 + Math.floor(hash(n, 3) * Math.max(1, mc1 - mc0 - markW - 1))
-        const mr = mr0 + 1 + Math.floor(hash(4, n) * Math.max(1, mr1 - mr0 - markH - 1))
-        spell(mc, mr, 0, true)
+        spell(0, true)
         return
       }
       if (t < from) return
@@ -119,7 +114,7 @@ function make(scene: Scene) {
         ep = episode(++k)
       }
       const local = t - from
-      if (ep.kind === 'spell') return spell(ep.mc, ep.mr, local, false)
+      if (ep.kind === 'spell') return spell(local, false)
 
       // The wave: each matrix plays the state from when the front reaches it.
       const [dx, dy] = ep.dir
