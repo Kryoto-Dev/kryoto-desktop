@@ -165,7 +165,7 @@ pub fn refuse() -> Result<(), String> {
 
 fn refusal(now: Option<&Required>) -> Result<(), String> {
     if now.is_some_and(|r| r.blocked) {
-        return Err("Update Kryoto Desktop first: this version has a serious problem, so downloads, uninstalling and moving games wait until it is updated.".into());
+        return Err("Update Kryoto Desktop first: this version has a serious problem, so downloads, repairs, uninstalling and moving games wait until it is updated.".into());
     }
     Ok(())
 }

@@ -3497,6 +3497,7 @@ async fn check_own_file<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<Ato
 /// if it matches nothing on kryo.to. The same file added again takes over
 /// its stopped row, and keeps what was read of it. Its download id.
 pub fn enqueue_file<R: Runtime>(app: &AppHandle<R>, path: &Path, size: u64, slug: String, title: Option<String>, not_verified: bool) -> Result<String, String> {
+    crate::required::refuse()?;
     let state = app.state::<Downloads>();
     let archive_path = path.to_string_lossy().into_owned();
     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

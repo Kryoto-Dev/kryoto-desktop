@@ -272,6 +272,7 @@ fn no_window(cmd: &mut std::process::Command) {
 /// and the offer card takes over (playtest, screenshot, offer).
 #[tauri::command(async)]
 pub async fn community_update_try(app: AppHandle, id: String) -> Result<offer::OfferState, String> {
+    crate::required::refuse()?;
     let game = offer::find(&app, &id)?;
     let slug = game.slug.clone().ok_or("Only a kryo.to game can be updated this way.")?;
     let source = cu::eligible_source(game.source.as_deref().unwrap_or_default())

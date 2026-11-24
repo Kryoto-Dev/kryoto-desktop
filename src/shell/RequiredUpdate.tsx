@@ -123,7 +123,7 @@ export function RequiredUpdate({ required }: { required: RequiredState }) {
               </p>
             ) : null}
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Downloads, uninstalling and moving games wait until Kryoto Desktop is updated.
+              Downloads, repairs, uninstalling and moving games wait until Kryoto Desktop is updated.
             </p>
           </section>
         </div>

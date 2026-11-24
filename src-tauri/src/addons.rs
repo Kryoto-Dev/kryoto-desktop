@@ -305,6 +305,7 @@ fn requests_for(addons: &[serde_json::Value], ids: &[String]) -> (Vec<downloads:
 /// the answer says to use the game's download window instead.
 #[tauri::command]
 pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>) -> Result<AddonsGot, String> {
+    crate::required::refuse()?;
     let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     let slug = game.slug.clone().ok_or("This game is not from kryo.to, so it has no add-ons there.")?;
     if library::is_running(&app, &game.id) {

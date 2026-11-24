@@ -425,6 +425,7 @@ async fn install(app: &AppHandle, game_id: &str, archive: &Path, published: Opti
 /// clicks the file, and Kryoto checks it and puts it in.
 #[tauri::command]
 pub async fn online_fix_get(app: AppHandle, game_id: String) -> Result<OnlineFixState, String> {
+    crate::required::refuse()?;
     let game = crate::repair::game(&app, &game_id)?;
     let lookup = match cached(&game_id) {
         Some(l) => l,
@@ -473,6 +474,7 @@ pub async fn online_fix_get(app: AppHandle, game_id: String) -> Result<OnlineFix
 /// and put in the same way. Their file is left where it is.
 #[tauri::command]
 pub async fn online_fix_from_file(app: AppHandle, game_id: String, path: String) -> Result<OnlineFixState, String> {
+    crate::required::refuse()?;
     let archive = PathBuf::from(&path);
     if !archive.is_file() {
         return Err("That file is not there any more.".into());

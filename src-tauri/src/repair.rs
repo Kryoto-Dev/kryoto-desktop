@@ -114,6 +114,8 @@ pub(crate) async fn apply<R: Runtime>(
     source: Emulator,
     achievements: bool,
 ) -> Result<repair::RepairReport, String> {
+    // A version kryo.to no longer allows (required.rs) changes no game's files.
+    crate::required::refuse()?;
     let (app, game_id) = (app.clone(), game_id.to_string());
     let before = game(&app, &game_id)?;
     if app
@@ -359,6 +361,7 @@ pub fn game_emulators(app: AppHandle, game_id: String) -> Result<Emulators, Stri
 /// that back. Without a list, as before.
 #[tauri::command]
 pub async fn repair_switch(app: AppHandle, game_id: String, source: Emulator) -> Result<repair::RepairReport, String> {
+    crate::required::refuse()?;
     let before = game(&app, &game_id)?;
     if library::is_running(&app, &game_id) {
         return Err("Close the game before changing its emulator.".into());
