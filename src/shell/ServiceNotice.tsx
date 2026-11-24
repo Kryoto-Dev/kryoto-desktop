@@ -9,8 +9,10 @@ import { BLOCKED_LINE } from '@/shell/NetworkBlocked'
  * does. What it promises is what catches up by itself (health.rs, Shell).
  */
 export function ServiceNotice({ health, store }: { health: ServiceHealth; store: boolean }) {
-  // The internet answers and kryo.to does not: this network blocks it. Say what gets around it.
-  if (health.blocked && health.state !== 'down') {
+  // The internet answers and kryo.to does not: this network blocks it. Say what
+  // gets around it, whatever else is known, as the Store does (health.rs never
+  // says blocked while the status page says down and nothing gets through).
+  if (health.blocked) {
     return (
       <div role="status" className="flex h-7 shrink-0 items-center justify-center gap-2 border-t border-border bg-background px-3 text-[11px] text-muted-foreground">
         <Matrix state="connect" className="size-3 shrink-0" />
