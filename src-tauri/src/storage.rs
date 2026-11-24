@@ -701,6 +701,7 @@ pub async fn storage_move(
     id: String,
     to: String,
 ) -> Result<(), String> {
+    crate::required::refuse()?;
     if running.0.lock().map(|m| m.contains_key(&id)).unwrap_or(false) {
         return Err("Close the game first.".into());
     }

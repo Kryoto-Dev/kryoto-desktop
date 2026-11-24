@@ -14,6 +14,8 @@ import { call, on } from '@/lib/bridge'
 import { emitTo } from '@tauri-apps/api/event'
 import { logInfo } from '@/lib/log'
 import { useOnline } from '@/lib/online'
+import { useRequiredUpdate } from '@/lib/required'
+import { RequiredUpdate } from '@/shell/RequiredUpdate'
 
 /** The look last sent to the desktop pet, for when it opens later. */
 let petLook: { palette: string; dark: boolean; reducedMotion: boolean } | null = null
@@ -82,6 +84,7 @@ export default function App() {
   // and the bell's count and the news pill would miss it.
   const inbox = useInbox()
   const online = useOnline()
+  const required = useRequiredUpdate()
   const [guest, setGuestState] = useState(loadGuest)
   const setGuest = useCallback((on: boolean) => {
     saveGuest(on)
@@ -233,6 +236,8 @@ export default function App() {
   }, [phase])
 
   if (phase === 'splash') return <Splash onRevealed={() => setRevealed(true)} />
+  // A version kryo.to no longer allows: only updating, quitting and playing (src-tauri required.rs).
+  if (required?.blocked) return <RequiredUpdate required={required} />
   if (settings?.recoveryError) return <main className="grid h-screen place-items-center bg-background p-6 text-foreground">
     <section role="alert" className="kryo-radius grid max-w-lg gap-4 border border-border bg-card p-6 text-sm">
       <h1 className="text-lg font-bold">Recover your settings</h1>

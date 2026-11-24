@@ -54,6 +54,7 @@ mod online_fix;
 mod steam_check;
 mod repair;
 mod release_files;
+mod required;
 mod joycons;
 mod pad;
 mod pad_games;
@@ -2386,6 +2387,8 @@ pub fn run() {
             repair::repair_support_url,
             links::take_pending_link,
             update_mirror::update_check_mirror,
+            required::required_check,
+            required::store_required_check,
             store_mint_release,
             display_env::display_rendered,
             game_logs::game_logs,
