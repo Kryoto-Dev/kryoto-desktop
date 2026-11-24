@@ -1,33 +1,40 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { SplashScene } from '@/boot/SplashScene'
+import { createPortal } from 'react-dom'
 import { on } from '@/lib/bridge'
 import { useDownloads } from '@/lib/downloads'
 import type { LibraryGame } from '@/lib/library'
+import { useHideAdult, useShowAdult } from '@/lib/adult'
 import { dialogCount } from '@/ui/dialog-focus'
+import { DEFAULT_SAVER, SAVER_IDS, type SaverId } from './screensavers'
+import { SaverCanvas } from './screensavers/SaverCanvas'
+import { lastPlayedTitle, saverTitles } from './screensavers/titles'
 
 /**
  * Big Picture's screensaver (suggestion #107): after a few minutes with no
- * button, key, click or pointer, the start screen's own scene (SplashScene,
- * as Big Picture's intro and Kryoto Mobile use it) plays dimmed on black, with
- * one of your games named under the mark. Any input leaves it, and only wakes
- * the screen: that press does nothing else.
+ * button, key, click or pointer, one of Kryoto's screensavers plays on black
+ * (screensavers/: Mark, the default, Clock, Field, Rain, Snake, or all of
+ * them in turn). Any input leaves it, and only wakes the screen: that press
+ * does nothing else.
  *
  * Kept light and screen-safe: at most 20 frames a second, nothing drawn while
- * the window is hidden (KB-0012), and every 40 seconds the scene starts again
- * somewhere else on the screen, so nothing sits on the same pixels. Never
- * while a game runs, a question or menu is open, or a download has failed
- * since Big Picture opened. Settings > Devices > Controller, Big Picture,
- * turns it off or changes the wait.
+ * the window is hidden (KB-0012), and everything lit keeps moving, so nothing
+ * sits on the same pixels. Never while a game runs, a question or menu is
+ * open, or a download has failed since Big Picture opened. Settings > Devices >
+ * Controller, Big Picture, picks one, turns it off, changes the wait, and
+ * shows it at once.
  */
 
 const ON_KEY = 'kryo:bp-screensaver'
 const WAIT_KEY = 'kryo:bp-screensaver-minutes'
+const WHICH_KEY = 'kryo:bp-screensaver-variant'
 export const SCREENSAVER_WAITS = [2, 5, 10, 20] as const
 const DEFAULT_WAIT = 5
-/** A new place, and a new game, this often. */
-const MOVE_MS = 40_000
+/** Full screen, at most this many frames a second (KB-0012). */
+const FPS = 20
 /** How often the idle time is looked at. */
 const CHECK_MS = 5_000
+/** Input this soon after it starts is the press that started it ("Show it now"), not someone coming back. */
+const SETTLE_MS = 600
 
 function read(key: string): string | null {
   try {
@@ -59,9 +66,24 @@ export function screensaverWait(): number {
 export function setScreensaverWait(minutes: number) {
   write(WAIT_KEY, String(minutes))
 }
+/** Which one plays: Mark unless another was picked. */
+export function screensaverVariant(): SaverId {
+  const v = read(WHICH_KEY)
+  return (SAVER_IDS as readonly string[]).includes(v ?? '') ? (v as SaverId) : DEFAULT_SAVER
+}
+export function setScreensaverVariant(id: SaverId) {
+  write(WHICH_KEY, id)
+}
 
-/** Somewhere new on the screen, within a tenth of it from the middle. */
-const place = () => ({ x: Math.round((Math.random() - 0.5) * 20), y: Math.round((Math.random() - 0.5) * 16) })
+/** The titles a screensaver may show, and the one played last: none hidden, adult only if shown. */
+export function useSaverTitles(games: readonly LibraryGame[]) {
+  const show = useShowAdult()
+  const hide = useHideAdult()
+  return useMemo(
+    () => ({ titles: saverTitles(games, { show, hide }), lastPlayed: lastPlayedTitle(games, { show, hide }) }),
+    [games, show, hide],
+  )
+}
 
 export function Screensaver({ games, running }: { games: LibraryGame[]; running: boolean }) {
   const [shown, setShown] = useState(false)
@@ -120,45 +142,34 @@ export function Screensaver({ games, running }: { games: LibraryGame[]; running:
   )
 }
 
-function Saver({ games, onWake }: { games: LibraryGame[]; onWake: () => void }) {
+/**
+ * The screensaver itself, full screen over everything, until any input.
+ * Big Picture shows it when left alone; Settings' "Show it now" shows it at
+ * once, with the one picked there.
+ */
+export function Saver({ games, onWake, variant }: { games: readonly LibraryGame[]; onWake: () => void; variant?: SaverId }) {
   const box = useRef<HTMLDivElement | null>(null)
   const wake = useRef(onWake)
   wake.current = onWake
-  // Games installed here, the ones played last first; none hidden or for adults.
-  const names = useMemo(
-    () =>
-      games
-        .filter((g) => !g.hidden && !g.nsfw)
-        .sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0))
-        .slice(0, 24)
-        .map((g) => g.title),
-    [games],
-  )
-  const [turn, setTurn] = useState(0)
-  const [at, setAt] = useState(place)
-  const [label, setLabel] = useState(0)
-  useEffect(() => {
-    const t = window.setInterval(() => {
-      setTurn((n) => n + 1)
-      setAt(place())
-    }, MOVE_MS)
-    return () => window.clearInterval(t)
-  }, [])
+  const { titles, lastPlayed } = useSaverTitles(games)
+  const [id] = useState<SaverId>(() => variant ?? screensaverVariant())
 
   // Any input wakes it, and that input goes nowhere else: Escape or B must
   // not also leave Big Picture, A must not also open a game.
   useEffect(() => {
     const before = document.activeElement instanceof HTMLElement ? document.activeElement : null
     box.current?.focus({ preventScroll: true })
+    const opened = performance.now()
+    const settled = () => performance.now() - opened > SETTLE_MS
     const start = { x: -1, y: -1 }
     const swallow = (e: Event) => {
       e.preventDefault()
       e.stopImmediatePropagation()
-      wake.current()
+      if (settled()) wake.current()
     }
     const moved = (e: PointerEvent) => {
       // A mouse that only settles is not someone coming back.
-      if (start.x < 0) return void Object.assign(start, { x: e.clientX, y: e.clientY })
+      if (start.x < 0 || !settled()) return void Object.assign(start, { x: e.clientX, y: e.clientY })
       if (Math.abs(e.clientX - start.x) + Math.abs(e.clientY - start.y) > 6) wake.current()
     }
     const keys = ['keydown', 'pointerdown', 'wheel'] as const
@@ -169,9 +180,9 @@ function Saver({ games, onWake }: { games: LibraryGame[]; onWake: () => void }) 
     const stops: (() => void)[] = []
     let cancelled = false
     const keep = (fn: () => void) => (cancelled ? fn() : stops.push(fn))
-    void on('pad-button', () => wake.current()).then(keep)
+    void on('pad-button', () => settled() && wake.current()).then(keep)
     void on<{ lx: number; ly: number; rx: number; ry: number }>('pad-axes', (a) => {
-      if (Math.max(Math.abs(a.lx), Math.abs(a.ly), Math.abs(a.rx), Math.abs(a.ry)) > 0.5) wake.current()
+      if (settled() && Math.max(Math.abs(a.lx), Math.abs(a.ly), Math.abs(a.rx), Math.abs(a.ry)) > 0.5) wake.current()
     }).then(keep)
     return () => {
       cancelled = true
@@ -183,26 +194,21 @@ function Saver({ games, onWake }: { games: LibraryGame[]; onWake: () => void }) 
     }
   }, [])
 
-  const name = names.length ? names[turn % names.length] : 'Big Picture'
-  return (
+  // On the body: a page that moves (Settings slides in) would otherwise hold it inside its own box.
+  return createPortal(
     <div
       ref={box}
       role="dialog"
       aria-modal="true"
       aria-label="Screensaver. Press any button to come back."
       tabIndex={-1}
+      data-screensaver={id}
       // A controller's A clicks what has focus (lib/pad-nav.ts): this.
       onClick={() => wake.current()}
-      className="kryo-night kryo-fade fixed inset-0 z-[655] cursor-none overflow-hidden bg-black text-foreground outline-none"
+      className="kryo-night kryo-fade fixed inset-0 z-[950] cursor-none overflow-hidden bg-black text-foreground outline-none"
     >
-      <div className="absolute inset-0 opacity-45" style={{ transform: `translate(${at.x}vw, ${at.y}vh)` }}>
-        <SplashScene key={turn} fps={20} fit={0.7} onMark={(bottom, cell) => setLabel(bottom + cell * 14)} onRevealed={() => {}} />
-        {label ? (
-          <p className="kryo-in pointer-events-none absolute inset-x-0 truncate px-8 pl-[0.6em] text-center text-sm font-bold uppercase tracking-[0.6em]" style={{ top: label }}>
-            {name}
-          </p>
-        ) : null}
-      </div>
-    </div>
+      <SaverCanvas id={id} fps={FPS} titles={titles} lastPlayed={lastPlayed} />
+    </div>,
+    document.body,
   )
 }

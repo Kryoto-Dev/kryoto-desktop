@@ -138,6 +138,8 @@ const ALLOW = {
     'the TV-mode intro is a black stage, like a console boot screen, in every palette',
   'src/bigpicture/Screensaver.tsx::opaque-white-black':
     'the screensaver plays the same intro scene dimmed on black, in every palette, so a TV left on shows as little lit as it can',
+  'src/settings/ControllerPane.tsx::opaque-white-black':
+    "the screensaver pictures in Settings show each screensaver as it plays, on black in every palette",
   'src/boot/Boot.tsx::opaque-white-black':
     'the boot splash draws the ASCII mark on black, as the brand is made to be seen',
   'src/ui/ReleaseIntro.tsx::opaque-white-black':
