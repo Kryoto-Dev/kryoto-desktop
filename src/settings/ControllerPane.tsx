@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { BatteryCharging, BatteryMedium, Gamepad2, RotateCcw, Vibrate } from '@/ui/pixel-icons'
 import { Button, Caption, Check, Dropdown, Matrix, Section, Segmented } from '@/ui'
 import { PadArtView, PadBadge, type Callout } from '@/controller/PadArtView'
@@ -6,7 +6,7 @@ import { PadSetup } from '@/controller/PadSetup'
 import { errorText } from '@/lib/bridge'
 import { openExternal } from '@/lib/window'
 import { clearPadRequest, savePadConfig, usePadInput, usePadStore } from '@/hooks/usePads'
-import { isWindowsHost } from '@/lib/library'
+import { isWindowsHost, library, type LibraryGame } from '@/lib/library'
 import {
   actsAs,
   assign,
@@ -26,7 +26,22 @@ import {
 } from '@/lib/pad'
 import { PAD_FAMILIES, type PadControl, type PadFamily } from '@/lib/pad-art'
 import { cn } from '@/lib/utils'
-import { SCREENSAVER_WAITS, screensaverOn, screensaverWait, setScreensaverOn, setScreensaverWait } from '@/bigpicture/Screensaver'
+import {
+  Saver,
+  SCREENSAVER_WAITS,
+  screensaverOn,
+  screensaverVariant,
+  screensaverWait,
+  setScreensaverOn,
+  setScreensaverVariant,
+  setScreensaverWait,
+  useSaverTitles,
+} from '@/bigpicture/Screensaver'
+import { SAVER_HINTS, SAVERS, type SaverId } from '@/bigpicture/screensavers'
+import { SaverCanvas } from '@/bigpicture/screensavers/SaverCanvas'
+
+/** Settings' screensaver pictures: small, so a few frames a second is plenty. */
+const THUMB_FPS = 8
 
 /**
  * Settings > Devices, Controller (kryo.to feature flag `controller`): the pads that are
@@ -396,12 +411,47 @@ export function ControllerPane() {
   )
 }
 
-/** Big Picture's screensaver (bigpicture/Screensaver.tsx): on, and after how long. */
+/**
+ * Big Picture's screensaver (bigpicture/Screensaver.tsx): on, which one, after
+ * how long, and a way to see it now. Each choice is a small live picture of
+ * itself, drawn only while this section is on screen.
+ */
 function BigPictureSection() {
   const [on, setOn] = useState(screensaverOn)
   const [wait, setWait] = useState(screensaverWait)
+  const [which, setWhich] = useState(screensaverVariant)
+  const [now, setNow] = useState(false)
+  const [games, setGames] = useState<LibraryGame[]>([])
+  const { titles, lastPlayed } = useSaverTitles(games)
+  const tiles = useRef<HTMLDivElement | null>(null)
+  const [seen, setSeen] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    void library
+      .list()
+      .then((list) => live && setGames(list))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [])
+  // The pictures move only while you can see them.
+  useEffect(() => {
+    const el = tiles.current
+    if (!el || !on) return
+    const watch = new IntersectionObserver(([entry]) => setSeen(!!entry?.isIntersecting))
+    watch.observe(el)
+    return () => watch.disconnect()
+  }, [on])
+
+  const pick = (id: SaverId) => {
+    setWhich(id)
+    setScreensaverVariant(id)
+  }
+
   return (
-    <Section title="Big Picture" hint="Left alone, Big Picture dims to Kryoto's start screen, moving now and then so nothing marks a TV. Any button brings it back. Never while a game runs.">
+    <Section title="Big Picture" hint="Left alone, Big Picture shows a screensaver, everything in it moving now and then so nothing marks a TV. Any button brings it back. Never while a game runs.">
       <Check
         checked={on}
         onChange={(v) => {
@@ -411,16 +461,59 @@ function BigPictureSection() {
         label="Show a screensaver when Big Picture is left alone"
       />
       {on ? (
-        <Segmented
-          label="Start the screensaver after"
-          value={String(wait)}
-          options={SCREENSAVER_WAITS.map((m) => ({ value: String(m), label: `${m} min` }))}
-          onChange={(v) => {
-            setWait(Number(v))
-            setScreensaverWait(Number(v))
-          }}
-        />
+        <>
+          <div ref={tiles} role="radiogroup" aria-label="Screensaver" className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {SAVERS.map((s, i) => {
+              const id = s.id as SaverId
+              const chosen = which === id
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="radio"
+                  aria-checked={chosen}
+                  tabIndex={chosen ? 0 : -1}
+                  title={SAVER_HINTS[id]}
+                  onClick={() => pick(id)}
+                  onKeyDown={(e) => {
+                    const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
+                    if (!step) return
+                    e.preventDefault()
+                    const next = SAVERS[(i + step + SAVERS.length) % SAVERS.length]!
+                    pick(next.id as SaverId)
+                    e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]').item((i + step + SAVERS.length) % SAVERS.length)?.focus()
+                  }}
+                  className={cn(
+                    'kryo-radius group grid gap-2 border p-2 text-left transition-colors',
+                    chosen ? 'border-primary' : 'border-border hover:border-foreground/40',
+                  )}
+                >
+                  <span className="kryo-night kryo-radius relative block aspect-video overflow-hidden bg-black">
+                    {seen && !now ? <SaverCanvas id={id} fps={THUMB_FPS} titles={titles} lastPlayed={lastPlayed} thumb /> : null}
+                  </span>
+                  <span className={cn('px-1 text-[10px] font-bold uppercase tracking-wider', chosen ? 'text-foreground' : 'text-muted-foreground')}>{s.name}</span>
+                </button>
+              )
+            })}
+          </div>
+          <Caption>{SAVER_HINTS[which]}</Caption>
+          <div className="flex flex-wrap items-center gap-3">
+            <Segmented
+              label="Start the screensaver after"
+              value={String(wait)}
+              options={SCREENSAVER_WAITS.map((m) => ({ value: String(m), label: `${m} min` }))}
+              onChange={(v) => {
+                setWait(Number(v))
+                setScreensaverWait(Number(v))
+              }}
+            />
+            <Button size="sm" onClick={() => setNow(true)}>
+              Show it now
+            </Button>
+          </div>
+        </>
       ) : null}
+      {now ? <Saver games={games} variant={which} onWake={() => setNow(false)} /> : null}
     </Section>
   )
 }
