@@ -289,7 +289,11 @@ pub fn prepare<R: Runtime>(_app: &AppHandle<R>, settings: &crate::settings::Sett
         if steamvr_running() {
             notes.push("VR: SteamVR already running".into());
         } else if let Some(starter) = &s.starter {
-            match std::process::Command::new(starter).current_dir(Path::new(starter).parent().unwrap_or(Path::new("."))).spawn() {
+            let mut cmd = std::process::Command::new(starter);
+            cmd.current_dir(Path::new(starter).parent().unwrap_or(Path::new(".")));
+            // SteamVR's own start script, not on the AppImage's libraries.
+            crate::launch::clean_appimage_env(&mut cmd);
+            match cmd.spawn() {
                 Ok(_) => {
                     let started = Instant::now();
                     while started.elapsed() < Duration::from_secs(25) && !steamvr_running() {

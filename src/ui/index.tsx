@@ -5,6 +5,7 @@ import { Check as CheckIcon, ChevronDown, Copy, X } from '@/ui/pixel-icons'
 import { cn } from '@/lib/utils'
 import { isTauri, isWeb } from '@/lib/bridge'
 import { anchorId, anchorOf } from '@/lib/setting-anchor'
+import { placeFloat } from './float-place'
 
 import { Busy } from './Busy'
 export { Busy }
@@ -260,9 +261,12 @@ export function Panes<T extends string>({
   onChange: (tab: T) => void
   children: ReactNode
 }) {
+  // One row exactly the dialog's height, and both sides scroll in it: a short
+  // window (or a big text size) left the row as tall as the tab list, so the
+  // dialog cut off the bottom of both and nothing could reach it (Properties, 2026-11-21).
   return (
-    <div className="-m-5 grid h-[calc(100%+2.5rem)] min-h-0 grid-cols-[180px_1fr]">
-      <nav aria-label="Sections" className="grid content-start gap-1 border-r border-border p-3">
+    <div className="-m-5 grid h-[calc(100%+2.5rem)] min-h-0 grid-cols-[minmax(0,180px)_minmax(0,1fr)] grid-rows-[minmax(0,1fr)]">
+      <nav aria-label="Sections" className="grid min-h-0 content-start gap-1 overflow-y-auto border-r border-border p-3">
         {tabs.map(([id, label]) => (
           <button
             key={id}
@@ -340,7 +344,8 @@ export function MenuList({ items, onDone, autoFocus = true }: { items: MenuEntry
                 : 'text-foreground hover:bg-primary hover:text-primary-foreground focus:bg-primary focus:text-primary-foreground',
             )}
           >
-            {item.icon ? <span className="grid size-3.5 place-items-center [&>svg]:size-3.5">{item.icon}</span> : null}
+            {/* A checked row without an icon of its own shows a check, as the menu view does (lib/popup.ts). */}
+            {item.icon || item.checked ? <span className="grid size-3.5 place-items-center [&>svg]:size-3.5">{item.icon ?? <CheckIcon />}</span> : null}
             <span className="min-w-0 grow truncate">{item.label}</span>
             {item.hint ? <span className="text-[10px] tracking-wider opacity-60">{item.hint}</span> : null}
           </button>
@@ -374,6 +379,7 @@ export function Floating({
   align = 'left',
   gap = 6,
   match = false,
+  cover = false,
   panelRef,
   className,
   children,
@@ -384,6 +390,8 @@ export function Floating({
   align?: 'left' | 'right'
   gap?: number
   match?: boolean
+  /** May cover its anchor to show more of itself (a right-click menu): `float-place.ts`. */
+  cover?: boolean
   panelRef?: React.RefObject<HTMLDivElement | null>
 }) {
   const box = useRef<HTMLDivElement | null>(null)
@@ -395,21 +403,29 @@ export function Floating({
     const place = () => {
       const a = where.current()
       if (!a) return
+      // Measured at its full height, then put back where it was scrolled to:
+      // taking the limit off for the measure scrolls the box to its top, and
+      // this runs on every scroll, so a long menu could never be scrolled
+      // (the right-click menu's Properties out of reach, 2026-11-21).
+      const scrolled = el.scrollTop
       el.style.maxHeight = ''
       if (match) el.style.minWidth = `${a.width}px`
       // Offset sizes: the opening animation's scale must not count.
-      const width = el.offsetWidth
-      const height = el.offsetHeight
-      const below = window.innerHeight - a.bottom - gap - WINDOW_EDGE
-      const above = a.top - gap - WINDOW_EDGE
-      const down = side === 'bottom' ? height <= below || below >= above : height > above && below > above
-      const room = Math.max(0, down ? below : above)
-      el.style.maxHeight = `${Math.min(height, room)}px`
-      // Clamped: a control scrolled out of the window takes its list only as far as the edge.
-      const top = down ? a.bottom + gap : a.top - gap - Math.min(height, room)
-      el.style.top = `${Math.max(WINDOW_EDGE, Math.min(top, window.innerHeight - Math.min(height, room) - WINDOW_EDGE))}px`
-      const left = align === 'right' ? a.right - width : a.left
-      el.style.left = `${Math.max(WINDOW_EDGE, Math.min(left, window.innerWidth - width - WINDOW_EDGE))}px`
+      const at = placeFloat({
+        anchor: a,
+        width: el.offsetWidth,
+        height: el.offsetHeight,
+        view: { width: window.innerWidth, height: window.innerHeight },
+        side,
+        align,
+        gap,
+        edge: WINDOW_EDGE,
+        cover,
+      })
+      el.style.maxHeight = `${at.maxHeight}px`
+      el.style.top = `${at.top}px`
+      el.style.left = `${at.left}px`
+      el.scrollTop = scrolled
     }
     place()
     // `place` sets this box's own height: from inside the observer's callback that
@@ -420,15 +436,21 @@ export function Floating({
       frame = requestAnimationFrame(place)
     })
     watch.observe(el)
+    // The page under it scrolling moves its control; the panel scrolling its
+    // own rows (wheel, keys, a controller) moves nothing.
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Node && el.contains(e.target)) return
+      place()
+    }
     window.addEventListener('resize', place)
-    window.addEventListener('scroll', place, true)
+    window.addEventListener('scroll', onScroll, true)
     return () => {
       cancelAnimationFrame(frame)
       watch.disconnect()
       window.removeEventListener('resize', place)
-      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('scroll', onScroll, true)
     }
-  }, [side, align, gap, match])
+  }, [side, align, gap, match, cover])
   return createPortal(
     <div
       {...rest}
@@ -574,14 +596,18 @@ export function useNativeOpen(menu: string | undefined) {
   return open
 }
 
-/** A right-click menu at the pointer, kept on screen. */
+/**
+ * A right-click menu at the pointer, kept inside the window at any size and
+ * text size: taller than the window, it scrolls (wheel, arrow keys, a
+ * controller's stick), and the row the keys reach is scrolled to.
+ */
 export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuEntry[]; onClose: () => void }) {
   const ref = useRef<HTMLDivElement | null>(null)
   const trigger = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   useLayoutEffect(() => () => { if (trigger.current?.isConnected) trigger.current.focus() }, [])
   useDismiss(true, ref, onClose)
   return (
-    <Floating role="menu" panelRef={ref} anchor={() => ({ left: x, right: x, top: y, bottom: y, width: 0 })} gap={0} className={MENU_PANEL}>
+    <Floating role="menu" panelRef={ref} anchor={() => ({ left: x, right: x, top: y, bottom: y, width: 0 })} gap={0} cover className={MENU_PANEL}>
       <MenuList items={items} onDone={onClose} />
     </Floating>
   )

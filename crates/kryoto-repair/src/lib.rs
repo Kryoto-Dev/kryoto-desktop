@@ -7,6 +7,7 @@ pub mod crack;
 pub mod detection;
 pub mod error;
 pub mod fixpack;
+pub mod fixsite;
 pub mod hubcap;
 pub mod journal;
 pub mod peversion;

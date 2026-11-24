@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { errorText } from '@/lib/bridge'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { errorText, isTauri } from '@/lib/bridge'
 import { library, type LibraryGame } from '@/lib/library'
+import { notify } from '@/lib/notify'
+import { alarms, plainSummary } from '@/lib/release-files'
+import { quickExit } from '@/lib/quick-exit'
 
 /**
  * The Library's live state: the saved games, which are running, and the last
@@ -42,11 +46,18 @@ export function useLibrary() {
   const [errorQuiet, setErrorQuiet] = useState(false)
   /** The game it is about, whose page may say it; none is for a notice. */
   const [errorGame, setErrorGame] = useState<string | null>(null)
-  const setError = useCallback((message: string | null, quiet = false, game: string | null = null) => {
+  /** A launch failure's catalog slug, for the logged line only (`reportSlug`). */
+  const [errorSlug, setErrorSlug] = useState<string | null>(null)
+  const setError = useCallback((message: string | null, quiet = false, game: string | null = null, slug: string | null = null) => {
     setErrorState(message)
     setErrorQuiet(quiet)
     setErrorGame(game)
+    setErrorSlug(slug)
   }, [])
+  const gamesRef = useRef<LibraryGame[]>([])
+  useEffect(() => {
+    gamesRef.current = games
+  }, [games])
 
   const reload = useCallback(async () => {
     const request = ++generation.current
@@ -101,8 +112,9 @@ export function useLibrary() {
           // A game gone within seconds almost never ran - say so instead of
           // leaving a Play button that silently did nothing.
           if (!event.stopped && !stopWhenUp.current.has(event.id) && (event.seconds ?? 0) < 5) {
-            const [message, quiet] = quickExit(event.code, event.detail)
-            setError(message, quiet, event.id)
+            const [message, quiet] = quickExit(event.code, event.detail, event.steam)
+            setError(message, quiet, event.id, reportSlug(gamesRef.current.find((g) => g.id === event.id)))
+            checkFilesAfterFailure(gamesRef.current.find((g) => g.id === event.id))
           }
           stopWhenUp.current.delete(event.id)
         }
@@ -142,7 +154,11 @@ export function useLibrary() {
         // Started from somewhere else (the phone, the Store): that is what was
         // wanted, and the button only has to catch up.
         if (errorText(e).includes('already running')) void reload()
-        else if (!request.cancelled) setError(errorText(e), false, id)
+        else if (!request.cancelled) {
+          setError(errorText(e), false, id)
+          // Its file gone or blocked (library.rs start_failure): which ones, exactly.
+          if (FILE_TROUBLE.test(errorText(e))) checkFilesAfterFailure(gamesRef.current.find((g) => g.id === id))
+        }
       }
     } finally {
       if (pendingLaunches.current.get(id) === request) pendingLaunches.current.delete(id)
@@ -230,72 +246,43 @@ export function useLibrary() {
     return () => window.clearInterval(timer)
   }, [live.size, confirmRunning])
 
-  return { games, running: live, loaded, error: error ?? refreshError, errorQuiet: error ? errorQuiet : false, errorGame: error ? errorGame : null, setError, reload, play, stop: stopGame, upsert, drop }
-}
-
-const RUNTIMES_HINT = 'Install everything under Settings > Game runtimes, then press Play again.'
-
-/**
- * What a game's exit code means, for the ones that keep coming back in reports.
- * "Check the exe" sent these people to the wrong place: their exe was right.
- */
-const EXIT_REASONS: Record<number, string> = {
-  // 0xC0000906: Windows refused to run a file it flagged.
-  [-1073739514]: "Your antivirus blocked a file in this game as a threat. Exclude the game's folder, then get the file back: both are on the game's page.",
-  // 0xC0000142: a DLL failed as it loaded, mostly a blocked or missing one.
-  [-1073741502]: `A file the game needs could not start, usually because an antivirus blocked it or a runtime is missing. ${RUNTIMES_HINT}`,
-  // 0xC06D007E: a DLL loaded late was not found, the same missing runtime.
-  [-1066598274]: `A file the game needs is missing, usually a runtime. ${RUNTIMES_HINT}`,
-  // 0xC0000139: a DLL is there but too old for the game.
-  [-1073741511]: `A runtime on this PC is too old for the game. ${RUNTIMES_HINT}`,
-  // 0xC000007B: a 32-bit and a 64-bit file mixed up, nearly always a broken runtime.
-  [-1073741701]: `A runtime on this PC is damaged or the wrong kind for the game. ${RUNTIMES_HINT}`,
-  // 0xC0000005 and 0xC0000409: the game itself crashed.
-  [-1073741819]: 'The game crashed as it started. Update your graphics driver and use Repair game. If it keeps crashing, report it on the game\'s page.',
-  [-1073740791]: 'The game crashed as it started. Update your graphics driver and use Repair game. If it keeps crashing, report it on the game\'s page.',
-  // 0xE0434352: an unhandled .NET error.
-  [-532462766]: `The game crashed with a .NET error. ${RUNTIMES_HINT}`,
-  // The Steam DRM's own code: the game would not start without Steam.
-  53: 'The game stopped at its Steam check. If this keeps happening, report it on the game\'s page so the release can be fixed.',
+  return { games, running: live, loaded, error: error ?? refreshError, errorQuiet: error ? errorQuiet : false, errorGame: error ? errorGame : null, errorSlug: error ? errorSlug : null, setError, reload, play, stop: stopGame, upsert, drop }
 }
 
 /**
- * What to say when a game was gone within seconds, and whether that is worth
- * reporting. The client already follows a launcher that hands over to the real
- * game (handoff.rs), so reaching this means nothing from the game's folder was
- * running afterwards either.
+ * The slug a logged launch failure carries, so "It closed again straight
+ * away" reports can be grouped by game. Only a kryo.to catalog game's: none
+ * for a game the player added themselves or brought from another launcher,
+ * and none for one they keep hidden.
  */
-function quickExit(code: number | null | undefined, detail?: string): [string, boolean] {
-  // ERROR_CANCELLED: the game needs administrator rights and Windows' prompt was turned down.
-  if (code === 1223) return ['It did not start: this game needs administrator rights. Press Play and answer Yes on Windows\' prompt.', true]
-  // 0x80131700: the .NET runtime could not start, so it is missing.
-  if (code === -2146232576) {
-    return [
-      'It closed straight away because the .NET Framework it needs is not installed. Install .NET Framework 4.8 (and 3.5 for older games) from Microsoft, then press Play again.',
-      true,
-    ]
-  }
-  // 0xC0000135: a DLL it needs is missing, almost always a Visual C++ runtime.
-  if (code === -1073741515) {
-    return [
-      'It closed straight away because a DLL it needs is missing. Install the Visual C++ Redistributables (2015-2022, x64 and x86) and the DirectX runtime, then press Play again.',
-      true,
-    ]
-  }
-  const known = code == null ? undefined : EXIT_REASONS[code]
-  if (known) return [`${known} (exit code ${code})`, false]
-  if (code === 0 || code == null) {
-    return [
-      'It started and closed again without an error. If no window opened, pick the game\'s own .exe (not a launcher) in Properties.',
-      true,
-    ]
-  }
-  // Linux: Wine, Proton and umu all end with a bare 1; their last lines say why.
-  if (detail) {
-    return [`It closed again straight away (exit code ${code}). Its last lines: ${detail} The whole log is under Properties > Logs.`, false]
-  }
-  return [
-    `It closed again straight away (exit code ${code}). Check the launch options and the exe in Properties.`,
-    false,
-  ]
+export function reportSlug(game: Pick<LibraryGame, 'slug' | 'origin' | 'launcher' | 'hidden'> | undefined): string | null {
+  if (!game?.slug || game.origin || game.launcher || game.hidden) return null
+  return /^[a-z0-9-]{1,160}$/.test(game.slug) ? game.slug : null
 }
+
+/** library.rs `start_failure`'s words for a file that is gone or that an antivirus blocked. */
+const FILE_TROUBLE = /gone from the game's folder|antivirus blocked/i
+
+/**
+ * A start that failed within seconds: the game's files checked against its
+ * release's own list (src-tauri release_files.rs), which names on the game's
+ * page any file an antivirus took. With the window in the background, the
+ * system notification says it too, as for the app's other news (lib/notify.ts).
+ * A release with no list is left as it was: nothing is checked or said.
+ */
+function checkFilesAfterFailure(game: LibraryGame | undefined) {
+  if (!game?.slug || game.launcher || !isTauri()) return
+  void library
+    .filesCheck(game.id)
+    .then(async (s) => {
+      const found = alarms([...(s.report?.missing ?? []), ...(s.report?.broken ?? [])])
+      if (!found.length) return
+      // The window itself, not the page: WebView2 keeps document.hasFocus()
+      // true behind other programs and even minimized, so this never fired.
+      if (await getCurrentWindow().isFocused().catch(() => document.hasFocus())) return
+      const missing = found.some((f) => f.problem === 'missing')
+      void notify(`${game.title} ${missing ? 'is missing files' : 'has damaged files'}`, `${plainSummary(found, 2)} Open the game to get them back.`)
+    })
+    .catch(() => {})
+}
+

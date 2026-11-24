@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { KryoFix } from '@/library/KryoFix'
 import { pickPath } from '@/lib/pick'
 import { FolderOpen, Glasses, Play, Trash2 } from '@/ui/pixel-icons'
 import { Button, Check, CommandLine, Dropdown, Modal, Panes, Section, Segmented, inputCls } from '@/ui'
@@ -26,6 +25,7 @@ import { cn } from '@/lib/utils'
 import { openSettingsSection } from '@/lib/window'
 import { VersionsList, type GetOurs } from '@/library/Versions'
 import { GameRepair } from '@/library/GameRepair'
+import { FilesRow } from '@/library/FilesRow'
 import { GameLogs } from '@/library/GameLogs'
 import { GameController } from '@/library/GameController'
 import { usePadStore } from '@/hooks/usePads'
@@ -38,7 +38,8 @@ const TABS = [
   ['artwork', 'Artwork'],
   ...(isWindowsHost() ? [] : ([['compat', 'Compatibility']] as const)),
   ['files', 'Installed files'],
-  ['repair', 'Repair game'],
+  // The emulator and the fixes: named for what is switched there, not hidden under Repair.
+  ['repair', 'Emulator & fixes'],
   ['versions', 'Builds'],
   ['kryoto', 'kryo.to'],
   ['logs', 'Logs'],
@@ -146,7 +147,7 @@ export function GameProperties({
     }
     setBusy(true)
     try {
-      const c = await fetchCatalogGame(slug)
+      const c = await fetchCatalogGame(slug, { ask: true })
       setDraft((d) => ({
         ...d,
         slug,
@@ -347,6 +348,20 @@ export function GameProperties({
               </div>
               ) : null}
             </Section>
+            {!windows ? (
+              <Section title="MangoHud" hint="The frame rate and load overlay, for this game alone. It shows when MangoHud is installed.">
+                <Segmented
+                  label="MangoHud in this game"
+                  value={draft.mangohud == null ? 'settings' : draft.mangohud ? 'on' : 'off'}
+                  options={[
+                    { value: 'settings', label: 'Same as Settings' },
+                    { value: 'on', label: 'On' },
+                    { value: 'off', label: 'Off' },
+                  ]}
+                  onChange={(v) => set('mangohud', v === 'settings' ? null : v === 'on')}
+                />
+              </Section>
+            ) : null}
             <Section title="Play runs">
               <CommandLine text={preview || '...'} />
             </Section>
@@ -429,8 +444,17 @@ export function GameProperties({
 
         {tab === 'repair' ? (
           <>
-            {game.slug ? <KryoFix gameId={game.id} slug={game.slug} onGet={() => onOurs(null)} /> : null}
-            <GameRepair gameId={game.id} />
+            {/* Emulator and Online fix (kryo.to's own fix first, then online-fix.me's), off with the auto-fixer. */}
+            <GameRepair gameId={game.id} slug={game.slug} onLeave={onClose} view="row" onGetFix={() => onOurs(null)} />
+            {/* Outside GameRepair: a release the auto-fixer is off for still has its files checked. */}
+            <FilesRow
+              game={game}
+              running={false}
+              onGetFiles={() => {
+                onClose()
+                onOurs(null)
+              }}
+            />
           </>
         ) : null}
         {tab === 'versions' ? (

@@ -10,6 +10,22 @@ export const WAYS_AROUND = [
   'Ask your internet provider, or whoever runs this network, to unblock kryo.to.',
 ]
 
+/**
+ * The three things that matter, said on the screen itself: a player whose
+ * network blocks kryo.to may not reach a help page on kryo.to either.
+ */
+export const ESSENTIAL_STEPS = [
+  'Try another DNS, such as 1.1.1.1 (Cloudflare).',
+  'Or turn on a VPN.',
+  'Your Library and installed games keep working meanwhile.',
+]
+
+/**
+ * kryo.to's page on what to do when a network blocks it ("More on kryo.to",
+ * for when it loads). A constant, so its final address can be set in one place.
+ */
+export const BLOCKED_HELP_URL = 'https://kryo.to/help/blocked'
+
 /** The one line that says it, for the notice above the footer and the Store. */
 export const BLOCKED_LINE = 'Your network seems to be blocking kryo.to. A VPN, your phone’s hotspot or other DNS gets around it.'
 
@@ -27,7 +43,10 @@ export function NetworkBlocked({ health }: { health: ServiceHealth }) {
       setShown(true)
       setOpen(true)
     }
-  }, [health.blocked, shown])
+    // kryo.to answers again: nothing is blocking it any more, so the
+    // pop-up does not stay saying it is.
+    if (!health.blocked && open) setOpen(false)
+  }, [health.blocked, shown, open])
   if (!open) return null
   return (
     <Modal

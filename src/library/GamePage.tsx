@@ -402,7 +402,7 @@ export function GamePage({
             {reuploaded ? (
               <>kryo.to has a new upload of {game.version ? <b className="text-foreground">{game.version}</b> : 'this game'}: the file you installed was replaced.</>
             ) : (
-              <>A newer build is on kryo.to <b className="text-foreground">{latest}</b>. You have {game.version}.</>
+              <>A newer build is on kryo.to <b className="text-foreground">{latest}</b>. You have {game.version ?? (game.unverified ? 'a copy from your own file' : 'an older one')}.</>
             )}
             {updateError ? <span className="block text-destructive">{updateError}</span> : null}
           </span>
@@ -450,7 +450,15 @@ export function GamePage({
           ) : game.keepFiles ? null : (
             <>
               {repairStuck ? <Button size="sm" variant="primary" disabled={running} onClick={() => keepFiles(true)}>Keep my files</Button> : null}
-              <Button size="sm" variant="outline" disabled={running} onClick={onRepair}>Repair game</Button>
+              {/* A release the auto-fixer cannot fix offers its own notice, not Repair game (lib/autofix.ts). */}
+              {catalog?.noAutofix ? (
+                <span className="block w-full text-xs text-muted-foreground">
+                  {catalog.noAutofix.notice}
+                  {catalog.noAutofix.reason ? ` Why: ${catalog.noAutofix.reason}` : null}
+                </span>
+              ) : (
+                <Button size="sm" variant="outline" disabled={running} onClick={onRepair}>Repair game</Button>
+              )}
             </>
           )}
           {error ? (
@@ -485,8 +493,15 @@ export function GamePage({
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
             {game.developer ? <Fact k="Developer" v={game.developer} /> : null}
             {game.source ? <Fact k="Release" v={game.source} /> : null}
-            {game.version ? (
-              <Fact k="Build" v={kept ? `${game.version}, kept${latest && latest !== game.version ? ` (current is ${latest})` : ''}` : game.version} />
+            {game.version || game.unverified ? (
+              <Fact
+                k="Build"
+                v={[
+                  kept ? `${game.version}, kept${latest && latest !== game.version ? ` (current is ${latest})` : ''}` : game.version,
+                  // Installed from the player's own file that matched nothing kryo.to lists.
+                  game.unverified ? "from your own file, not verified against Kryoto's copy" : null,
+                ].filter(Boolean).join(', ')}
+              />
             ) : null}
             <Fact k="Folder" v={game.installDir} mono />
             {/* The file Play starts, changeable right here: a release can name

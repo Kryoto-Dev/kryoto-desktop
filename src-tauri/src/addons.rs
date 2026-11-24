@@ -89,9 +89,9 @@ fn move_recording(from: &Path, to: &Path, root: &Path, backup: &Path, own: &[Str
 }
 
 /// The game's own folder: the top folder in its library folder, or where it is.
-fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
+pub(crate) fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
     let folders = crate::settings::all_folders(&crate::settings::load(app));
-    crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir))
+    crate::storage::game_folder(&folders, game).unwrap_or_else(|| PathBuf::from(&game.install_dir))
 }
 
 /// Unpack a downloaded add-on into its game (called by the download runner).
@@ -110,7 +110,11 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
             // A row named from its file reads "Forts DLC - Firebird" or
             // "Forts - DLC Firebird": the game comes first.
             let game = downloads::dlc_parts(&item.meta.title).map(|(game, _)| game).unwrap_or_else(|| item.meta.title.clone());
-            format!("{label} is an add-on. Install {game} first, then download it again.")
+            if item.from_file {
+                format!("{label} is an add-on for {game}. Install {game} first, then press Retry here. Your file stays where it is.")
+            } else {
+                format!("{label} is an add-on. Install {game} first, then download it again.")
+            }
         })?;
     // Its files are in use while it runs. The archive stays, so Retry is quick.
     if library::is_running(app, &game.id) {
@@ -169,8 +173,8 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
         }
         Ok(())
     })?;
-    if settings.delete_archives {
-        let _ = std::fs::remove_file(&item.archive_path);
+    if let Some(path) = downloads::own_archive(&item).filter(|_| settings.delete_archives) {
+        let _ = std::fs::remove_file(path);
     }
     downloads::finish_as(app, id, &game);
     crate::logging::info("addons", &format!("{label} applied to {} ({count} files)", game.title));
@@ -190,8 +194,21 @@ pub async fn addons_list(app: AppHandle, slug: String) -> Result<serde_json::Val
     if slug.is_empty() || !slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return Err("That is not a kryo.to game.".into());
     }
+    // A game kryo.to took off has no add-ons to list, and is not asked again
+    // for a day (catalog_gone.rs): its Library page asked on every visit.
+    let none = || serde_json::json!([]);
+    if crate::catalog_gone::is_gone(&app, &slug) {
+        return Ok(none());
+    }
     let json = match crate::phone::session(&app) {
-        Ok(session) => crate::phone::listing(&session, &slug).await?,
+        Ok(session) => match crate::phone::listing(&session, &slug).await {
+            Ok(json) => json,
+            Err(e) if crate::phone::listing_says_gone(&e) => {
+                crate::catalog_gone::set(&app, &slug, true);
+                return Ok(none());
+            }
+            Err(e) => return Err(e),
+        },
         Err(_) => {
             let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(&app));
             let client = crate::net::builder()
@@ -199,14 +216,16 @@ pub async fn addons_list(app: AppHandle, slug: String) -> Result<serde_json::Val
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|e| e.to_string())?;
-            client
+            let res = client
                 .get(format!("{endpoint}/api/games/{slug}/downloads"))
                 .send()
                 .await
-                .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?
-                .json::<serde_json::Value>()
-                .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("Could not reach kryo.to: {}", crate::logging::why(&e)))?;
+            if crate::catalog_gone::says_gone(res.status().as_u16()) {
+                crate::catalog_gone::set(&app, &slug, true);
+                return Ok(none());
+            }
+            res.json::<serde_json::Value>().await.map_err(|e| e.to_string())?
         }
     };
     Ok(json.get("addons").cloned().unwrap_or_else(|| serde_json::json!([])))
@@ -286,12 +305,14 @@ fn requests_for(addons: &[serde_json::Value], ids: &[String]) -> (Vec<downloads:
 /// the answer says to use the game's download window instead.
 #[tauri::command]
 pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>) -> Result<AddonsGot, String> {
+    crate::required::refuse()?;
     let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     let slug = game.slug.clone().ok_or("This game is not from kryo.to, so it has no add-ons there.")?;
     if library::is_running(&app, &game.id) {
         return Err(format!("Close {} first: its files are in use.", game.title));
     }
-    let Ok(session) = crate::phone::session(&app) else {
+    // Only a signed-in app can mint them (KB-0326): a guest gets the window.
+    let Some(session) = crate::phone::session(&app).ok().filter(|s| s.signed_in()) else {
         return Ok(AddonsGot { queued: Vec::new(), store: true });
     };
     let listing = crate::phone::listing(&session, &slug).await?;
@@ -351,8 +372,8 @@ async fn install_fix<R: Runtime>(
         crate::logging::error("addons", &format!("{label} on {}: {e}", game.title));
         e
     })?;
-    if settings.delete_archives {
-        let _ = std::fs::remove_file(&item.archive_path);
+    if let Some(path) = downloads::own_archive(item).filter(|_| settings.delete_archives) {
+        let _ = std::fs::remove_file(path);
     }
     downloads::finish_as(app, id, game);
     crate::logging::info("addons", &format!("{label} applied to {} as a repair ({} files)", game.title, plan.placements.len()));

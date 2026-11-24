@@ -538,6 +538,12 @@ html[data-motion='reduced'] .kryo-matrix > i { animation: none !important; }
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
+/* A touch screen: no title-bar regions at all, or a tap on a control inside
+   one never arrives (KB-0369). lib/window-drag.ts moves the window instead. */
+[data-touch] .drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
 
 /* The window buttons: Windows 11's own glyphs and sizes. */
 .kryo-caption {
@@ -770,6 +776,12 @@ html[data-os='linux'][data-window='popup'] .kryo-square.border.bg-popover {
 html.kryo-pad :focus {
   outline: 3px solid var(--primary);
   outline-offset: 2px;
+}
+/* A button that covers a whole card (the cover that opens a game) sits in a
+   card that clips what is outside it: the ring goes just inside instead, or
+   the selection on a game card did not show at all. */
+html.kryo-pad .absolute.inset-0:focus {
+  outline-offset: -4px;
 }
 
 /* Tooltips (ui/GlobalTooltip.tsx), as kryo.to draws them. */

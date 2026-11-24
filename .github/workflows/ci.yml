@@ -165,6 +165,9 @@ jobs:
       - name: Shared saves engine tests
         run: cargo test --locked --manifest-path crates/kryoto-saves/Cargo.toml
 
+      - name: Bridge readers and Lutris writer tests
+        run: cargo test --locked --manifest-path crates/kryoto-import/Cargo.toml
+
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings

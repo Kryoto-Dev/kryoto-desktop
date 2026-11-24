@@ -12,6 +12,8 @@ import { RuntimesPrompt, useStartupRuntimes } from '@/boot/RuntimesPrompt'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { isTauri, exitApp, mountStore, navigateCatalog, openExternal, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
 import { isOutage, pokeHealth, useServiceHealth } from '@/lib/health'
+import { BLOCKED_LINE, ESSENTIAL_STEPS } from '@/shell/NetworkBlocked'
+import { HelpButton } from '@/shell/WebView'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
@@ -44,7 +46,7 @@ function BoxControls() {
 }
 
 /** The box is the whole window; Windows rounds it and draws its shadow. A night scene in every theme. */
-function Box({ children, className }: { children: ReactNode; className?: string }) {
+export function Box({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <main className={cn('kryo-night drag kryo-square relative h-full overflow-hidden bg-background text-foreground', className)}>
       <BoxControls />
@@ -132,6 +134,8 @@ export function Welcome({
   // Try again shows it is trying, until kryo.to answers or the wait runs out.
   const health = useServiceHealth()
   const outage = isOutage(health)
+  // This network, not Kryoto: said here as the Store says it, and before "down".
+  const blocked = !!health.blocked || page.error?.kind === 'blocked'
   const [retrying, setRetrying] = useState(false)
   const [noAnswer, setNoAnswer] = useState(false)
   const retry = useRef(onRetry)
@@ -216,30 +220,37 @@ export function Welcome({
                 <p role="status" className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
                   {retrying
                     ? 'Trying again'
-                    : health.state === 'down'
-                      ? 'Kryoto is down right now'
-                      : noAnswer
-                        ? 'Still no answer from kryo.to'
-                        : page.error || outage
-                          ? 'kryo.to is not answering'
-                          : slow
-                            ? 'kryo.to is slow to answer'
-                            : 'Checking your account'}
+                    : blocked
+                      ? 'kryo.to did not load here'
+                      : health.state === 'down'
+                        ? 'Kryoto is down right now'
+                        : noAnswer
+                          ? 'Still no answer from kryo.to'
+                          : page.error || outage
+                            ? 'kryo.to is not answering'
+                            : slow
+                              ? 'kryo.to is slow to answer'
+                              : 'Checking your account'}
                 </p>
-                {page.error || slow || outage ? (
+                {page.error || slow || outage || blocked ? (
                   <>
+                    {blocked ? <BlockedLine /> : null}
                     <Button size="sm" busy={retrying} busyLabel="Trying again" onClick={tryAgain}>
                       <RotateCw className="size-3" />
                       Try again
                     </Button>
                     <GuestButton onGuest={onGuest} />
-                    <button
-                      type="button"
-                      onClick={() => void openExternal(health.statusUrl)}
-                      className="kryo-pill px-2 text-[10px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
-                    >
-                      See what is happening on the status page
-                    </button>
+                    {blocked ? (
+                      <HelpButton />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void openExternal(health.statusUrl)}
+                        className="kryo-pill px-2 text-[10px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                      >
+                        See what is happening on the status page
+                      </button>
+                    )}
                   </>
                 ) : null}
               </>
@@ -269,6 +280,12 @@ export function Welcome({
                   Sign in with kryo.to
                 </Button>
                 <GuestButton onGuest={onGuest} />
+                {blocked ? (
+                  <>
+                    <BlockedLine />
+                    <HelpButton />
+                  </>
+                ) : null}
               </>
             )}
           </div>
@@ -278,6 +295,20 @@ export function Welcome({
         {__APP_VERSION__}
       </p>
     </Box>
+  )
+}
+
+/** This network blocks kryo.to, and what gets around it. */
+function BlockedLine() {
+  return (
+    <div className="grid max-w-72 gap-1 text-[11px] leading-relaxed text-muted-foreground">
+      <p className="text-center">{BLOCKED_LINE}</p>
+      <ul className="grid list-disc gap-0.5 pl-5 text-left">
+        {ESSENTIAL_STEPS.map((s) => (
+          <li key={s}>{s}</li>
+        ))}
+      </ul>
+    </div>
   )
 }
 
@@ -293,6 +324,18 @@ function GuestButton({ onGuest }: { onGuest: () => void }) {
       </p>
     </>
   )
+}
+
+/** How long the box says "Signing you in" before it shows the page again. */
+const FINISH_WAIT_MS = 12_000
+
+/** kryo.to's pages for signing in, where the box stays open. */
+function onSignInPage(url: string): boolean {
+  try {
+    return /^\/(login|register|signup|link|invite|recover|forgot-password|reset-password|verify-email)(\/|$)/.test(new URL(url).pathname)
+  } catch {
+    return true
+  }
 }
 
 /** kryo.to's sign-in page in a box, in the Store's web view. */
@@ -325,6 +368,22 @@ function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack
     }
   }, [])
 
+  // Signed in on the page: it moves on from the sign-in pages while the app
+  // takes the account in. Said here, over the page, until the account arrives
+  // (Welcome then goes on by itself); a page that stays somewhere else for long
+  // is shown again.
+  const finishing = opened && !page.loading && !page.error && !!page.url && !onSignInPage(page.url)
+  const [stale, setStale] = useState(false)
+  useEffect(() => {
+    setStale(false)
+    if (!finishing || !isTauri()) return
+    void setStoreVisible(false)
+    const t = window.setTimeout(() => {
+      setStale(true)
+      void setStoreVisible(true)
+    }, FINISH_WAIT_MS)
+    return () => window.clearTimeout(t)
+  }, [finishing])
   const ready = opened && !page.loading
   return (
     <section className="no-drag kryo-pop kryo-radius grid min-h-0 w-[460px] grid-rows-[auto_1fr] overflow-hidden border border-border bg-background shadow-2xl shadow-black/70">
@@ -357,6 +416,13 @@ function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack
             <Button variant="primary" onClick={onRetry}>
               Try again
             </Button>
+          </>
+        ) : finishing && !stale ? (
+          <>
+            <Matrix state="busy" className="size-5 text-foreground/70" />
+            <p role="status" className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
+              Signing you in
+            </p>
           </>
         ) : !ready ? (
           <AsciiBar fraction={null} cells={16} showPct={false} className="text-muted-foreground" />

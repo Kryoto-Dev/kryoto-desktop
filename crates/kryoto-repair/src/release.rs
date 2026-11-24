@@ -163,32 +163,23 @@ pub async fn install<F: Fn(&str, Option<u8>)>(
     );
     use sha2::Digest;
     let dir = safe_path(cache, &key)?;
-    let complete = dir.join("complete.json");
-    if let Ok(text) = std::fs::read_to_string(&complete) {
-        if let Ok(stored) = serde_json::from_str::<Cache>(&text) {
-            let expected = asset
-                .digest
-                .as_deref()
-                .and_then(|s| s.strip_prefix("sha256:"));
-            if stored.version == release.tag_name
-                && expected.is_none_or(|s| s == stored.archive_sha256)
-                && !stored.files.is_empty()
-                && stored.files.iter().all(|(p, hash)| {
-                    safe_path(&dir, p)
-                        .and_then(|p| digest(&p))
-                        .is_ok_and(|h| h == *hash)
-                })
-            {
-                return Ok(Tools {
-                    version: stored.version,
-                    archive_sha256: stored.archive_sha256,
-                    paths: locate(&dir, source)?,
-                });
-            }
-        }
-        return Err(
-            "The cached emulator files changed. Delete this tool cache and try again.".into(),
-        );
+    let expected = asset
+        .digest
+        .as_deref()
+        .and_then(|s| s.strip_prefix("sha256:"));
+    if let Some(stored) = cached(&dir, &release.tag_name, expected) {
+        return Ok(Tools {
+            version: stored.version,
+            archive_sha256: stored.archive_sha256,
+            paths: locate(&dir, source)?,
+        });
+    }
+    // KB-0382: a copy whose files changed since it was unpacked (an antivirus
+    // holding back a DLL, most often) or one left half unpacked is stale, not
+    // an error: it goes, and the emulator is fetched and checked again.
+    if dir.exists() {
+        progress(&format!("Kryoto's copy of {} changed on this PC; getting it again", source.label()), None);
+        discard(cache, &key, &dir).map_err(|why| stuck_cache(source.label(), &dir, &why))?;
     }
     // A unique fresh directory avoids trusting a half-unpacked previous attempt.
     let stage = safe_path(
@@ -224,10 +215,7 @@ pub async fn install<F: Fn(&str, Option<u8>)>(
         output.write_all(&chunk).map_err(|e| e.to_string())?;
         let percent = ((done * 100 / asset.size).min(100)) as u8;
         if last != Some(percent) {
-            progress(
-                &format!("Downloading {} latest release", source.label()),
-                Some(percent),
-            );
+            progress(&fetching_line(source.label(), done, asset.size), Some(percent));
             last = Some(percent);
         }
     }
@@ -248,10 +236,14 @@ pub async fn install<F: Fn(&str, Option<u8>)>(
             );
         }
     }
-    progress("Unpacking the emulator", None);
+    progress(&format!("Unpacking {}, once: Kryoto keeps it for next time", source.label()), None);
     let unpacked = stage.join("files");
     std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
-    unpack(&archive, &unpacked)?;
+    // Its files as they come out, so a slow disk or a big archive never
+    // looks stuck (the first switch sat on one line for minutes).
+    unpack(&archive, &unpacked, &|files| {
+        progress(&format!("Unpacking {}, once: {files} files so far", source.label()), None)
+    })?;
     let _ = locate(&unpacked, source)?;
     let mut files = BTreeMap::new();
     for entry in walkdir::WalkDir::new(&unpacked)
@@ -278,11 +270,17 @@ pub async fn install<F: Fn(&str, Option<u8>)>(
         serde_json::to_vec(&metadata).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    // This cache path is validated under cache; only unused/incomplete files exist here.
+    // Another repair may have put a copy there meanwhile: a whole one is used,
+    // anything else goes as above.
     if dir.exists() {
-        return Err("An incomplete emulator cache exists. Remove it and try again.".into());
+        if cached(&dir, &release.tag_name, Some(hash.as_str())).is_none() {
+            discard(cache, &key, &dir).map_err(|why| stuck_cache(source.label(), &dir, &why))?;
+        } else {
+            let _ = std::fs::remove_dir_all(&stage);
+            return Ok(Tools { version: release.tag_name, archive_sha256: hash, paths: locate(&dir, source)? });
+        }
     }
-    std::fs::rename(&unpacked, &dir).map_err(|e| e.to_string())?;
+    std::fs::rename(&unpacked, &dir).map_err(|e| stuck_cache(source.label(), &dir, &e.to_string()))?;
     std::fs::remove_file(archive).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir(stage);
     Ok(Tools {
@@ -292,12 +290,67 @@ pub async fn install<F: Fn(&str, Option<u8>)>(
     })
 }
 
-fn unpack(archive: &Path, root: &Path) -> Result<(), String> {
+/// The emulator unpacked in `dir` before, whole: the same release (and, when
+/// it is known, the same archive), every file as it was unpacked.
+fn cached(dir: &Path, tag: &str, archive_sha256: Option<&str>) -> Option<Cache> {
+    let stored: Cache = serde_json::from_str(&std::fs::read_to_string(dir.join("complete.json")).ok()?).ok()?;
+    let whole = stored.version == tag
+        && archive_sha256.is_none_or(|s| s == stored.archive_sha256)
+        && !stored.files.is_empty()
+        && stored.files.iter().all(|(p, hash)| {
+            safe_path(dir, p)
+                .and_then(|p| digest(&p))
+                .is_ok_and(|h| h == *hash)
+        });
+    whole.then_some(stored)
+}
+
+/// Clear a stale copy out of the way: deleted, or, when something holds a
+/// file in it, renamed aside (and deleted as far as it can be) so the fresh
+/// copy can take its place. Only ever a folder of this tool cache.
+fn discard(cache: &Path, key: &str, dir: &Path) -> Result<(), String> {
+    if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+        return Ok(());
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let aside = safe_path(cache, &format!("{key}-stale-{nanos}"))?;
+    std::fs::rename(dir, &aside).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(&aside);
+    Ok(())
+}
+
+/// The cache could not be replaced: where it is, in words, so the player can
+/// delete it (Kryoto Desktop's Repair adds an Open folder button for it).
+fn stuck_cache(label: &str, dir: &Path, why: &str) -> String {
+    format!(
+        "Kryoto's copy of {label} in {} changed on this PC and could not be replaced ({why}). Open that folder, delete it, then press Repair again.",
+        dir.display()
+    )
+}
+
+/// What the player reads while an emulator comes from its upstream release:
+/// that it happens once, and how far it is.
+fn fetching_line(label: &str, done: u64, size: u64) -> String {
+    let mb = |b: u64| b as f64 / 1_048_576.0;
+    format!(
+        "Getting {label}, once (Kryoto keeps it for next time): {:.1} of {:.1} MB",
+        mb(done),
+        mb(size)
+    )
+}
+
+fn unpack(archive: &Path, root: &Path, files_out: &dyn Fn(u32)) -> Result<(), String> {
     let mut total = 0u64;
     let mut count = 0u32;
     if archive.extension().is_some_and(|e| e == "7z") {
         sevenz_rust::decompress_file_with_extract_fn(archive, root, |entry, reader, _| {
             count += 1;
+            if count.is_multiple_of(10) {
+                files_out(count);
+            }
             total = total.saturating_add(entry.size());
             if count > 10000 || total > 1024 * 1024 * 1024 {
                 return Err(sevenz_rust::Error::other(
@@ -324,6 +377,9 @@ fn unpack(archive: &Path, root: &Path) -> Result<(), String> {
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
             count += 1;
+            if count.is_multiple_of(10) {
+                files_out(count);
+            }
             total = total.saturating_add(entry.size());
             if count > 10000
                 || total > 1024 * 1024 * 1024
@@ -401,4 +457,68 @@ pub fn locate(root: &Path, source: Emulator) -> Result<ToolPaths, String> {
         return Err("The emulator archive is missing required files.".into());
     }
     Ok(paths)
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    #[test]
+    fn the_emulator_download_says_it_happens_once_and_how_far_it_is() {
+        let line = super::fetching_line("gbe_fork", 3 * 1_048_576, 12 * 1_048_576);
+        assert_eq!(line, "Getting gbe_fork, once (Kryoto keeps it for next time): 3.0 of 12.0 MB");
+    }
+
+    /// A cached emulator copy as `install` leaves it: one file and its record.
+    fn cache_with(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("steam_api64.dll"), b"the emulator").unwrap();
+        let files = [("steam_api64.dll".to_string(), crate::journal::digest(&dir.join("steam_api64.dll")).unwrap())].into_iter().collect();
+        let record = super::Cache { version: "v1".into(), archive_sha256: "aa".into(), files };
+        std::fs::write(dir.join("complete.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    /// KB-0382: a copy whose file changed (an antivirus quarantining a DLL)
+    /// is stale: it is not used, and it is cleared so a fresh one can be
+    /// fetched, rather than stopping Repair with no way out.
+    #[test]
+    fn an_altered_emulator_cache_is_cleared_for_a_fresh_copy() {
+        let cache = std::env::temp_dir().join(format!("kryoto-emu-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let dir = cache.join("key");
+        cache_with(&dir);
+        assert!(super::cached(&dir, "v1", Some("aa")).is_some());
+        // Another release or another archive is not this copy.
+        assert!(super::cached(&dir, "v2", None).is_none());
+        assert!(super::cached(&dir, "v1", Some("bb")).is_none());
+        // Altered, or half unpacked: stale.
+        std::fs::write(dir.join("steam_api64.dll"), b"quarantined").unwrap();
+        assert!(super::cached(&dir, "v1", Some("aa")).is_none());
+        super::discard(&cache, "key", &dir).unwrap();
+        assert!(!dir.exists());
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(super::cached(&dir, "v1", None).is_none());
+        super::discard(&cache, "key", &dir).unwrap();
+        assert!(!dir.exists() && cache.exists());
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// When even that fails (a file in it held open), the message names the
+    /// folder so the player can delete it.
+    #[cfg(windows)]
+    #[test]
+    fn a_cache_that_cannot_be_cleared_is_named() {
+        let cache = std::env::temp_dir().join(format!("kryoto-emu-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let dir = cache.join("key");
+        cache_with(&dir);
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // No sharing: neither a delete nor a rename of its folder gets past it.
+            std::fs::OpenOptions::new().read(true).share_mode(0).open(dir.join("steam_api64.dll")).unwrap()
+        };
+        let why = super::discard(&cache, "key", &dir).unwrap_err();
+        let text = super::stuck_cache("gbe_fork", &dir, &why);
+        assert!(text.contains(&dir.display().to_string()) && text.contains("Open that folder"), "{text}");
+        drop(held);
+        let _ = std::fs::remove_dir_all(&cache);
+    }
 }

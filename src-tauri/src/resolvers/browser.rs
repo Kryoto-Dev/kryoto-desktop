@@ -372,6 +372,131 @@ pub async fn solve<R: Runtime>(app: &AppHandle<R>, page: &str, host: &str, mode:
     outcome
 }
 
+/// How long a person has to click the file in `save_in_window`.
+const SAVE_IDLE: Duration = Duration::from_secs(20 * 60);
+/// And for it to finish once started (a fix is megabytes, not gigabytes).
+const SAVE_BUDGET: Duration = Duration::from_secs(60 * 60);
+
+/// What `save_in_window` waits for.
+#[derive(Default)]
+struct Saving {
+    started: Mutex<Option<std::path::PathBuf>>,
+    done: Mutex<Option<Result<std::path::PathBuf, String>>>,
+    refused: Mutex<Vec<String>>,
+}
+
+/// A file only a real browser window is given, kept by that window itself:
+/// online-fix.me's uploads host answers 403 to anything but the window that
+/// opened its folder, so unlike `solve` the download is not handed to the
+/// download manager (a second request would be refused). `folder` opens for
+/// the person, nothing on it is pressed, and only `file` is saved, into
+/// `dest_dir`; anything else the page or an ad starts is refused. The same
+/// window, profile and blockers as `solve`, one at a time with it.
+pub async fn save_in_window<R: Runtime>(app: &AppHandle<R>, folder: &Url, file: &Url, dest_dir: &std::path::Path, title: &str) -> Result<std::path::PathBuf, String> {
+    let _slot = tokio::time::timeout(BUDGET, SLOT.lock()).await.map_err(|_| "another download window is still open".to_string())?;
+    if let Some(w) = app.get_webview_window(LABEL) {
+        let _ = w.destroy();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    std::fs::create_dir_all(dest_dir).map_err(|e| format!("could not make a folder for it ({e})"))?;
+    let shared = Arc::new(Shared::default());
+    if let Ok(mut a) = ACTIVE.lock() {
+        *a = Some(shared.clone());
+    }
+    let _active_reset = ActiveReset;
+    let saving = Arc::new(Saving::default());
+    let (on_dl, nav_app) = (saving.clone(), app.clone());
+    let (want, dest) = (file.clone(), dest_dir.join(kryoto_repair::fixsite::file_name(file)));
+    let initial = if cfg!(windows) { "about:blank".parse().unwrap() } else { folder.clone() };
+    let builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(initial))
+        .title(title)
+        .inner_size(1000.0, 720.0)
+        .min_inner_size(420.0, 320.0)
+        .center()
+        .on_download(move |_, event| match event {
+            DownloadEvent::Requested { url, destination } => {
+                if !kryoto_repair::fixsite::same_file(&url, &want) {
+                    if let Ok(mut r) = on_dl.refused.lock() {
+                        r.push(url.path().rsplit('/').next().unwrap_or("").to_string());
+                    }
+                    return false;
+                }
+                let _ = std::fs::remove_file(&dest);
+                *destination = dest.clone();
+                if let Ok(mut s) = on_dl.started.lock() {
+                    *s = Some(dest.clone());
+                }
+                true
+            }
+            DownloadEvent::Finished { url, path, success } => {
+                if kryoto_repair::fixsite::same_file(&url, &want) {
+                    if let Ok(mut d) = on_dl.done.lock() {
+                        *d = Some(if success { Ok(path.unwrap_or_else(|| dest.clone())) } else { Err("the download failed or was cancelled in the window".into()) });
+                    }
+                }
+                true
+            }
+            _ => true,
+        })
+        // The site's own links that open a tab load here, where the download
+        // is caught; anything else (ads) is refused.
+        .on_new_window(move |target, _| {
+            if kryoto_repair::fixsite::is_online_fix(&target) {
+                if let Some(w) = nav_app.get_webview_window(LABEL) {
+                    let _ = w.navigate(target);
+                }
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .on_navigation(move |nav| {
+            if crate::discord_web::is_discord_page(nav) {
+                let target = nav.to_string();
+                std::thread::spawn(move || {
+                    let _ = crate::open_external(target);
+                });
+                return false;
+            }
+            true
+        });
+    #[cfg(windows)]
+    let builder = builder.browser_extensions_enabled(true).data_directory(app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("mirror-browser"));
+    let window = builder.build().map_err(|e| format!("could not open the window ({})", crate::logging::why(&e)))?;
+    #[cfg(target_os = "linux")]
+    crate::adblock::install_mirror(&window);
+    #[cfg(windows)]
+    {
+        if let Err(error) = super::ublock::install(&window).await {
+            // A window without its blocker still works; it is only noisier.
+            crate::logging::warn("resolver", &format!("uBlock did not start ({error}); the window opens without it"));
+        }
+        window.navigate(folder.clone()).map_err(|e| {
+            let _ = window.destroy();
+            format!("could not open its page ({e})")
+        })?;
+    }
+    let _ = window.set_focus();
+    let started = Instant::now();
+    let outcome = loop {
+        tokio::time::sleep(TICK).await;
+        if let Some(done) = saving.done.lock().ok().and_then(|mut d| d.take()) {
+            break done;
+        }
+        if shared.cancelled.load(std::sync::atomic::Ordering::SeqCst) || app.get_webview_window(LABEL).is_none() {
+            break Err("the window was closed before the file was downloaded".into());
+        }
+        let began = saving.started.lock().map(|s| s.is_some()).unwrap_or(false);
+        if started.elapsed() > if began { SAVE_BUDGET } else { SAVE_IDLE } {
+            break Err("the window was open too long without the file downloading".into());
+        }
+    };
+    let _ = window.destroy();
+    let refused = saving.refused.lock().map(|r| r.len()).unwrap_or(0);
+    if refused > 0 {
+        crate::logging::info("resolver", &format!("{refused} other download(s) in the window were refused"));
+    }
+    outcome
+}
+
 /// filez.stream's verification, passed in its own page.
 pub struct FilezAccess {
     /// Its access cookies (`__Host-fz-download`, `__Host-fz-preview`).

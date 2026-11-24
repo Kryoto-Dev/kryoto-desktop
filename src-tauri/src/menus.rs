@@ -29,6 +29,12 @@ pub const LABEL: &str = "popup";
 /// the window, in logical pixels.
 const GAP: f64 = 6.0;
 
+/// A menu's height inside a window `room` tall, a gap from each edge. Its page
+/// scrolls the rest (PopupApp.tsx).
+fn fit_height(height: f64, room: f64) -> f64 {
+    height.min((room - 2.0 * GAP).max(20.0))
+}
+
 /// How long a menu may take to come up before its view is made again. A dead
 /// renderer answers nothing, and only the menus in this view would stop working.
 const READY_WAIT: Duration = Duration::from_millis(2500);
@@ -328,6 +334,9 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64, s
         menu_scale.map_or(1.0, |menu| menu / scale)
     };
     let (width, height) = ((width * ratio).ceil().max(40.0), (height * ratio).ceil().max(20.0));
+    // Never taller than the window: the page scrolls its rows (PopupApp.tsx),
+    // where a menu past the bottom edge had rows nobody could reach.
+    let height = fit_height(height, inner.height);
     let tip = menu == "tip";
     let x = match (tip, right) {
         (true, _) => (anchor.left + anchor.right - width) / 2.0,
@@ -405,4 +414,19 @@ pub fn menu_close(app: AppHandle, menu: Option<String>, back: Option<bool>) {
 #[tauri::command]
 pub fn menu_hover(app: AppHandle, inside: bool) {
     let _ = app.emit_to("main", "menu-hover", inside);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_menu_taller_than_the_window_is_cut_to_it_and_scrolls() {
+        // A short window at a big text size: 420 CSS px of room, a 700 px menu.
+        assert_eq!(fit_height(700.0, 420.0), 420.0 - 2.0 * GAP);
+        // One that fits keeps its own height.
+        assert_eq!(fit_height(300.0, 420.0), 300.0);
+        // A window too small for anything still gets a usable view.
+        assert_eq!(fit_height(300.0, 10.0), 20.0);
+    }
 }

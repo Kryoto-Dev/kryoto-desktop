@@ -37,6 +37,7 @@ use std::sync::LazyLock;
 use tauri::{AppHandle, Runtime};
 
 pub use browser::cancel as cancel_browser;
+pub use browser::save_in_window;
 
 /// The user agent resolvers present, a current desktop Chrome: hosts that
 /// sniff for a browser get one, and it is replayed on the download itself.
@@ -160,10 +161,28 @@ pub fn classify(url: &str) -> Option<(Kind, &'static str)> {
     if mocha::share_token(url).is_some() {
         return Some((Kind::Api, "Mocha"));
     }
-    if host_matches(url, &DIRECT_RE) {
+    if host_matches(url, &DIRECT_RE) || dev_direct(url) {
         return Some((Kind::Direct, "catbox"));
     }
     page_host(url).map(|name| (Kind::Page, name))
+}
+
+/// Debug builds only: a local file server standing in for a direct mirror
+/// host (`KRYOTO_DEV_DIRECT_ORIGIN`), so a mirror taking over a download our
+/// own server keeps cutting can be run for real. Compiled out of releases.
+fn dev_direct(url: &str) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var("KRYOTO_DEV_DIRECT_ORIGIN").is_ok_and(|o| {
+            let o = o.trim().trim_end_matches('/');
+            !o.is_empty() && url.strip_prefix(o).is_some_and(|rest| rest.starts_with('/'))
+        })
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = url;
+        false
+    }
 }
 
 /// Links never opened for a download. MEGA decrypts its files inside its own

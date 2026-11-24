@@ -1,4 +1,4 @@
-import { catalogApiUrl } from '@/lib/endpoint'
+import { fetchGameApi } from '@/lib/library'
 
 /**
  * What kryo.to's testers found for a game, platform by platform
@@ -70,8 +70,8 @@ export type Compatibility = {
 
 /** Null when kryo.to has nothing to say: an older site, or a game nobody tested. */
 export async function fetchCompatibility(slug: string): Promise<Compatibility | null> {
-  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}/compatibility`))
-  if (!res.ok) return null
+  const res = await fetchGameApi(slug, '/compatibility')
+  if (!res?.ok) return null
   const json = (await res.json()) as {
     summary?: { headline?: string; platforms?: Record<Platform, PlatformSummary>; unspecified?: PlatformSummary }
     reports?: CompatReport[]

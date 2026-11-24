@@ -40,3 +40,5 @@ dist-web/
 # there, full of this PC's paths)
 .tmp-*/
 tmp/
+# The Hydra test library's LevelDB log is a fixture, not a log.
+!crates/kryoto-import/tests/fixtures/hydra-db/*.log

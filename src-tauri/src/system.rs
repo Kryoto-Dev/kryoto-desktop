@@ -217,9 +217,48 @@ pub fn os_notify(app: AppHandle, title: String, body: Option<String>) {
     });
 }
 
+/// A file or folder picker is open. One at a time on Windows, where the
+/// picker holds the whole window while it is up: a second press (one that got
+/// through while it opened behind Kryoto, KB-0020) says where it is instead of
+/// stacking another out of sight.
+#[cfg(windows)]
+static PICKING: AtomicBool = AtomicBool::new(false);
+
+/// Holds `PICKING` for one picker and lets go however it ends: picked,
+/// cancelled, closed, failed or panicked.
+#[cfg(windows)]
+struct PickerOpen;
+
+#[cfg(windows)]
+impl PickerOpen {
+    fn take() -> Result<Self, String> {
+        PICKING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| PickerOpen)
+            .map_err(|_| "Another file window is still open. It may be behind Kryoto: press Alt+Tab to find it, then pick a file or cancel.".to_string())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PickerOpen {
+    fn drop(&mut self) {
+        PICKING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// The system's file or folder picker, over the main window. Our own for the
 /// same reason as `os_notify`: the dialog plugin also swaps `alert` and
 /// `confirm` in every frame of the Store.
+///
+/// Every way it ends answers the page: a path, or null for Cancel (and for
+/// the window's own close button). Add a game's Browse, Find the .exe and
+/// Choose picture opened once and then never again (KB-0020, firesync), which
+/// is what a first answer that never arrives looks like: Choose picture stays
+/// busy waiting for it. On Windows the dialog now runs start to end on a
+/// thread of its own with rfd's plain blocking call, not rfd's future driven
+/// from the main thread: that future can lose its wake-up when the dialog ends
+/// while it is first checked (a dialog that fails to show ends at once), and
+/// then nothing answers.
 #[tauri::command]
 pub async fn pick_path(
     window: tauri::Window,
@@ -229,31 +268,77 @@ pub async fn pick_path(
     extensions: Option<Vec<String>>,
     filter_name: Option<String>,
 ) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    let open = PickerOpen::take()?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let parent = window.clone();
-    // Built on the main thread (GTK insists), awaited off it.
-    window
-        .run_on_main_thread(move || {
-            let mut dialog = rfd::AsyncFileDialog::new().set_parent(&parent).set_can_create_directories(true);
-            if let Some(title) = title {
-                dialog = dialog.set_title(title);
-            }
-            if let Some(dir) = default_path.filter(|p| std::path::Path::new(p).is_dir()) {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(ext) = extensions.filter(|e| !e.is_empty()) {
-                let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
-                dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("Games"), &ext);
-            }
-            type Picked = std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>;
-            let picked: Picked = if directory { Box::pin(dialog.pick_folder()) } else { Box::pin(dialog.pick_file()) };
-            std::thread::spawn(move || {
-                let path = tauri::async_runtime::block_on(picked).map(|h| h.path().display().to_string());
-                let _ = tx.send(path);
-            });
-        })
-        .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "The picker closed unexpectedly.".to_string())
+    let directory_ok = default_path.filter(|p| std::path::Path::new(p).is_dir());
+    #[cfg(windows)]
+    {
+        std::thread::Builder::new()
+            .name("file picker".into())
+            .spawn(move || {
+                let _open = open;
+                let mut dialog = rfd::FileDialog::new().set_parent(&parent).set_can_create_directories(true);
+                if let Some(title) = title {
+                    dialog = dialog.set_title(title);
+                }
+                if let Some(dir) = directory_ok {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(ext) = extensions.filter(|e| !e.is_empty()) {
+                    let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
+                    dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("Games"), &ext);
+                }
+                let picked = if directory { dialog.pick_folder() } else { dialog.pick_file() };
+                let _ = tx.send(picked.map(|p| p.display().to_string()));
+            })
+            .map_err(|e| format!("The file window could not open: {e}"))?;
+    }
+    // Linux: made and answered on Tauri's own GTK thread, the desktop's
+    // portal first, never rfd's second GTK loop (KB-0042, linux_pick.rs).
+    #[cfg(target_os = "linux")]
+    {
+        let ask = crate::linux_pick::Ask {
+            title: title.unwrap_or_else(|| if directory { "Choose a folder".into() } else { "Choose a file".into() }),
+            directory,
+            folder: directory_ok,
+            extensions: extensions.unwrap_or_default(),
+            filter_name: filter_name.unwrap_or_else(|| "Games".into()),
+        };
+        window
+            .run_on_main_thread(move || {
+                let gtk_parent = parent.gtk_window().ok().map(gtk::prelude::Cast::upcast::<gtk::Window>);
+                crate::linux_pick::open(gtk_parent, ask, tx);
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        // Built on the main thread (GTK insists), awaited off it.
+        window
+            .run_on_main_thread(move || {
+                let mut dialog = rfd::AsyncFileDialog::new().set_parent(&parent).set_can_create_directories(true);
+                if let Some(title) = title {
+                    dialog = dialog.set_title(title);
+                }
+                if let Some(dir) = directory_ok {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(ext) = extensions.filter(|e| !e.is_empty()) {
+                    let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
+                    dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("Games"), &ext);
+                }
+                type Picked = std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>;
+                let picked: Picked = if directory { Box::pin(dialog.pick_folder()) } else { Box::pin(dialog.pick_file()) };
+                std::thread::spawn(move || {
+                    let path = tauri::async_runtime::block_on(picked).map(|h| h.path().display().to_string());
+                    let _ = tx.send(path);
+                });
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    rx.await.map_err(|_| "The file window closed unexpectedly. Try again.".to_string())
 }
 
 #[tauri::command]
@@ -344,6 +429,14 @@ pub fn tray_action(app: AppHandle, action: String) -> Result<(), String> {
         }
         return Ok(());
     }
+    // From the tray, which opens when nothing else can be clicked (KB-0369).
+    if action == "hide-pet" {
+        crate::pet::hide(&app);
+        if let Some(panel) = app.get_webview_window(TRAY_PANEL_LABEL) {
+            let _ = panel.hide();
+        }
+        return Ok(());
+    }
     show_main(&app);
     if action != "open" {
         app.emit_to("main", "tray-go", action).map_err(|e| e.to_string())?;
@@ -371,15 +464,21 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         let downloads = MenuItem::with_id(app, "tray-downloads", "Downloads", true, None::<&str>)?;
         let settings = MenuItem::with_id(app, "tray-settings", "Settings", true, None::<&str>)?;
         let sep = PredefinedMenuItem::separator(app)?;
+        // For when the window cannot be used: the pet in the way (KB-0369),
+        // or a window that stays black on NVIDIA (KB-0377).
+        let hide_pet = MenuItem::with_id(app, "tray-hide-pet", "Hide the pet", true, None::<&str>)?;
+        let safe = MenuItem::with_id(app, "tray-safe-graphics", "Start in compatible graphics", true, None::<&str>)?;
+        let sep_safe = PredefinedMenuItem::separator(app)?;
         let exit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
         let sep_top = PredefinedMenuItem::separator(app)?;
-        Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &exit])?
+        Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &hide_pet, &safe, &sep_safe, &exit])?
     };
     let mut builder = TrayIconBuilder::with_id("kryoto")
         // The channel keeps the name right in a dev or Preview build (channel.rs).
         .tooltip(crate::channel::APP_NAME)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
+            crate::logging::step("menu pick");
             let id = event.id().as_ref();
             // Every menu's clicks arrive here, the pet's right-click menu
             // included: only the tray's own items bring Kryoto up.
@@ -388,6 +487,15 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
             if id == "tray-exit" {
                 quit(app);
+                return;
+            }
+            if id == "tray-hide-pet" {
+                crate::pet::hide(app);
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            if id == "tray-safe-graphics" {
+                crate::display_env::restart_compatible(app);
                 return;
             }
             show_main(app);
@@ -403,7 +511,14 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 position,
                 ..
             } = event {
-                show_tray_panel(tray.app_handle(), position);
+                crate::logging::step("tray click");
+                // Not from inside the tray's event: making the panel's web view
+                // the first time runs Windows' message loop, which handed tao
+                // its next event while this one was still being handled ("event
+                // handler is re-entrant", KB-0370). From a thread, the window is
+                // made the way every other window is, through the event loop.
+                let app = tray.app_handle().clone();
+                std::thread::spawn(move || show_tray_panel(&app, position));
             }
             #[cfg(not(windows))]
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
@@ -950,7 +1065,12 @@ pub fn os_dark() -> Option<bool> {
 /// GNOME's (and most desktops') color-scheme preference.
 #[cfg(not(windows))]
 pub fn os_dark() -> Option<bool> {
-    let out = std::process::Command::new("gsettings").args(["get", "org.gnome.desktop.interface", "color-scheme"]).output().ok()?;
+    let mut cmd = std::process::Command::new("gsettings");
+    cmd.args(["get", "org.gnome.desktop.interface", "color-scheme"]);
+    // The system's gsettings is GLib's: on the AppImage's older GLib it fails
+    // like gio did (KB-0005, the uninstall's Trash).
+    crate::launch::clean_appimage_env(&mut cmd);
+    let out = cmd.output().ok()?;
     let scheme = String::from_utf8_lossy(&out.stdout);
     match scheme.trim().trim_matches('\'') {
         "prefer-dark" => Some(true),

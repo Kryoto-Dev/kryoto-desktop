@@ -67,6 +67,7 @@ export function SplashScene({
   fit = 1,
   onMark,
   settled = false,
+  fps,
 }: {
   onRevealed: () => void
   className?: string
@@ -74,6 +75,12 @@ export function SplashScene({
   /** The mark's bottom edge in the scene, and the scale it is drawn at. */
   onMark?: (bottom: number, cell: number) => void
   settled?: boolean
+  /**
+   * At most this many frames a second, for a scene left running a long time
+   * (Big Picture's screensaver): the shimmer reads the same at 20, and the
+   * GPU and fans stay quiet (KB-0012). Unset: the display's own rate.
+   */
+  fps?: number
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -176,7 +183,14 @@ export function SplashScene({
     const t0 = performance.now()
     let last = t0
     let raf = 0
+    let wait = 0
     const timers: number[] = []
+    // The next frame: at the display's rate, or no sooner than `fps` allows.
+    // A hidden window gets no animation frames either way, so it draws nothing.
+    const next = () => {
+      if (fps && fps > 0) wait = window.setTimeout(() => (raf = requestAnimationFrame(frame)), 1000 / fps)
+      else raf = requestAnimationFrame(frame)
+    }
 
     // ---- One frame ----------------------------------------------------------
     const frame = (now: number) => {
@@ -292,7 +306,7 @@ export function SplashScene({
       }
       ctx.globalAlpha = 1
 
-      if (!still) raf = requestAnimationFrame(frame)
+      if (!still) next()
     }
 
     if (still) frame(performance.now())
@@ -315,6 +329,7 @@ export function SplashScene({
 
     return () => {
       cancelAnimationFrame(raf)
+      window.clearTimeout(wait)
       watch.disconnect()
       window.removeEventListener('resize', follow)
       for (const id of timers) window.clearTimeout(id)

@@ -7,6 +7,7 @@ import {
   Cloud,
   Download as DownloadIcon,
   FlaskConical,
+  FileArchive,
   FolderHeart,
   FolderInput,
   FolderPlus,
@@ -74,6 +75,7 @@ import { carry, launcherName, merges } from '@/lib/launchers'
 import { discordGames, useDiscord } from '@/lib/discord'
 import { SITE_ORIGIN } from '@/lib/endpoint'
 import { DownloadsPage } from '@/downloads/DownloadsPage'
+import { ArchiveDrop, InstallFromFile, pickArchive } from '@/downloads/InstallFromFile'
 import { isWebSection, SettingsPage, type SettingsSection } from '@/settings/SettingsPage'
 import { useLibrary } from '@/hooks/useLibrary'
 import type { Account } from '@/hooks/useAccount'
@@ -101,6 +103,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { logError, logWarn } from '@/lib/log'
 import { flushPlays, isExpectedReportError, reportPlay } from '@/lib/play-reports'
 import { syncPlaytime } from '@/lib/playtime-sync'
+import { usePersisted } from '@/hooks/usePersisted'
 import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
 import { entryIsVr, entryLabel, folderName, gameLogs, isWindowsHost, knowsBuild, library, plainPath, playTarget, type LibraryGame } from '@/lib/library'
 import {
@@ -122,6 +125,8 @@ type Browser = ReturnType<typeof useBrowserPage>
 
 type Overlay =
   | { kind: 'add'; slug: string | null }
+  /** A game's archive already on this PC, installed from where it is (downloads/InstallFromFile.tsx). */
+  | { kind: 'file'; path: string; slug: string | null }
   | { kind: 'choose'; id: string }
   | { kind: 'props'; id: string; tab?: 'versions' | 'logs' | 'repair' | 'controller' }
   | { kind: 'uninstall'; id: string }
@@ -338,6 +343,17 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     [go, guest],
   )
   const signIn = useCallback(() => openWeb('/login?next=/'), [openWeb])
+  // A download that needs an account (a guest's): Sign in opens, and the
+  // download carries on by itself afterwards (src-tauri phone.rs).
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on('sign-in-for-download', () => signIn()).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [signIn])
   // Pages deep in the app ask for a Store page or a Settings section by event
   // (lib/window.ts), so the view switches instead of loading behind it.
   useEffect(() => {
@@ -660,8 +676,9 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
 
   // What the library reports as an error goes in the log too.
   useEffect(() => {
-    if (lib.error && !lib.errorQuiet) logError('library', lib.error)
-  }, [lib.error, lib.errorQuiet])
+    // A launch failure names its catalog game (useLibrary.ts `reportSlug`).
+    if (lib.error && !lib.errorQuiet) logError('library', lib.errorSlug ? `${lib.error} [game ${lib.errorSlug}]` : lib.error)
+  }, [lib.error, lib.errorQuiet, lib.errorSlug])
 
   const gameById = (id: string) => lib.games.find((g) => g.id === id) ?? null
 
@@ -905,7 +922,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     ...hideItems(g),
     { label: 'Remove from Library', icon: <Trash2 />, danger: true, onSelect: () => setOverlay({ kind: 'uninstall', id: g.id }) },
   ] : [
-    { label: 'Repair', icon: <Wrench />, disabled: lib.running.has(g.id), onSelect: () => setOverlay({ kind: 'props', id: g.id, tab: 'repair' }) },
+    { label: 'Emulator & fixes', icon: <Wrench />, disabled: lib.running.has(g.id), onSelect: () => setOverlay({ kind: 'props', id: g.id, tab: 'repair' }) },
     { label: 'Properties', icon: <SettingsIcon />, onSelect: () => setOverlay({ kind: 'props', id: g.id }) },
     ...hideItems(g),
     ...discordItem(g),
@@ -1187,7 +1204,10 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
 
   const newSettings = useNewSettings(guest)
   // The window's one row folds on a narrow window; what left it is here instead.
-  const { row, fold } = useRowFold([account.displayName, account.username, account.kryos, news?.version, online, view.kind === 'web' ? view.url : ''].join('|'))
+  // View > Compact menu bar: Kryoto, View, Games and Help stay in the menu on
+  // the K// whatever the room, as they fold on a narrow window (suggestion #103).
+  const [compactMenus, setCompactMenus] = usePersisted<'on' | 'off'>('kryoto.menus.compact', 'off', (v): v is 'on' | 'off' => v === 'on' || v === 'off')
+  const { row, fold } = useRowFold([account.displayName, account.username, account.kryos, news?.version, online, compactMenus, view.kind === 'web' ? view.url : ''].join('|'))
   const folded: MenuEntry[] = [
     ...(fold >= FOLD.fullscreen ? [{ label: 'Full screen', hint: 'F11', onSelect: () => void toggleFullscreen() }] : []),
   ]
@@ -1240,6 +1260,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         { label: 'Reload page', hint: 'Ctrl R', disabled: view.kind !== 'web', onSelect: () => web.reload() },
         { label: 'Full screen', hint: 'F11', onSelect: () => void toggleFullscreen().catch(() => {}) },
         ...(account.controller ? [{ label: 'Big Picture', onSelect: () => setBigPicture(true) }] : []),
+        { separator: true },
+        { label: 'Compact menu bar', checked: compactMenus === 'on', onSelect: () => setCompactMenus(compactMenus === 'on' ? 'off' : 'on') },
       ],
     },
     {
@@ -1255,6 +1277,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
           },
         },
         { label: 'Add a game on this PC', icon: <Plus />, onSelect: () => setOverlay({ kind: 'add', slug: null }) },
+        { label: 'Install a game from a file', icon: <FileArchive />, onSelect: () => installFromFile(null) },
         { label: 'Bridge', icon: <FolderInput />, onSelect: () => setOverlay({ kind: 'bridge' }) },
         ...(recent.length
           ? [{ separator: true } as MenuEntry, { heading: 'Recent' } as MenuEntry, ...recent.map((g) => ({ label: titleWithBranch(g.title, g.steamBranch), icon: <Play />, onSelect: () => play(g) }))]
@@ -1303,6 +1326,17 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     else openWeb('/')
   }
 
+  /**
+   * A game's archive the player already downloaded (a browser download from
+   * kryo.to, a mirror): the file picker, then the same dialog a drop opens.
+   * `slug` when it is asked for from that game's own page or row.
+   */
+  const installFromFile = (slug: string | null) => {
+    void pickArchive()
+      .then((path) => path && setOverlay({ kind: 'file', path, slug }))
+      .catch((e: unknown) => push({ title: 'The file picker did not open', body: errorText(e), gameId: null }))
+  }
+
   /* ── Store helpers ── */
   const pageSlug = view.kind === 'web' ? slugOnPage(webUrl, settings?.catalogEndpoint) : null
   const pageGame = pageSlug ? (lib.games.find((g) => g.slug === pageSlug) ?? null) : null
@@ -1325,11 +1359,15 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
       // Before kryo.to has named it, the title is a slug or a placeholder.
       const title = d.meta.title?.trim() ?? ''
       const named = title !== '' && title.toLowerCase() !== 'download' && title !== d.slug
-      push({
-        title: named ? `Downloading ${title}` : 'Download started',
-        body: 'It installs itself when done. Open Downloads to watch it.',
-        gameId: null,
-      })
+      push(
+        d.fromFile
+          ? { title: named ? `Installing ${title}` : 'Installing from your file', body: "From your file, checked against kryo.to's copy first. Open Downloads to watch it.", gameId: null }
+          : {
+              title: named ? `Downloading ${title}` : 'Download started',
+              body: 'It installs itself when done. Open Downloads to watch it.',
+              gameId: null,
+            },
+      )
     }
   }, [dl, push])
 
@@ -1402,6 +1440,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
           onRepair={(id) => setOverlay({ kind: 'props', id, tab: 'repair' })}
           onStore={() => openWeb('/')}
           onDonate={account.supporter ? null : () => openWeb('/donate')}
+          onInstallFile={installFromFile}
+          onFileForAnotherGame={(path) => setOverlay({ kind: 'file', path, slug: null })}
         />
       </div>
     )
@@ -1446,6 +1486,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
             onInstall={(release) => openOurs(catalogSlug, release)}
             onStorePage={() => openWeb(`/game/${catalogSlug}`)}
             onHaveIt={() => setOverlay({ kind: 'add', slug: catalogSlug })}
+            onInstallFile={() => installFromFile(catalogSlug)}
             onDownloads={() => go({ kind: 'downloads' })}
           />
         ) : (view.kind === 'game' || catalogInstalled) && selected ? (
@@ -1527,6 +1568,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         newSettings={newSettings.length > 0}
         rowRef={row}
         fold={fold}
+        compactMenus={compactMenus === 'on'}
         onNews={() => openWeb('/changelog')}
         onOpenNotification={openNotification}
         onMarkRead={markAllRead}
@@ -1568,6 +1610,11 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
             {content}
           </div>
         ) : null}
+        {/* A game's archive dropped on the Library or Downloads installs from where it is. */}
+        <ArchiveDrop
+          enabled={!overlay && !bigPicture && (view.kind === 'downloads' || view.kind === 'home' || view.kind === 'game' || view.kind === 'catalog')}
+          onFile={(path) => setOverlay({ kind: 'file', path, slug: view.kind === 'catalog' ? view.slug : null })}
+        />
       </main>
       {padStore.on && padStore.config?.navigate && !bigPicture ? (
         <PadHints family={familyOf(firstPad, firstPad ? padStore.config?.pads[firstPad.guid] : null)} store={storeVisible} />
@@ -1583,6 +1630,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         }}
         onDismissNotice={dismiss}
         onAddGame={() => setOverlay({ kind: 'add', slug: pageSlug })}
+        onInstallFile={() => installFromFile(pageSlug)}
         onDownloads={() => go({ kind: 'downloads' })}
         onFriends={account.friends ? () => go({ kind: 'friends' }) : undefined}
         friendsActive={view.kind === 'friends'}
@@ -1601,6 +1649,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
           initialSlug={overlay.slug}
           onClose={() => setOverlay(null)}
           onImport={() => setOverlay({ kind: 'bridge' })}
+          onInstallFile={installFromFile}
           onDownload={(slug) => {
             setOverlay(null)
             openOurs(slug)
@@ -1629,6 +1678,23 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
             setOverlay(null)
             go({ kind: 'game', id: game.id })
             push({ title: `${game.title} added`, body: 'It is in your library, ready to play.', gameId: game.id })
+          }}
+        />
+      ) : null}
+      {overlay?.kind === 'file' ? (
+        <InstallFromFile
+          key={overlay.path}
+          path={overlay.path}
+          slug={overlay.slug}
+          onClose={() => setOverlay(null)}
+          onStarted={() => {
+            setOverlay(null)
+            go({ kind: 'downloads' })
+          }}
+          onOpenCatalog={(slug) => {
+            setOverlay(null)
+            const game = lib.games.find((g) => g.slug === slug)
+            go(game ? { kind: 'game', id: game.id } : { kind: 'catalog', slug })
           }}
         />
       ) : null}

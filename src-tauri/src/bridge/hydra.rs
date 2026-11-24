@@ -13,9 +13,11 @@ pub(super) struct Hydra;
 /// Hydra's `hydra-db` on this PC, when there is one.
 fn default_dir() -> Option<PathBuf> {
     // Debug builds only: a test library in Hydra's format instead of the PC's own.
+    // Set, it is the only one read, valid or not: a test never falls through
+    // to the PC's real Hydra library.
     #[cfg(debug_assertions)]
-    if let Some(dir) = env_path("KRYOTO_DEV_HYDRA_DIR").filter(|d| d.join("CURRENT").is_file()) {
-        return Some(dir);
+    if let Some(dir) = env_path("KRYOTO_DEV_HYDRA_DIR") {
+        return dir.join("CURRENT").is_file().then_some(dir);
     }
     let home = env_path("HOME").or_else(|| env_path("USERPROFILE"));
     hy::candidate_dirs(env_path("APPDATA").as_deref(), home.as_deref(), env_path("XDG_CONFIG_HOME").as_deref())
@@ -44,6 +46,7 @@ impl From<HydraGame> for Incoming {
             custom_hero: h.custom_hero,
             developer: h.developer,
             year: h.year,
+            cannot: None,
         }
     }
 }

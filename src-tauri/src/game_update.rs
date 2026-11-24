@@ -349,7 +349,7 @@ pub fn game_update_undo(app: AppHandle, slug: String) -> Result<(), String> {
     // the folder it left, and the game stayed on the new build under the old
     // version number.
     let folders = crate::settings::all_folders(&crate::settings::load(&app));
-    let dest = crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir));
+    let dest = crate::storage::game_folder(&folders, game).unwrap_or_else(|| PathBuf::from(&game.install_dir));
     if !dest.is_dir() {
         return Err("The game's folder cannot be found.".into());
     }

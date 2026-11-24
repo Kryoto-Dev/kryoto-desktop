@@ -1,2 +1,4 @@
 # Preserve the official extension byte for byte on every platform.
 src-tauri/resources/ublock/** -text
+# Test libraries in other launchers' formats, byte for byte.
+crates/kryoto-import/tests/fixtures/** -text

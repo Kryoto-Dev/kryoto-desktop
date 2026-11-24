@@ -272,6 +272,99 @@ pub fn out_of_memory(text: &str) -> bool {
     ["dictionary allocation too large", "needed memory too big", "not enough memory", "memory allocation", "maxmemlimited"].iter().any(|m| text.contains(m))
 }
 
+/* ── Memory ──────────────────────────────────────────────────────────────
+ *
+ * HatchZip decodes many solid blocks at once, one per core (its engine.rs
+ * hands the blocks to rayon; v0.1.8 to v0.1.10 have no switch for it), and
+ * every block being decoded holds its own LZMA dictionary. An archive packed
+ * with a big dictionary on a PC with many cores and little free RAM then asks
+ * for cores x dictionary at once, and the allocation fails part way through:
+ * "dictionary allocation too large" (KB-0264 Baldur's Gate 3, KB-0295
+ * Pragmata on Linux, Red Dead Redemption 2 twice on one PC on 2026-11-20,
+ * KB-0329). 7-Zip decodes one block at a time, so it went on, but by then the
+ * archive was partly eaten and the whole game had to be downloaded again.
+ *
+ * So the number of blocks decoded at once is set from the archive's biggest
+ * dictionary and the memory free now (`RAYON_NUM_THREADS`, which rayon's
+ * shared pool reads), and an archive whose one block will not fit is left to
+ * 7-Zip before anything is eaten.
+ */
+
+/// The dictionary an LZMA or LZMA2 coder of a 7z needs, from its properties.
+pub fn dictionary_of(method: &[u8], props: &[u8]) -> Option<u64> {
+    match method {
+        // LZMA2: one byte, 40 meaning 4 GiB - 1.
+        [0x21] => match *props.first()? {
+            b @ 0..=39 => Some(u64::from(2 | (b & 1)) << (b / 2 + 11)),
+            40 => Some(0xFFFF_FFFF),
+            _ => None,
+        },
+        // LZMA: lc/lp/pb, then the dictionary as four little-endian bytes.
+        [3, 1, 1] => Some(u64::from(u32::from_le_bytes(props.get(1..5)?.try_into().ok()?))),
+        _ => None,
+    }
+}
+
+/// The biggest dictionary any block of `archive` (a .7z) needs.
+pub fn largest_dictionary(archive: &Path) -> Option<u64> {
+    let is_7z = archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+    if !is_7z {
+        return None;
+    }
+    let a = sevenz_rust::Archive::open(archive).ok()?;
+    a.folders.iter().flat_map(|f| f.coders.iter()).filter_map(|c| dictionary_of(c.decompression_method_id(), &c.properties)).max()
+}
+
+/// What one block being decoded costs beyond its dictionary: the decoder's
+/// own tables and buffers, and the file being written.
+const PER_BLOCK: u64 = 64 << 20;
+
+/// How many blocks may be decoded at once with `available` bytes of memory
+/// free: what fits in 60% of it, at most `cores`. `None` when not even one
+/// fits, and the unpack should be 7-Zip's from the start.
+pub fn blocks_at_once(dictionary: u64, available: u64, cores: usize) -> Option<usize> {
+    let fit = (available / 10 * 6) / (dictionary + PER_BLOCK);
+    (fit >= 1).then(|| (fit as usize).min(cores.max(1)))
+}
+
+/// Memory free now, in bytes.
+fn available_memory() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.available_memory()
+}
+
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Whether unpacking `archive` in place fits this PC's free memory at all.
+pub fn fits_in_memory(archive: &Path) -> bool {
+    match largest_dictionary(archive) {
+        Some(dict) => {
+            let available = available_memory();
+            let fits = blocks_at_once(dict, available, cores()).is_some();
+            if !fits {
+                crate::logging::info(
+                    "hatchzip",
+                    &format!("a block needs a {} dictionary and {} of memory is free; 7-Zip instead", crate::storage::human_size(dict), crate::storage::human_size(available)),
+                );
+            }
+            fits
+        }
+        None => true,
+    }
+}
+
+/// `RAYON_NUM_THREADS` for an unpack of `archive`, when fewer blocks than
+/// cores fit in memory at once.
+fn threads_for(archive: &Path) -> Option<usize> {
+    let dict = largest_dictionary(archive)?;
+    let cores = cores();
+    let n = blocks_at_once(dict, available_memory(), cores).unwrap_or(1);
+    (n < cores).then_some(n)
+}
+
 /// The two files HatchZip keeps beside an archive while an unpack is
 /// unfinished (`game.7z.hatchzip`, `game.7z.hatchzip-tail`): the same
 /// command carries on from them, so a stopped unpack is never started over.
@@ -302,7 +395,16 @@ pub fn forget(archive: &Path) {
 ///
 /// A run that stops for space with part of the archive eaten is carried on at
 /// once, as often as each run gets further (`stopped_for_space`).
-pub fn extract(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total: Option<u64>, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Result<(), Failure> {
+///
+/// `one_at_a_time` decodes one block at a time, as 7-Zip does: for a run
+/// carrying on after one that ran out of memory. Otherwise as many blocks at
+/// once as fit in the memory free (`threads_for`).
+#[allow(clippy::too_many_arguments)]
+pub fn extract(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total: Option<u64>, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8, one_at_a_time: bool) -> Result<(), Failure> {
+    let threads = if one_at_a_time { Some(1) } else { threads_for(archive) };
+    if let Some(n) = threads {
+        crate::logging::info("hatchzip", &format!("decoding {n} block(s) at a time to stay within this PC's free memory"));
+    }
     let size = || std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
     // What the archive was when this unpack began, for the bar across runs.
     let whole = size();
@@ -318,7 +420,7 @@ pub fn extract(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total:
     let mut busy = 0u32;
     loop {
         let before = size();
-        match extract_once(tool, archive, dest, keep_free, total, whole, &forward, stop) {
+        match extract_once(tool, archive, dest, keep_free, total, whole, &forward, stop, threads) {
             Err(Failure::Other(text)) if stopped_for_space(&text) && resumes(archive) && size() < before => {
                 crate::logging::info("hatchzip", &format!("run {runs} stopped for space with {} of the archive freed; carrying on ({})", crate::storage::human_size(before - size()), first_line(&text)));
                 runs += 1;
@@ -387,9 +489,13 @@ fn first_line(text: &str) -> String {
 /// One run of `hatchzip extract`. `whole` is the archive's size when the
 /// unpack began, which a run carrying on from another no longer sees.
 #[allow(clippy::too_many_arguments)]
-fn extract_once(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total: Option<u64>, whole: u64, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Result<(), Failure> {
+fn extract_once(tool: &Path, archive: &Path, dest: &Path, keep_free: &str, total: Option<u64>, whole: u64, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8, threads: Option<usize>) -> Result<(), Failure> {
     use std::io::Read;
-    let mut child = command(tool)
+    let mut cmd = command(tool);
+    if let Some(n) = threads {
+        cmd.env("RAYON_NUM_THREADS", n.to_string());
+    }
+    let mut child = cmd
         .arg("extract")
         .arg("-y")
         .arg("-q")
@@ -535,6 +641,29 @@ mod tests {
         assert!(!refused("dictionary allocation too large") && !unreadable("not enough disk space to continue"));
     }
 
+    /// KB-0329/KB-0295: a dictionary read from the 7z's own coder properties,
+    /// and as many blocks at once as fit in the memory free.
+    #[test]
+    fn blocks_decoded_at_once_fit_the_memory_free() {
+        // LZMA2 property bytes as 7-Zip writes them: 16 = 1 MiB, 24 = 16 MiB, 40 = 4 GiB - 1.
+        assert_eq!(dictionary_of(&[0x21], &[16]), Some(1 << 20));
+        assert_eq!(dictionary_of(&[0x21], &[17]), Some(3 << 19));
+        assert_eq!(dictionary_of(&[0x21], &[24]), Some(16 << 20));
+        assert_eq!(dictionary_of(&[0x21], &[40]), Some(0xFFFF_FFFF));
+        assert_eq!(dictionary_of(&[0x21], &[41]), None);
+        // LZMA: 64 MiB as four little-endian bytes after lc/lp/pb.
+        assert_eq!(dictionary_of(&[3, 1, 1], &[0x5d, 0, 0, 0, 4]), Some(64 << 20));
+        assert_eq!(dictionary_of(&[4, 1, 8], &[]), None);
+        let gb = 1u64 << 30;
+        // A 1.5 GB dictionary on 16 cores with 8 GB free: three at a time, not sixteen.
+        assert_eq!(blocks_at_once(3 * gb / 2, 8 * gb, 16), Some(3));
+        // Forge's default level (a small dictionary): every core.
+        assert_eq!(blocks_at_once(1 << 20, 8 * gb, 16), Some(16));
+        // Not even one block fits: 7-Zip from the start, before anything is eaten.
+        assert_eq!(blocks_at_once(4 * gb, 2 * gb, 8), None);
+        assert_eq!(blocks_at_once(gb, 4 * gb, 0), Some(1));
+    }
+
     #[test]
     fn reads_the_space_plan_out_of_check() {
         let plan = parse_plan(CHECK).unwrap();
@@ -574,7 +703,7 @@ mod tests {
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
         let stop = AtomicU8::new(crate::downloads::RUN);
-        extract(&tool, &archive, &out, "100MB", Some(plan.standard), &|d, t| println!("progress {d}/{t:?}"), &stop).expect("extract");
+        extract(&tool, &archive, &out, "100MB", Some(plan.standard), &|d, t| println!("progress {d}/{t:?}"), &stop, false).expect("extract");
         assert!(!archive.exists(), "the archive is eaten as it unpacks");
         let size = crate::library::dir_size(&out);
         println!("unpacked {size} bytes into {}", out.display());

@@ -131,6 +131,8 @@ export function Bridge({ onClose }: { onClose: () => void }) {
   const open = rows.filter((r) => r.kind === 'matched' || r.kind === 'own' || r.kind === 'ask' || r.kind === 'stays')
   const unanswered = open.filter((r) => picks[r.key] === '').length
   const coming = open.filter((r) => picks[r.key] && picks[r.key] !== 'skip')
+  /** Brought over before: brought up to date by the same button. */
+  const before = rows.filter((r) => r.kind === 'imported')
   const hours = coming.reduce((s, r) => s + r.playtimeSeconds, 0)
 
   /** The scene gets a moment even for a short list, so the move is seen. */
@@ -209,8 +211,8 @@ export function Bridge({ onClose }: { onClose: () => void }) {
             Back
           </Button>
           {way === 'in' ? (
-            <Button variant="primary" disabled={!!unanswered || coming.length === 0} onClick={() => bring()}>
-              {`Bring ${count(coming.length)} in`}
+            <Button variant="primary" disabled={!!unanswered || (coming.length === 0 && before.length === 0)} onClick={() => bring()}>
+              {coming.length || !before.length ? `Bring ${count(coming.length)} in` : `Update ${count(before.length)}`}
             </Button>
           ) : (
             <Button variant="primary" disabled={!closed || !user || chosen.size === 0} onClick={() => send()}>
@@ -267,7 +269,7 @@ export function Bridge({ onClose }: { onClose: () => void }) {
             onUndo={() => void takeBack()}
           />
         ) : (
-          <div className="grid content-center justify-items-center gap-4 text-center" aria-live="polite">
+          <div className="grid min-h-0 content-center justify-items-center gap-4 overflow-y-auto text-center" aria-live="polite">
             <Stage phase={phase} way={way} name={name} keeps={!!launcher?.keeps} imported={imported} sent={sent} undone={undone} hours={hours} error={error} />
           </div>
         )}
@@ -278,18 +280,29 @@ export function Bridge({ onClose }: { onClose: () => void }) {
 
 /** A launcher: how it stands, and what can be done with it. */
 function LauncherRow({ launcher: l, onGo, onChoose }: { launcher: Launcher; onGo: (way: Way) => void; onChoose: () => void }) {
-  const closeFirst = l.running && !l.keeps
+  const closeFirst = l.running && !l.openOk
   return (
-    <li className="kryo-radius flex items-center gap-3 border border-border p-3">
-      <span className="grid min-w-0 grow gap-0.5">
+    <li className="kryo-radius flex flex-wrap items-center gap-3 border border-border p-3">
+      <span className="grid min-w-0 grow basis-40 gap-0.5">
         <span className="text-sm font-bold text-foreground">{l.name}</span>
-        <span className="truncate text-[11px] text-muted-foreground" title={l.dir ?? undefined}>
-          {!l.dir ? 'Not on this PC' : closeFirst ? `Close ${l.name} first, from the tray too. This moves on by itself.` : l.dir}
+        <span className={cn('text-[11px] text-muted-foreground', l.dir && 'truncate')} title={l.dir ?? undefined}>
+          {!l.dir
+            ? `No ${l.name} library found on this PC. If yours is somewhere else, like a portable copy, choose its folder.`
+            : closeFirst
+              ? `Close ${l.name} first, from the tray too. This moves on by itself.`
+              : l.dir}
         </span>
       </span>
-      <IconButton label={`Choose ${l.name}'s folder`} onClick={onChoose}>
-        <FolderOpen className="size-4" />
-      </IconButton>
+      {l.dir ? (
+        <IconButton label={`Choose ${l.name}'s folder`} onClick={onChoose}>
+          <FolderOpen className="size-4" />
+        </IconButton>
+      ) : (
+        <Button size="sm" onClick={onChoose}>
+          <FolderOpen className="size-3" />
+          Choose folder
+        </Button>
+      )}
       {l.exports ? (
         <Button size="sm" disabled={!l.dir} onClick={() => onGo('out')}>
           <Upload className="size-3" />
@@ -333,7 +346,7 @@ function ReviewIn({
     { kind: 'own', title: 'Your own games', hint: `Kryoto does not list these. They keep ${name}'s name, pictures and play time, and stay on this PC.` },
     { kind: 'stays', title: `These stay in ${name}`, hint: `They show in your Library and Play starts them through ${name}. Nothing about them goes to kryo.to.` },
   ] as const
-  const missing = rows.filter((r) => r.kind === 'missing')
+  const left = rows.filter((r) => r.kind === 'missing' || r.kind === 'skipped').map((r) => ({ title: r.title, why: r.why ?? 'Not on this PC' }))
   const before = rows.filter((r) => r.kind === 'imported')
   const setAll = (list: BridgeRow[], pick: Pick) => setPicks((cur) => ({ ...cur, ...Object.fromEntries(list.map((r) => [r.key, pick])) }))
   const [find, setFind] = useState('')
@@ -351,7 +364,7 @@ function ReviewIn({
         </div>
       ) : null}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
-      {open.length === 0 ? <p className="text-xs text-muted-foreground">Nothing new to bring in.</p> : null}
+      {open.length === 0 ? <p className="text-xs text-muted-foreground">{before.length ? 'Nothing new to bring in. The games brought in before are brought up to date.' : 'Nothing new to bring in.'}</p> : null}
       {groups.map((g) => {
         const list = open.filter((r) => r.kind === g.kind && named(r.title, find))
         if (!list.length) return null
@@ -383,14 +396,34 @@ function ReviewIn({
           </section>
         )
       })}
-      {missing.length || before.length ? (
+      {left.length ? <LeftOut title={`These stay in ${name}`} games={left} /> : null}
+      {before.length ? (
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {missing.length ? `Not on this PC, so left in ${name}: ${missing.map((r) => r.title).join(', ')}.` : ''}
-          {missing.length && before.length ? ' ' : ''}
-          {before.length ? `${keeps ? 'In your Library already' : 'Brought over before'}: ${before.map((r) => r.title).join(', ')}.` : ''}
+          {`${keeps ? 'In your Library already' : 'Brought over before'}, their play time is brought up to date: ${before.map((r) => r.title).join(', ')}.`}
         </p>
       ) : null}
     </div>
+  )
+}
+
+/** Games that did not come over, grouped by why. Long groups name a few. */
+function LeftOut({ title, games }: { title: string; games: { title: string; why: string }[] }) {
+  const groups = [...games.reduce((m, g) => m.set(g.why, [...(m.get(g.why) ?? []), g.title]), new Map<string, string[]>())]
+  const SHOWN = 6
+  return (
+    <section className="grid gap-1.5 text-left">
+      <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">
+        {title} <span className="text-muted-foreground">{games.length}</span>
+      </h3>
+      <ul className="grid gap-1">
+        {groups.map(([why, titles]) => (
+          <li key={why} className="text-[11px] leading-relaxed text-muted-foreground">
+            <span className="text-foreground">{`${titles.slice(0, SHOWN).join(', ')}${titles.length > SHOWN ? ` and ${titles.length - SHOWN} more` : ''}`}</span>
+            {`: ${/[.!?]$/.test(why) ? why : `${why}.`}`}
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 
@@ -548,11 +581,26 @@ function Stage({
       </>
     )
   }
+  const skipped = imported?.skipped.length ? (
+    <div className="w-full max-w-md">
+      <LeftOut title="Not brought in" games={imported.skipped} />
+    </div>
+  ) : null
+  const updated = imported?.updated ? `${count(imported.updated)} brought in before ${imported.updated === 1 ? 'is' : 'are'} up to date.` : ''
   if (imported && keeps) {
     return (
       <>
         <PixelSplash icon="Check" className="size-24 text-success" label="Done" />
-        <Words title="Your games are here" text={`${count(imported.own)} from ${name} in your Library. Play starts them through ${name}, which keeps their hours and saves. They stay on this PC.`} />
+        <Words
+          title={imported.own ? 'Your games are here' : 'Up to date'}
+          text={[
+            imported.own ? `${count(imported.own)} from ${name} in your Library. Play starts them through ${name}, which keeps their hours and saves. They stay on this PC.` : '',
+            updated,
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        />
+        {skipped}
       </>
     )
   }
@@ -562,15 +610,23 @@ function Stage({
       imported.own ? `${imported.own} of your own` : null,
       imported.joined ? `${imported.joined} joined ${imported.joined === 1 ? 'a game' : 'games'} already here` : null,
     ].filter(Boolean)
+    const came = parts.length > 0
     return (
       <>
         <PixelSplash icon="Check" className="size-24 text-success" label="Done" />
         <Words
-          title="Your games are here"
-          text={`${parts.join(', ')}.${imported.seconds ? ` ${formatPlaytime(imported.seconds)} of play time came along.` : ''} ${
-            imported.saves ? `Their saves are being kept as versions now, ${name}'s own backup too.` : 'Turn on save versions in Settings > Cloud to keep their saves.'
-          } Your own games stay on this PC: if Kryoto adds one later, it asks you once whether to link it.`}
+          title={came ? 'Your games are here' : 'Up to date'}
+          text={[
+            came ? `${parts.join(', ')}.` : '',
+            updated,
+            imported.seconds ? `${formatPlaytime(imported.seconds)} of play time came along.` : '',
+            came ? (imported.saves ? `Their saves are being kept as versions now, ${name}'s own backup too.` : 'Turn on save versions in Settings > Cloud to keep their saves.') : '',
+            came ? 'Your own games stay on this PC: if Kryoto adds one later, it asks you once whether to link it.' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
         />
+        {skipped}
       </>
     )
   }

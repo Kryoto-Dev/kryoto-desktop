@@ -11,10 +11,13 @@ import { downloads, isActive, phaseOf, progressOf, useDownloads } from '@/lib/do
  * it for this game right here, like an add-on from the game's Add-ons & DLC
  * card (addons.rs `addons_get`), and the download runner applies it as a
  * repair (`install_fix`): checked against this game and copied with backups,
- * so Undo below puts back what it replaced. Only when the app cannot fetch it
+ * so Back to the release's own files (the Emulator row) puts back what it replaced. Only when the app cannot fetch it
  * itself does it open the game's download window.
+ *
+ * `bare`: drawn inside the Online fix row (OnlineFixRow.tsx), which says what
+ * an online fix is, as its first choice.
  */
-export function KryoFix({ gameId, slug, onGet }: { gameId: string; slug: string; onGet: () => void }) {
+export function KryoFix({ gameId, slug, onGet, bare = false }: { gameId: string; slug: string; onGet: () => void; bare?: boolean }) {
   const [fixes, setFixes] = useState<KryoAddon[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -43,11 +46,8 @@ export function KryoFix({ gameId, slug, onGet }: { gameId: string; slug: string;
     }
   }
 
-  return (
-    <Section
-      title="From kryo.to"
-      hint="A fix kryo.to keeps for this game. It replaces only the files it ships, keeps a backup of each, and Undo puts them back. Online-Fix needs Steam running and signed in."
-    >
+  const items = (
+    <>
       {fixes.map((f) => {
         const d = rows
           .filter((r) => r.slug === slug && r.status !== 'canceled' && (r.addonRelease === String(f.id) || (!!f.label && r.addon === f.label)))
@@ -59,7 +59,7 @@ export function KryoFix({ gameId, slug, onGet }: { gameId: string; slug: string;
               <b className="text-foreground">{f.label ?? 'Fix'}</b>
               {f.download_size ? <span className="text-muted-foreground"> · {f.download_size}</span> : null}
               {moving ? <span className="block text-muted-foreground" aria-live="polite">{d.status === 'queued' ? 'Waiting its turn in Downloads' : phaseOf(d)}</span> : null}
-              {d?.status === 'installed' ? <span className="block text-muted-foreground">Applied. Undo below puts the game's own files back.</span> : null}
+              {d?.status === 'installed' ? <span className="block text-muted-foreground">Applied. Back to the release's own files, above, takes it out.</span> : null}
               {d?.status === 'failed' && d.error ? <span className="block text-destructive">{d.error}</span> : null}
               {!moving && f.note && d?.status !== 'failed' ? <span className="block text-muted-foreground">{f.note}</span> : null}
             </span>
@@ -89,6 +89,22 @@ export function KryoFix({ gameId, slug, onGet }: { gameId: string; slug: string;
         )
       })}
       {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
+    </>
+  )
+  if (bare) {
+    return (
+      <div className="grid gap-2">
+        <p className="text-[11px] text-muted-foreground">kryo.to keeps this game&apos;s fix, packed and checked by staff. It is the quickest way in:</p>
+        {items}
+      </div>
+    )
+  }
+  return (
+    <Section
+      title="From kryo.to"
+      hint="A fix kryo.to keeps for this game. It replaces only the files it ships, keeps a backup of each, and Undo puts them back. Online-Fix needs Steam running and signed in."
+    >
+      {items}
     </Section>
   )
 }

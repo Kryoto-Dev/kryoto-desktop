@@ -146,7 +146,7 @@ pub fn safe_path(rel: &str) -> bool {
         && !rel.contains('\\')
         && !rel.contains('\0')
         && !rel.starts_with('/')
-        && !(rel.len() > 1 && rel.as_bytes()[1] == b':')
+        && (rel.len() <= 1 || rel.as_bytes()[1] != b':')
         && rel.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
 }
 

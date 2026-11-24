@@ -42,6 +42,26 @@ export type PadInfo = {
   buttons: number
   axes: number
   hats: number
+  /** A Joy-Con half: which one. */
+  side?: 'left' | 'right' | null
+  /** Part of a Joy-Con pair (both halves connected), or the pair as one controller. */
+  pair?: PadPair | null
+}
+
+/** Two Joy-Cons, on each half and on the pair once it is one controller (src-tauri joycons.rs). */
+export type PadPair = {
+  /** What the choice is kept under. */
+  key: string
+  /** The two act as one controller now. */
+  combined: boolean
+  /** Kryoto can make the two one here. */
+  canCombine: boolean
+  /** On a half: the other half's id. */
+  other: number | null
+  /** The player chose to keep the two apart. */
+  keptApart: boolean
+  /** Where it works as one, in plain words, or why it cannot be. */
+  reach: string
 }
 
 /** physical control -> the control it acts as; missing ones act as themselves. */
@@ -70,6 +90,8 @@ export type PadConfig = {
   /** Windows: play as a virtual Xbox controller while a game runs. */
   virtualPad: boolean
   pads: Record<string, PadPrefs>
+  /** Joy-Con pairs: true to use the two as one controller, false to keep them apart. */
+  joycons?: Record<string, boolean>
 }
 
 /** A game's use of the pad (src-tauri pad_games.rs). */
@@ -179,6 +201,8 @@ export const padApi = {
     call<PadConfig>('pad_mapping_set', { guid, name, bindings }),
   /** Windows: is the virtual-controller driver installed? */
   virtualDriver: () => call<boolean>('pad_virtual_driver'),
+  /** Use a Joy-Con pair as one controller, or as two again; kept for that pair. */
+  joycons: (key: string, one: boolean) => call<PadConfig>('pad_joycons_set', { key, one }),
 }
 
 /* ── Names ─────────────────────────────────────────────── */

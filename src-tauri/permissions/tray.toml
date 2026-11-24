@@ -1,4 +1,4 @@
 [[permission]]
 identifier = "allow-tray-action"
-description = "Open, hide, or exit Kryoto from the system tray panel."
-commands.allow = ["tray_action"]
+description = "Open, hide, or exit Kryoto from the system tray panel, and put the pet away."
+commands.allow = ["tray_action", "pet_shown"]

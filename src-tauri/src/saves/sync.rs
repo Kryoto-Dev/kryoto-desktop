@@ -702,10 +702,9 @@ pub fn answer(id: &str, choice: &str) -> Result<(), String> {
 
 /// Ask the player (the shell shows it) and wait for the answer.
 fn ask<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, kind: &str, head: &api::Version, local: &Local, state: &GameState) -> String {
-    let (tx, rx) = mpsc::channel();
-    PROMPTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(game.id.clone(), tx);
-    let _ = app.emit(
-        "cloud-saves-prompt",
+    ask_with(
+        app,
+        game,
         json!({
             "gameId": game.id,
             "title": game.title,
@@ -713,7 +712,14 @@ fn ask<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, kind: &str, head: &ap
             "cloud": { "machine": head.machine, "createdAt": head.created_at, "size": head.size, "files": head.file_count },
             "local": { "files": local.files.len(), "bytes": local.found.bytes, "lastBackupAt": state.last_backup_at, "changedAt": local.files.iter().map(|f| f.mtime).max() },
         }),
-    );
+    )
+}
+
+/// Show `prompt` (CloudSavesPrompt.tsx) and wait for the answer.
+fn ask_with<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, prompt: serde_json::Value) -> String {
+    let (tx, rx) = mpsc::channel();
+    PROMPTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(game.id.clone(), tx);
+    let _ = app.emit("cloud-saves-prompt", prompt);
     if let Some(w) = app.get_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -729,18 +735,108 @@ fn ask<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, kind: &str, head: &ap
 
 /* ── before a game starts ────────────────────────────────────────────── */
 
+/// The game's save folders as its rules name them, with every Steam id left
+/// open: where saves filed under an id are looked for (steam_id.rs).
+fn save_dirs<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> (Vec<PathBuf>, kryoto_saves::SaveRoots) {
+    let mut r = roots(app, game);
+    r.steam_id = None;
+    let (rules, _) = locations(app, game, &r);
+    let mut dirs: Vec<PathBuf> = rules.iter().flat_map(|rule| kryoto_saves::rules::expand(rule, &r)).filter(|p| p.is_dir()).collect();
+    dirs.sort();
+    dirs.dedup();
+    (dirs, r)
+}
+
+/// Where the account's Steam id is worth pinning: saves that follow the
+/// player to other PCs (a supporter's account, a folder or own server of
+/// theirs). A guest, or a player without the perk, keeps gbe_fork's own id.
+fn pins_steam_id<R: Runtime>(app: &AppHandle<R>) -> bool {
+    match super::target(app) {
+        super::Target::Account => account(app).perk == Some(true),
+        _ => true,
+    }
+}
+
 /// Give gbe_fork the account's Steam id where the game has none set, so a game
 /// that ties saves to the player's id finds them on every PC.
-fn pin_steam_id(game_dir: &Path, steam_id: &str) {
-    for dir in kryoto_saves::emulator::steam_settings_dirs(game_dir) {
-        let file = dir.join("configs.user.ini");
-        let text = std::fs::read(&file).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-        if kryoto_saves::emulator::ini_get(&text, "user::general", "account_steamid").is_some() {
-            continue;
+///
+/// KB-0376: a game already played under the id gbe_fork made on this PC has
+/// its saves under that id. They are copied across first (never moved); when
+/// Kryoto cannot find the game's saves at all, the game keeps the id it has.
+fn pin_steam_id<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, steam_id: &str) {
+    let unpinned: Vec<PathBuf> = kryoto_saves::emulator::steam_settings_dirs(Path::new(&game.install_dir))
+        .into_iter()
+        .map(|dir| dir.join("configs.user.ini"))
+        .filter(|file| {
+            let text = std::fs::read(file).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            kryoto_saves::emulator::ini_get(&text, "user::general", "account_steamid").is_none()
+        })
+        .collect();
+    if unpinned.is_empty() {
+        return;
+    }
+    let (dirs, r) = save_dirs(app, game);
+    let current = r.app_data.as_deref().and_then(super::steam_id::emulator_default);
+    if let Some(old) = current.as_deref().filter(|old| *old != steam_id) {
+        let played = game.playtime_seconds > 0 || game.last_played.is_some() || !super::steam_id::id_folders(&dirs).is_empty();
+        if played && dirs.is_empty() {
+            crate::logging::info("saves", &format!("{}: keeps the Steam id it plays as: its saves were not found, so they could not come along", game.title));
+            return;
         }
+        if played {
+            match super::steam_id::carry(&dirs, old, steam_id) {
+                Ok(0) => {}
+                Ok(n) => {
+                    crate::logging::info("saves", &format!("{}: copied {n} save folder(s) to the account's Steam id; the earlier ones are kept", game.title));
+                    notice(app, &format!("{} saves came along", game.title), "They were copied to your account's Steam id, so the game finds them on every PC. The earlier copy is kept.", game);
+                }
+                Err(e) => {
+                    crate::logging::warn("saves", &format!("{}: keeps the Steam id it plays as: {e}", game.title));
+                    return;
+                }
+            }
+        }
+    }
+    for file in unpinned {
+        let text = std::fs::read(&file).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
         let next = crate::player_name::set_ini(&text, Some("user::general"), "account_steamid", steam_id, true);
         let _ = std::fs::write(&file, next);
     }
+}
+
+/// KB-0376, for players it already happened to: Kryoto pinned the game to the
+/// account's id and its saves stayed under the earlier one. Play asks once
+/// (until answered) whether to bring them over, backing up both folders first.
+fn offer_stranded<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, steam_id: &str) {
+    if super::steam_id::pinned(Path::new(&game.install_dir)).as_deref() != Some(steam_id) {
+        return;
+    }
+    let mut state = load_state(app, &game.id);
+    if state.id_moved_answered {
+        return;
+    }
+    let (dirs, _) = save_dirs(app, game);
+    let Some((from, to)) = super::steam_id::stranded(&dirs, steam_id) else { return };
+    let side = |dir: &Path| {
+        let (files, bytes, newest) = super::steam_id::measure(dir);
+        json!({ "path": dir.display().to_string(), "files": files, "bytes": bytes, "changedAt": (newest > 0).then_some(newest) })
+    };
+    let choice = ask_with(app, game, json!({ "gameId": game.id, "title": game.title, "kind": "idMoved", "earlier": side(&from), "current": side(&to) }));
+    match choice.as_str() {
+        "bring" => {
+            let Some(backup) = game_data(app, &game.id).map(|d| d.join(format!("id-backup-{}", now()))) else { return };
+            match super::steam_id::bring_over(&from, &to, &backup) {
+                Ok(()) => {
+                    crate::logging::info("saves", &format!("{}: brought the earlier saves over from {}; both kept in {}", game.title, from.display(), backup.display()));
+                    state.id_moved_answered = true;
+                }
+                Err(e) => crate::logging::warn("saves", &format!("{}: {e}", game.title)),
+            }
+        }
+        "never" => state.id_moved_answered = true,
+        _ => {}
+    }
+    save_state(app, &game.id, &state);
 }
 
 async fn refresh_community<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, api: &Api) {
@@ -762,7 +858,11 @@ pub fn before_launch<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) {
         return;
     }
     if let Some(user) = account(app).username {
-        pin_steam_id(Path::new(&game.install_dir), &super::steam_id_for(&user));
+        let id = super::steam_id_for(&user);
+        offer_stranded(app, game, &id);
+        if pins_steam_id(app) {
+            pin_steam_id(app, game, &id);
+        }
     }
     let checked = tauri::async_runtime::block_on(async { tokio::time::timeout(LAUNCH_CHECK, check(app, game)).await });
     let (head, local) = match checked {

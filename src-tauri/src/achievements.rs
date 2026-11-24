@@ -29,6 +29,11 @@ fn client() -> reqwest::Client {
     crate::net::builder().user_agent("Kryoto Desktop").build().unwrap_or_default()
 }
 
+/// `client` for kryo.to itself, with its name encrypted where that works (net.rs `kryoto_tls`, KB-0347).
+fn kryoto_client(endpoint: &str) -> reqwest::Client {
+    crate::net::kryoto_tls(endpoint, crate::net::builder().user_agent("Kryoto Desktop")).build().unwrap_or_default()
+}
+
 /// When this game's emulator last unlocked an achievement on this PC: a sign
 /// it was played here before, for a game whose hours nothing remembers
 /// (library.rs `playtime_offer`). The saves are the PC's own folders on
@@ -342,13 +347,21 @@ impl GameAchievements {
 
 /// The game's Steam AppID: what its files say, else what kryo.to lists for it.
 /// A release published DRM-free has no emulator file to say it.
-async fn appid_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<String> {
+pub(crate) async fn appid_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<String> {
     if let Some(id) = appid_of(Path::new(&game.install_dir)) {
         return Some(id);
     }
     let slug = game.slug.as_deref()?;
+    // Taken off kryo.to: asked again tomorrow at the earliest (catalog_gone.rs).
+    if crate::catalog_gone::is_gone(app, slug) {
+        return None;
+    }
     let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(app));
-    let res = client().get(format!("{endpoint}/api/games/{slug}")).timeout(Duration::from_secs(15)).send().await.ok()?;
+    let res = kryoto_client(&endpoint).get(format!("{endpoint}/api/games/{slug}")).timeout(Duration::from_secs(15)).send().await.ok()?;
+    if crate::catalog_gone::says_gone(res.status().as_u16()) {
+        crate::catalog_gone::set(app, slug, true);
+        return None;
+    }
     let json: serde_json::Value = res.error_for_status().ok()?.json().await.ok()?;
     let id: String = json["game"]["steam_appid"].as_str()?.chars().take_while(char::is_ascii_digit).collect();
     (!id.is_empty() && id != "480").then_some(id)

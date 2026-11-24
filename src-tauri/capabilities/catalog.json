@@ -13,5 +13,5 @@
       "http://*.localhost:*/*"
     ]
   },
-  "permissions": ["allow-report-catalog-state"]
+  "permissions": ["allow-report-catalog-state", "allow-store-required"]
 }

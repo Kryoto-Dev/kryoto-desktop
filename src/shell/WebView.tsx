@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { BookOpen, Lock, LockOpen, Plus, RotateCw, ShieldBan, X, Library } from '@/ui/pixel-icons'
+import { ArrowUpRight, BookOpen, Lock, LockOpen, Plus, RotateCw, ShieldBan, X, Library } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Matrix, Modal } from '@/ui'
 import { SceneMotion } from '@/ui/ascii/SceneMotion'
 import { ADSWEEP } from '@/ui/ascii/motion'
@@ -7,7 +7,7 @@ import { settingsApi, useSettings } from '@/lib/settings'
 import { logWarn } from '@/lib/log'
 import { isTauri, mountStore, openExternal, setMainPlacer, STORE_HOME } from '@/lib/window'
 import type { ServiceHealth } from '@/lib/health'
-import { WAYS_AROUND } from '@/shell/NetworkBlocked'
+import { BLOCKED_HELP_URL, WAYS_AROUND } from '@/shell/NetworkBlocked'
 import { resolveUserInputToUrl } from '@/lib/browser'
 import { cn } from '@/lib/utils'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
@@ -128,6 +128,36 @@ export function WebSlot({
               </Button>
             ) : null}
             {outage.statusUp ? <Button onClick={() => openExternal(outage.statusUrl)}>Status page</Button> : null}
+            {outage.blocked ? <HelpButton /> : null}
+          </div>
+        </>
+      ) : page.error?.kind === 'blocked' ? (
+        <>
+          <Matrix state="connect" className="size-6 text-muted-foreground" />
+          <p className="text-xs uppercase tracking-[0.25em] text-primary">kryo.to did not load here</p>
+          <div className="grid max-w-sm gap-2 text-left text-xs leading-relaxed text-muted-foreground">
+            <p>
+              Something on your network answered in its place: an internet provider&apos;s block, a DNS filter or a web filter (in a VPN app,
+              a router, a school or work network). Kryoto itself is up.
+            </p>
+            <ul className="grid list-disc gap-0.5 pl-5">
+              {WAYS_AROUND.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+            <p>Your library, installed games and downloads already on this PC still work.</p>
+          </div>
+          <div className="flex flex-wrap justify-center gap-2">
+            {onLibrary ? (
+              <Button variant="primary" onClick={onLibrary}>
+                Go to your library
+              </Button>
+            ) : null}
+            <Button onClick={onRetry}>
+              <RotateCw className="size-3" />
+              Try again
+            </Button>
+            <HelpButton />
           </div>
         </>
       ) : problem ? (
@@ -159,6 +189,15 @@ export function WebSlot({
         </>
       )}
     </div>
+  )
+}
+
+/** kryo.to's page on getting past a block, in the browser (which may get through where this app does not); the steps that matter are on the screen already. */
+export function HelpButton() {
+  return (
+    <Button onClick={() => void openExternal(BLOCKED_HELP_URL).catch(() => {})}>
+      More on kryo.to <ArrowUpRight className="size-3" aria-hidden />
+    </Button>
   )
 }
 

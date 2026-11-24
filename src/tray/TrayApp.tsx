@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronRight, Download, Library, LogOut, Settings, Store, X } from '@/ui/pixel-icons'
+import { ChevronRight, Download, EyeOff, Library, LogOut, Settings, Store, X } from '@/ui/pixel-icons'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { emitTo } from '@tauri-apps/api/event'
 import { call, errorText } from '@/lib/bridge'
@@ -33,6 +33,16 @@ export function TrayApp() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // The pet is out: "Hide the pet" here too, for when nothing else on the
+  // screen can be clicked (KB-0369). Asked again each time the panel opens.
+  const [petOut, setPetOut] = useState(false)
+  useEffect(() => {
+    const ask = () => void call<boolean>('pet_shown').then(setPetOut).catch(() => setPetOut(false))
+    ask()
+    window.addEventListener('focus', ask)
+    return () => window.removeEventListener('focus', ask)
   }, [])
 
   const choose = async (action: TrayAction, gameId?: string) => {
@@ -98,7 +108,13 @@ export function TrayApp() {
       {actionError ? <p className="tray-error" role="alert">{actionError}</p> : null}
       <footer className="tray-footer">
         <button type="button" role="menuitem" onClick={() => choose('exit')}><LogOut aria-hidden /> Exit Kryoto</button>
-        <span>ESC close</span>
+        {petOut ? (
+          <button type="button" role="menuitem" onClick={() => void call('tray_action', { action: 'hide-pet' }).then(() => setPetOut(false)).catch((e: unknown) => setActionError(errorText(e)))}>
+            <EyeOff aria-hidden /> Hide the pet
+          </button>
+        ) : (
+          <span>ESC close</span>
+        )}
       </footer>
     </main>
   )

@@ -59,6 +59,8 @@ export type Settings = {
   connections: number
   /** MB/s cap; 0 is none. */
   speedLimitMb: number
+  /** Speeds shown in Mbps instead of MB/s (suggestion #105). */
+  speedInBits?: boolean
   /** Blank uses production; set a local site origin while developing. */
   catalogEndpoint: string
   /** Linux: MangoHud's overlay on Windows games. */
@@ -147,39 +149,8 @@ export const PET_MASCOTS: { id: PetMascot; label: string }[] = [
   { id: 'blip', label: 'Blip' },
 ]
 
-/** Every language Steam has, by the name the emulators hand a game (src-tauri player_name.rs). */
-export const GAME_LANGUAGES: { value: string; label: string }[] = [
-  { value: 'arabic', label: 'Arabic' },
-  { value: 'bulgarian', label: 'Bulgarian' },
-  { value: 'schinese', label: 'Chinese (Simplified)' },
-  { value: 'tchinese', label: 'Chinese (Traditional)' },
-  { value: 'czech', label: 'Czech' },
-  { value: 'danish', label: 'Danish' },
-  { value: 'dutch', label: 'Dutch' },
-  { value: 'english', label: 'English' },
-  { value: 'finnish', label: 'Finnish' },
-  { value: 'french', label: 'French' },
-  { value: 'german', label: 'German' },
-  { value: 'greek', label: 'Greek' },
-  { value: 'hungarian', label: 'Hungarian' },
-  { value: 'indonesian', label: 'Indonesian' },
-  { value: 'italian', label: 'Italian' },
-  { value: 'japanese', label: 'Japanese' },
-  { value: 'koreana', label: 'Korean' },
-  { value: 'norwegian', label: 'Norwegian' },
-  { value: 'polish', label: 'Polish' },
-  { value: 'portuguese', label: 'Portuguese' },
-  { value: 'brazilian', label: 'Portuguese (Brazil)' },
-  { value: 'romanian', label: 'Romanian' },
-  { value: 'russian', label: 'Russian' },
-  { value: 'spanish', label: 'Spanish' },
-  { value: 'latam', label: 'Spanish (Latin America)' },
-  { value: 'swedish', label: 'Swedish' },
-  { value: 'thai', label: 'Thai' },
-  { value: 'turkish', label: 'Turkish' },
-  { value: 'ukrainian', label: 'Ukrainian' },
-  { value: 'vietnamese', label: 'Vietnamese' },
-]
+// Steam's language codes and names, kept where a plain test can read them.
+export { GAME_LANGUAGES } from './game-languages.ts'
 
 /** How a game's in-game name is picked (src-tauri player_name.rs). */
 export type PlayerNameMode = 'account' | 'custom' | 'build'

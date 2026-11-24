@@ -1102,7 +1102,7 @@ impl Driver {
                 .iter()
                 .filter_map(|(id, _)| {
                     let game = games.iter().find(|g| g.id == *id)?;
-                    let dir = crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir));
+                    let dir = crate::storage::game_folder(&folders, game).unwrap_or_else(|| PathBuf::from(&game.install_dir));
                     Some((id.clone(), dir))
                 })
                 .collect();
@@ -1219,6 +1219,10 @@ pub struct PadFacts {
     pub xinput: bool,
     /// Its buttons are known (SDL's database, or a setup saved here).
     pub mapped: bool,
+    /// Two Joy-Cons used as one controller (`joycons.rs`).
+    pub pair: bool,
+    /// A Joy-Con whose other half is connected too, and the two could be one.
+    pub half: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1251,8 +1255,19 @@ pub struct Seen {
 /// Windows games read four Xbox controllers at most.
 const XINPUT_SLOTS: u32 = 4;
 
-/// What a game gets from the controllers plugged in, with these settings.
+/// What a game gets from the controllers plugged in, with these settings. A
+/// Joy-Con whose other half is connected too says where to make the two one.
 pub fn describe(p: &GameProfile, pads: &[PadFacts], windows: bool, driver: Option<bool>) -> Seen {
+    let mut seen = describe_each(p, pads, windows, driver);
+    for (line, d) in seen.pads.iter_mut().zip(pads) {
+        if d.half {
+            line.sees.push_str(" It is one of two Joy-Cons: to use them as one controller, open Settings, Devices, Controller.");
+        }
+    }
+    seen
+}
+
+fn describe_each(p: &GameProfile, pads: &[PadFacts], windows: bool, driver: Option<bool>) -> Seen {
     let removed = |d: &PadFacts| p.pads.get(&d.key).is_some_and(|u| u.off);
     let own = |d: &PadFacts| p.pads.get(&d.key).is_some_and(|u| u.own.is_some());
     let line = |d: &PadFacts, sees: String, player: Option<u32>, can_remove: bool, can_own: bool| PadLine {
@@ -1354,6 +1369,10 @@ pub fn describe(p: &GameProfile, pads: &[PadFacts], windows: bool, driver: Optio
                     if removed(d) {
                         return line(d, "Taken out: hidden from games that use SDL's controller support, with every controller of this model. Others can still read it.".into(), None, true, false);
                     }
+                    if d.pair {
+                        // SDL combines the pair in the game itself (joycons::game_env).
+                        return line(d, "Games that use SDL, Wine or Proton combine the two Joy-Cons into one controller too; other games see two controllers. Button changes made here for the pair may not reach games.".into(), None, true, false);
+                    }
                     let sees = if own(d) { "The game reads it directly, with its own remap if it uses SDL, Wine or Proton." } else { "The game reads it directly, remapped if it uses SDL, Wine or Proton." };
                     line(d, sees.into(), None, true, true)
                 })
@@ -1388,7 +1407,7 @@ pub struct GameView {
 pub fn pad_game_get(app: AppHandle, game_id: String) -> Result<GameView, String> {
     let game = crate::library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     let folders = crate::settings::all_folders(&crate::settings::load(&app));
-    let dir = crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir));
+    let dir = crate::storage::game_folder(&folders, &game).unwrap_or_else(|| PathBuf::from(&game.install_dir));
     let anti_cheat = anti_cheat_in(&dir);
     if let Ok(mut scans) = SCANS.lock() {
         scans.get_or_insert_with(HashMap::new).insert(dir, Some(anti_cheat));
@@ -1646,7 +1665,26 @@ mod tests {
     }
 
     fn pad(key: &str, xinput: bool) -> PadFacts {
-        PadFacts { key: key.into(), name: key.into(), xinput, mapped: true }
+        PadFacts { key: key.into(), name: key.into(), xinput, mapped: true, pair: false, half: false }
+    }
+
+    #[test]
+    fn it_says_what_a_game_sees_of_a_joycon_pair() {
+        let p = GameProfile { mode: Mode::Gamepad, ..template("action").unwrap() };
+        let pair = PadFacts { pair: true, ..pad("000000007e0500000820000000006b00", false) };
+        // Windows: one virtual Xbox controller, like any pad that is not one.
+        let seen = describe(&p, std::slice::from_ref(&pair), true, Some(true));
+        assert_eq!(seen.pads[0].player, Some(1));
+        assert!(seen.summary.contains("one Xbox controller"), "{}", seen.summary);
+        // Linux: SDL games combine it too; it can be taken out, not remapped.
+        let seen = describe(&p, std::slice::from_ref(&pair), false, None);
+        assert!(seen.pads[0].sees.contains("SDL") && seen.pads[0].sees.contains("two controllers"), "{}", seen.pads[0].sees);
+        assert!(seen.pads[0].can_remove && !seen.pads[0].can_own);
+        // Two halves not yet one: each says where to make them one.
+        let half = |k: &str| PadFacts { half: true, ..pad(k, false) };
+        let seen = describe(&p, &[half("l"), half("r"), pad("other", false)], true, Some(true));
+        assert!(seen.pads[0].sees.contains("Settings, Devices, Controller") && seen.pads[1].sees.contains("Settings"));
+        assert!(!seen.pads[2].sees.contains("Joy-Con"));
     }
 
     #[test]
@@ -1886,6 +1924,104 @@ mod tests {
             assert!(seen.iter().any(|s| s == want), "{want} never came");
         }
         assert!(moves > 5, "the mouse barely moved: {moves}");
+    }
+
+    /// KB-0335: a controller in use must not use up the app's window objects
+    /// (players hit Windows' 10,000 and the tray icon failed). Plugs a virtual
+    /// Xbox pad, moves the sticks and taps the D-pad for 20 s, and compares the
+    /// dev app's USER objects before and after. The dev app (`KB_DEV_PID` = its
+    /// process id) runs with `KRYOTO_DEV_PAD_FOCUSED=1` and `pad_start` called.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn pad_input_leaves_window_objects_alone_live() {
+        use vigem_client::{Client, TargetId, XButtons, XGamepad, Xbox360Wired};
+        use windows_sys::Win32::System::Threading::{GetGuiResources, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let pid: u32 = std::env::var("KB_DEV_PID").expect("KB_DEV_PID").parse().unwrap();
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        assert!(!process.is_null(), "no process {pid}");
+        let objects = || unsafe { GetGuiResources(process, 1) };
+        let mut pad = Xbox360Wired::new(Client::connect().expect("ViGEmBus"), TargetId::XBOX360_WIRED);
+        pad.plugin().unwrap();
+        pad.wait_ready().unwrap();
+        std::thread::sleep(Duration::from_millis(3500)); // the dev app scans for new pads every two seconds
+        let before = objects();
+        let start = Instant::now();
+        let mut i = 0u32;
+        while start.elapsed() < Duration::from_secs(20) {
+            let t = i as f32 / 6.0;
+            let buttons = match i % 40 {
+                0..=2 => XButtons::RIGHT,
+                20..=22 => XButtons::LEFT,
+                _ => 0,
+            };
+            pad.update(&XGamepad {
+                thumb_lx: (t.sin() * 30000.0) as i16,
+                thumb_ly: (t.cos() * 30000.0) as i16,
+                thumb_rx: ((t * 0.7).sin() * 20000.0) as i16,
+                buttons: XButtons { raw: buttons },
+                ..Default::default()
+            })
+            .unwrap();
+            i += 1;
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        pad.update(&XGamepad::default()).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let after = objects();
+        pad.unplug().unwrap();
+        println!("window objects: {before} -> {after} over {i} reports");
+        assert!(after < before + 50, "controller input used up {} window objects", after - before);
+    }
+
+    /// KB-0335, SDL alone: started as pad.rs starts it, a virtual Xbox pad's
+    /// reports, SDL's events waited on, and this thread's messages handled as
+    /// pad.rs handles them (`thread_messages`); this process's window objects
+    /// must stay put. `KB_SDL_UNHANDLED=1` leaves the messages alone and shows
+    /// the leak: one window object per report (Windows.Gaming.Input).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn sdl_input_leaves_window_objects_alone_live() {
+        use vigem_client::{Client, TargetId, XGamepad, Xbox360Wired};
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetGuiResources};
+        let objects = || unsafe { GetGuiResources(GetCurrentProcess(), 1) };
+        let handled = std::env::var_os("KB_SDL_UNHANDLED").is_none();
+        sdl2::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+        sdl2::hint::set("SDL_JOYSTICK_RAWINPUT", "0");
+        let sdl = sdl2::init().unwrap();
+        let (js, gc, mut pump) = (sdl.joystick().unwrap(), sdl.game_controller().unwrap(), sdl.event_pump().unwrap());
+        let mut pad = Xbox360Wired::new(Client::connect().expect("ViGEmBus"), TargetId::XBOX360_WIRED);
+        pad.plugin().unwrap();
+        pad.wait_ready().unwrap();
+        let settle = Instant::now();
+        while settle.elapsed() < Duration::from_secs(3) {
+            for _ in pump.poll_iter() {}
+            if handled {
+                crate::pad::thread_messages();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let open: Vec<_> = (0..js.num_joysticks().unwrap()).filter_map(|i| gc.open(i).ok()).collect();
+        let before = objects();
+        let mut events = 0u32;
+        for i in 0..600u32 {
+            let t = i as f32 / 6.0;
+            pad.update(&XGamepad { thumb_lx: (t.sin() * 30000.0) as i16, thumb_ly: (t.cos() * 30000.0) as i16, ..Default::default() }).unwrap();
+            if pump.wait_event_timeout(8).is_some() {
+                events += 1 + pump.poll_iter().count() as u32;
+            }
+            if handled {
+                crate::pad::thread_messages();
+            }
+            // A real pad's pace: reports this close together reach Windows as one.
+            std::thread::sleep(Duration::from_millis(8));
+        }
+        let after = objects();
+        pad.unplug().unwrap();
+        drop(open);
+        println!("SDL, messages {}: window objects {before} -> {after} over 600 reports, {events} events", if handled { "handled" } else { "left alone" });
+        assert!(after < before + 50, "SDL used up {} window objects", after - before);
     }
 
     /// Two pads at once, keyboard and mouse, on Windows: prints what Kryoto sent

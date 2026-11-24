@@ -344,7 +344,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
         {section === 'storage' ? (
           <>
             <StoragePane onChanged={() => void settingsApi.get().then((v) => setS((cur) => (cur ? { ...cur, libraryDir: v.libraryDir, libraryFolders: v.libraryFolders } : v)))} />
-            <Section title="Bring games in" anchor="find-games" hint="Find games Kryoto installed that your library lost, or bring them over from Steam and Hydra with Bridge.">
+            <Section title="Bring games in" anchor="find-games" hint="Find games Kryoto installed that your library lost, or bring them over from Steam, Playnite, Lutris and Hydra with Bridge.">
               <span className="flex flex-wrap items-center gap-2">
                 <FindGamesButton />
                 <span id={anchorId('bridge')}>
@@ -400,6 +400,16 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
                   { value: '50', label: '50 MB/s' },
                 ]}
                 onChange={(v) => set('speedLimitMb', Number(v))}
+              />
+            </Section>
+            <Section title="Speed shown in" hint="Internet plans are sold in megabits a second: 100 Mbps is about 12 MB/s.">
+              <Segmented
+                label="Speed shown in" value={s.speedInBits ? 'bits' : 'bytes'}
+                options={[
+                  { value: 'bytes', label: 'MB/s' },
+                  { value: 'bits', label: 'Mbps' },
+                ]}
+                onChange={(v) => set('speedInBits', v === 'bits')}
               />
             </Section>
             <Check checked={s.deleteArchives} onChange={(v) => set('deleteArchives', v)} label="Delete the archive once a game is installed" />
@@ -635,6 +645,11 @@ function GraphicsSection() {
       <p className="text-[11px] text-muted-foreground">
         {state.healed ? 'The last start did not draw its window, so Kryoto switched to Compatible. ' : ''}
         Now: {state.reason}.{picked && picked !== state.mode ? ' Restart Kryoto to use the new setting.' : ''}
+      </p>
+      {/* KB-0377: a window that turns black cannot reach this page. */}
+      <p className="text-[11px] text-muted-foreground">
+        Window black or flickering? The tray icon&apos;s menu has Start in compatible graphics, or start Kryoto with{' '}
+        <code className="select-text">--safe-graphics</code>.
       </p>
       {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
     </Section>

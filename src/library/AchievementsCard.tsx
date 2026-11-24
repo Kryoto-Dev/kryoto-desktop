@@ -186,7 +186,7 @@ export function AchievementsCard({ game, running = false }: { game: LibraryGame;
           ) : null}
         </Card>
       ) : null}
-      {repairOpen ? <Modal title="Switch emulator for achievements" onClose={() => setRepairOpen(false)}><GameRepair gameId={game.id} purpose="achievements" /></Modal> : null}
+      {repairOpen ? <Modal title="Switch emulator for achievements" onClose={() => setRepairOpen(false)}><GameRepair gameId={game.id} slug={game.slug} purpose="achievements" onLeave={() => setRepairOpen(false)} /></Modal> : null}
     </>
   )
 }

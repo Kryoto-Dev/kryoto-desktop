@@ -177,6 +177,24 @@ pub struct Download {
     /// ranged path has `checkpoint` for the same). None: an older row, which
     /// goes by the length as before.
     pub synced: Option<u64>,
+    /// The archive is the player's own file, installed from where it is
+    /// (from_file.rs): never moved, deleted or unpacked in place, and Retry
+    /// checks it again instead of downloading anything.
+    pub from_file: bool,
+    /// That file's SHA-256 once read, so another game picked for it is
+    /// matched without reading it a second time.
+    pub file_sha: Option<String>,
+    /// That file passed 7-Zip's own test of the archive.
+    pub tested: bool,
+    /// The player chose to install it although it matches no file kryo.to
+    /// lists: it goes in marked "not verified against Kryoto's copy".
+    pub not_verified: bool,
+}
+
+/// The archive this row may delete: one the app downloaded. A player's own
+/// file (`from_file`) is theirs and stays where it is.
+pub(crate) fn own_archive(d: &Download) -> Option<String> {
+    (!d.from_file && !d.archive_path.is_empty()).then(|| d.archive_path.clone())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -379,9 +397,14 @@ fn client_builder() -> reqwest::ClientBuilder {
 /// `jar`, so a range retried from another network after a drop is not
 /// refused. Built again for new connections (a crawl, a dropped line): over
 /// HTTP/2 every range shares one, which the old client would hand out again.
+///
+/// With dl.kryo.to's name encrypted where that works, as Edge and the Store do
+/// on a network that cuts downloads by the site's name (net.rs `kryoto_tls`,
+/// KB-0347).
 fn own_client<R: Runtime>(app: &AppHandle<R>, id: &str, jar: &Arc<reqwest::cookie::Jar>) -> Option<reqwest::Client> {
-    let family = edit(app, id, |_| {}).and_then(|d| d.family.map(family_addr).or_else(|| link_family(&d.url)));
-    let mut builder = client_builder().cookie_provider(jar.clone());
+    let download = edit(app, id, |_| {})?;
+    let family = download.family.map(family_addr).or_else(|| link_family(&download.url));
+    let mut builder = crate::net::kryoto_tls(&download.url, client_builder()).cookie_provider(jar.clone());
     if let Some(local) = family {
         builder = builder.local_address(local);
     }
@@ -622,6 +645,17 @@ pub fn taskbar_state(list: &[Download]) -> (u8, u64) {
 fn overall_progress(d: &Download) -> f64 {
     let part = d.extract_total.filter(|t| *t > 0).map(|t| (d.extracted as f64 / t as f64).min(1.0)).unwrap_or(0.0);
     match d.status {
+        // The player's own file (from_file.rs): nothing to fetch, so checking
+        // it is the first part of the bar and unpacking the rest.
+        Status::Verifying if d.from_file => 0.4 * part,
+        Status::Extracting if d.from_file => {
+            if d.extract_total.is_some() {
+                0.4 + 0.6 * part
+            } else {
+                0.7
+            }
+        }
+        _ if d.from_file => 0.0,
         Status::Verifying => 0.85 + 0.05 * part,
         Status::Extracting => {
             if d.extract_total.is_some() {
@@ -663,6 +697,18 @@ fn edit<R: Runtime>(app: &AppHandle<R>, id: &str, f: impl FnOnce(&mut Download))
     let item = list.iter_mut().find(|d| d.id == id)?;
     f(item);
     Some(item.clone())
+}
+
+/// The games a row in Downloads says Kryoto installed (and where): how an
+/// uninstall tells an install from before 0.3.0, which wrote no record of its
+/// files, from a game the player added by hand.
+pub fn installed_rows<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, String)> {
+    let state = app.state::<Downloads>();
+    let Ok(list) = state.list.lock() else { return Vec::new() };
+    list.iter()
+        .filter(|d| d.status == Status::Installed)
+        .filter_map(|d| Some((d.game_id.clone()?, d.install_dir.clone().unwrap_or_default())))
+        .collect()
 }
 
 /// The download as it stands (for the add-on installer).
@@ -735,6 +781,7 @@ fn set_status<R: Runtime>(app: &AppHandle<R>, id: &str, status: Status, error: O
 /// the player resumes it, rather than the client silently using the network.
 pub fn init<R: Runtime>(app: &AppHandle<R>) {
     let Some(file) = state_file(app) else { return };
+    let _ = WHOLE_FILE.set(file.with_file_name("unpack-whole.json"));
     let mut list: Vec<Download> = std::fs::read_to_string(file)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -977,6 +1024,13 @@ fn enqueue_item<R: Runtime>(
     release: Option<String>,
     remote_id: Option<String>,
 ) -> Result<(), String> {
+    // A version kryo.to no longer allows (required.rs) starts nothing new.
+    crate::required::refuse()?;
+    // A Download pressed for the game means kryo.to has it (again): its
+    // "gone" mark goes, so its row asks about it (catalog_gone.rs).
+    if let Some(slug) = slug.as_deref() {
+        crate::catalog_gone::set(app, slug, false);
+    }
     let state = app.state::<Downloads>();
     if let Some(id) = &remote_id {
         if state.list.lock().map_err(|_| "download list lock poisoned")?.iter().any(|d| &d.id == id) {
@@ -1284,8 +1338,12 @@ pub fn download_pick_folder(app: AppHandle, id: String, folder: String, always_d
     .ok_or("That download is gone.")?;
     persist(&app);
     emit(&app, true);
-    if edit(&app, &id, |_| {}).is_some_and(|d| d.status == Status::Queued) {
-        start(app.clone(), id);
+    match edit(&app, &id, |_| {}).map(|d| d.status) {
+        Some(Status::Queued) => start(app.clone(), id),
+        // "Choose another folder" under a download that stopped for room
+        // (src/downloads/DownloadsPage.tsx): it carries on in the new one.
+        Some(Status::Failed | Status::Paused) => requeue(&app, &id)?,
+        _ => {}
     }
     Ok(())
 }
@@ -1387,8 +1445,9 @@ fn start<R: Runtime>(app: AppHandle<R>, id: String) {
                 let e = explain_os_error(e);
                 // A full disk is the player's to fix and the message says how:
                 // in this PC's log, not in the reports to kryo.to, where it was
-                // a third of everything sent. So is a game still running.
-                if e.starts_with("Not enough space") || e.ends_with(KEPT_FOR_RETRY) {
+                // a third of everything sent. So is a game still running, and
+                // so is a row waiting for a sign-in, which carries on by itself.
+                if e.starts_with("Not enough space") || e.ends_with(KEPT_FOR_RETRY) || waits_for_sign_in(&e) {
                     crate::logging::warn("download", &format!("{id}: {e}"));
                 } else {
                     crate::logging::error("download", &format!("{id}: {e}"));
@@ -1643,6 +1702,22 @@ pub(crate) async fn find_slug(client: &reqwest::Client, endpoint: &str, name: &s
         .map(str::to_ascii_lowercase)
 }
 
+/// `GET <base>/api/games/<slug><rest>` for a download row's game, through the
+/// app's memory of games taken off kryo.to (catalog_gone.rs): a game that
+/// answered 404 or 410 in the last day is not asked again, and a new such
+/// answer is remembered. `None` for a removed game or an unreachable site.
+async fn ask_about_game<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, base: &str, slug: &str, rest: &str) -> Option<reqwest::Response> {
+    if crate::catalog_gone::is_gone(app, slug) {
+        return None;
+    }
+    let res = client.get(format!("{base}/api/games/{slug}{rest}")).send().await.ok()?;
+    if crate::catalog_gone::says_gone(res.status().as_u16()) {
+        crate::catalog_gone::set(app, slug, true);
+        return None;
+    }
+    Some(res)
+}
+
 pub(crate) async fn fetch_meta(client: &reqwest::Client, endpoint: &str, slug: &str) -> Option<CatalogMeta> {
     let res = client.get(format!("{endpoint}/api/games/{slug}")).send().await.ok()?;
     if !res.status().is_success() {
@@ -1859,7 +1934,8 @@ async fn fill_meta<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::C
         return;
     }
     let Some(slug) = &item.slug else { return };
-    if let Some(meta) = fetch_meta(client, endpoint, slug).await {
+    let Some(res) = ask_about_game(app, client, endpoint, slug, "").await.filter(|r| r.status().is_success()) else { return };
+    if let Some(meta) = res.json::<serde_json::Value>().await.ok().map(|json| meta_from_api(&json)) {
         edit(app, id, |d| {
             // The current release's size says nothing about another's.
             if d.release.is_none() {
@@ -1890,7 +1966,7 @@ async fn already_installed<R: Runtime>(app: &AppHandle<R>, id: &str, client: &re
     if installed.is_none() && d.mirror.is_none() {
         return false;
     }
-    let json = downloads_json(client, endpoint, &d).await;
+    let json = downloads_json(app, client, endpoint, &d).await;
     // The same build number, but kryo.to's file is another one now (replaced,
     // or a new upload that has no number): that is an update, not a second press.
     let installed = installed.filter(|g| !json.as_ref().is_some_and(|j| replaced(j, g.build_sha.as_deref(), d.release.as_deref())));
@@ -1958,7 +2034,9 @@ fn already_had<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     let Some(game) = installed_build_in(&games, &d).filter(|g| Path::new(&g.install_dir).is_dir()) else { return false };
     let body = format!("{} is already in your Library, on this build.", game.title);
     let _ = app.emit("notify", Notice::new("Already installed", &body, Some(game.id.clone())));
-    let _ = std::fs::remove_file(&d.archive_path);
+    if let Some(path) = own_archive(&d) {
+        let _ = std::fs::remove_file(path);
+    }
     drop_row(app, id);
     true
 }
@@ -1998,7 +2076,7 @@ fn is_dlc_link(url: &str) -> bool {
 }
 
 /// The label kryo.to gives a DLC, from its file's name.
-fn dlc_label(file: &str) -> Option<String> {
+pub(crate) fn dlc_label(file: &str) -> Option<String> {
     dlc_parts(file).map(|(_, name)| format!("DLC: {name}"))
 }
 
@@ -2047,9 +2125,9 @@ fn file_kind(json: &serde_json::Value, file: Option<&str>, page: Option<&str>) -
 
 /// What this row fetches. A DLC's link says so; anything else is asked of kryo.to.
 /// `/api/games/<slug>/downloads` for this row's game, when it names one.
-async fn downloads_json(client: &reqwest::Client, endpoint: &str, d: &Download) -> Option<serde_json::Value> {
+async fn downloads_json<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, endpoint: &str, d: &Download) -> Option<serde_json::Value> {
     let slug = d.slug.as_deref()?;
-    let res = client.get(format!("{endpoint}/api/games/{slug}/downloads")).send().await.ok()?;
+    let res = ask_about_game(app, client, endpoint, slug, "/downloads").await?;
     res.json::<serde_json::Value>().await.ok()
 }
 
@@ -2129,6 +2207,7 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
                 continue;
             }
             Err(crate::phone::MintError::Other(e)) => return Err(e),
+            Err(crate::phone::MintError::SignedOut) => return Err(signed_out(app, &d)),
             // Cloudflare's check, which only the game's download window can
             // pass: it opens, and the link its Download mints carries this
             // row on (`waiting_addon`), as a refused game's does.
@@ -2147,6 +2226,35 @@ async fn mint_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
     }
     Err(unreachable.unwrap_or_else(|| "Could not reach kryo.to.".into()))
 }
+
+/// kryo.to does not know this app's account (a guest, or a session it no
+/// longer takes), so it mints nothing here. Either way the row waits for a
+/// sign-in and goes again by itself once kryo.to reports one
+/// (phone.rs `wait_for_sign_in`). A game opens Sign in. An add-on still has
+/// its game's download window, where the page's own check lets a signed-out
+/// player through: that opens instead, and the link its Download mints
+/// carries the row on (`waiting_addon`, which looks for "download window" in
+/// the text).
+fn signed_out<R: Runtime>(app: &AppHandle<R>, d: &Download) -> String {
+    let addon = d.addon_release.is_some();
+    crate::phone::wait_for_sign_in(app, &d.id, !addon);
+    if !addon {
+        return crate::phone::SIGNED_OUT.into();
+    }
+    if let Some(slug) = d.slug.as_deref().filter(|s| open_window_once(s)) {
+        let _ = app.emit_to("main", "store-download-page", slug.to_string());
+    }
+    ADDON_SIGNED_OUT.into()
+}
+
+/// A row stopped only to wait for a sign-in (`signed_out`): not an app error.
+fn waits_for_sign_in(error: &str) -> bool {
+    error == crate::phone::SIGNED_OUT || error == ADDON_SIGNED_OUT
+}
+
+/// An add-on row while nobody is signed in to kryo.to here (see `signed_out`).
+pub const ADDON_SIGNED_OUT: &str =
+    "You are signed out of kryo.to, so the app cannot fetch this add-on by itself. Sign in and it carries on, or press Download on it in the game's download window.";
 
 /// Our own link refused (made for another network, or run out), and no
 /// family passes: this app mints the same file again for this PC, so the
@@ -2220,6 +2328,24 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
             return Ok(());
         }
         mint_link(app, id).await?;
+    }
+
+    // The player's own archive: nothing to fetch. Checked where it is, then
+    // installed exactly as a finished download is.
+    if item.from_file {
+        match check_own_file(app, id, flag, &client).await {
+            Ok(()) => {}
+            Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
+            Err(e) => return Err(e),
+        }
+        edit(app, id, |d| d.notice = None);
+        if edit(app, id, |_| {}).and_then(|d| d.addon).is_some() {
+            return crate::addons::install(app, id, &settings).await;
+        }
+        return match install(app, id, &settings, flag).await {
+            Err(_) if flag.load(Ordering::SeqCst) != RUN => settle_stopped(app, id, flag),
+            done => done,
+        };
     }
 
     let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
@@ -2345,7 +2471,7 @@ async fn fetch_filez<R: Runtime>(
         && d.segments.len() == filez_segments(file.size).len();
     if !reusable {
         let dir = archive_dir(settings);
-        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), file.size, file.size, install_size(&d), unpacks_in_place(&d), &d.meta.title)?;
+        crate::storage::check_download_room(&dir, &install_parent(app, &d, settings), file.size, file.size, install_size(&d), unpacks_in_place(&d), &d.meta.title)?;
         let name = safe_name(&file.name);
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot write to {}: {e}", dir.display()))?;
         let path = dir.join(&name);
@@ -2635,6 +2761,13 @@ async fn fetch_all<R: Runtime>(
     let mut failures = 0u32;
     let mut restarts = 0u32;
     let mut asked_again = false;
+    // What had arrived when our own link was last asked for again.
+    let mut own_asked_at: Option<u64> = None;
+    // Every dropped or stalled connection this run, progress or not, and
+    // whether a mirror was asked to take over.
+    let mut cuts = 0u32;
+    let mut tried_mirrors = false;
+    let mut is_mirror = is_mirror;
     let mut refreshed = 0u32;
     // Once a server has answered a range with the whole file, it gets one
     // stream for the rest of this run.
@@ -2653,6 +2786,13 @@ async fn fetch_all<R: Runtime>(
         match step {
             Ok(true) => {
                 edit(app, id, |d| d.notice = None);
+                // Counted where the reports can see it: retries are warnings,
+                // which never leave this PC, so nobody could tell how often
+                // a host cuts downloads that still finish (KB-0117).
+                if cuts >= 3 {
+                    let from = edit(app, id, |_| {}).map(|d| source_of(d.mirror.as_ref().map_or(d.url.as_str(), |m| m.page.as_str()))).unwrap_or_default();
+                    crate::logging::error("download", &format!("{id}: finished from {from} after {cuts} dropped or stalled connections"));
+                }
                 return Ok(true);
             }
             Ok(false) => {
@@ -2675,9 +2815,12 @@ async fn fetch_all<R: Runtime>(
             // out: once a run, the family that passes is found, or the link
             // minted again for this PC (see `fresh_link`); only when that
             // fails does the game's page open so one press re-mints it.
-            Err(Transfer::Refused(code @ (403 | 410))) if !is_mirror && !asked_again => {
-                asked_again = true;
-                match fresh_link(app, id, client, code).await {
+            // Asked again once per stretch of progress, not once per run: a
+            // link that passed and moved bytes can be refused later in the
+            // same run (a reconnect that left from another network).
+            Err(Transfer::Refused(code @ (403 | 410))) if !is_mirror && own_asked_at.is_none_or(|at| received_now(app, id) > at) => {
+                own_asked_at = Some(received_now(app, id));
+                match fresh_link(app, id, client, code, jar).await {
                     Some(other) => {
                         *client = other;
                         set_status(app, id, Status::Downloading, None);
@@ -2726,6 +2869,29 @@ async fn fetch_all<R: Runtime>(
                     failures = 0;
                 }
                 failures += 1;
+                cuts += 1;
+                // Our own server keeps cutting the download: the same archive
+                // from one of the game's mirrors, for the bytes still missing
+                // (KB-0117, 2026-11-22: 20 of 30 ranges cut in 50 s, players
+                // on "Reconnecting." for half an hour).
+                if !is_mirror && !tried_mirrors && cuts >= OWN_CUTS_BEFORE_MIRROR {
+                    tried_mirrors = true;
+                    match take_over_from_mirror(app, id, flag, settings).await {
+                        Ok((mirror_client, n, host)) => {
+                            crate::logging::error("download", &format!("{id}: Kryoto's own server cut the download {cuts} times ({e}); carrying on from {host}"));
+                            *client = mirror_client;
+                            *connections = n;
+                            is_mirror = true;
+                            failures = 0;
+                            edit(app, id, |d| d.notice = Some(format!("Our file host is having trouble; continuing from {host}.")));
+                            emit(app, true);
+                            continue;
+                        }
+                        Err(why) => {
+                            crate::logging::error("download", &format!("{id}: Kryoto's own server cut the download {cuts} times ({e}); no mirror could take over: {why}"));
+                        }
+                    }
+                }
                 if failures > MAX_FAILURES {
                     return Err(format!("The connection kept dropping ({e}). Resume to try again."));
                 }
@@ -2753,13 +2919,154 @@ async fn fetch_all<R: Runtime>(
     }
 }
 
+/// Dropped or stalled connections to our own server in one run before a
+/// mirror is asked to carry on. With the back-off between them, about a
+/// minute of trying; it used to retry for as long as each try moved a byte.
+const OWN_CUTS_BEFORE_MIRROR: u32 = 6;
+
+/// The mirror pages kryo.to lists for the build a row downloads, in its order.
+fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<String> {
+    let releases: Vec<&serde_json::Value> = listing["releases"].as_array().into_iter().flatten().collect();
+    let build = release
+        .and_then(|v| releases.iter().find(|r| r["version"].as_str() == Some(v)))
+        .or_else(|| releases.iter().find(|r| r["primary"].as_bool() == Some(true)));
+    build
+        .map(|r| {
+            r["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["url"].as_str())
+                .filter(|u| crate::resolvers::classify(u).is_some())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Our own server keeps cutting this download: the same archive from one of
+/// the game's mirrors carries it on, from where every range got to. A mirror
+/// is only taken when its file is this one: the same size, and the same first
+/// bytes as what is on disk (the 7z start header, which names the archive's
+/// end). The checksum at the end still checks every byte. The mirror's
+/// client, its connection count and its name.
+async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8, settings: &crate::settings::Settings) -> Result<(reqwest::Client, u32, String), String> {
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let slug = d.slug.clone().ok_or("no game to ask kryo.to about")?;
+    if crate::catalog_gone::is_gone(app, &slug) {
+        return Err("the game is no longer on kryo.to".into());
+    }
+    let total = d.total.ok_or("the file's size is not known yet")?;
+    let endpoint = crate::settings::catalog_endpoint(settings);
+    let listing = match crate::phone::session(app) {
+        Ok(session) => crate::phone::listing(&session, &slug).await?,
+        Err(_) => client_builder()
+            .build()
+            .map_err(|e| e.to_string())?
+            .get(format!("{endpoint}/api/games/{slug}/downloads"))
+            .send()
+            .await
+            .map_err(|e| crate::logging::why(&e.without_url()))?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+    let pages = mirror_pages(&listing, d.release.as_deref());
+    if pages.is_empty() {
+        return Err("the game has no mirror Kryoto downloads from".into());
+    }
+    // What is on disk of the start, to compare (zeros until range 0 has it).
+    let ours: Vec<u8> = std::fs::File::open(&d.archive_path)
+        .and_then(|mut f| {
+            use std::io::Read;
+            let mut b = [0u8; 32];
+            f.read_exact(&mut b)?;
+            Ok(b.to_vec())
+        })
+        .unwrap_or_default();
+    let have_head = d.segments.first().is_some_and(|s| s.start == 0 && s.done >= 32) && ours.len() == 32;
+    let mut why = Vec::new();
+    for page in pages {
+        if flag.load(Ordering::SeqCst) != RUN {
+            return Err("stopped".into());
+        }
+        let host = crate::resolvers::classify(&page).map(|(_, h)| h.to_string()).unwrap_or_default();
+        // filez.stream sends its file sealed, chunk by chunk (`fetch_filez`):
+        // its bytes cannot fill the ranges of a plain download. Left out before
+        // it is asked: resolving it opens its page for its own check.
+        if crate::resolvers::filez::matches(&page) {
+            why.push(format!("{host}: sealed, cannot carry on a plain download"));
+            continue;
+        }
+        let resolved = match crate::resolvers::resolve(app, &page).await {
+            Ok(r) => r,
+            Err(e) => {
+                why.push(format!("{host}: {e}"));
+                continue;
+            }
+        };
+        if resolved.size.is_some_and(|s| s != total) {
+            why.push(format!("{host}: another size ({} bytes, ours {total})", resolved.size.unwrap_or(0)));
+            continue;
+        }
+        let (before_url, before_mirror, before_etag) = (d.url.clone(), d.mirror.clone(), d.etag.clone());
+        let state = app.state::<Downloads>();
+        if let Ok(mut map) = state.resolved.lock() {
+            map.insert(id.to_string(), resolved);
+        }
+        edit(app, id, |row| {
+            row.mirror = Some(Mirror { page: page.clone(), host: host.clone() });
+            row.url = page.clone();
+            // Another host's ETag: each range is checked by size from here.
+            row.etag = None;
+        });
+        let taken = async {
+            let (client, n) = mirror_client(app, id, flag, false, settings.connections).await?;
+            let url = edit(app, id, |_| {}).map(|r| r.url).unwrap_or_default();
+            let res = send(client.get(&url).header(reqwest::header::RANGE, "bytes=0-31")).await.map_err(|_| "no answer".to_string())?;
+            let size = content_range_of(&res).and_then(|r| r.total);
+            if res.status().as_u16() != 206 || size != Some(total) || is_web_page(&res) {
+                return Err(format!("answered {} for {} bytes", res.status().as_u16(), size.map_or("?".into(), |s| s.to_string())));
+            }
+            let head = res.bytes().await.map_err(|e| e.to_string())?;
+            if have_head && head.as_ref() != ours.as_slice() {
+                return Err("another file (its first bytes differ)".into());
+            }
+            Ok((client, n))
+        }
+        .await;
+        match taken {
+            Ok((client, n)) => {
+                persist(app);
+                return Ok((client, n, host));
+            }
+            Err(e) => {
+                why.push(format!("{host}: {e}"));
+                if let Ok(mut map) = state.resolved.lock() {
+                    map.remove(id);
+                }
+                edit(app, id, |row| {
+                    row.url = before_url;
+                    row.mirror = before_mirror;
+                    row.etag = before_etag;
+                });
+            }
+        }
+    }
+    persist(app);
+    Err(why.join("; "))
+}
+
+/// Bytes of the download on disk now.
+fn received_now<R: Runtime>(app: &AppHandle<R>, id: &str) -> u64 {
+    edit(app, id, |_| {}).map(|d| d.received).unwrap_or(0)
+}
+
 /// Throw away what was fetched so far, so the next try starts from zero.
 fn discard<R: Runtime>(app: &AppHandle<R>, id: &str) {
-    if let Some(d) = edit(app, id, |_| {}) {
-        if !d.archive_path.is_empty() {
-            let _ = std::fs::remove_file(&d.archive_path);
-            crate::hatchzip::forget(Path::new(&d.archive_path));
-        }
+    if let Some(path) = edit(app, id, |_| {}).as_ref().and_then(own_archive) {
+        let _ = std::fs::remove_file(&path);
+        crate::hatchzip::forget(Path::new(&path));
     }
     edit(app, id, |d| {
         d.received = 0;
@@ -2771,14 +3078,8 @@ fn discard<R: Runtime>(app: &AppHandle<R>, id: &str) {
     persist(app);
 }
 
-/// What kryo.to says about this exact file: its SHA-256, and whether it is
-/// one of the game's add-ons. Matched by the name it downloads as.
-async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client) {
-    let Some(d) = edit(app, id, |_| {}) else { return };
-    let Some(slug) = d.slug.clone() else { return };
-    if d.file_name.is_empty() {
-        return;
-    }
+/// Where a game's `/downloads` listing is asked for its files' hashes.
+pub(crate) fn listing_base<R: Runtime>(app: &AppHandle<R>) -> String {
     #[allow(unused_mut)]
     let mut base = crate::settings::catalog_endpoint(&crate::settings::load(app));
     // Debug builds only, beside KRYOTO_DEV_DOWNLOAD_HOST: the stand-in filehost
@@ -2789,7 +3090,28 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
             base = format!("http://{dev}");
         }
     }
-    let Ok(res) = client.get(format!("{base}/api/games/{slug}/downloads")).send().await else { return };
+    base
+}
+
+/// A game's `/api/games/<slug>/downloads` listing, read whatever the status:
+/// signed out it still carries every file's hash (only links are withheld).
+pub(crate) async fn game_listing<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, slug: &str) -> Option<serde_json::Value> {
+    let res = ask_about_game(app, client, &listing_base(app), slug, "/downloads").await?;
+    // An error page or a busy answer is no listing: "matches nothing" must
+    // only ever be said from a real one.
+    res.json::<serde_json::Value>().await.ok().filter(|j| j["releases"].is_array() || j["hashes"].is_array())
+}
+
+/// What kryo.to says about this exact file: its SHA-256, and whether it is
+/// one of the game's add-ons. Matched by the name it downloads as.
+async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client) {
+    let Some(d) = edit(app, id, |_| {}) else { return };
+    let Some(slug) = d.slug.clone() else { return };
+    if d.file_name.is_empty() {
+        return;
+    }
+    let base = listing_base(app);
+    let Some(res) = ask_about_game(app, client, &base, &slug, "/downloads").await else { return };
     let Ok(json) = res.json::<serde_json::Value>().await else { return };
     let hint = FileHint {
         size: d.total,
@@ -2944,20 +3266,10 @@ pub fn match_file_with(json: &serde_json::Value, file: &str, hint: &FileHint) ->
     FileMatch::default()
 }
 
-/// Check the archive against the SHA-256 kryo.to lists for it. A mismatch
-/// keeps the archive and marks it (`hash_mismatch`): Install anyway uses it,
-/// Retry deletes it and downloads it again.
-async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<(), String> {
+/// The SHA-256 of this row's archive, read off the window's thread with the
+/// row's progress (Checked x of y). `Err(STOPPED)` on Pause or Cancel.
+async fn hash_archive<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<String, String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
-    let Some(expected) = d.sha256.clone() else { return Ok(()) };
-    // Partly unpacked in place, what is left of it can only fail the check.
-    if d.verified || crate::hatchzip::resumes(Path::new(&d.archive_path)) {
-        return Ok(());
-    }
-    if flag.load(Ordering::SeqCst) != RUN {
-        return Err(STOPPED.into());
-    }
-    set_status(app, id, Status::Verifying, None);
     let stop = flag.clone();
     let path = PathBuf::from(&d.archive_path);
     let total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -2996,8 +3308,43 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
     if flag.load(Ordering::SeqCst) != RUN {
         return Err(STOPPED.into());
     }
+    Ok(actual)
+}
+
+/// Check the archive against the SHA-256 kryo.to lists for it. A mismatch
+/// keeps the archive and marks it (`hash_mismatch`): Install anyway uses it,
+/// Retry deletes it and downloads it again.
+async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<(), String> {
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let Some(expected) = d.sha256.clone() else { return Ok(()) };
+    // Partly unpacked in place, what is left of it can only fail the check.
+    if d.verified || crate::hatchzip::resumes(Path::new(&d.archive_path)) {
+        return Ok(());
+    }
+    if flag.load(Ordering::SeqCst) != RUN {
+        return Err(STOPPED.into());
+    }
+    set_status(app, id, Status::Verifying, None);
+    let total = std::fs::metadata(&d.archive_path).map(|m| m.len()).unwrap_or(0);
+    let actual = hash_archive(app, id, flag).await?;
     if actual != expected {
-        crate::logging::error("download", &format!("{id}: sha256 {actual} is not {expected}"));
+        // Who served it and what it is, so the reports can tell a host's bad
+        // copy from a torn transfer (KB-0367: the same wrong file on several
+        // PCs, and nothing said from where). No address, no link.
+        let source = source_of(d.mirror.as_ref().map_or(d.url.as_str(), |m| m.page.as_str()));
+        let head = std::fs::File::open(&d.archive_path)
+            .and_then(|mut f| {
+                use std::io::Read;
+                let mut b = [0u8; 32];
+                let n = f.read(&mut b)?;
+                Ok(b[..n].to_vec())
+            })
+            .unwrap_or_default();
+        let declared = seven_z_length(&head).map(|n| format!(", its header says {n} bytes")).unwrap_or_default();
+        crate::logging::error(
+            "download",
+            &format!("{id}: sha256 {actual} is not {expected} (from {source}, {total} bytes, starts as {}{declared})", looks_like(&head)),
+        );
         // The archive stays: the player decides between installing it anyway
         // and downloading it again (Retry, which throws this copy away).
         edit(app, id, |d| {
@@ -3005,7 +3352,11 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
             d.extracted = 0;
             d.extract_total = None;
         });
-        return Err("The archive doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.".into());
+        // A mirror gives the same wrong copy every time: Retry from it is no use.
+        if d.mirror.is_some() {
+            return Err(format!("The archive from {source} doesn't match kryo.to's checksum: that copy is not the right file. Take another mirror or Kryoto's own copy, or Install it anyway."));
+        }
+        return Err(format!("The archive from {source} doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again."));
     }
     edit(app, id, |d| {
         d.verified = true;
@@ -3013,6 +3364,210 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
         d.extract_total = None;
     });
     Ok(())
+}
+
+/// The player's own archive (from_file.rs), at its turn: still there, read
+/// once for its SHA-256 (the same check a download gets), and that matched
+/// against every file kryo.to lists for the game. A match is Kryoto's copy,
+/// verified, of that build or add-on. No match: 7-Zip tests the archive
+/// itself, and it installs only at the player's word, marked not verified.
+async fn check_own_file<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>, client: &reqwest::Client) -> Result<(), String> {
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let path = PathBuf::from(&d.archive_path);
+    let Some(size) = std::fs::metadata(&path).ok().filter(|m| m.is_file()).map(|m| m.len()) else {
+        return Err(format!("Your file is not at {} any more. Put it back and press Retry, or install it from where it is now.", path.display()));
+    };
+    // Another file under the same name since (a fresh download over it): read anew.
+    if Some(size) != d.total {
+        edit(app, id, |d| {
+            d.file_sha = None;
+            d.tested = false;
+            d.verified = false;
+            d.sha256 = None;
+            d.total = Some(size);
+            d.received = size;
+        });
+    }
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    if d.verified {
+        return Ok(());
+    }
+    if flag.load(Ordering::SeqCst) != RUN {
+        return Err(STOPPED.into());
+    }
+    let sha = match d.file_sha.clone() {
+        Some(sha) => sha,
+        None => {
+            set_status(app, id, Status::Verifying, None);
+            let sha = hash_archive(app, id, flag).await?;
+            edit(app, id, |d| d.file_sha = Some(sha.clone()));
+            persist(app);
+            sha
+        }
+    };
+    let slug = d.slug.clone().ok_or("Pick the game this file is for first.")?;
+    let listing = game_listing(app, client, &slug).await;
+    if let Some(found) = listing.as_ref().and_then(|json| crate::from_file::match_sha(json, &sha)) {
+        crate::logging::info("download", &format!("{id}: {} is kryo.to's file for {slug} {}", d.file_name, found.what()));
+        edit(app, id, |d| {
+            d.sha256 = Some(sha.clone());
+            d.verified = true;
+            d.hash_mismatch = false;
+            d.not_verified = false;
+            d.addon = found.addon.clone();
+            d.repair = found.repair;
+            // That build, not pinned: kryo.to's newer one is offered as an update.
+            if found.addon.is_none() {
+                d.meta.version = found.version.clone().or(d.meta.version.take());
+            }
+            d.extracted = 0;
+            d.extract_total = None;
+        });
+        persist(app);
+        return Ok(());
+    }
+    // Matched nothing: the archive answers for itself before anything is written.
+    if !d.tested {
+        set_status(app, id, Status::Verifying, None);
+        edit(app, id, |d| d.notice = Some("Testing the archive".into()));
+        emit(app, true);
+        let (progress_app, pid, stop, archive) = (app.clone(), id.to_string(), flag.clone(), path.clone());
+        #[cfg(windows)]
+        ensure_7zr(app).await;
+        let tested = tauri::async_runtime::spawn_blocking(move || {
+            crate::from_file::test_archive(
+                &archive,
+                &|done, total| {
+                    edit(&progress_app, &pid, |d| {
+                        d.extracted = done;
+                        d.extract_total = total;
+                    });
+                    emit(&progress_app, false);
+                },
+                &stop,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        edit(app, id, |d| {
+            d.notice = None;
+            d.extracted = 0;
+            d.extract_total = None;
+        });
+        match tested {
+            Err(_) if flag.load(Ordering::SeqCst) != RUN => return Err(STOPPED.into()),
+            Err(e) => return Err(format!("{} is damaged: {e}. Nothing was installed, and your file stays where it is. Download it again.", d.file_name)),
+            Ok(by_tool) => {
+                if !by_tool {
+                    crate::logging::warn("download", &format!("{id}: no 7-Zip to test {} with; its headers were checked", d.file_name));
+                }
+                edit(app, id, |d| d.tested = true);
+                persist(app);
+            }
+        }
+    }
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    if d.not_verified {
+        crate::logging::warn("download", &format!("{id}: installing {} for {slug}, matching no file kryo.to lists, at the player's word", d.file_name));
+        edit(app, id, |d| {
+            d.sha256 = None;
+            // Its own name's build, if it says one: never kryo.to's current one.
+            d.meta.version = crate::from_file::version_in_name(&d.file_name);
+            if d.addon.is_none() {
+                d.addon = dlc_label(&d.file_name);
+            }
+        });
+        return Ok(());
+    }
+    edit(app, id, |d| d.hash_mismatch = true);
+    persist(app);
+    let title = if is_placeholder(&d.meta.title, d.slug.as_deref()) { title_from_file(&d.file_name) } else { d.meta.title.clone() };
+    Err(match listing {
+        None => format!("Could not reach kryo.to to check {} against its copy. Retry once you are online, or Install anyway: it goes in marked as not verified against Kryoto's copy.", d.file_name),
+        Some(_) => format!(
+            "{} is not a copy of any file kryo.to lists for {title}: an older build, a re-pack or a changed copy. Install anyway, marked as not verified against Kryoto's copy, or pick another game for it.",
+            d.file_name
+        ),
+    })
+}
+
+/// Queue the player's own archive `path` for the game `slug`: checked and
+/// installed from where it is, as a finished download is (`check_own_file`,
+/// then `install`). `not_verified`: the player already agreed to install it
+/// if it matches nothing on kryo.to. The same file added again takes over
+/// its stopped row, and keeps what was read of it. Its download id.
+pub fn enqueue_file<R: Runtime>(app: &AppHandle<R>, path: &Path, size: u64, slug: String, title: Option<String>, not_verified: bool) -> Result<String, String> {
+    crate::required::refuse()?;
+    let state = app.state::<Downloads>();
+    let archive_path = path.to_string_lossy().into_owned();
+    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let running = state.controls.lock().map(|c| c.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+    let same = |d: &Download| d.from_file && crate::settings::same_path(&d.archive_path, &archive_path);
+    let found = state.list.lock().ok().and_then(|list| {
+        list.iter().find(|d| same(d) && !matches!(d.status, Status::Installed | Status::Canceled)).map(|d| (d.id.clone(), running.contains(&d.id)))
+    });
+    if let Some((id, true)) = found {
+        let _ = app.emit("notify", Notice::new("Already installing", "That file is already in Downloads.", None));
+        return Ok(id);
+    }
+    if let Some((id, false)) = found {
+        // Another game picked for it, or the same one again: what was read of
+        // the file stays (its hash, its test), what was said of a game goes.
+        let keep_title = title.filter(|t| !is_placeholder(t, Some(&slug)));
+        edit(app, &id, |d| {
+            if d.slug.as_deref() != Some(slug.as_str()) {
+                d.meta = CatalogMeta { title: keep_title.clone().unwrap_or_else(|| title_from_file(&d.file_name)), ..Default::default() };
+                d.addon = None;
+                d.repair = false;
+            }
+            d.slug = Some(slug.clone());
+            d.sha256 = None;
+            d.verified = false;
+            d.hash_mismatch = false;
+            d.not_verified = not_verified;
+            d.error = None;
+        });
+        persist(app);
+        requeue(app, &id)?;
+        return Ok(id);
+    }
+    let id = format!("dl-{}-file", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+    let queue_order = state.list.lock().map(|l| l.iter().map(|d| d.queue_order).max().unwrap_or(0) + 1).unwrap_or(1);
+    let ask_folder = {
+        let settings = crate::settings::load(app);
+        let installed = library::load(app).is_ok_and(|games| games.iter().any(|g| g.slug.as_deref() == Some(slug.as_str())));
+        asks_for_folder(&settings, installed)
+    };
+    let named = title.filter(|t| !is_placeholder(t, Some(&slug))).or_else(|| title_in_file_name(&file_name));
+    let item = Download {
+        id: id.clone(),
+        queue_order,
+        ask_folder,
+        from_file: true,
+        not_verified,
+        slug: Some(slug.clone()),
+        file_name,
+        archive_path,
+        total: Some(size),
+        received: size,
+        added_at: now(),
+        meta: CatalogMeta { title: named.unwrap_or(slug), ..Default::default() },
+        ..Default::default()
+    };
+    state.list.lock().map_err(|_| "download list lock poisoned")?.insert(0, item);
+    emit(app, true);
+    if let Err(e) = persist_checked(app) {
+        if let Ok(mut list) = state.list.lock() {
+            list.retain(|d| d.id != id);
+        }
+        emit(app, true);
+        return Err(format!("Could not save the download queue: {e}"));
+    }
+    let _ = app.emit("download-started", id.clone());
+    if !ask_folder {
+        start(app.clone(), id.clone());
+    }
+    Ok(id)
 }
 
 /* ── full speed behind other windows (KB-0306) ─────────────── */
@@ -3198,7 +3753,10 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     edit(app, id, |d| {
         // Retry on an archive that failed its check: that copy is thrown away
         // and the download starts over (Install anyway clears the flag first).
-        if d.hash_mismatch {
+        // The player's own file is checked again where it is instead.
+        if d.hash_mismatch && d.from_file {
+            d.hash_mismatch = false;
+        } else if d.hash_mismatch {
             let _ = std::fs::remove_file(&d.archive_path);
             d.hash_mismatch = false;
             d.received = 0;
@@ -3235,7 +3793,15 @@ fn clear_leftovers(archive: Option<String>, staging: Option<String>) {
 /// Delete a folder without making anyone wait. It changes name first, so a
 /// Retry pressed straight after unpacks into a folder of its own and not into
 /// one being deleted under it.
+///
+/// Only ever an unpack's own staging folder (`.Title.installing`): the row's
+/// `staging` is read back from a file, and a damaged one must never name a
+/// player's folder (KB-0375).
 fn throw_away(dir: PathBuf) {
+    if !is_staging(&dir) {
+        crate::logging::warn("download", &format!("not deleting {}: not an unpack's staging folder", dir.display()));
+        return;
+    }
     let gone = dir.with_extension(format!("gone-{}", now()));
     let target = if std::fs::rename(&dir, &gone).is_ok() { gone } else { dir };
     std::thread::spawn(move || {
@@ -3243,10 +3809,19 @@ fn throw_away(dir: PathBuf) {
     });
 }
 
+/// An unpack's staging folder by its name: `.<name>.installing`.
+fn is_staging(dir: &Path) -> bool {
+    dir.file_name().map(|n| n.to_string_lossy().into_owned()).is_some_and(|n| n.starts_with('.') && n.ends_with(".installing") && n.len() > ".installing".len() + 1)
+}
+
 fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Result<(), String> {
     if flag.load(Ordering::SeqCst) == CANCEL {
-        let row = edit(app, id, |d| d.received = 0);
-        let (archive, staging) = row.map(|d| (Some(d.archive_path).filter(|p| !p.is_empty()), d.staging)).unwrap_or_default();
+        let row = edit(app, id, |d| {
+            if !d.from_file {
+                d.received = 0;
+            }
+        });
+        let (archive, staging) = row.map(|d| (own_archive(&d), d.staging)).unwrap_or_default();
         edit(app, id, |d| d.staging = None);
         set_status(app, id, Status::Canceled, None);
         clear_leftovers(archive, staging);
@@ -3333,11 +3908,11 @@ async fn refusal_reason(client: &reqwest::Client, url: &str) -> Option<String> {
 /// can land the mint and the download in two /24s, and the next pair in
 /// one. A link that ran out (410) is minted again straight away. `None`
 /// when nothing gets through.
-async fn fresh_link<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client, code: u16) -> Option<reqwest::Client> {
+async fn fresh_link<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client, code: u16, jar: &Arc<reqwest::cookie::Jar>) -> Option<reqwest::Client> {
     let d = edit(app, id, |_| {})?;
     let reason = refusal_reason(client, &d.url).await;
     if code != 410 && reason.as_deref() == Some("foreign_ip") && link_bound(&d.url) {
-        if let Some(passing) = passing_family(app, id).await {
+        if let Some(passing) = passing_family(app, id, jar).await {
             return Some(passing);
         }
     }
@@ -3349,16 +3924,89 @@ async fn fresh_link<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::
         if !remint_same_file(app, id).await {
             return None;
         }
-        if let Some(passing) = passing_family(app, id).await {
+        if let Some(passing) = passing_family(app, id, jar).await {
             return Some(passing);
         }
     }
-    crate::logging::error("download", &format!("{id}: a fresh link was refused {REMINTS} times over every address family"));
+    // Why, for the reports: whether kryo.to and its download server see this
+    // PC from one network at all. Only yes or no is logged, never an address.
+    let seen = network_views(app, &d.url).await;
+    crate::logging::error("download", &format!("{id}: a fresh link was refused {REMINTS} times over every address family ({seen})"));
     None
 }
 
-/// How many fresh links a refused download asks for before the game's page opens.
+/// How many fresh links a refused download asks for before it stops.
 const REMINTS: usize = 3;
+
+/// New connections a link is tried on over one family before the next
+/// family. Some carriers (satellite lines, mobile networks behind a shared
+/// address) send each new connection out from another address of theirs,
+/// sometimes in another /24: the mint and the download then each landed
+/// somewhere else, and one try per family missed the connection that would
+/// have passed. A one-byte request each; a link that passes once has
+/// started its download, and dl.kryo.to lets that operator carry on from
+/// its other addresses (dl.kryo.to resume.ts).
+const PROBES_PER_FAMILY: usize = 3;
+
+/// What one probe of our link said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    Passes,
+    Refused,
+    /// No answer over this family: it does not reach dl.kryo.to from here.
+    Unreachable,
+}
+
+/// The probes to run for a family: until one passes, at most
+/// `PROBES_PER_FAMILY`, and none more once the family cannot connect.
+fn keep_probing(results: &[Probe]) -> bool {
+    results.len() < PROBES_PER_FAMILY && !results.iter().any(|p| matches!(p, Probe::Passes | Probe::Unreachable))
+}
+
+/// Whether kryo.to and dl.kryo.to see this PC from the same network (the
+/// /24 or /64 a link is bound to), over each family this PC routes, said
+/// in words for the log. Never logs an address.
+async fn network_views<R: Runtime>(app: &AppHandle<R>, link: &str) -> String {
+    let site = crate::settings::catalog_endpoint(&crate::settings::load(app));
+    let Some(dl) = url::Url::parse(link).ok().map(|u| u.origin().ascii_serialization()) else { return "no link".into() };
+    let mut out = Vec::new();
+    for family in route_families() {
+        let seen = |base: String| async move {
+            let url = format!("{}/cdn-cgi/trace", base.trim_end_matches('/'));
+            let client = crate::net::kryoto_tls(&url, client_builder()).local_address(family_addr(family)).timeout(std::time::Duration::from_secs(10)).build().ok()?;
+            let body = client.get(&url).send().await.ok()?.text().await.ok()?;
+            body.lines().find_map(|l| l.strip_prefix("ip=")).and_then(|ip| ip.trim().parse::<std::net::IpAddr>().ok()).map(network_of)
+        };
+        let (a, b, c) = (seen(site.clone()).await, seen(site.clone()).await, seen(dl.clone()).await);
+        out.push(format!("IPv{family}: {}", network_verdict(a, b, c)));
+    }
+    out.join("; ")
+}
+
+/// The network a link is bound to: the /24 of an IPv4 address, the /64 of
+/// an IPv6 one (kryo.to lib/dl-token.ts `ipPrefix`).
+fn network_of(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+    }
+}
+
+/// `site` twice (two connections) and `dl` once, in words.
+fn network_verdict(site: Option<String>, again: Option<String>, dl: Option<String>) -> &'static str {
+    match (site, again, dl) {
+        (Some(a), Some(b), _) if a != b => "the network changes between connections",
+        (Some(a), _, Some(c)) if a != c => "kryo.to and its download server see different networks (a VPN, proxy or split tunnel?)",
+        (Some(_), _, Some(_)) => "the same network",
+        _ => "could not tell",
+    }
+}
 
 /// The order families are asked in: the one on record first, then the
 /// others this PC has a route for.
@@ -3374,18 +4022,39 @@ fn families_to_probe(recorded: Option<u8>, routes: &[u8]) -> Vec<u8> {
 
 /// A client over the first family dl.kryo.to accepts the row's link from,
 /// recorded on the row.
-async fn passing_family<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<reqwest::Client> {
+///
+/// Built as the download's own client is (`own_client`): the same encrypted
+/// handshake, so a network that cuts dl.kryo.to by name does not cut the
+/// probe and call a good link refused, and the run's cookie jar, so the
+/// resume pass the passing probe brings is kept with the row
+/// (`keep_resume_pass`) and a reconnect later in the run is not refused.
+async fn passing_family<R: Runtime>(app: &AppHandle<R>, id: &str, jar: &Arc<reqwest::cookie::Jar>) -> Option<reqwest::Client> {
     let d = edit(app, id, |_| {})?;
     let recorded = d.family.or_else(|| link_family(&d.url).map(|a| if a.is_ipv6() { 6 } else { 4 }));
-    for family in families_to_probe(recorded, &route_families()) {
-        let Ok(client) = client_builder().cookie_store(true).local_address(family_addr(family)).build() else { continue };
-        let probe = client.get(&d.url).header(reqwest::header::RANGE, "bytes=0-0").send();
-        let passes = matches!(tokio::time::timeout(ANSWER_TIMEOUT, probe).await, Ok(Ok(res)) if res.status().is_success());
-        if passes {
-            crate::logging::info("download", &format!("{id}: the link passes over IPv{family}"));
-            edit(app, id, |d| d.family = Some(family));
-            persist(app);
-            return Some(client);
+    let (family, tries, client) = probe_families(&d.url, &families_to_probe(recorded, &route_families()), jar).await?;
+    crate::logging::info("download", &format!("{id}: the link passes over IPv{family} (try {tries})"));
+    edit(app, id, |d| d.family = Some(family));
+    persist(app);
+    Some(client)
+}
+
+/// The first family, try and client `url` passes on (`PROBES_PER_FAMILY`).
+async fn probe_families(url: &str, families: &[u8], jar: &Arc<reqwest::cookie::Jar>) -> Option<(u8, usize, reqwest::Client)> {
+    for &family in families {
+        let mut results = Vec::new();
+        while keep_probing(&results) {
+            // A new client is a new connection, maybe from another address.
+            let Ok(client) = crate::net::kryoto_tls(url, client_builder()).cookie_provider(jar.clone()).local_address(family_addr(family)).build() else { break };
+            let probe = client.get(url).header(reqwest::header::RANGE, "bytes=0-0").send();
+            let result = match tokio::time::timeout(ANSWER_TIMEOUT, probe).await {
+                Ok(Ok(res)) if res.status().is_success() => Probe::Passes,
+                Ok(Ok(_)) => Probe::Refused,
+                _ => Probe::Unreachable,
+            };
+            results.push(result);
+            if result == Probe::Passes {
+                return Some((family, results.len(), client));
+            }
         }
     }
     None
@@ -3395,14 +4064,37 @@ async fn passing_family<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<reqw
 /// to another network - the game's page in the Store, where one press on
 /// Download mints a fresh link that this row then carries on with
 /// (`unfinished_copy`). The page opening is the fix; the text explains it.
+///
+/// Until 0.3.12 a refused link always opened the page. On 0.3.11 (to
+/// 2026-11-21) 22 of the 29 installs that hit it had nobody signed in: the
+/// app could not mint a link of its own, the page minted one over the web
+/// view's way out (a proxy, a VPN, Encrypted Client Hello: 11 of the 29 also
+/// logged "kryo.to answers the Store but not this app's own requests"), the
+/// downloader was refused again, and the page opened again. Now a signed-out
+/// player is asked to sign in, which lets the app mint over its own
+/// connection, and the row goes again by itself once signed in; a signed-in
+/// one, whose app minted and was still refused three times, is told what
+/// does it. Only an expired link opens the page.
 fn refused_ours<R: Runtime>(app: &AppHandle<R>, id: &str, code: u16) -> String {
-    let text = refused_text(code, false);
-    if code == 403 {
+    let signed_in = crate::phone::session(app).is_ok_and(|s| s.signed_in());
+    if !signed_in && code != 410 {
+        crate::phone::wait_for_sign_in(app, id, true);
+    }
+    if code == 410 {
         if let Some(slug) = edit(app, id, |_| {}).and_then(|d| d.slug) {
             let _ = app.emit_to("main", "store-download-page", slug);
         }
     }
-    text
+    refused_own_text(code, signed_in)
+}
+
+/// What a refused link of ours means, for the person.
+fn refused_own_text(code: u16, signed_in: bool) -> String {
+    match (code, signed_in) {
+        (410, _) => refused_text(410, false),
+        (_, false) => "kryo.to refused the link: it was made for another connection than the one this app downloads over (a VPN, a proxy, or a mobile or satellite line can do this). Sign in to kryo.to in Kryoto Desktop: the app then asks for the link over its own connection and carries on by itself.".into(),
+        (_, true) => "kryo.to refused the link three times: this PC reaches kryo.to and its download server from different networks (a VPN, a proxy, or a mobile or satellite line that changes address can do this). Press Retry, turn the VPN or proxy off for kryo.to, or download the game from a mirror on its page.".into(),
+    }
 }
 
 /// What a refused address means, for the person.
@@ -3412,9 +4104,7 @@ fn refused_text(code: u16, mirror: bool) -> String {
         (false, 410) => {
             "The download link expired. Press Download on the game's Store page again: it carries on from where it stopped.".into()
         }
-        (false, _) => {
-            "kryo.to refused the link - it only works on the network it was made for. The game's page is open in the Store: press Download there and this download carries on.".into()
-        }
+        (false, _) => "kryo.to refused the link. Press Retry, or Download on the game's page again: it carries on from where it stopped.".into(),
     }
 }
 
@@ -3540,6 +4230,11 @@ async fn transfer<R: Runtime>(
         return Err(Transfer::Restart(format!("the server has {total:?} bytes and {on_disk} are here")));
     }
     check_status(status.as_u16())?;
+    // Never written as the archive: a page where the file should be. A host
+    // that answers ranges with a page falls back to this one stream first.
+    if is_web_page(&response) {
+        return Err(Transfer::Fatal(web_page_sent(&source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str())))));
+    }
     let resumed = status.as_u16() == 206;
     let range = content_range_of(&response);
     let etag = etag_of(&response);
@@ -3601,7 +4296,7 @@ async fn transfer<R: Runtime>(
     // Room for the rest of the archive, and for about as much again unpacked.
     // The exact unpacked size is checked again before extracting.
     if let Some(t) = total {
-        crate::storage::check_download_room(&path_dir(&path), Path::new(&settings.library_dir), t.saturating_sub(received), t, install_size(&item), unpacks_in_place(&item), &item.meta.title)
+        crate::storage::check_download_room(&path_dir(&path), &install_parent(app, &item, settings), t.saturating_sub(received), t, install_size(&item), unpacks_in_place(&item), &item.meta.title)
             .map_err(Transfer::Fatal)?;
     }
     edit(app, id, |d| {
@@ -3753,6 +4448,107 @@ fn range_not_satisfiable(from: u64, expected: Option<u64>, server: Option<u64>) 
     }
 }
 
+/// Who served `url`, for the player and the reports: a mirror's name, or
+/// Kryoto's own server. Never the address itself (signed links).
+fn source_of(url: &str) -> String {
+    let parsed = url::Url::parse(url).ok();
+    let host = parsed.as_ref().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
+    if host == "kryo.to" || host.ends_with(".kryo.to") {
+        return OWN_HOST.into();
+    }
+    // Debug builds only: the local stand-in for dl.kryo.to (`is_ours`).
+    #[cfg(debug_assertions)]
+    if let Ok(dev) = std::env::var("KRYOTO_DEV_DOWNLOAD_HOST") {
+        let port = parsed.as_ref().and_then(|u| u.port()).map(|p| format!(":{p}")).unwrap_or_default();
+        if !dev.is_empty() && format!("{host}{port}") == dev {
+            return OWN_HOST.into();
+        }
+    }
+    crate::resolvers::classify(url).map(|(_, name)| name.to_string()).unwrap_or(host)
+}
+
+/// A host answered with a web page where the file should be.
+fn web_page_sent(source: &str) -> String {
+    format!("{source} sent a web page instead of the file. {}", another_source(source))
+}
+
+/// What the player reads for our own file host (dl.kryo.to).
+const OWN_HOST: &str = "Kryoto's file host (dl.kryo.to)";
+
+/// What to do when `source` sent the wrong thing: our own host is worth a
+/// retry and then a mirror; a mirror is not, and our own copy is the way.
+fn another_source(source: &str) -> &'static str {
+    if source == OWN_HOST {
+        "Retry in a few minutes, or download it from one of the game's mirrors on its page."
+    } else {
+        "Take another mirror, or Kryoto's own copy."
+    }
+}
+
+/// An answer that is a web page (a host's "file removed" or wait page, a
+/// network's block page) where a file was asked for.
+fn is_web_page(res: &reqwest::Response) -> bool {
+    res.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"))
+}
+
+/// The 7z signature every 7z archive starts with.
+pub(crate) const SEVEN_Z_MAGIC: [u8; 6] = [b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
+
+/// What the first bytes of a download are, in words, for a report.
+pub(crate) fn looks_like(head: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(&head[..head.len().min(64)]).trim_start().to_ascii_lowercase();
+    if head.starts_with(&SEVEN_Z_MAGIC) {
+        "a 7z archive"
+    } else if head.starts_with(b"PK\x03\x04") {
+        "a zip archive"
+    } else if head.starts_with(b"Rar!") {
+        "a rar archive"
+    } else if text.starts_with('<') || text.starts_with("<!doctype") {
+        "a web page"
+    } else if text.starts_with('{') {
+        "a JSON answer"
+    } else if head.iter().all(|b| *b == 0) {
+        "zeros"
+    } else {
+        "something else"
+    }
+}
+
+/// How long a 7z archive says it is, from its 32-byte start header: the
+/// header, then everything up to and including its end header. `None` when
+/// `head` is not a 7z start header.
+pub(crate) fn seven_z_length(head: &[u8]) -> Option<u64> {
+    if head.len() < 32 || !head.starts_with(&SEVEN_Z_MAGIC) {
+        return None;
+    }
+    let u64_at = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap_or([0; 8]));
+    32u64.checked_add(u64_at(12))?.checked_add(u64_at(20))
+}
+
+/// The first 32 bytes, as a probe got them, against the size the host says
+/// its file is: is this the archive, whole? `Err` names what it is instead
+/// (KB-0367: the same wrong file came down on several PCs, the reports did not
+/// say from where, and 7-Zip then said "Cannot open the file as [7z] archive").
+fn check_head(name: &str, head: &[u8], total: u64, source: &str) -> Result<(), String> {
+    let is_7z = name.to_ascii_lowercase().ends_with(".7z");
+    if !is_7z || head.len() < 32 {
+        return Ok(());
+    }
+    match seven_z_length(head) {
+        None => Err(format!("{source} sent {} instead of the game's archive. {}", looks_like(head), another_source(source))),
+        Some(len) if len > total => Err(format!(
+            "{source}'s copy of this file is cut short: {} of {}. {}",
+            crate::storage::human_size(total),
+            crate::storage::human_size(len),
+            another_source(source)
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 /// What a status code means for a download.
 fn check_status(code: u16) -> Result<(), Transfer> {
     match code {
@@ -3790,10 +4586,19 @@ async fn transfer_parallel<R: Runtime>(
     }
     let resumable = !item.segments.is_empty() && !item.archive_path.is_empty() && on_disk;
     if !resumable {
-        let probe = send(client.get(&item.url).header(reqwest::header::RANGE, "bytes=0-0"));
+        // The first 32 bytes, not one: a 7z's start header says how long the
+        // archive is, so a copy cut short or a page in its place is told
+        // before a byte is written (`check_head`).
+        let probe = send(client.get(&item.url).header(reqwest::header::RANGE, "bytes=0-31"));
         let Some(probe) = unless_stopped(flag, probe).await else { return Ok(false) };
         let probe = probe?;
         check_status(probe.status().as_u16())?;
+        let source = source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str()));
+        // Before the one-stream fallback: a page answers a range with 200,
+        // and was then downloaded as the archive (2026-11-22, a block page).
+        if is_web_page(&probe) {
+            return Err(Transfer::Fatal(web_page_sent(&source)));
+        }
         let total = (probe.status().as_u16() == 206).then(|| content_range_of(&probe).and_then(|r| r.total)).flatten();
         let Some(total) = total.filter(|t| *t > 0) else {
             drop(probe);
@@ -3810,9 +4615,13 @@ async fn transfer_parallel<R: Runtime>(
             .or_else(|| probe.url().path_segments().and_then(|mut s| s.next_back()).map(String::from))
             .map(|n| safe_name(&n))
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
-        drop(probe);
+        let head = tokio::time::timeout(ANSWER_TIMEOUT, probe.bytes()).await.ok().and_then(Result::ok).unwrap_or_default();
+        if let Err(why) = check_head(&name, &head, total, &source) {
+            crate::logging::error("download", &format!("{id}: {source} refused before writing: {} ({total} bytes on offer, starts as {})", why, looks_like(&head)));
+            return Err(Transfer::Fatal(why));
+        }
         let dir = archive_dir(settings);
-        crate::storage::check_download_room(&dir, Path::new(&settings.library_dir), total, total, install_size(&item), unpacks_in_place(&item), &item.meta.title).map_err(Transfer::Fatal)?;
+        crate::storage::check_download_room(&dir, &install_parent(app, &item, settings), total, total, install_size(&item), unpacks_in_place(&item), &item.meta.title).map_err(Transfer::Fatal)?;
         std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
         let path = dir.join(&name);
         crate::hatchzip::forget(&path);
@@ -3900,6 +4709,8 @@ async fn transfer_parallel<R: Runtime>(
     let mut meter = SpeedMeter::new(Instant::now(), last_sum);
     let mut last_checkpoint = Instant::now();
     let mut saving: Option<tokio::task::JoinHandle<()>> = None;
+    // How long the last save took, in ms (`checkpoint_gap`).
+    let save_took = Arc::new(AtomicU64::new(0));
     let mut slow = SlowWatch::new(Instant::now());
     let mut crawled = false;
     let whole: u64 = segments.iter().map(Segment::len).sum::<u64>() + segments.first().map_or(0, |s| s.start);
@@ -3946,11 +4757,14 @@ async fn transfer_parallel<R: Runtime>(
         // disk while every connection is still writing into it, and on a hard
         // disk that flush held the writes up for seconds at a time. A crash
         // now costs at most this much downloading again.
-        if last_checkpoint.elapsed() >= CHECKPOINT_EVERY && saving.as_ref().is_none_or(|t| t.is_finished()) {
-            let (app, id, path, progress) = (app.clone(), id.to_string(), path.clone(), progress.clone());
+        let took = std::time::Duration::from_millis(save_took.load(Ordering::SeqCst));
+        if last_checkpoint.elapsed() >= checkpoint_gap(took) && saving.as_ref().is_none_or(|t| t.is_finished()) {
+            let (app, id, path, progress, save_took) = (app.clone(), id.to_string(), path.clone(), progress.clone(), save_took.clone());
             // A failed one only means the next save covers this stretch too.
             saving = Some(tokio::spawn(async move {
+                let started = Instant::now();
                 let _ = checkpoint(&app, &id, &path, &progress).await;
+                save_took.store(started.elapsed().as_millis() as u64, Ordering::SeqCst);
             }));
             last_checkpoint = Instant::now();
         }
@@ -4040,6 +4854,20 @@ async fn transfer_parallel<R: Runtime>(
 
 /// How often a ranged download saves how far it has got (`checkpoint`).
 const CHECKPOINT_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The time from one save to the next: `CHECKPOINT_EVERY`, or ten times what
+/// the last save took when that is longer.
+///
+/// A save puts everything the system still holds of the archive on the disk.
+/// On a fast line into a hard disk that is gigabytes every 15 s, the flush
+/// takes longer than the gap, the disk does nothing else meanwhile, every
+/// connection waits on its writes, and the speed fell to 0 B/s and shot back
+/// up again, round and round (KB-0117: "from 150 MB/s to 0 and back"). Spaced
+/// by what the disk needs, a save holds the download up a tenth of the time
+/// at most; a crash then costs a little more downloading again.
+fn checkpoint_gap(last_took: std::time::Duration) -> std::time::Duration {
+    CHECKPOINT_EVERY.max(last_took * 10)
+}
 /// The longest Pause waits for the disk before saying Paused.
 const STOP_SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -4052,6 +4880,38 @@ fn archive_dir(settings: &crate::settings::Settings) -> PathBuf {
     }
 }
 
+/// The folder a download installs into: an update goes where the game already
+/// is (whichever library folder that is, under whatever its folder is called)
+/// so saves stay with it, and so does one kept outside the library folders
+/// (it used to land in the default folder as a second copy, with the old one
+/// and its saves left behind); a new game into the library folder.
+fn install_dest(games: &[LibraryGame], settings: &crate::settings::Settings, item: &Download, title: &str) -> PathBuf {
+    let folders = crate::settings::all_folders(settings);
+    item.slug
+        .as_ref()
+        .and_then(|slug| games.iter().find(|g| g.slug.as_deref() == Some(slug.as_str())))
+        .filter(|g| g.launcher.is_none())
+        .and_then(|g| crate::storage::game_folder(&folders, g).or_else(|| crate::storage::outside_root(games, &folders, g).ok()))
+        // Those are canonical, \\?\D:\..., which a .bat cannot start from and
+        // Properties would show.
+        .map(|dir| dunce::simplified(&dir).to_path_buf())
+        .unwrap_or_else(|| Path::new(&settings.library_dir).join(plain_name(title, item.slug.as_deref())))
+}
+
+#[cfg(test)]
+pub(crate) fn install_dest_for_tests(games: &[LibraryGame], settings: &crate::settings::Settings, item: &Download, title: &str) -> PathBuf {
+    install_dest(games, settings, item, title)
+}
+
+/// The folder whose drive the game lands on (`install_dest`'s parent), for
+/// the room checks before a download. They measured the default library
+/// folder, so the update of a game on a second drive (a laptop's D:) was
+/// refused for room on C: it was never going to use (KB-0319).
+fn install_parent<R: Runtime>(app: &AppHandle<R>, item: &Download, settings: &crate::settings::Settings) -> PathBuf {
+    let games = library::load(app).unwrap_or_default();
+    install_dest(&games, settings, item, &item.meta.title).parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(&settings.library_dir))
+}
+
 /// How big the game is once installed, when kryo.to lists it for the build
 /// this row downloads (another build picked on the page may differ).
 fn install_size(d: &Download) -> Option<u64> {
@@ -4060,8 +4920,44 @@ fn install_size(d: &Download) -> Option<u64> {
 
 /// Whether this download's archive can be unpacked in place (HatchZip), so the
 /// drive needs room for the game, not for the game and its archive side by side.
+/// Never the player's own file: unpacking in place eats the archive.
 fn unpacks_in_place(d: &Download) -> bool {
-    crate::hatchzip::supported() && !d.unpack_whole
+    crate::hatchzip::supported() && !d.from_file && !d.unpack_whole && !d.slug.as_deref().is_some_and(unpacks_whole)
+}
+
+/// Games HatchZip could not unpack on this PC after it had eaten part of the
+/// archive (out of memory, an entry it refuses). Kept beside the queue, so a
+/// new download of the same game, not only a Retry of the same row, unpacks
+/// the usual way: on 2026-11-20 one PC downloaded Red Dead Redemption 2
+/// (117 GB) twice in two hours, and HatchZip ran out of memory both times.
+static WHOLE: Mutex<Option<std::collections::BTreeSet<String>>> = Mutex::new(None);
+
+fn whole_file() -> Option<PathBuf> {
+    WHOLE_FILE.get().cloned()
+}
+
+static WHOLE_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The remembered games, read once from `unpack-whole.json`.
+fn with_whole<T>(f: impl FnOnce(&mut std::collections::BTreeSet<String>) -> T) -> T {
+    let mut held = WHOLE.lock().unwrap_or_else(|e| e.into_inner());
+    let set = held.get_or_insert_with(|| {
+        whole_file().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    });
+    f(set)
+}
+
+/// Whether the game `slug` is unpacked the usual way on this PC.
+fn unpacks_whole(slug: &str) -> bool {
+    with_whole(|set| set.contains(slug))
+}
+
+/// Remember that the game `slug` is unpacked the usual way from now on.
+fn remember_whole(slug: &str) {
+    let json = with_whole(|set| set.insert(slug.to_string()).then(|| serde_json::to_vec(&*set).unwrap_or_default()));
+    if let (Some(json), Some(file)) = (json, whole_file()) {
+        let _ = std::fs::write(file, json);
+    }
 }
 
 /// The folder a file is in.
@@ -4144,6 +5040,10 @@ async fn fetch_range(
         };
     }
     check_status(res.status().as_u16())?;
+    // Never written into the archive: a page where the bytes should be.
+    if is_web_page(&res) {
+        return Err(Transfer::Fatal(web_page_sent(&source_of(url))));
+    }
     if res.status().as_u16() != 206 {
         return Err(Transfer::NoRanges);
     }
@@ -4234,9 +5134,6 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     } else {
         item.meta.title.clone()
     };
-    // An update goes where the game already is - whichever library folder
-    // that is, under whatever its folder is called - so saves stay with it.
-    let folders = crate::settings::all_folders(settings);
     let games = library::load(app).unwrap_or_default();
     let existing = item.slug.as_ref().and_then(|slug| games.iter().find(|g| g.slug.as_deref() == Some(slug.as_str())).cloned());
     // A running game's files are in use: the merge would stop halfway through,
@@ -4252,16 +5149,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .as_ref()
         .filter(|_| !settings.update_backup_dir.trim().is_empty())
         .map(|_| (PathBuf::from(settings.update_backup_dir.trim()), crate::game_update::data_dir(app)));
-    // One kept outside the library folders too: it used to land in the default
-    // folder as a second copy, with the old one and its saves left behind.
-    let dest = existing
-        .as_ref()
-        .filter(|g| g.launcher.is_none())
-        .and_then(|g| crate::storage::game_folder(&folders, &g.install_dir).or_else(|| crate::storage::outside_root(&games, &folders, g).ok()))
-        // Those are canonical, \\?\D:\..., which a .bat cannot start from and
-        // Properties would show.
-        .map(|dir| dunce::simplified(&dir).to_path_buf())
-        .unwrap_or_else(|| Path::new(&settings.library_dir).join(plain_name(&title, item.slug.as_deref())));
+    let dest = install_dest(&games, settings, &item, &title);
     // An old repair backup must never restore files over a newer release.
     // Keep the same lock as the fixer through installation and library saving.
     // The achievements switch is Kryoto's own, not a choice made in Repair:
@@ -4317,7 +5205,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     // and eating it would free none: that drive never unpacks in place.
     let same_drive = crate::storage::same_drive(&path_dir(&archive), &parent);
     let short = same_drive && program.is_none() && unpacked.is_some_and(|size| crate::storage::check_room(&parent, size + archive_len, &title).is_err());
-    let unpack_whole = edit(app, id, |_| {}).is_some_and(|d| d.unpack_whole);
+    let unpack_whole = edit(app, id, |_| {}).is_some_and(|d| !unpacks_in_place(&d));
     let in_place = same_drive && program.is_none() && !unpack_whole && (settings.extract_in_place || short) && (settings.delete_archives || short);
     let hatchzip = if in_place || crate::hatchzip::resumes(&archive) { crate::hatchzip::ensure(app).await } else { None };
     if hatchzip.is_none() {
@@ -4373,7 +5261,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let unpacked = match hatchzip.as_deref() {
             Some(tool) => match extract_in_place(tool, &archive, &staging_clone, &parent, &title, room_needed, unpacked, resuming, &progress, &stop) {
                 // No gain (a solid 7z): 7-Zip, with the room check it skipped.
-                Ok(None) => crate::storage::check_room(&parent, unpacked.unwrap_or(archive_len), &title)
+                Ok(None) => crate::storage::check_room_beside(&parent, unpacked.unwrap_or(archive_len), archive_len, &title)
                     .and_then(|()| extract_until(&archive, &staging_clone, &progress, &stop)),
                 Ok(Some(())) => Ok(Vec::new()),
                 Err(e) => Err(e),
@@ -4390,6 +5278,9 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         }
         if unpacked.as_ref().is_err_and(|e| unpack_whole_after(e)) {
             edit(&progress_app, &progress_id, |d| d.unpack_whole = true);
+            if !journal_slug.is_empty() {
+                remember_whole(&journal_slug);
+            }
         }
         if unpacked.as_ref().is_err_and(|e| e == STOPPED) {
             return Err(STOPPED.into());
@@ -4447,33 +5338,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .into_iter()
         .filter_map(|(rel, size)| Some((dest.join(&rel).strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/"), size)))
         .collect();
-    let game = library::upsert_installed(
-        app,
-        LibraryGame {
-            title: title.clone(),
-            slug: item.slug.clone(),
-            cover: item.meta.cover.clone(),
-            hero: item.meta.hero.clone(),
-            logo: item.meta.logo.clone(),
-            header: item.meta.header.clone(),
-            install_dir: root.to_string_lossy().into_owned(),
-            executable,
-            default_args: item.meta.default_args.clone(),
-            entries: item.meta.entries.clone(),
-            source: item.meta.source.clone(),
-            version: item.meta.version.clone(),
-            // What the archive was, so a replaced upload reads as an update.
-            build_sha: item.sha256.clone().filter(|_| item.verified),
-            // An older build keeps itself; the current one follows updates.
-            pinned_version: item.release.clone(),
-            short: item.meta.short.clone(),
-            developer: item.meta.developer.clone(),
-            nsfw: item.meta.nsfw,
-            steam_branch: item.meta.steam_branch.clone(),
-            vr: item.meta.vr.clone(),
-            ..Default::default()
-        },
-    )?;
+    let game = library::upsert_installed(app, installed_entry(&item, &title, &root, executable))?;
     // Only now, with the library saying so, is the update done; until here a
     // crash leaves the journal at "applying" and the next start rolls it back.
     if let Some(mut j) = journal {
@@ -4481,8 +5346,8 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let _ = j.save();
         crate::game_update::drop_previous(&j);
     }
-    if settings.delete_archives {
-        let _ = std::fs::remove_file(&item.archive_path);
+    if let Some(path) = own_archive(&item).filter(|_| settings.delete_archives) {
+        let _ = std::fs::remove_file(path);
     }
     // Its art on disk now, so the Library shows it with no connection.
     crate::art::prefetch(app, [&game.cover, &game.hero, &game.logo, &game.header].into_iter().flatten().cloned().collect());
@@ -4512,6 +5377,12 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let _ = app.emit(
             "notify",
             match &warning {
+                None if item.from_file => Notice::new(
+                    &format!("{title} is ready to play"),
+                    if item.verified { "Installed from your file, which matches Kryoto's copy. Your file stays where it is." } else { "Installed from your file, not verified against Kryoto's copy. Your file stays where it is." },
+                    Some(game.id),
+                )
+                .sound("ready"),
                 None => Notice::new(&format!("{title} is ready to play"), "Installed and added to your library.", Some(game.id)).sound("ready"),
                 Some(_) => Notice::new(
                     &format!("{title} is installed, with a warning"),
@@ -4523,6 +5394,38 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         );
     }
     Ok(())
+}
+
+/// The library entry an install writes (and with it the folder's own record,
+/// `.kryoto-game.json`): what the download was, which build, and whether it
+/// is Kryoto's copy. Pure, for the tests.
+pub(crate) fn installed_entry(item: &Download, title: &str, root: &Path, executable: String) -> LibraryGame {
+    LibraryGame {
+        title: title.to_string(),
+        slug: item.slug.clone(),
+        cover: item.meta.cover.clone(),
+        hero: item.meta.hero.clone(),
+        logo: item.meta.logo.clone(),
+        header: item.meta.header.clone(),
+        install_dir: root.to_string_lossy().into_owned(),
+        executable,
+        default_args: item.meta.default_args.clone(),
+        entries: item.meta.entries.clone(),
+        source: item.meta.source.clone(),
+        version: item.meta.version.clone(),
+        // What the archive was, so a replaced upload reads as an update.
+        build_sha: item.sha256.clone().filter(|_| item.verified),
+        // The player's own file that matched nothing kryo.to lists.
+        unverified: item.from_file && !item.verified,
+        // An older build keeps itself; the current one follows updates.
+        pinned_version: item.release.clone(),
+        short: item.meta.short.clone(),
+        developer: item.meta.developer.clone(),
+        nsfw: item.meta.nsfw,
+        steam_branch: item.meta.steam_branch.clone(),
+        vr: item.meta.vr.clone(),
+        ..Default::default()
+    }
 }
 
 /// Unpack in place with HatchZip (hatchzip.rs). `Ok(None)` when its check
@@ -4566,8 +5469,29 @@ fn extract_in_place(
             Failure::Other(text) => format!("HatchZip could not unpack it: {}. Press Retry to carry on from where it stopped.", first_line(&text)),
         }
     };
+    // A block too big for the memory free: 7-Zip, before anything is eaten
+    // (hatchzip.rs "Memory").
+    if !resuming && !hatchzip::fits_in_memory(archive) {
+        return Ok(None);
+    }
     if !resuming {
-        let plan = hatchzip::check(tool, archive, hatchzip::KEEP_FREE).map_err(explain)?;
+        let plan = match hatchzip::check(tool, archive, hatchzip::KEEP_FREE) {
+            Ok(plan) => plan,
+            // HatchZip refuses an entry of this archive before changing
+            // anything: Forza Horizon 6 ships `forzahorizon6.exe:4`, an NTFS
+            // stream of the exe, which it reads as a path leaving the folder.
+            // Its `check` says so already, and that answer went to the player
+            // as "HatchZip could not unpack it ... Press Retry", which asked
+            // the same check again (KB-0338: 5 installs on 0.3.11, one 15
+            // times). 7-Zip unpacks such a stream onto its file, inside the
+            // folder; the archive is whole, so it takes over now.
+            Err(Failure::Other(text) | Failure::Damaged(text)) if hatchzip::refused(&text) || hatchzip::out_of_memory(&text) => {
+                hatchzip::forget(archive);
+                crate::logging::warn("hatchzip", &format!("{title}: {}; 7-Zip instead (archive whole: true)", first_line(&text)));
+                return Ok(None);
+            }
+            Err(f) => return Err(explain(f)),
+        };
         if !plan.gains() {
             crate::logging::info("hatchzip", &format!("{title}: no gain unpacking in place (solid archive); 7-Zip instead"));
             return Ok(None);
@@ -4576,15 +5500,27 @@ fn extract_in_place(
     }
     std::fs::create_dir_all(staging).map_err(|e| format!("Cannot create {}: {e}", staging.display()))?;
     let whole = std::fs::metadata(archive).map(|m| m.len()).ok();
-    match hatchzip::extract(tool, archive, staging, hatchzip::KEEP_FREE, unpacked, progress, stop) {
+    match hatchzip::extract(tool, archive, staging, hatchzip::KEEP_FREE, unpacked, progress, stop, false) {
         Ok(()) => Ok(Some(())),
         // HatchZip could not get the memory a block's dictionary needs
         // (KB-0264, Baldur's Gate 3). 7-Zip unpacks one block at a time and
         // can: it takes over while the archive is still whole.
         // Or it will not unpack an entry of this archive here at all (KB-0338).
         Err(Failure::Other(text)) if hatchzip::out_of_memory(&text) || hatchzip::refused(&text) => {
-            hatchzip::forget(archive);
             let untouched = !resuming && whole.is_some() && std::fs::metadata(archive).map(|m| m.len()).ok() == whole;
+            // Out of memory with part of the archive eaten: what is left can
+            // only be unpacked by HatchZip, and the other way is the whole
+            // download again (117 GB for Red Dead Redemption 2, 2026-11-20).
+            // The same command carries on from its saved place, now one
+            // block at a time as 7-Zip would (hatchzip.rs "Memory"): one
+            // dictionary in memory instead of one per core.
+            if !untouched && hatchzip::out_of_memory(&text) && hatchzip::resumes(archive) && stop.load(Ordering::SeqCst) == RUN {
+                crate::logging::warn("hatchzip", &format!("{title}: {}; carrying on one block at a time", first_line(&text)));
+                if hatchzip::extract(tool, archive, staging, hatchzip::KEEP_FREE, unpacked, progress, stop, true).is_ok() {
+                    return Ok(Some(()));
+                }
+            }
+            hatchzip::forget(archive);
             crate::logging::warn("hatchzip", &format!("{title}: {}; 7-Zip instead (archive whole: {untouched})", first_line(&text)));
             if untouched {
                 let _ = std::fs::remove_dir_all(staging);
@@ -4609,11 +5545,15 @@ fn extract_in_place(
 
 /// An unpack in place that ran out of memory after it had eaten part of the
 /// archive. The row then never unpacks in place again (`unpack_whole`).
-const HATCHZIP_MEMORY: &str = "Unpacking in place needed more memory than this PC could give, so this game is unpacked with 7-Zip instead. Retry downloads it again.";
+///
+/// "Memory" alone was read as disk space: a player with 500 GB free asked why
+/// it said the laptop had no room, and what 7-Zip is (KB-0329, 2026-11-20).
+/// So it says RAM, says it is not the disk, and says what 7-Zip is.
+const HATCHZIP_MEMORY: &str = "Unpacking while freeing space as it goes ran out of RAM on this PC (working memory, not disk space) after it had used up part of the download. Retry downloads the game again and unpacks it the usual way, with 7-Zip (the standard unpacker), which needs room for the download and the game at the same time.";
 /// The same for an archive HatchZip will not unpack here (`hatchzip::refused`).
-const HATCHZIP_REFUSED: &str = "Unpacking in place cannot handle a file in this game, so it is unpacked with 7-Zip instead. Retry downloads it again.";
+const HATCHZIP_REFUSED: &str = "Unpacking while freeing space as it goes cannot handle a file in this game. Retry downloads the game again and unpacks it the usual way, with 7-Zip (the standard unpacker), which needs room for the download and the game at the same time.";
 /// An archive that cannot be read as it is (`hatchzip::unreadable`).
-const HATCHZIP_UNREADABLE: &str = "The archive could not be read to the end, so it was deleted. Retry downloads it again and unpacks it with 7-Zip.";
+const HATCHZIP_UNREADABLE: &str = "The download could not be read to the end, so it was deleted. Retry downloads it again and unpacks it with 7-Zip (the standard unpacker).";
 
 /// The unpack failures after which this row unpacks with 7-Zip from then on.
 fn unpack_whole_after(error: &str) -> bool {
@@ -4779,7 +5719,7 @@ fn needs_newer_7zip(tried: &[String]) -> String {
 /// Where 7-Zip's console might be: an installed 7-Zip, then the standalone
 /// `7zr.exe` this client keeps (which reads only .7z), or on Linux whatever
 /// the distribution calls it. Missing ones are skipped when they fail to start.
-fn seven_zip_tools(is_7z: bool) -> Vec<PathBuf> {
+pub(crate) fn seven_zip_tools(is_7z: bool) -> Vec<PathBuf> {
     #[cfg(windows)]
     let list = {
         let mut list: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
@@ -4816,9 +5756,43 @@ pub fn seven_zip_percent(line: &str) -> Option<u64> {
     line[..digits].parse().ok().filter(|p| *p <= 100)
 }
 
+/// Just `names` (as the archive itself lists them) out of a kept archive into
+/// `dest`, with the same 7-Zip an install uses: "Get the files back" in
+/// release_files.rs. `Ok(false)` when there is no 7-Zip on this PC. A solid
+/// archive is read up to the last file asked for, so its progress is honest.
+pub fn extract_named(archive: &Path, dest: &Path, names: &[String], progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Result<bool, String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("Cannot create {}: {e}", dest.display()))?;
+    let list = dest.with_extension("names");
+    std::fs::write(&list, names.join("\n")).map_err(|e| e.to_string())?;
+    let is_7z = archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+    let mut errors = Vec::new();
+    for tool in seven_zip_tools(is_7z) {
+        match run_7zip(&tool, archive, dest, Some(&list), progress, stop) {
+            None => continue,
+            Some(Ok(_)) => {
+                let _ = std::fs::remove_file(&list);
+                return Ok(true);
+            }
+            Some(Err(e)) => errors.push(e),
+        }
+    }
+    let _ = std::fs::remove_file(&list);
+    if errors.is_empty() {
+        Ok(false)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 /// Unpack with 7-Zip's console, following its progress. `None` when the tool
 /// is not there; otherwise what it reported damaged, or why it failed.
 fn extract_with_7zip(tool: &Path, archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Option<Result<Vec<String>, String>> {
+    run_7zip(tool, archive, dest, None, progress, stop)
+}
+
+/// `extract_with_7zip`, or with `names` (a list file, one of the archive's
+/// own names per line, taken as written) only those files.
+fn run_7zip(tool: &Path, archive: &Path, dest: &Path, names: Option<&Path>, progress: &dyn Fn(u64, Option<u64>), stop: &AtomicU8) -> Option<Result<Vec<String>, String>> {
     use std::io::Read;
     // The bar counts unpacked bytes when the archive says how many there are
     // (a .7z's headers do), and the archive's own size otherwise.
@@ -4826,6 +5800,10 @@ fn extract_with_7zip(tool: &Path, archive: &Path, dest: &Path, progress: &dyn Fn
     let mut cmd = std::process::Command::new(tool);
     // -bso0: no listing. -bsp1: progress on stdout. -bse2: errors on stderr.
     cmd.arg("x").arg("-y").arg("-bso0").arg("-bsp1").arg("-bse2").arg(format!("-o{}", dest.display())).arg(archive);
+    if let Some(list) = names {
+        // -spd: no wildcards in the names; the list is UTF-8.
+        cmd.arg("-spd").arg("-scsUTF-8").arg(format!("@{}", list.display()));
+    }
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     // Inside the AppImage, never hand 7-Zip the AppImage's own library paths (KB-0311).
     crate::launch::clean_appimage_env(&mut cmd);
@@ -4904,7 +5882,7 @@ fn extract_with_7zip(tool: &Path, archive: &Path, dest: &Path, progress: &dyn Fn
 /// libarchive (Windows' tar.exe, bsdtar): `Game.pck: 7-Zip bad CRC 0x... should
 /// be 0x...` then `Error exit delayed from previous errors.` 7-Zip: `ERROR: CRC
 /// Failed : Game.pck` or `ERROR: Data Error : Game.pck`, plus its summary lines.
-fn damaged_files(stderr: &str) -> Option<Vec<String>> {
+pub(crate) fn damaged_files(stderr: &str) -> Option<Vec<String>> {
     let mut damaged = Vec::new();
     for line in stderr.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let lower = line.to_ascii_lowercase();
@@ -5214,7 +6192,14 @@ pub fn download_install_anyway(app: AppHandle, id: String) -> Result<(), String>
     crate::logging::warn("download", &format!("{id}: installing {} without a matching checksum, at the player's word", d.file_name));
     edit(&app, &id, |d| {
         d.hash_mismatch = false;
-        d.verified = true;
+        // The player's own file goes in marked as not verified, never as
+        // the copy it did not match.
+        if d.from_file {
+            d.not_verified = true;
+            d.sha256 = None;
+        } else {
+            d.verified = true;
+        }
     });
     persist(&app);
     requeue(&app, &id)
@@ -5291,10 +6276,12 @@ pub fn download_cancel(app: AppHandle, state: State<'_, Downloads>, id: String) 
     // Not running (paused or failed): tidy up here, the files in the background.
     let (archive, staging) = edit(&app, &id, |_| {})
         .filter(|d| d.status != Status::Installed)
-        .map(|d| (Some(d.archive_path).filter(|p| !p.is_empty()), d.staging))
+        .map(|d| (own_archive(&d), d.staging))
         .unwrap_or_default();
     edit(&app, &id, |d| {
-        d.received = 0;
+        if !d.from_file {
+            d.received = 0;
+        }
         d.staging = None;
     });
     set_status(&app, &id, Status::Canceled, None);
@@ -5786,6 +6773,126 @@ mod tests {
         assert_eq!(family_addr(4), std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     }
 
+    /// KB-0072 on carrier lines (Starlink, mobile): each new connection can
+    /// leave from another address, so a link refused on one connection may
+    /// pass on the next. A server that refuses the first two connections as
+    /// dl.kryo.to does (`foreign_ip`) and lets the third through: the link is
+    /// found on the third try, and that try's resume pass lands in the run's
+    /// jar. One probe per family (0.3.11) gave up after the first.
+    #[test]
+    fn a_link_refused_on_one_connection_is_tried_on_new_ones() {
+        use reqwest::cookie::CookieStore;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let url = rt.block_on({
+            let connections = connections.clone();
+            async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tokio::spawn(async move {
+                    loop {
+                        let Ok((mut sock, _)) = listener.accept().await else { return };
+                        let n = connections.fetch_add(1, Ordering::SeqCst);
+                        tokio::spawn(async move {
+                            let mut req = [0u8; 4096];
+                            let _ = sock.read(&mut req).await;
+                            let answer: &[u8] = if n < 2 {
+                                b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: 22\r\nConnection: close\r\n\r\n{\"error\":\"foreign_ip\"}"
+                            } else {
+                                b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/10\r\nSet-Cookie: kr_resume=pass; Path=/d/t\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx"
+                            };
+                            let _ = sock.write_all(answer).await;
+                        });
+                    }
+                });
+                format!("http://{addr}/d/t")
+            }
+        });
+        let jar = Arc::new(reqwest::cookie::Jar::default());
+        let found = rt.block_on(probe_families(&url, &[4], &jar));
+        let (family, tries, _) = found.expect("the third connection passes");
+        assert_eq!((family, tries), (4, 3));
+        assert_eq!(connections.load(Ordering::SeqCst), 3, "one new connection per try");
+        let kept = jar.cookies(&url::Url::parse(&url).unwrap()).map(|h| h.to_str().unwrap_or_default().to_string());
+        assert_eq!(kept.as_deref(), Some("kr_resume=pass"), "the pass is in the run's jar for keep_resume_pass");
+        // Refused on every connection: three tries, then the next family.
+        assert!(keep_probing(&[Probe::Refused, Probe::Refused]));
+        assert!(!keep_probing(&[Probe::Refused, Probe::Refused, Probe::Refused]));
+        // No answer at all over a family: no more tries over it.
+        assert!(!keep_probing(&[Probe::Unreachable]));
+    }
+
+    /// KB-0367: a page, or a copy cut short, is told from the first 32 bytes
+    /// and the size on offer, before anything is written, and named by host.
+    #[test]
+    fn a_body_that_is_not_the_archive_is_refused_by_name() {
+        // A 7z start header saying 32 + 100 + 20 bytes.
+        let mut head = SEVEN_Z_MAGIC.to_vec();
+        head.extend_from_slice(&[0, 4, 0, 0, 0, 0]);
+        head.extend_from_slice(&100u64.to_le_bytes());
+        head.extend_from_slice(&20u64.to_le_bytes());
+        head.extend_from_slice(&[0; 4]);
+        assert_eq!(seven_z_length(&head), Some(152));
+        assert!(check_head("Game - Kryoto.7z", &head, 152, "Mocha").is_ok());
+        let short = check_head("Game - Kryoto.7z", &head, 140, "Mocha").unwrap_err();
+        assert!(short.starts_with("Mocha's copy of this file is cut short"), "{short}");
+        let page = b"<!DOCTYPE html><html><head><title>File removed</title>".to_vec();
+        let wrong = check_head("Game - Kryoto.7z", &page, 5_000, "VikingFile").unwrap_err();
+        assert!(wrong.starts_with("VikingFile sent a web page"), "{wrong}");
+        assert_eq!(looks_like(&[0u8; 32]), "zeros");
+        // Not a 7z by name: nothing to read in its head.
+        assert!(check_head("Game.zip", &page, 5_000, "Pixeldrain").is_ok());
+        assert_eq!(source_of("https://dl.kryo.to/d/abc.sig"), OWN_HOST);
+        // Our own host is named, and offered a retry and the mirrors; a
+        // mirror is told to take another one, or our own copy.
+        assert!(web_page_sent(OWN_HOST).starts_with("Kryoto's file host (dl.kryo.to) sent a web page"));
+        assert!(web_page_sent(OWN_HOST).contains("one of the game's mirrors"));
+        assert!(!web_page_sent(OWN_HOST).contains("Kryoto's own copy"));
+        assert!(web_page_sent("VikingFile").ends_with("Take another mirror, or Kryoto's own copy."));
+    }
+
+    /// KB-0117: the mirrors that can carry on a download our server keeps
+    /// cutting are the ones listed for its build, that Kryoto downloads from.
+    #[test]
+    fn the_mirrors_of_the_build_are_the_ones_asked_to_take_over() {
+        let listing = serde_json::json!({ "releases": [
+            { "version": "1.1", "primary": true, "links": [
+                { "url": "/api/download/v/9" },
+                { "url": "https://pixeldrain.com/u/abc" },
+                { "url": "https://example.com/file" },
+            ] },
+            { "version": "1.0", "links": [{ "url": "https://pixeldrain.com/u/old" }] },
+        ] });
+        assert_eq!(mirror_pages(&listing, None), ["https://pixeldrain.com/u/abc"]);
+        assert_eq!(mirror_pages(&listing, Some("1.0")), ["https://pixeldrain.com/u/old"]);
+        assert!(mirror_pages(&serde_json::json!({}), None).is_empty());
+    }
+
+    /// What the log says when a link never passes, without an address in it.
+    #[test]
+    fn the_log_says_how_the_networks_differ() {
+        let v4 = |s: &str| Some(network_of(s.parse().unwrap()));
+        assert_eq!(network_of("203.0.113.9".parse().unwrap()), "203.0.113.0/24");
+        assert_eq!(network_of("2001:db8:0:1:2::3".parse().unwrap()), "2001:db8:0:1::/64");
+        assert_eq!(network_verdict(v4("203.0.113.9"), v4("203.0.113.200"), v4("203.0.113.1")), "the same network");
+        assert_eq!(network_verdict(v4("203.0.113.9"), v4("198.51.100.1"), v4("203.0.113.1")), "the network changes between connections");
+        assert!(network_verdict(v4("203.0.113.9"), v4("203.0.113.9"), v4("198.51.100.1")).starts_with("kryo.to and its download server"));
+        assert_eq!(network_verdict(None, None, None), "could not tell");
+    }
+
+    /// A refused link tells a signed-out player to sign in (the app can then
+    /// mint over its own connection) instead of opening the page again.
+    #[test]
+    fn a_refused_link_says_what_gets_past_it() {
+        assert!(refused_own_text(403, false).contains("Sign in"));
+        assert!(!refused_own_text(403, true).contains("Sign in"));
+        assert!(refused_own_text(403, true).contains("mirror"));
+        assert!(refused_own_text(410, false).contains("expired"));
+        assert!(!refused_own_text(403, false).contains("page is open"));
+    }
+
     #[test]
     fn names_are_safe_folder_names() {
         assert_eq!(safe_name("Half-Life: Alyx?"), "Half-Life Alyx");
@@ -5857,6 +6964,15 @@ mod tests {
         assert_eq!(plain_name("Half-Life: Alyx?", None), "Half-Life Alyx");
     }
 
+    /// A cancelled or failed unpack throws away only its own staging folder.
+    #[test]
+    fn only_a_staging_folder_is_thrown_away() {
+        assert!(is_staging(Path::new("D:/Kryoto Games/.Hades.installing")));
+        for not in ["D:/Kryoto Games", "D:/", "D:/Games/Hades", "D:/Games/.installing", "D:/Games/Hades.installing"] {
+            assert!(!is_staging(Path::new(not)), "{not}");
+        }
+    }
+
     #[test]
     fn only_kryoto_downloads_are_taken_over() {
         let settings = crate::settings::Settings::default();
@@ -5902,6 +7018,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A stand-in for the HatchZip command line that prints `said` on its
+    /// error output and exits with `code`, whatever it is asked.
+    fn fake_hatchzip(dir: &Path, said: &str, code: u8) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let tool = dir.join("hatchzip.cmd");
+            std::fs::write(&tool, format!("@echo off\r\necho error: {said} 1>&2\r\nexit /b {code}\r\n")).unwrap();
+            tool
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = dir.join("hatchzip");
+            std::fs::write(&tool, format!("#!/bin/sh\necho \"error: {said}\" >&2\nexit {code}\n")).unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            tool
+        }
+    }
+
+    /// KB-0338, Forza Horizon 6 on 0.3.11: HatchZip's `check` refuses the
+    /// archive for `forzahorizon6.exe:4` (an NTFS stream) before anything
+    /// changes. 7-Zip takes over with the archive whole; it used to stop on
+    /// "HatchZip could not unpack it ... Press Retry", and Retry asked the
+    /// same check again.
+    #[test]
+    fn an_archive_hatchzip_refuses_is_unpacked_with_7zip_instead() {
+        let dir = scratch("hz-refused");
+        let archive = dir.join("FH6 - Kryoto.7z");
+        std::fs::write(&archive, b"0123456789").unwrap();
+        let said = "'FH6/Forza Horizon 6/forzahorizon6.exe:4' would be written outside the destination folder; extraction refused";
+        let stop = AtomicU8::new(RUN);
+        for code in [1, 4] {
+            let tool = fake_hatchzip(&dir, said, code);
+            let got = extract_in_place(&tool, &archive, &dir.join("staging"), &dir, "Forza Horizon 6", 20, None, false, &|_, _| {}, &stop);
+            assert!(matches!(got, Ok(None)), "exit {code}: {got:?}");
+            assert_eq!(std::fs::read(&archive).unwrap(), b"0123456789", "the archive is kept for 7-Zip");
+        }
+        // Anything else from the check is still said as it is.
+        let tool = fake_hatchzip(&dir, "something else went wrong", 1);
+        let got = extract_in_place(&tool, &archive, &dir.join("staging"), &dir, "Forza Horizon 6", 20, None, false, &|_, _| {}, &stop);
+        assert!(got.as_ref().is_err_and(|e| e.starts_with("HatchZip could not unpack it")), "{got:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5970,6 +7130,16 @@ mod tests {
         assert!(root.join(&exe).is_file());
         assert_eq!(std::fs::read(root.join("Data/level.bin")).unwrap().len(), 300_000);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A row that only waits for a sign-in carries on by itself: it stays in
+    /// this PC's log as a warning and is never reported as an app error.
+    #[test]
+    fn a_wait_for_a_sign_in_is_not_an_app_error() {
+        assert!(waits_for_sign_in(crate::phone::SIGNED_OUT));
+        assert!(waits_for_sign_in(ADDON_SIGNED_OUT));
+        assert!(!waits_for_sign_in("The connection kept dropping (timed out). Resume to try again."));
+        assert!(!waits_for_sign_in("kryo.to wants a check only its page can pass. Press Download on X's page, or Retry later."));
     }
 
     #[test]
@@ -6057,6 +7227,17 @@ mod tests {
         assert!(same_file(None, None, Some("b"), Some(11)));
         assert!(!same_file(Some("a-3"), Some(10), Some("b-3"), Some(10)));
         assert!(!same_file(Some("a-3"), Some(10), Some("a-3"), Some(11)));
+    }
+
+    /// KB-0117: a save that takes the hard disk 6 s is not run again 15 s
+    /// later, which stalled every connection for 6 s in every 15; a quick
+    /// one keeps the 15 s.
+    #[test]
+    fn saves_are_spaced_by_how_long_the_disk_takes() {
+        let s = std::time::Duration::from_secs;
+        assert_eq!(checkpoint_gap(s(0)), s(15));
+        assert_eq!(checkpoint_gap(std::time::Duration::from_millis(800)), s(15));
+        assert_eq!(checkpoint_gap(s(6)), s(60));
     }
 
     #[test]

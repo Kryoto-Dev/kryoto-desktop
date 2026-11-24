@@ -1,6 +1,7 @@
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { gameContext } from './context'
-import { ChevronDown, Download as DownloadIcon, Play, Square } from '@/ui/pixel-icons'
+import { ChevronDown, ChevronLeft, ChevronRight, Download as DownloadIcon, HardDrive, Play, Square } from '@/ui/pixel-icons'
+import { openSettingsSection } from '@/lib/window'
 import { Button, Check, Label, MenuButton, Segmented } from '@/ui'
 import { capsulesFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
@@ -206,8 +207,10 @@ export function LibraryHome({
       {filter === 'all' && recent.length > 1 ? (
         <section className="grid min-w-0 gap-3">
           <Label>Recent</Label>
-          {/* Capped: with one or two recent games a `1fr` card filled the whole width at 460:215 and dwarfed the page (KB-0021). */}
-          <div className="grid auto-cols-[minmax(260px,360px)] grid-flow-col justify-start gap-3 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {/* Capped: with one or two recent games a `1fr` card filled the whole width at 460:215 and dwarfed the page (KB-0021).
+              Room on every side (p-2, taken back by -m-2): a scroller cuts off what
+              sticks out, so a lifted card's top and the controller's ring were cut. */}
+          <SideScroller count={recent.length} className="grid auto-cols-[minmax(260px,360px)] grid-flow-col justify-start gap-3 -m-2 overflow-x-auto p-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {recent.slice(1, 7).map((g) => (
               <div key={g.id} className="group/lift relative">
               <button
@@ -215,7 +218,7 @@ export function LibraryHome({
                 onClick={() => onOpen(g.id)}
                 onDoubleClick={() => onPlay(g)}
                 {...ctx(g)}
-                className="kryo-radius group grid w-full overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-0.5 group-hover/lift:border-foreground/50"
+                className="kryo-radius group grid w-full overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-0.5 group-hover/lift:border-foreground/50 group-focus-within/lift:-translate-y-0.5 group-focus-within/lift:border-foreground/50"
               >
                 <Art adult={g.nsfw} src={capsulesFor(g)[0]} fallback={capsulesFor(g).slice(1)} title={g.title} className="aspect-[460/215] w-full object-cover" />
                 <span className="grid gap-0.5 px-3 py-2.5">
@@ -231,7 +234,7 @@ export function LibraryHome({
               {running.has(g.id) ? <StopChip game={g} onStop={onStop} className="absolute right-2 top-2" /> : null}
               </div>
             ))}
-          </div>
+          </SideScroller>
         </section>
       ) : null}
 
@@ -242,6 +245,15 @@ export function LibraryHome({
           </Label>
           {sort === 'size' && measuring > 0 ? <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Measuring {measuring} more</span> : null}
           <span className="h-px grow bg-border" />
+          {/* The drives, their free space and the folders' tools, a press from the games on them (abraxas.777). */}
+          <button
+            type="button"
+            onClick={() => openSettingsSection('storage')}
+            className="kryo-pill flex h-7 items-center gap-1.5 border border-border px-3 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+          >
+            <HardDrive className="size-3" aria-hidden />
+            Storage
+          </button>
           <MenuButton
             align="right"
             className="kryo-pill flex h-7 items-center gap-1.5 border border-border px-3 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
@@ -262,7 +274,7 @@ export function LibraryHome({
             <div key={g.id} className="group/lift">
             <div
               {...ctx(g)}
-              className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60"
+              className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60 group-focus-within/lift:-translate-y-1 group-focus-within/lift:border-foreground/60"
             >
               <button type="button" onClick={() => onOpen(g.id)} className="kryo-square absolute inset-0" aria-label={`Open ${g.title}`}>
                 <Art adult={g.nsfw} src={coverFor(g)} fallback={[g.header]} title={g.title} className="size-full object-cover" />
@@ -323,7 +335,7 @@ export function LibraryHome({
                 <div key={e.slug} className="group/lift">
                 <div
                   {...gameContext(onSavedContext ? (x, y) => onSavedContext(e, x, y) : undefined)}
-                  className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-dashed border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60"
+                  className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-dashed border-border bg-card transition-[transform,border-color] duration-200 group-hover/lift:-translate-y-1 group-hover/lift:border-foreground/60 group-focus-within/lift:-translate-y-1 group-focus-within/lift:border-foreground/60"
                 >
                   <button type="button" onClick={() => onCatalogGame?.(e.slug)} className="kryo-square absolute inset-0" aria-label={`Open ${e.title}`}>
                     {/* The tall cover, like the cards of games on this PC; the wide one only when kryo.to has no tall one. */}
@@ -365,3 +377,55 @@ export function LibraryHome({
   )
 }
 
+/**
+ * A row that scrolls sideways (Recent): an arrow at each end while there is
+ * more that way, and the wheel scrolls it while it can still move, so a
+ * mouse reaches every card. A controller's selection scrolls it by itself.
+ */
+function SideScroller({ className, count, children }: { className: string; count: number; children: ReactNode }) {
+  const box = useRef<HTMLDivElement>(null)
+  const [more, setMore] = useState({ left: false, right: false })
+  useEffect(() => {
+    const el = box.current
+    if (!el) return
+    const look = () => setMore({ left: el.scrollLeft > 4, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4 })
+    look()
+    const wheel = (e: WheelEvent) => {
+      if (e.ctrlKey || Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return
+      const room = e.deltaY > 0 ? el.scrollWidth - el.clientWidth - el.scrollLeft : el.scrollLeft
+      if (room < 1) return
+      e.preventDefault()
+      el.scrollBy({ left: e.deltaY })
+    }
+    el.addEventListener('scroll', look, { passive: true })
+    el.addEventListener('wheel', wheel, { passive: false })
+    const sized = new ResizeObserver(look)
+    sized.observe(el)
+    return () => {
+      el.removeEventListener('scroll', look)
+      el.removeEventListener('wheel', wheel)
+      sized.disconnect()
+    }
+  }, [count])
+  const go = (dir: -1 | 1) => box.current?.scrollBy({ left: dir * box.current.clientWidth * 0.8, behavior: 'smooth' })
+  const arrow = 'kryo-pill absolute top-1/2 grid size-9 -translate-y-1/2 place-items-center border border-border bg-background/90 text-foreground shadow-lg shadow-black/50 backdrop-blur transition-colors hover:bg-foreground hover:text-background'
+  return (
+    // min-w-0: a grid item grows to its content, so the row was as wide as all
+    // its cards, never scrolled, and the page cut the last ones off.
+    <div className="relative min-w-0">
+      <div ref={box} className={className}>
+        {children}
+      </div>
+      {more.left ? (
+        <button type="button" aria-label="Scroll left" onClick={() => go(-1)} className={cn(arrow, 'left-1')}>
+          <ChevronLeft className="size-4" />
+        </button>
+      ) : null}
+      {more.right ? (
+        <button type="button" aria-label="Scroll right" onClick={() => go(1)} className={cn(arrow, 'right-1')}>
+          <ChevronRight className="size-4" />
+        </button>
+      ) : null}
+    </div>
+  )
+}

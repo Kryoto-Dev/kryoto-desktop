@@ -3,8 +3,7 @@ import { ExternalLink, RotateCcw, SlidersHorizontal, Trash2, Undo2 } from '@/ui/
 import { Button, Check, ContextMenu, Dropdown, Section, Segmented, type MenuEntry } from '@/ui'
 import { PadBadge } from '@/controller/PadArtView'
 import { errorText } from '@/lib/bridge'
-import { catalogApiUrl } from '@/lib/endpoint'
-import { isWindowsHost, type LibraryGame } from '@/lib/library'
+import { fetchGameApi, isWindowsHost, type LibraryGame } from '@/lib/library'
 import { openExternal } from '@/lib/window'
 import { cn } from '@/lib/utils'
 import { usePadStore } from '@/hooks/usePads'
@@ -99,9 +98,8 @@ export function GameController({ game, onGeneral }: { game: LibraryGame; onGener
   useEffect(() => {
     if (!game.slug) return
     let cancelled = false
-    void catalogApiUrl(`/api/games/${encodeURIComponent(game.slug)}`)
-      .then((url) => fetch(url))
-      .then((r) => (r.ok ? (r.json() as Promise<{ game?: { genres?: unknown; tags?: unknown } }>) : null))
+    void fetchGameApi(game.slug)
+      .then((r) => (r?.ok ?(r.json() as Promise<{ game?: { genres?: unknown; tags?: unknown } }>) : null))
       .then((b) => {
         const list = (v: unknown) => (Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [])
         if (!cancelled && b?.game) setSuggested(layoutFor([...list(b.game.genres), ...list(b.game.tags)]))

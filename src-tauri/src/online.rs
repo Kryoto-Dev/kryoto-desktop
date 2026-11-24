@@ -131,7 +131,7 @@ pub fn ini(appid: &str, dlc: &[String]) -> String {
 
 fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
     let folders = crate::settings::all_folders(&crate::settings::load(app));
-    crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir))
+    crate::storage::game_folder(&folders, game).unwrap_or_else(|| PathBuf::from(&game.install_dir))
 }
 
 /// Put `from` at `to`, first saving whatever is at `to` beside it.
@@ -186,8 +186,16 @@ pub fn online_unneeded(game: &serde_json::Value, local_source: Option<&str>) -> 
 }
 
 async fn catalog_game<R: tauri::Runtime>(app: &AppHandle<R>, client: &reqwest::Client, slug: &str) -> Result<serde_json::Value, String> {
+    // A game taken off kryo.to is not asked again for a day (catalog_gone.rs):
+    // its Library page asked on every visit (the Add-ons card's online check).
+    if crate::catalog_gone::is_gone(app, slug) {
+        return Err("kryo.to no longer has this game.".into());
+    }
     let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(app));
     let res = client.get(format!("{endpoint}/api/games/{slug}")).send().await.map_err(|e| e.to_string())?;
+    if crate::catalog_gone::says_gone(res.status().as_u16()) {
+        crate::catalog_gone::set(app, slug, true);
+    }
     if !res.status().is_success() {
         return Err(format!("kryo.to answered {}.", res.status().as_u16()));
     }

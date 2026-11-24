@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { BatteryCharging, BatteryMedium, Gamepad2, RotateCcw, Vibrate } from '@/ui/pixel-icons'
 import { Button, Caption, Check, Dropdown, Matrix, Section, Segmented } from '@/ui'
 import { PadArtView, PadBadge, type Callout } from '@/controller/PadArtView'
@@ -6,7 +6,7 @@ import { PadSetup } from '@/controller/PadSetup'
 import { errorText } from '@/lib/bridge'
 import { openExternal } from '@/lib/window'
 import { clearPadRequest, savePadConfig, usePadInput, usePadStore } from '@/hooks/usePads'
-import { isWindowsHost } from '@/lib/library'
+import { isWindowsHost, library, type LibraryGame } from '@/lib/library'
 import {
   actsAs,
   assign,
@@ -21,10 +21,27 @@ import {
   VIRTUAL_DRIVER_URL,
   type PadConfig,
   type PadInfo,
+  type PadPair,
   type PadPrefs,
 } from '@/lib/pad'
 import { PAD_FAMILIES, type PadControl, type PadFamily } from '@/lib/pad-art'
 import { cn } from '@/lib/utils'
+import {
+  Saver,
+  SCREENSAVER_WAITS,
+  screensaverOn,
+  screensaverVariant,
+  screensaverWait,
+  setScreensaverOn,
+  setScreensaverVariant,
+  setScreensaverWait,
+  useSaverTitles,
+} from '@/bigpicture/Screensaver'
+import { SAVER_HINTS, SAVERS, type SaverId } from '@/bigpicture/screensavers'
+import { SaverCanvas } from '@/bigpicture/screensavers/SaverCanvas'
+
+/** Settings' screensaver pictures: small, so a few frames a second is plenty. */
+const THUMB_FPS = 8
 
 /**
  * Settings > Devices, Controller (kryo.to feature flag `controller`): the pads that are
@@ -72,14 +89,19 @@ export function ControllerPane() {
     if (!pad.mapped) setSetup(true)
   }, [requested, pads])
 
+  // A Joy-Con pair just made one controller (or two again): the page follows
+  // it to what it became.
+  const [follow, setFollow] = useState<'pair' | 'half' | null>(null)
   useEffect(() => {
     // Follow a new connection instead of leaving the test drawing on a
     // saved, disconnected profile after its instance/backend changes.
     // A pad asked for by its notification comes first.
     const waiting = requested && !pads.some((p) => p.guid === requested.guid)
     if ((!requested || waiting) && pads.length && !pads.some(p => p.guid === chosen)) {
-      setChosen(pads[0]!.guid)
+      const next = (follow === 'pair' && pads.find((p) => p.pair?.combined)) || (follow === 'half' && pads.find((p) => p.side === 'left')) || pads[0]!
+      setChosen(next.guid)
       setSetup(false)
+      setFollow(null)
     }
   }, [pads])
 
@@ -127,6 +149,14 @@ export function ControllerPane() {
     if (!pad) return
     setFailed(null)
     void padApi.saveSetup(pad.guid, pad.name, null).then((c) => savePadConfig(c)).catch((e: unknown) => setFailed(`Not saved: ${errorText(e)}`))
+  }
+  const setPair = (key: string, one: boolean) => {
+    setFailed(null)
+    setFollow(one ? 'pair' : 'half')
+    void padApi.joycons(key, one).then((c) => savePadConfig(c)).catch((e: unknown) => {
+      setFollow(null)
+      setFailed(`Not saved: ${errorText(e)}`)
+    })
   }
 
   return (
@@ -188,6 +218,8 @@ export function ControllerPane() {
             </Button>
           </div>
         ) : null}
+
+        {pad?.pair ? <JoyConPair pair={pad.pair} onChoose={setPair} /> : null}
 
         <div
           className="kryo-radius relative grid justify-items-center gap-3 border border-border bg-card/40 px-6 pb-5 pt-6"
@@ -374,7 +406,161 @@ export function ControllerPane() {
           {config.navigate ? <NavLegend family={family} /> : null}
         </Section>
       ) : null}
+      <BigPictureSection />
     </>
+  )
+}
+
+/**
+ * Big Picture's screensaver (bigpicture/Screensaver.tsx): on, which one, after
+ * how long, and a way to see it now. Each choice is a small live picture of
+ * itself, drawn only while this section is on screen.
+ */
+function BigPictureSection() {
+  const [on, setOn] = useState(screensaverOn)
+  const [wait, setWait] = useState(screensaverWait)
+  const [which, setWhich] = useState(screensaverVariant)
+  const [now, setNow] = useState(false)
+  const [games, setGames] = useState<LibraryGame[]>([])
+  const { titles, lastPlayed } = useSaverTitles(games)
+  const tiles = useRef<HTMLDivElement | null>(null)
+  const [seen, setSeen] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    void library
+      .list()
+      .then((list) => live && setGames(list))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [])
+  // The pictures move only while you can see them.
+  useEffect(() => {
+    const el = tiles.current
+    if (!el || !on) return
+    const watch = new IntersectionObserver(([entry]) => setSeen(!!entry?.isIntersecting))
+    watch.observe(el)
+    return () => watch.disconnect()
+  }, [on])
+
+  const pick = (id: SaverId) => {
+    setWhich(id)
+    setScreensaverVariant(id)
+  }
+
+  return (
+    <Section title="Big Picture" hint="Left alone, Big Picture shows a screensaver, everything in it moving now and then so nothing marks a TV. Any button brings it back. Never while a game runs.">
+      <Check
+        checked={on}
+        onChange={(v) => {
+          setOn(v)
+          setScreensaverOn(v)
+        }}
+        label="Show a screensaver when Big Picture is left alone"
+      />
+      {on ? (
+        <>
+          <div ref={tiles} role="radiogroup" aria-label="Screensaver" className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {SAVERS.map((s, i) => {
+              const id = s.id as SaverId
+              const chosen = which === id
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="radio"
+                  aria-checked={chosen}
+                  tabIndex={chosen ? 0 : -1}
+                  title={SAVER_HINTS[id]}
+                  onClick={() => pick(id)}
+                  onKeyDown={(e) => {
+                    const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
+                    if (!step) return
+                    e.preventDefault()
+                    const next = SAVERS[(i + step + SAVERS.length) % SAVERS.length]!
+                    pick(next.id as SaverId)
+                    e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]').item((i + step + SAVERS.length) % SAVERS.length)?.focus()
+                  }}
+                  className={cn(
+                    'kryo-radius group grid gap-2 border p-2 text-left transition-colors',
+                    chosen ? 'border-primary' : 'border-border hover:border-foreground/40',
+                  )}
+                >
+                  <span className="kryo-night kryo-radius relative block aspect-video overflow-hidden bg-black">
+                    {seen && !now ? <SaverCanvas id={id} fps={THUMB_FPS} titles={titles} lastPlayed={lastPlayed} thumb /> : null}
+                  </span>
+                  <span className={cn('px-1 text-[10px] font-bold uppercase tracking-wider', chosen ? 'text-foreground' : 'text-muted-foreground')}>{s.name}</span>
+                </button>
+              )
+            })}
+          </div>
+          <Caption>{SAVER_HINTS[which]}</Caption>
+          <div className="flex flex-wrap items-center gap-3">
+            <Segmented
+              label="Start the screensaver after"
+              value={String(wait)}
+              options={SCREENSAVER_WAITS.map((m) => ({ value: String(m), label: `${m} min` }))}
+              onChange={(v) => {
+                setWait(Number(v))
+                setScreensaverWait(Number(v))
+              }}
+            />
+            <Button size="sm" onClick={() => setNow(true)}>
+              Show it now
+            </Button>
+          </div>
+        </>
+      ) : null}
+      {now ? <Saver games={games} variant={which} onWake={() => setNow(false)} /> : null}
+    </Section>
+  )
+}
+
+/**
+ * Two Joy-Cons (suggestion #79): on either half, the offer to use them as one
+ * controller; on the pair, the way back to two. Kept for that pair.
+ */
+function JoyConPair({ pair, onChoose }: { pair: PadPair; onChoose: (key: string, one: boolean) => void }) {
+  if (pair.combined) {
+    return (
+      <div className="kryo-radius flex flex-wrap items-center gap-4 border border-border p-4">
+        <Gamepad2 className="size-5 shrink-0 text-success" aria-hidden />
+        <div className="min-w-0 grow">
+          <p className="text-sm font-bold text-foreground">Two Joy-Cons, one controller</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">{pair.reach}</p>
+        </div>
+        <Button size="sm" onClick={() => onChoose(pair.key, false)}>
+          Use as two controllers
+        </Button>
+      </div>
+    )
+  }
+  if (!pair.canCombine) {
+    return <p className="text-[11px] text-muted-foreground">{pair.reach}</p>
+  }
+  return (
+    <div className={cn('kryo-radius flex flex-wrap items-center gap-4 border p-4', pair.keptApart ? 'border-border' : 'border-primary/50 bg-primary/5')}>
+      <Gamepad2 className={cn('size-5 shrink-0', pair.keptApart ? 'text-muted-foreground' : 'text-primary')} aria-hidden />
+      <div className="min-w-0 grow">
+        <p className="text-sm font-bold text-foreground">{pair.keptApart ? 'Two Joy-Cons, kept as two controllers' : 'Use these two Joy-Cons as one controller?'}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {pair.keptApart ? 'One player each, held sideways. ' : 'The left and the right Joy-Con together, held like a full controller. '}
+          {pair.reach}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button variant={pair.keptApart ? undefined : 'primary'} size="sm" onClick={() => onChoose(pair.key, true)}>
+          Use as one controller
+        </Button>
+        {pair.keptApart ? null : (
+          <Button size="sm" variant="ghost" onClick={() => onChoose(pair.key, false)}>
+            Keep as two
+          </Button>
+        )}
+      </div>
+    </div>
   )
 }
 

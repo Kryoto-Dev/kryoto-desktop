@@ -1,7 +1,10 @@
-import { call, errorText, on } from '@/lib/bridge'
+import { call, errorText, isTauri, isWeb, on } from '@/lib/bridge'
 import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { automaticArtwork, coverFor } from '@/lib/game-artwork'
+import { autofixBlock } from '@/lib/autofix'
+import type { FilesRestored, FilesState } from '@/lib/release-files'
+import type { OnlineFixState } from '@/lib/online-fix'
 
 /**
  * The Library: games on this PC and how each one starts.
@@ -31,6 +34,26 @@ export type FoundGame = {
   moved?: boolean
 }
 
+/** What an uninstall would delete (library.rs `UninstallPlan`, safe_delete.rs). */
+export type UninstallPlan = {
+  /** `delete`: the folder (or the files in it) go. `listOnly`: Kryoto did not
+   *  install it, so only its place in the Library goes. `refused`: not provably
+   *  this game's alone, so nothing is deleted. */
+  kind: 'delete' | 'listOnly' | 'refused'
+  reason: string | null
+  folder: string | null
+  /** The whole folder goes; otherwise only `files` of it. */
+  whole: boolean
+  files: number
+  bytes: number
+  /** What stays in the folder: saves, and files Kryoto did not install. */
+  keptFiles: number
+  keptBytes: number
+  /** The Recycle Bin (or Trash) takes it; otherwise `binNote` says why it would be deleted for good. */
+  bin: boolean
+  binNote: string | null
+}
+
 export type LibraryGame = {
   id: string
   title: string
@@ -58,6 +81,8 @@ export type LibraryGame = {
   applyOverrides: boolean
   /** Windows: Play starts it as administrator. */
   runAsAdmin?: boolean
+  /** Linux: MangoHud for this game; null follows Settings > Compatibility. */
+  mangohud?: boolean | null
   /** The player changed its files: Kryoto stops offering updates and asking to repair it. */
   keepFiles?: boolean
   playtimeSeconds: number
@@ -66,6 +91,8 @@ export type LibraryGame = {
   version: string | null
   /** The SHA-256 of the archive it came from, when kryo.to listed one (src-tauri library.rs `build_sha`). */
   buildSha?: string | null
+  /** Installed from the player's own archive, which matched no file kryo.to lists (src-tauri library.rs `unverified`). */
+  unverified?: boolean
   /** A build picked under Versions: while it is installed, no update is offered. */
   pinnedVersion?: string | null
   short: string | null
@@ -133,6 +160,11 @@ export type KryoAddon = {
    * already brings its own. Absent from older answers.
    */
   offered?: boolean
+  /**
+   * A language pack's Steam code (`polish`): an add-on labelled
+   * `Language: <name>` (kryo.to lib/game-languages.ts). Absent otherwise.
+   */
+  language?: string | null
 }
 
 /**
@@ -148,15 +180,19 @@ export async function latestFor(game: Pick<LibraryGame, 'slug' | 'version' | 'bu
   if (!game.slug || !game.buildSha || (version && version !== (game.version ?? ''))) return version
   // The same number (or none): only the file says whether it is the same build.
   // Read even when the links are withheld: the hashes still come.
-  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(game.slug)}/downloads`)).catch(() => null)
-  const json = res ? ((await res.json().catch(() => null)) as { hashes?: { sha256?: string }[] } | null) : null
+  const res = await fetchGameApi(game.slug, '/downloads').catch(() => null)
+  const json = res ?((await res.json().catch(() => null)) as { hashes?: { sha256?: string }[] } | null) : null
   const hashes = (json?.hashes ?? []).map((h) => h.sha256?.toLowerCase()).filter((h): h is string => !!h && h.length === 64)
   if (!hashes.length || hashes.includes(game.buildSha.toLowerCase())) return version
   return `${version || game.version || 'This build'}${NEW_UPLOAD}`
 }
 
-/** A game kryo.to can say has an update: on a known build number, or a known file. */
-export const knowsBuild = (g: Pick<LibraryGame, 'version' | 'buildSha'>) => !!g.version || !!g.buildSha
+/**
+ * A game kryo.to can say has an update: on a known build number, or a known
+ * file. One installed from a file that is not Kryoto's copy is offered
+ * kryo.to's build even when its own number is unknown.
+ */
+export const knowsBuild = (g: Pick<LibraryGame, 'version' | 'buildSha' | 'unverified'>) => !!g.version || !!g.buildSha || !!g.unverified
 
 /**
  * A game's add-ons on kryo.to, asked by the app as the signed-in account
@@ -219,8 +255,9 @@ type RawRelease = {
  * resolves by itself follow, API hosts before page hosts.
  */
 export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
-  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}/downloads`))
-  if (!res.ok) throw new Error(res.status === 404 ? `kryo.to has no game at /game/${slug}.` : `kryo.to answered ${res.status}.`)
+  const res = await fetchGameApi(slug, '/downloads')
+  if (!res) throw new Error(goneText(slug))
+  if (!res.ok) throw new Error(`kryo.to answered ${res.status}.`)
   const json = (await res.json()) as {
     releases?: RawRelease[]
     version?: string
@@ -264,7 +301,17 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
   })
 }
 
-export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null; stopped?: boolean; /** Linux: the launcher's last lines, when it failed at once. */ detail?: string }
+export type GameStateEvent = {
+  id: string
+  running: boolean
+  seconds: number | null
+  code: number | null
+  stopped?: boolean
+  /** Linux: the launcher's last lines, when it failed at once. */
+  detail?: string
+  /** Why it sent the player to Steam ("No licenses"), when it ended at once and its folder says why (src-tauri steam_check.rs). */
+  steam?: string
+}
 
 export const BLANK_GAME: LibraryGame = {
   id: '',
@@ -346,9 +393,12 @@ export const library = {
   refreshArtwork: (id: string, art: { cover: string | null; hero: string | null; logo?: string | null; header?: string | null }) =>
     call<LibraryGame>('library_artwork', { id, ...art, logo: art.logo ?? null, header: art.header ?? null }),
   /** `deletePrefix`: on Linux, its Wine prefix goes too. `together`: the games
-   *  uninstalled in the same go, which may share its folder. */
-  remove: (id: string, deleteFiles: boolean, deletePrefix = false, together: string[] = []) =>
-    call<boolean>('library_remove', { id, deleteFiles, deletePrefix, together }),
+   *  uninstalled in the same go, which may share its folder. `permanent`: the
+   *  player was told it cannot go to the Recycle Bin and said yes. */
+  remove: (id: string, deleteFiles: boolean, deletePrefix = false, together: string[] = [], permanent = false) =>
+    call<boolean>('library_remove', { id, deleteFiles, deletePrefix, together, permanent }),
+  /** What uninstalling would delete, worked out on the PC before the player confirms (src-tauri safe_delete.rs). */
+  uninstallPlan: (id: string, together: string[] = []) => call<UninstallPlan>('library_uninstall_plan', { id, together }),
   /** The game is somewhere else now: `exePath` is what starts it. Only its place changes. */
   relocate: (id: string, exePath: string) => call<LibraryGame>('library_relocate', { id, exePath }),
   /** Manage > Rename folder: the game's folder in plain letters, where it is (src-tauri library.rs). */
@@ -385,7 +435,48 @@ export const library = {
   onlineApply: (gameId: string) => call<LibraryGame>('online_apply', { gameId }),
   /** All clients share the same emulator repair/undo engine. */
   repairApply: (gameId: string, source: string) => call('repair_apply', { gameId, source }),
+  /** Which emulator the game uses and which it can switch to (src-tauri repair.rs `game_emulators`). */
+  emulators: (gameId: string) => call<GameEmulators>('game_emulators', { gameId }),
+  /** Switch in one go: what Kryoto put in before comes out, then this one goes in (repair.rs `repair_switch`). */
+  switchEmulator: (gameId: string, source: string) => call<{ source: string; version: string; warnings: string[] }>('repair_switch', { gameId, source }),
+  /** The release's file list and the last check, without asking kryo.to (src-tauri release_files.rs). */
+  filesState: (gameId: string) => call<FilesState>('game_files_state', { gameId }),
+  /** The same, with the list fetched first when it is due (opening Properties). */
+  filesFetch: (gameId: string) => call<FilesState>('game_files_fetch', { gameId }),
+  /** Check files: `full` hashes every file (`files-check-progress`, and Cancel). */
+  filesCheck: (gameId: string, full = false) => call<FilesState>('game_files_check', { gameId, full }),
+  filesCheckCancel: (gameId: string) => call<void>('game_files_check_cancel', { gameId }),
+  /** Get the files back from this PC (another copy, the kept download); says what is left. */
+  filesRestore: (gameId: string) => call<FilesRestored>('game_files_restore', { gameId }),
   onlineUndo: (gameId: string) => call<LibraryGame>('online_undo', { gameId }),
+  /** Online-Fix's fix from online-fix.me (src-tauri online_fix.rs): what is known, asking nobody. */
+  onlineFixState: (gameId: string) => call<OnlineFixState>('online_fix_state', { gameId }),
+  /** The same, with online-fix.me asked what it has (once a run, unless `fresh`). */
+  onlineFixLookup: (gameId: string, fresh = false) => call<OnlineFixState>('online_fix_lookup', { gameId, fresh }),
+  /** online-fix.me's folder opens in a window; the player clicks the file; Kryoto checks it and puts it in. */
+  onlineFixGet: (gameId: string) => call<OnlineFixState>('online_fix_get', { gameId }),
+  /** "I have the file": an archive the player downloaded, checked and put in the same way. */
+  onlineFixFromFile: (gameId: string, path: string) => call<OnlineFixState>('online_fix_from_file', { gameId, path }),
+  onlineFixOpenPage: (gameId: string) => call<void>('online_fix_open_page', { gameId }),
+}
+
+/** One emulator a game can switch to (repair.rs `EmulatorChoice`). */
+export type EmulatorChoice = { id: string; label: string; online: boolean; purpose: string }
+/** A game's emulator now, what it came with, and its choices (repair.rs `Emulators`). */
+export type GameEmulators = {
+  current: string | null
+  switched: string | null
+  original: string | null
+  choices: EmulatorChoice[]
+  undo: boolean
+  interrupted: boolean
+  blocked: string | null
+  /** The emulator the release came with, from its file list: "gbe_fork (experimental)". */
+  release: string | null
+  /** The uploader left the emulator out of this release. */
+  releaseOff: boolean
+  /** Steam files the uploader kept as the game shipped them. */
+  keptOwn: string[]
 }
 
 /* ── kryo.to ─────────────────────────────────────────────── */
@@ -408,6 +499,8 @@ export type CatalogGame = {
   nsfw: boolean
   /** VR only, VR as well as flat, or neither (null). */
   vr: VrKind | null
+  /** Set when kryo.to says the auto-fixer cannot fix this release (lib/autofix.ts): its notice, shown instead. */
+  noAutofix: { notice: string; reason: string | null } | null
 }
 
 /** A kryo.to game page link or a bare slug, as a slug. */
@@ -419,16 +512,55 @@ export function slugFrom(input: string): string | null {
   return /^[a-z0-9-]+$/i.test(text) ? text.toLowerCase() : null
 }
 
+const goneText = (slug: string) => `kryo.to has no game at /game/${slug}.`
+
+/**
+ * kryo.to's answer for a game was 404 or 410 less than a day ago (src-tauri
+ * catalog_gone.rs); with `gone`, remember or forget that first. False where
+ * there is no such memory (the browser preview, an app without the command).
+ */
+async function catalogGone(slug: string, gone?: boolean): Promise<boolean> {
+  if (!isTauri() || isWeb()) return false
+  return call<boolean>('catalog_gone', { slug, gone: gone ?? null }).catch(() => false)
+}
+
+/**
+ * `GET /api/games/<slug><rest>` through the same memory: null, without
+ * asking, for a game kryo.to took off less than a day ago, and null (and
+ * remembered) when this answer says so. `rest` is '' or '/downloads', which
+ * answer 404 or 410 only for a game that is gone; any other path is only
+ * skipped for one already known gone (its 404 may mean nothing to show).
+ * A removed game's Library page asked four paths on every visit (2026-11-22).
+ */
+export async function fetchGameApi(slug: string, rest: '' | '/downloads' | '/compatibility' | '/writeups' = ''): Promise<Response | null> {
+  if (await catalogGone(slug)) return null
+  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}${rest}`))
+  if ((rest === '' || rest === '/downloads') && (res.status === 404 || res.status === 410)) {
+    void catalogGone(slug, true)
+    return null
+  }
+  return res
+}
+
 /**
  * A release's facts from kryo.to's public game API: Steam's launch entries,
  * the exe and arguments staff picked, art, version, and the source label
  * (which says whether Wine needs DLL overrides).
  */
-export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
+export async function fetchCatalogGame(slug: string, { ask = false }: { ask?: boolean } = {}): Promise<CatalogGame> {
+  // A game kryo.to took off is not asked about again for a day (src-tauri
+  // catalog_gone.rs): the Library, update checks and the adult flags asked for
+  // removed games over and over. `ask`: the player asked for this one by name.
+  if (!ask && (await catalogGone(slug))) throw new Error(goneText(slug))
   const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}`))
-  if (res.status === 404) throw new Error(`kryo.to has no game at /game/${slug}.`)
+  if (res.status === 404 || res.status === 410) {
+    void catalogGone(slug, true)
+    throw new Error(goneText(slug))
+  }
   if (!res.ok) throw new Error(`kryo.to answered ${res.status}.`)
-  const { game, art } = (await res.json()) as { game: Record<string, unknown>; art?: Record<string, unknown> }
+  if (ask) void catalogGone(slug, false)
+  const answer = (await res.json()) as { game: Record<string, unknown>; art?: Record<string, unknown> } & Record<string, unknown>
+  const { game, art } = answer
   const artUrl = (k: string) => (typeof art?.[k] === 'string' && (art[k] as string).trim() ? (art[k] as string).trim() : null)
   const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null)
   const available = (game.game_launch_options as { available?: LaunchEntry[] } | null)?.available
@@ -457,6 +589,8 @@ export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
     developer: str(game.developer),
     nsfw: game.nsfw === true,
     vr: vrKind(game.vr),
+    // kryo.to puts `hypervisor` and `autofix` beside `game`, not in it.
+    noAutofix: autofixBlock(answer),
   }
 }
 

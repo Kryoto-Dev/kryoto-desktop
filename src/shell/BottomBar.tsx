@@ -1,6 +1,7 @@
-import { Bell, Download, Play, Plus, Users } from '@/ui/pixel-icons'
+import { Bell, Download, FileArchive, Play, Plus, Users } from '@/ui/pixel-icons'
 import { asciiTrack } from '@/ui'
-import { formatBytes, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
+import { formatSpeed, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
+import { useSettings } from '@/lib/settings'
 import { ToastActionButton, type Toast } from '@/shell/Toasts'
 import { useSocialBadge } from '@/hooks/useSocialBadge'
 
@@ -8,7 +9,7 @@ const chip =
   'kryo-pill flex h-7 items-center gap-2 px-3 text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground'
 
 /**
- * The footer: Add a Game, the download in progress drawn as the site's ASCII
+ * The footer: Add a Game and Install from a file, the download in progress drawn as the site's ASCII
  * bar (click for Downloads), the latest notice while the Store covers the
  * corner, and Friends & Chat.
  */
@@ -18,6 +19,7 @@ export function BottomBar({
   onNotice,
   onDismissNotice,
   onAddGame,
+  onInstallFile,
   onDownloads,
   onFriends,
   friendsActive = false,
@@ -27,21 +29,31 @@ export function BottomBar({
   onNotice: (t: Toast) => void
   onDismissNotice: (key: number) => void
   onAddGame: () => void
+  /** A game's .7z already on this PC (downloads/InstallFromFile.tsx). */
+  onInstallFile: () => void
   onDownloads: () => void
   /** None for an account friends and chat are not on for. */
   onFriends?: () => void
   friendsActive?: boolean
 }) {
   const waitingSocial = useSocialBadge().total
+  const bits = !!useSettings()?.speedInBits
   const active = downloads.find(isWorking)
   const count = (status: Dl['status']) => downloads.filter((d) => d.status === status).length
-  const waiting = [`${count('failed')} failed`, `${count('paused')} paused`, `${count('queued')} queued`].filter((s) => !s.startsWith('0 '))
+  // A row stopped only for a sign-in carries on by itself once there is one
+  // (src-tauri downloads.rs `signed_out`): waiting, not failed.
+  const forSignIn = downloads.filter((d) => d.status === 'failed' && /once you are signed in|Sign in and it carries on/i.test(d.error ?? '')).length
+  const waiting = [`${count('failed') - forSignIn} failed`, `${forSignIn} waiting for a sign-in`, `${count('paused')} paused`, `${count('queued')} queued`].filter((s) => !s.startsWith('0 '))
   return (
     <footer className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-t border-border bg-background px-2">
       <div className="flex">
         <button type="button" className={chip} onClick={onAddGame}>
           <Plus className="size-3" />
           Add a game
+        </button>
+        <button type="button" className={chip} onClick={onInstallFile} title="A game's .7z you already downloaded, from kryo.to or a mirror">
+          <FileArchive className="size-3" />
+          Install from a file
         </button>
       </div>
 
@@ -57,7 +69,7 @@ export function BottomBar({
             {/* A fixed width: the whole group is centred, so a figure changing length would slide it. */}
             <span className="w-32 text-left tabular-nums">
               {Math.round(progressOf(active) * 100)}%
-              {active.status === 'downloading' && active.speed ? ` · ${formatBytes(active.speed)}/s` : ''}
+              {active.status === 'downloading' && active.speed ? ` · ${formatSpeed(active.speed, bits)}` : ''}
             </span>
           </>
         ) : (

@@ -291,7 +291,7 @@ try {
     const news = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     news.on('pageerror', e => failures.push(e.message))
     // The boot's game-runtimes question comes first otherwise, as in the checks below.
-    await news.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await news.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     try {
       await news.goto(`${base}/?whatsnew`)
       const dialog = news.getByRole('dialog', { name: /^What's new in Kryoto Desktop/ })
@@ -381,7 +381,7 @@ try {
   await check('Play starts without a launch-choice dialog and alternate modes remain available', async () => {
     const game = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
     game.on('pageerror', e => failures.push(e.message))
-    await game.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await game.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     try {
       await game.goto(base)
       await game.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Captain Hardcore', exact: true }).click()
@@ -401,7 +401,7 @@ try {
   await check('a failed Play is told where it was pressed, and only its own game page keeps it', async () => {
     const game = await browser.newPage({ viewport: { width: 1280, height: 800 } })
     game.on('pageerror', e => failures.push(e.message))
-    await game.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await game.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     try {
       await game.goto(base)
       const rail = game.getByRole('complementary', { name: 'Your games' })
@@ -430,7 +430,7 @@ try {
   await check('a question Play asks in Big Picture opens over it and B answers the question', async () => {
     const game = await browser.newPage({ viewport: { width: 1280, height: 800 } })
     game.on('pageerror', e => failures.push(e.message))
-    await game.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await game.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     try {
       await game.goto(base)
       await game.getByRole('complementary', { name: 'Your games' }).waitFor()
@@ -464,7 +464,7 @@ try {
   await check('Controller settings: a failed save says so, and a pad asked for opens its setup', async () => {
     const pads = await browser.newPage({ viewport: { width: 1280, height: 800 } })
     pads.on('pageerror', e => failures.push(e.message))
-    await pads.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await pads.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     try {
       await pads.goto(base)
       await pads.getByRole('complementary', { name: 'Your games' }).waitFor()
@@ -500,7 +500,7 @@ try {
   await check('a Settings switch does not undo where saves are kept, chosen on the same page', async () => {
     const cloud = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     cloud.on('pageerror', e => failures.push(e.message))
-    await cloud.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await cloud.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     try {
       await cloud.goto(base)
       await cloud.getByRole('complementary', { name: 'Your games' }).waitFor()
@@ -535,7 +535,7 @@ try {
   await check('the Troubleshooting log stays where it was scrolled, and Refresh goes to the newest lines', async () => {
     const logs = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     logs.on('pageerror', e => failures.push(e.message))
-    await logs.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await logs.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     try {
       await logs.goto(base)
       await logs.getByRole('complementary', { name: 'Your games' }).waitFor()
@@ -592,7 +592,7 @@ try {
     const achievements = await browser.newPage({ viewport: { width: 1100, height: 860 } })
     // This journey starts after startup setup; Windows otherwise waits at the
     // preview's missing-runtime prompt before the library can open.
-    await achievements.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await achievements.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     achievements.on('pageerror', e => failures.push(e.message))
     try {
       await achievements.goto(base)
@@ -633,7 +633,7 @@ try {
   })
   await check('a DRM-free game turns achievements on with one button, and one with no Steam API shows no card', async () => {
     const page = await browser.newPage({ viewport: { width: 1100, height: 860 } })
-    await page.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
     page.on('pageerror', e => failures.push(e.message))
     try {
       await page.goto(base)

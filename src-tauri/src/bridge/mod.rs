@@ -5,8 +5,11 @@
 //! [`PROVIDERS`]: where it keeps its data, whether it is open, and what games
 //! it has; and, when games can go out to it, [`Export`]. Everything else
 //! is here and shared: the review before anything is written, the merge rules,
-//! remembered answers, reports. Adding Epic, GOG, Heroic or Playnite is a new
-//! file and a line in that list.
+//! remembered answers, reports. Adding Epic, GOG or Heroic is a new file and a
+//! line in that list (Playnite and Lutris came that way).
+//!
+//! Bringing games in again updates the ones brought before (their play time,
+//! last played) and never adds them twice.
 //!
 //! Two kinds of launcher. One that hands its games over (Hydra): each game is
 //! matched on this PC against Kryoto's match index
@@ -26,6 +29,8 @@
 //! names it and the player says yes or no once.
 
 mod hydra;
+mod lutris;
+mod playnite;
 mod steam;
 
 use crate::library::{self, LibraryGame};
@@ -43,7 +48,7 @@ const OWN: &str = "own";
 pub(crate) const INDEX_MAX_AGE: u64 = 6 * 3600;
 
 /// Every launcher Bridge knows.
-static PROVIDERS: &[&dyn Provider] = &[&hydra::Hydra, &steam::Steam];
+static PROVIDERS: &[&dyn Provider] = &[&hydra::Hydra, &steam::Steam, &playnite::Playnite, &lutris::Lutris];
 
 /* ── a launcher ────────────────────────────────────────────────────── */
 
@@ -73,6 +78,9 @@ pub(crate) struct Incoming {
     pub custom_hero: Option<String>,
     pub developer: Option<String>,
     pub year: Option<u32>,
+    /// Why it cannot come over, in the player's words: the launcher starts it
+    /// in a way Kryoto cannot (through Steam, a link, an emulator).
+    pub cannot: Option<String>,
 }
 
 pub(crate) enum ReadProblem {
@@ -86,6 +94,15 @@ pub(crate) trait Provider: Sync {
     fn id(&self) -> &'static str;
     /// As the player reads it.
     fn name(&self) -> &'static str;
+    /// It exists on this system (Playnite on Windows, Lutris on Linux): the
+    /// Bridge screen lists only these.
+    fn available(&self) -> bool {
+        true
+    }
+    /// Its library can be read while it runs.
+    fn reads_while_open(&self) -> bool {
+        self.keeps_games()
+    }
     /// Where it keeps its data on this PC: `picked` when the player chose a
     /// folder and it is one, else where it normally is.
     fn locate(&self, picked: Option<&str>) -> Option<PathBuf>;
@@ -196,6 +213,24 @@ fn data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 
 pub(crate) fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// The program a launcher's entry for a Kryoto game starts: this app, as that
+/// launcher can reach it.
+pub(crate) fn this_app() -> Result<PathBuf, String> {
+    // The AppImage, not the temporary mount it runs from.
+    if let Some(p) = env_path("APPIMAGE") {
+        return Ok(p);
+    }
+    std::env::current_exe().map_err(|e| e.to_string())
+}
+
+/// A Kryoto game another launcher can start through Kryoto (Steam, Lutris):
+/// one a `kryoto://library/<id>` link can name, with something to run, that
+/// no launcher keeps.
+pub(crate) fn sendable(g: &LibraryGame) -> bool {
+    let linkable = crate::links::parse(&format!("kryoto://library/{}", g.id)).is_some_and(|l| l.slug == g.id);
+    g.launcher.is_none() && linkable && !g.install_dir.is_empty() && (!g.executable.is_empty() || !g.entries.is_empty())
 }
 
 /// Is a process with one of these names (lower case) running? `exe` gets a
@@ -312,18 +347,28 @@ pub struct Launcher {
     pub running: bool,
     /// Its games stay in it, and it can be read while it runs.
     pub keeps: bool,
+    /// Its games can be brought in while it is open.
+    pub open_ok: bool,
     /// Games can go out to it too.
     pub exports: bool,
 }
 
 fn launcher(p: &dyn Provider, picked: Option<&str>) -> Launcher {
-    Launcher { id: p.id(), name: p.name(), dir: p.locate(picked).map(|d| d.to_string_lossy().into_owned()), running: p.running(), keeps: p.keeps_games(), exports: p.export().is_some() }
+    Launcher {
+        id: p.id(),
+        name: p.name(),
+        dir: p.locate(picked).map(|d| d.to_string_lossy().into_owned()),
+        running: p.running(),
+        keeps: p.keeps_games(),
+        open_ok: p.reads_while_open(),
+        exports: p.export().is_some(),
+    }
 }
 
-/// Every launcher, found here or not.
+/// Every launcher there is on this system, found here or not.
 #[tauri::command(async)]
 pub fn bridge_launchers() -> Vec<Launcher> {
-    PROVIDERS.iter().map(|p| launcher(*p, None)).collect()
+    PROVIDERS.iter().filter(|p| p.available()).map(|p| launcher(*p, None)).collect()
 }
 
 /// One launcher again: with a folder the player picked, or to see if it closed.
@@ -355,9 +400,12 @@ pub struct Row {
     pub executable: Option<String>,
     pub cover: Option<String>,
     /// `matched` (kryo.to has it), `own` (it does not), `ask` (maybe: the
-    /// player picks), `missing` (not installed on this PC), `imported`
-    /// (brought over before) or `stays` (remains in its own launcher).
+    /// player picks), `missing` (not installed on this PC), `skipped` (its
+    /// launcher starts it in a way Kryoto cannot), `imported` (brought over
+    /// before: updated) or `stays` (remains in its own launcher).
     pub kind: &'static str,
+    /// For `missing` and `skipped`: why, in the player's words.
+    pub why: Option<String>,
     /// For `matched`, the game; for `ask`, the possibilities, best first.
     pub options: Vec<Choice>,
     /// What made the match sure.
@@ -416,7 +464,12 @@ pub(crate) fn judge_kept(provider: &str, h: &Incoming, games: &[LibraryGame]) ->
         row.joins = Some(g.title.clone());
         return row;
     }
-    row.kind = if installed(h) { "stays" } else { "missing" };
+    if let Some((kind, why)) = cannot_come(h) {
+        row.kind = kind;
+        row.why = Some(why);
+        return row;
+    }
+    row.kind = "stays";
     let name = |t: &str| kryoto_import::matcher::squash(&kryoto_import::matcher::normalize(t));
     row.joins = games.iter().find(|g| name(&g.title) == name(&h.title)).map(|g| g.title.clone());
     row
@@ -431,11 +484,22 @@ fn blank_row(h: &Incoming) -> Row {
         executable: h.executable.clone().or_else(|| h.folder.clone()),
         cover: h.cover.clone().or_else(|| h.custom_cover.clone().filter(|c| c.starts_with("https://"))),
         kind: "own",
+        why: None,
         options: Vec::new(),
         how: None,
         joins: None,
         remembered: false,
     }
+}
+
+const NOT_HERE: &str = "Not installed on this PC";
+
+/// Why a game cannot come over (`skipped`, `missing`), or None when it can.
+fn cannot_come(h: &Incoming) -> Option<(&'static str, String)> {
+    if let Some(why) = &h.cannot {
+        return Some(("skipped", why.clone()));
+    }
+    (!installed(h)).then(|| ("missing", NOT_HERE.to_string()))
 }
 
 /// One game from a launcher that hands its games over: what it is, as the
@@ -448,8 +512,9 @@ pub(crate) fn judge(provider: &str, h: &Incoming, index: Option<&Index>, links: 
         row.joins = Some(g.title.clone());
         return row;
     }
-    if !installed(h) {
-        row.kind = "missing";
+    if let Some((kind, why)) = cannot_come(h) {
+        row.kind = kind;
+        row.why = Some(why);
         return row;
     }
     let here = same_install(games, h);
@@ -499,7 +564,7 @@ pub async fn bridge_scan(app: AppHandle, launcher_id: String, dir: Option<String
     };
     let shown = Some(root.to_string_lossy().into_owned());
     let open = || Scan { dir: shown.clone(), running: true, catalog: false, rows: Vec::new() };
-    if !p.keeps_games() && p.running() {
+    if !p.reads_while_open() && p.running() {
         return Ok(open());
     }
     let incoming = match read_games(p, root).await? {
@@ -545,6 +610,51 @@ pub struct Imported {
     /// Save versions are on, so the games' saves are being kept as versions
     /// now (the launcher's own backup too, when it left one).
     pub saves: bool,
+    /// Brought over before, and brought up to date now.
+    pub updated: usize,
+    /// The launcher's games that did not come over, and why.
+    pub skipped: Vec<Skipped>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Skipped {
+    pub title: String,
+    pub why: String,
+}
+
+/// A game brought over before, brought up to date: the launcher's play time
+/// when it is higher (never the sum: the same hours may be in both), and its
+/// later last-played. `owed`: the extra hours have not reached kryo.to (a
+/// launcher that hands its games over); a linked game sends them once.
+/// Returns the extra seconds, or None when nothing changed. Pure, for the tests.
+fn refresh(into: &mut LibraryGame, h: &Incoming, owed: bool) -> Option<u64> {
+    let more = h.playtime_seconds.saturating_sub(into.playtime_seconds);
+    let later = h.last_played.is_some() && h.last_played > into.last_played;
+    if more == 0 && !later {
+        return None;
+    }
+    into.playtime_seconds += more;
+    if later {
+        into.last_played = h.last_played;
+    }
+    if owed && more > 0 {
+        into.carry_seconds += more;
+        if into.slug.is_some() {
+            library::queue_carry(into);
+        }
+    }
+    Some(more)
+}
+
+/// Every game of the launcher's that neither came over now nor before, with
+/// the reason. Pure, for the tests.
+fn skipped_list(incoming: &[Incoming], handled: &std::collections::BTreeSet<String>) -> Vec<Skipped> {
+    incoming
+        .iter()
+        .filter(|h| !handled.contains(&h.key))
+        .map(|h| Skipped { title: h.title.clone(), why: cannot_come(h).map(|(_, why)| why).unwrap_or_else(|| "You left it out".to_string()) })
+        .collect()
 }
 
 /// A library entry from the launcher's copy, before any kryo.to link.
@@ -635,7 +745,7 @@ pub async fn bridge_import(app: AppHandle, launcher_id: String, dir: Option<Stri
     let p = provider(&launcher_id)?;
     let root = p.locate(dir.as_deref()).ok_or_else(|| format!("No {} library found.", p.name()))?;
     let closed_first = || format!("Close {} first: it keeps its library open while it runs.", p.name());
-    if !p.keeps_games() && p.running() {
+    if !p.reads_while_open() && p.running() {
         return Err(closed_first());
     }
     let incoming = match read_games(p, root.clone()).await? {
@@ -684,6 +794,7 @@ pub async fn bridge_import(app: AppHandle, launcher_id: String, dir: Option<Stri
     let mut links = load_links(&app, p.id());
     let mut out = Imported::default();
     let mut came: Vec<(String, String)> = Vec::new();
+    let mut before = std::collections::BTreeSet::new();
     let changed = library::update(&app, |games| {
         let mut changed: Vec<String> = Vec::new();
         for d in &decisions {
@@ -756,14 +867,30 @@ pub async fn bridge_import(app: AppHandle, launcher_id: String, dir: Option<Stri
             came.push((id.clone(), h.key.clone()));
             changed.push(id);
         }
+        // The ones brought over before: up to date, never twice.
+        for h in &incoming {
+            if came.iter().any(|(_, k)| k == &h.key) {
+                continue;
+            }
+            let from = origin(p.id(), &h.key);
+            let Some(g) = games.iter_mut().find(|g| g.origin.as_deref() == Some(from.as_str())) else { continue };
+            before.insert(h.key.clone());
+            if let Some(more) = refresh(g, h, true) {
+                out.updated += 1;
+                out.seconds += more;
+                changed.push(g.id.clone());
+            }
+        }
         Ok(changed)
     })?;
+    let handled = came.iter().map(|(_, k)| k.clone()).chain(before).collect();
+    out.skipped = skipped_list(&incoming, &handled);
     let _ = save_links(&app, p.id(), &links);
     let games = library::load(&app).unwrap_or_default();
     for g in games.iter().filter(|g| changed.contains(&g.id)) {
         library::write_marker(g);
     }
-    crate::logging::info("bridge", &format!("{}: imported {} linked, {} own, {} joined", p.id(), out.linked, out.own, out.joined));
+    crate::logging::info("bridge", &format!("{}: imported {} linked, {} own, {} joined, {} updated, {} skipped", p.id(), out.linked, out.own, out.joined, out.updated, out.skipped.len()));
     let _ = app.emit("library-changed", ());
     let brought = came
         .into_iter()
@@ -781,6 +908,7 @@ async fn import_kept(app: &AppHandle, p: &'static dyn Provider, incoming: Vec<In
     let ids: Vec<String> = chosen.iter().filter_map(|h| h.steam_appid.clone()).collect();
     let art = crate::steam_art::many(&ids).await;
     let mut out = Imported::default();
+    let mut came = std::collections::BTreeSet::new();
     let changed = library::update(app, |games| {
         let mut changed = Vec::new();
         for h in &chosen {
@@ -800,12 +928,28 @@ async fn import_kept(app: &AppHandle, p: &'static dyn Provider, incoming: Vec<In
             g.added_at = now();
             out.own += 1;
             out.seconds += g.playtime_seconds;
+            came.insert(h.key.clone());
             changed.push(g.id.clone());
             games.push(g);
         }
+        // The ones added before: the launcher's hours and last played. They
+        // are that launcher's, so nothing is owed to any account.
+        for h in &incoming {
+            let from = origin(p.id(), &h.key);
+            if came.contains(&h.key) {
+                continue;
+            }
+            let Some(g) = games.iter_mut().find(|g| g.origin.as_deref() == Some(from.as_str())) else { continue };
+            came.insert(h.key.clone());
+            if refresh(g, h, false).is_some() {
+                out.updated += 1;
+                changed.push(g.id.clone());
+            }
+        }
         Ok(changed)
     })?;
-    crate::logging::info("bridge", &format!("{}: {} games added", p.id(), changed.len()));
+    out.skipped = skipped_list(&incoming, &came);
+    crate::logging::info("bridge", &format!("{}: {} games added, {} updated ({} entries changed)", p.id(), out.own, out.updated, changed.len()));
     let _ = app.emit("library-changed", ());
     Ok(out)
 }
@@ -1099,6 +1243,52 @@ mod tests {
         assert_eq!(judge_kept("steam", &h, std::slice::from_ref(&g)).kind, "imported");
         let gone = Incoming { folder: Some(r"Z:\gone".into()), ..h };
         assert_eq!(judge_kept("steam", &gone, &[]).kind, "missing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn every_launcher_on_this_system_and_only_those() {
+        let shown: Vec<_> = PROVIDERS.iter().filter(|p| p.available()).map(|p| p.id()).collect();
+        assert!(shown.contains(&"hydra") && shown.contains(&"steam"));
+        // The dev folders can add the other one, never take one away.
+        assert!(!cfg!(windows) || shown.contains(&"playnite"));
+        assert!(!cfg!(target_os = "linux") || shown.contains(&"lutris"));
+        assert!(provider("lutris").unwrap().reads_while_open() && !provider("playnite").unwrap().reads_while_open() && !provider("hydra").unwrap().reads_while_open());
+        assert!(provider("lutris").unwrap().export().is_some() && provider("playnite").unwrap().export().is_none());
+    }
+
+    #[test]
+    fn what_cannot_come_says_why_and_bringing_in_again_updates() {
+        let (dir, exe) = temp_exe("again", "Lantern");
+        let mut h = hydra("g1", "Lantern Rite Test", Some(&exe), None, 5_400);
+        h.last_played = Some(1_700_000_000);
+        let steam = Incoming { cannot: Some("Playnite starts it through Steam. Bring it in from Steam instead.".into()), ..hydra("g2", "Hades", None, None, 0) };
+        let gone = hydra("g3", "Celeste", Some(r"Z:\nowhere\Celeste.exe"), None, 0);
+        let r = judge("playnite", &steam, Some(&index()), &Links::new(), &[]);
+        assert_eq!((r.kind, r.why.as_deref()), ("skipped", steam.cannot.as_deref()));
+        let r = judge("playnite", &gone, Some(&index()), &Links::new(), &[]);
+        assert_eq!((r.kind, r.why.as_deref()), ("missing", Some(NOT_HERE)));
+        // Brought over once, then played more in that launcher.
+        let mut g = from_incoming("playnite", &h, None, None).unwrap();
+        assert_eq!(judge("playnite", &h, Some(&index()), &Links::new(), std::slice::from_ref(&g)).kind, "imported");
+        assert_eq!(refresh(&mut g, &h, true), None, "nothing new");
+        g.carry_seconds = 0;
+        let later = Incoming { playtime_seconds: 9_000, last_played: Some(1_700_100_000), ..h.clone() };
+        assert_eq!(refresh(&mut g, &later, true), Some(3_600));
+        assert_eq!((g.playtime_seconds, g.carry_seconds, g.last_played), (9_000, 3_600, Some(1_700_100_000)));
+        // Kryoto counted more than the launcher: kept, never summed.
+        let less = Incoming { playtime_seconds: 100, ..later.clone() };
+        assert_eq!(refresh(&mut g, &less, true), None);
+        assert_eq!(g.playtime_seconds, 9_000);
+        // A kept launcher's hours are its own: nothing owed.
+        let mut kept = kept_entry("steam", &h, "steam://rungameid/1".into());
+        assert_eq!(refresh(&mut kept, &later, false), Some(3_600));
+        assert_eq!(kept.carry_seconds, 0);
+        // The report: what did not come, and why.
+        let handled = std::collections::BTreeSet::from(["g1".to_string()]);
+        let left = skipped_list(&[h, steam, gone, hydra("g4", "Picked Out", Some(&exe), None, 0)], &handled);
+        let whys: Vec<(&str, &str)> = left.iter().map(|s| (s.title.as_str(), s.why.as_str())).collect();
+        assert_eq!(whys, vec![("Hades", "Playnite starts it through Steam. Bring it in from Steam instead."), ("Celeste", NOT_HERE), ("Picked Out", "You left it out")]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

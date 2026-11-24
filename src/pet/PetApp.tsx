@@ -219,10 +219,12 @@ export function PetApp() {
     // The pointer. Only the drawn pixels take it, as on the site. The page
     // hears it only over its own small window, so the eyes ask where it is.
     const pet = petDetector(stage)
-    let press: { x: number; y: number } | null = null
+    // A press on the pet. Only a mouse or a pen carries it: the system's move
+    // loop entered from a touch could keep the pointer (KB-0369).
+    let press: { x: number; y: number; touch: boolean } | null = null
     const down = (e: PointerEvent) => {
       if (held) return drop()
-      if (e.button === 0 && stage.opaqueAt(e.clientX, e.clientY)) press = { x: e.clientX, y: e.clientY }
+      if (e.button === 0 && stage.opaqueAt(e.clientX, e.clientY)) press = { x: e.clientX, y: e.clientY, touch: e.pointerType === 'touch' }
     }
     const move = (e: PointerEvent) => {
       // The pointer moving with no button down: the carrying is over.
@@ -230,7 +232,7 @@ export function PetApp() {
       stage.lookAt(e.clientX, e.clientY)
       const over = stage.opaqueAt(e.clientX, e.clientY)
       canvas.style.cursor = over || press ? 'grab' : 'default'
-      if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 4) {
+      if (press && !press.touch && e.buttons !== 0 && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 4) {
         press = null
         return pickUp()
       }
@@ -250,11 +252,34 @@ export function PetApp() {
     let scale = window.devicePixelRatio || 1
     void quiet(win.scaleFactor()).then((f) => (scale = f || scale))
     offs.push(win.onScaleChanged(({ payload }) => (scale = payload.scaleFactor)))
+    // On Windows the window lets every click and tap through (pet.rs) until
+    // the pointer is on the drawn pet: then it takes them, so nothing else on
+    // the screen is ever in its way (KB-0369). Elsewhere (the pointer cannot
+    // be asked for on Wayland), or should asking fail, the small window takes
+    // them as it always did.
+    const passThrough = /Windows/i.test(navigator.userAgent)
+    let hit = !passThrough
+    const setHit = (over: boolean) => {
+      if (!passThrough || over === hit) return
+      hit = over
+      void quiet(call('pet_hit', { over }))
+    }
+    let blind = false
     const follow = window.setInterval(() => {
-      if (held || press || document.hidden) return
+      if (blind || document.hidden) return
+      if (held || press) return setHit(true)
       void Promise.all([cursorPosition(), win.innerPosition()])
-        .then(([c, at]) => stage.lookAt((c.x - at.x) / scale, (c.y - at.y) / scale))
-        .catch(() => {})
+        .then(([c, at]) => {
+          const x = (c.x - at.x) / scale
+          const y = (c.y - at.y) / scale
+          stage.lookAt(x, y)
+          setHit(stage.opaqueAt(x, y))
+        })
+        .catch(() => {
+          if (!passThrough) return
+          blind = true
+          setHit(true)
+        })
     }, 150)
     canvas.addEventListener('pointerdown', down)
     canvas.addEventListener('pointermove', move)

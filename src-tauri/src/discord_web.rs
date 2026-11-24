@@ -13,7 +13,8 @@
 //! So the Store never loads them: they open in the browser, where the address
 //! bar is Discord's and the player is usually signed in to Discord already.
 //! kryo.to's sign-in with Discord opens there from its start (`/api/auth/discord`),
-//! so the whole round trip, its state cookie included, is the browser's.
+//! so the whole round trip, its state cookie included, is the browser's. The
+//! sign-in comes back to Kryoto by itself (`signin_handoff`).
 
 use url::Url;
 
@@ -116,6 +117,9 @@ mod tests {
     fn signing_in_with_discord_opens_kryotos_start_in_the_browser() {
         let start = u("https://kryo.to/api/auth/discord?next=%2Flibrary");
         assert_eq!(route(&start, true, Some(&u("https://kryo.to/login?next=/library"))), Outside::Browser(start.clone()));
+        // The sign-in box's code goes along whole: the browser brings it back.
+        let boxed = u("https://kryo.to/api/auth/discord?next=%2F&desktop=ABCDEFGH");
+        assert_eq!(route(&boxed, true, Some(&u("https://kryo.to/login?next=/"))), Outside::Browser(boxed.clone()));
         let invite = u("https://kryo.to/api/auth/discord?invite=abc");
         assert_eq!(route(&invite, true, Some(&u("https://kryo.to/invite/abc"))), Outside::Browser(invite.clone()));
         // Its callback is kryo.to's own page and stays.

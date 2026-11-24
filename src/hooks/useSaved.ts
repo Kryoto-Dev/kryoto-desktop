@@ -132,11 +132,13 @@ export function setSavedStatusMany(slugs: string[], status: SavedStatus | null) 
    for the session. */
 const nsfwBySlug = new Map<string, boolean>()
 const pending = new Set<string>()
+/** Asked once and not answered (a game taken off kryo.to, a failed call): not asked again this session, and stays blurred. */
+const unanswered = new Set<string>()
 
 export function useAdultFlags(slugs: string[]) {
   const [, bump] = useState(0)
   useEffect(() => {
-    const todo = slugs.filter((s) => !nsfwBySlug.has(s) && !pending.has(s)).slice(0, 40)
+    const todo = slugs.filter((s) => !nsfwBySlug.has(s) && !pending.has(s) && !unanswered.has(s)).slice(0, 40)
     if (!todo.length) return
     let cancelled = false
     todo.forEach((s) => pending.add(s))
@@ -144,7 +146,7 @@ export function useAdultFlags(slugs: string[]) {
       todo.map((s) =>
         fetchCatalogGame(s)
           .then((g) => nsfwBySlug.set(s, !!g.nsfw))
-          .catch(() => {})
+          .catch(() => unanswered.add(s))
           .finally(() => pending.delete(s)),
       ),
     ).then(() => !cancelled && bump((n) => n + 1))

@@ -97,6 +97,11 @@ export function PopupApp() {
       void call('menu_ready', { menu: payload.menu, width: el.offsetWidth, height: el.offsetHeight, scale: window.devicePixelRatio })
         .then(() => {
           if (cancelled || !box.current || payload.kind === 'tip') return
+          // Measured at its full height above; placed, the view may be shorter
+          // (menus.rs keeps it inside the window), and the rest scrolls: the
+          // wheel, the arrow keys (each row is scrolled to) and a controller.
+          box.current.style.maxHeight = '100vh'
+          box.current.style.overflowY = 'auto'
           if (document.hasFocus()) focused.current = true
           box.current.focus({ preventScroll: true })
         })
@@ -151,7 +156,7 @@ export function PopupApp() {
       }}
       // One column that keeps to the panel: left to its content, a long title
       // stretched it past the edge, cut the text and pushed Mark all read out of sight.
-      className="kryo-square grid w-max grid-cols-[minmax(0,1fr)] gap-0.5 overflow-hidden border border-border bg-popover p-1 outline-none"
+      className="kryo-square grid w-max grid-cols-[minmax(0,1fr)] gap-0.5 overflow-hidden border border-border bg-popover p-1 outline-none [scrollbar-width:thin]"
       style={payload.kind === 'menu' ? { minWidth: payload.minWidth ?? 200, maxWidth: 420 } : { width: 320 }}
     >
       {payload.kind === 'menu' ? <Items items={payload.items} onSelect={select} /> : <InboxList payload={payload} onSelect={select} />}

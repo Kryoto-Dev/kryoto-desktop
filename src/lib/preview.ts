@@ -152,6 +152,7 @@ const settings: Record<string, unknown> = {
   sharePlaytime: true,
   connections: 16,
   speedLimitMb: 0,
+  speedInBits: false,
   catalogEndpoint: '',
   savesEndpoint: '',
   achievementsEndpoint: '',
@@ -286,7 +287,7 @@ const downloadList: Record<string, unknown>[] = [
     total: 2_075_315_145,
     speed: 0,
     hashMismatch: true,
-    error: "The archive doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.",
+    error: "The archive from Kryoto's file host (dl.kryo.to) doesn't match kryo.to's checksum. Install it anyway, or Retry to download it again.",
     meta: {
       ...dl({}).meta,
       title: 'Schedule I',
@@ -812,6 +813,21 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     if (i >= 0) games.splice(i, 1)
     return false
   },
+  library_uninstall_plan: (a) => {
+    const g = games.find((x) => x.id === a.id)
+    return {
+      kind: 'delete',
+      reason: null,
+      folder: g ? String(g.installDir) : null,
+      whole: true,
+      files: 1284,
+      bytes: 12.4 * 1024 ** 3,
+      keptFiles: 0,
+      keptBytes: 0,
+      bin: true,
+      binNote: null,
+    }
+  },
   game_launch: (a) => {
     const id = String(a.id)
     running.add(id)
@@ -1021,6 +1037,20 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     previewBus.emit('downloads', clone(downloadList))
     return null
   },
+  // Install from a file (src-tauri from_file.rs): a file named after its game, the size of its build.
+  archive_look: (a) => {
+    const path = String(a.path ?? '')
+    const fileName = path.split(/[\\/]/).pop() ?? path
+    if (!/\.7z$/i.test(fileName)) throw new Error(`${fileName} is not a .7z file. Kryoto installs .7z archives, the files kryo.to and its mirrors serve.`)
+    const slug = (a.slug as string | null) ?? (/^captain hardcore/i.test(fileName) ? 'captain-hardcore' : null)
+    return { path, fileName, size: 2_400_000_000, slug, title: slug ? 'Captain Hardcore' : null, cover: null, nsfw: false, version: slug ? '1.4.2' : null, addon: null, sizeMatch: slug ? true : null, installed: false, reachable: true }
+  },
+  archive_install: (a) => {
+    const id = `dl-file-${downloadList.length}`
+    downloadList.unshift(dl({ id, slug: a.slug, fromFile: true, archivePath: a.path, status: 'verifying', received: 2_400_000_000, total: 2_400_000_000, extracted: 600_000_000, extractTotal: 2_400_000_000 }))
+    previewBus.emit('downloads', clone(downloadList))
+    return id
+  },
   download_resume: (a) => {
     const d = downloadList.find((x) => x.id === a.id)
     if (d) Object.assign(d, d.hashMismatch ? { status: 'downloading', hashMismatch: false, received: 0, error: null } : { status: 'downloading' })
@@ -1100,6 +1130,42 @@ const previewPads = [
     hats: 1,
   },
 ]
+/** Two Joy-Cons over Bluetooth (src-tauri joycons.rs): offered as one controller, and the pair once it is. */
+const PREVIEW_JOYCON_KEY = '98:b6:e9:00:00:01+98:b6:e9:00:00:02'
+const PREVIEW_JOYCON_REACH = 'Works in Kryoto, and in games through the virtual Xbox controller (it needs ViGEmBus). A game that reads Joy-Cons itself may still see two controllers.'
+const joyConModel = (name: string) => ({ family: 'nintendo', name, features: { touchpad: false, gyro: true, paddles: 0, misc: true, analogTriggers: false }, matched: 'ids' })
+const previewJoyConHalves = (keptApart: boolean) =>
+  (['left', 'right'] as const).map((side, i) => ({
+    id: 2 + i,
+    guid: side === 'left' ? '050000007e0500000620000001006800' : '050000007e0500000720000001006800',
+    name: side === 'left' ? 'Joy-Con (L)' : 'Joy-Con (R)',
+    systemName: side === 'left' ? 'Nintendo Switch Joy-Con (L)' : 'Nintendo Switch Joy-Con (R)',
+    vendor: 0x057e,
+    product: side === 'left' ? 0x2006 : 0x2007,
+    model: joyConModel(side === 'left' ? 'Joy-Con (L)' : 'Joy-Con (R)'),
+    mapped: true,
+    custom: false,
+    xinput: false,
+    rumble: true,
+    battery: side === 'left' ? 55 : 100,
+    charging: false,
+    buttons: 20,
+    axes: 4,
+    hats: 0,
+    side,
+    pair: { key: PREVIEW_JOYCON_KEY, combined: false, canCombine: true, other: 3 - i, keptApart, reach: PREVIEW_JOYCON_REACH },
+  }))
+const previewJoyConPair = () => ({
+  ...previewJoyConHalves(false)[0]!,
+  guid: '030000007e0500000820000000006800',
+  name: 'Nintendo Switch Joy-Con (L/R)',
+  systemName: 'Nintendo Switch Joy-Con (L/R)',
+  product: 0x2008,
+  model: joyConModel('Joy-Con'),
+  side: null,
+  pair: { key: PREVIEW_JOYCON_KEY, combined: true, canCombine: true, other: null, keptApart: false, reach: PREVIEW_JOYCON_REACH },
+})
+previewPads.push(...(previewJoyConHalves(false) as unknown as (typeof previewPads)[number][]))
 let previewPadConfig = {
   enabled: true,
   navigate: true,
@@ -1113,6 +1179,7 @@ let previewPadConfig = {
     '030000005e040000120b00000b050000': { name: 'Xbox Series X|S Controller', family: null, remap: { a: 'b', b: 'a' }, mapping: null, base: null, sdl: null },
   } as Record<string, Record<string, unknown>>,
 }
+const previewFixLookups = new Map<string, unknown>()
 const previewRepairs = new Map<string, { source: unknown; online: unknown; report: { game: { title: string; slug: string }; source: string; version: string; warnings: string[] } }>()
 
 Object.assign(HANDLERS, {
@@ -1141,6 +1208,13 @@ Object.assign(HANDLERS, {
     return previewPadConfig
   },
   pad_virtual_driver: () => false,
+  pad_joycons_set: (a: Record<string, unknown>) => {
+    const one = a.one === true
+    previewPadConfig = { ...previewPadConfig, joycons: { ...(previewPadConfig as { joycons?: Record<string, boolean> }).joycons, [String(a.key)]: one } } as typeof previewPadConfig
+    previewPads.splice(2, previewPads.length - 2, ...((one ? [previewJoyConPair()] : previewJoyConHalves(true)) as unknown as (typeof previewPads)[number][]))
+    setTimeout(() => previewBus.emit('pad-list', clone(previewPads)), 30)
+    return previewPadConfig
+  },
   // pad_games.rs: a game following the shared default, one layout to pick.
   pad_game_get: () => {
     const profile = { mode: 'keyboard', template: 'shooter', remap: {}, binds: { righttrigger: 'mouse1', a: 'space' }, leftStick: 'wasd', rightStick: 'mouse', sensitivity: 1600, deadzone: 0.15, invertY: false, pads: {} }
@@ -1201,10 +1275,11 @@ Object.assign(HANDLERS, {
     },
   }),
   bridge_launchers: () => [
-    { id: 'hydra', name: 'Hydra', dir: 'C:\\Users\\you\\AppData\\Roaming\\hydralauncher\\hydra-db', running: false, keeps: false, exports: false },
-    { id: 'steam', name: 'Steam', dir: 'C:\\Program Files (x86)\\Steam', running: false, keeps: true, exports: true },
+    { id: 'hydra', name: 'Hydra', dir: 'C:\\Users\\you\\AppData\\Roaming\\hydralauncher\\hydra-db', running: false, keeps: false, openOk: false, exports: false },
+    { id: 'steam', name: 'Steam', dir: 'C:\\Program Files (x86)\\Steam', running: false, keeps: true, openOk: true, exports: true },
+    { id: 'playnite', name: 'Playnite', dir: null, running: false, keeps: false, openOk: false, exports: false },
   ],
-  bridge_detect: (a: Record<string, unknown>) => ({ id: a.launcherId, name: String(a.launcherId), dir: a.dir, running: false, keeps: a.launcherId === 'steam', exports: a.launcherId === 'steam' }),
+  bridge_detect: (a: Record<string, unknown>) => ({ id: a.launcherId, name: String(a.launcherId), dir: a.dir, running: false, keeps: a.launcherId === 'steam', openOk: a.launcherId === 'steam', exports: a.launcherId === 'steam' }),
   bridge_export_list: () => ({
     users: [{ id: '1', name: 'you' }],
     games: games.slice(0, 3).map((g) => ({ id: g.id, title: g.title, cover: g.cover ?? null, nsfw: !!g.nsfw, sent: false })),
@@ -1221,10 +1296,22 @@ Object.assign(HANDLERS, {
       { key: 'steam:1145360', title: 'Hades', playtimeSeconds: 45_000, lastPlayed: Math.floor(Date.now() / 1000) - 86_400, executable: 'D:\\Games\\Hades\\x64\\Hades.exe', cover: null, kind: 'matched', options: [{ slug: 'hades', title: 'Hades', developer: 'Supergiant Games', year: 2020, nsfw: false }], how: 'steamAppid', joins: null, remembered: false },
       { key: 'custom:1', title: 'Hollow Knight: Godmaster', playtimeSeconds: 1_800, lastPlayed: null, executable: 'D:\\HK\\hollow_knight.exe', cover: null, kind: 'ask', options: [{ slug: 'hollow-knight', title: 'Hollow Knight', developer: 'Team Cherry', year: 2017, nsfw: false }], how: null, joins: null, remembered: false },
       { key: 'custom:2', title: 'Lantern Rite Test', playtimeSeconds: 5_400, lastPlayed: Math.floor(Date.now() / 1000) - 3_600, executable: 'D:\\Games\\Lantern Rite\\LanternRite.exe', cover: null, kind: 'own', options: [], how: null, joins: null, remembered: false },
-      { key: 'steam:504230', title: 'Celeste', playtimeSeconds: 900, lastPlayed: null, executable: null, cover: null, kind: 'missing', options: [], how: null, joins: null, remembered: false },
+      { key: 'steam:504230', title: 'Celeste', playtimeSeconds: 900, lastPlayed: null, executable: null, cover: null, kind: 'missing', why: 'Not installed on this PC', options: [], how: null, joins: null, remembered: false },
+      { key: 'web:1', title: 'Web Game', playtimeSeconds: 0, lastPlayed: null, executable: null, cover: null, kind: 'skipped', why: 'Its Play opens a link, not a program.', options: [], how: null, joins: null, remembered: false },
     ],
   }),
-  bridge_import: (a: Record<string, unknown>) => ({ linked: 1, own: (a.decisions as { slug: string | null }[]).filter((d) => !d.slug).length, joined: 0, seconds: 52_200 }),
+  bridge_import: (a: Record<string, unknown>) => ({
+    linked: 1,
+    own: (a.decisions as { slug: string | null }[]).filter((d) => !d.slug).length,
+    joined: 0,
+    seconds: 52_200,
+    saves: false,
+    updated: 0,
+    skipped: [
+      { title: 'Celeste', why: 'Not installed on this PC' },
+      { title: 'Web Game', why: 'Its Play opens a link, not a program.' },
+    ],
+  }),
   library_merge_offers: () => [],
   store_report_carry: () => null,
   playtime_offer: (a: Record<string, unknown>) => (a.id === games[0]?.id && !games[0]?.playtimePrompt ? { seconds: 45_900, source: 'folder' } : null),
@@ -1330,6 +1417,64 @@ Object.assign(HANDLERS, {
     previewBus.emit('library-changed', null)
     return report
   },
+  game_emulators: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined
+    if (!g) throw new Error('That game is no longer in the library.')
+    const saved = previewRepairs.get(id)
+    const switched = saved?.report.source ?? null
+    const purpose: Record<string, string> = {
+      gbe_fork: 'Plays offline, with achievements. Right for almost every game.',
+      online: 'Plays online with friends through Kryoto Online. Steam has to be running.',
+      rune: 'Plays offline, with achievements. Try it when gbe_fork does not start the game.',
+    }
+    const blocked = g.slug ? null : 'Link this game to its kryo.to page first, in the kryo.to tab.'
+    const sources = HANDLERS.repair_sources!({}) as { id: string; label: string; online: boolean }[]
+    return {
+      current: switched ?? (String(g.source ?? '').replace(/^Steam \+ /, '') || 'gbe_fork / Goldberg'),
+      switched,
+      original: saved ? (saved.source as string | null) ?? null : null,
+      choices: blocked ? [] : sources.filter((s) => s.label !== switched).map((s) => ({ ...s, purpose: purpose[s.id] ?? 'Another RUNE setup, for a game the first one does not start.' })),
+      undo: !!saved,
+      interrupted: false,
+      blocked,
+      release: null,
+      releaseOff: false,
+      keptOwn: [],
+    }
+  },
+  repair_switch: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    if (previewRepairs.has(id)) HANDLERS.repair_undo!({ gameId: id })
+    return HANDLERS.repair_apply!({ gameId: id, source: a.source })
+  },
+  // Properties > Emulator & fixes > Online fix (src-tauri online_fix.rs): online-fix.me has one for every game here.
+  online_fix_state: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined
+    if (!g) throw new Error('That game is no longer in the library.')
+    const applied = previewRepairs.get(id)?.report.source === 'Online-Fix (generic)'
+    const carried = !applied && /online-?fix|ofme/i.test(String(g.source ?? ''))
+    return { blocked: g.slug ? null : 'Link this game to its kryo.to page first, in the kryo.to tab.', carried, applied, sevenZip: true, installed: (g.version as string | null) ?? null, lookup: previewFixLookups.get(id) ?? null }
+  },
+  online_fix_lookup: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    previewFixLookups.set(id, { status: 'found', page: 'https://online-fix.me/', file: 'Game_Fix_Repair_Steam_Generic.rar', size: '11M', madeFor: '1.0.11', newerNeeded: false, detail: null })
+    return HANDLERS.online_fix_state!({ gameId: id })
+  },
+  online_fix_get: (a: Record<string, unknown>) => {
+    const id = String(a.gameId)
+    const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined
+    if (!g) throw new Error('That game is no longer in the library.')
+    if (previewRepairs.has(id)) HANDLERS.repair_undo!({ gameId: id })
+    previewRepairs.set(id, { source: g.source, online: g.online, report: { game: { title: String(g.title), slug: String(g.slug) }, source: 'Online-Fix (generic)', version: 'preview', warnings: [] } })
+    g.source = 'Steam + Online-Fix (generic)'
+    g.online = null
+    previewBus.emit('library-changed', null)
+    return HANDLERS.online_fix_state!({ gameId: id })
+  },
+  online_fix_from_file: (a: Record<string, unknown>) => HANDLERS.online_fix_get!({ gameId: a.gameId }),
+  online_fix_open_page: () => undefined,
   repair_undo: (a: Record<string, unknown>) => {
     const id = String(a.gameId)
     const g = games.find((g) => g.id === id) as Record<string, unknown> | undefined

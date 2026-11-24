@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, LifeBuoy, RotateCcw, X } from '@/ui/pixel-icons'
+import { Check, FolderOpen, LifeBuoy, RotateCcw, X } from '@/ui/pixel-icons'
 import { Button, Busy, Dropdown, Segmented } from '@/ui'
 import { MARK_H, MARK_PATH, MARK_W } from '@/ui/ascii/mark'
 import { errorText } from '@/lib/bridge'
+import { stuckCacheFolder } from '@/lib/repair-errors'
 
 export type RepairSource = { id: string; label: string; online: boolean }
 export type RepairProgress = { text: string; percent?: number | null; gameId?: string | null }
@@ -15,6 +16,15 @@ export type RepairBackend = {
   support: () => Promise<string>
   openSupport: () => Promise<void>
   listen: (handler: (progress: RepairProgress) => void) => Promise<() => void>
+  /** Shows a folder an error names (Desktop; the portable app has none). */
+  openFolder?: (path: string) => Promise<void>
+}
+
+/** Open folder, beside a Repair error that names one. */
+export function OpenStuckCache({ error, backend }: { error: string | null; backend: RepairBackend }) {
+  const folder = stuckCacheFolder(error)
+  if (!folder || !backend.openFolder) return null
+  return <Button size="sm" variant="outline" onClick={() => void backend.openFolder?.(folder)}><FolderOpen className="size-3.5" aria-hidden="true" /> Open folder</Button>
 }
 
 /** One panel for Desktop and the portable app; source options come from Rust. */
@@ -108,6 +118,7 @@ export function RepairPanel({ backend, portable = false, initialOnline = false, 
       {result?.warnings.length ? <details className="max-w-sm text-left text-xs text-muted-foreground"><summary>Repair notes</summary><ul className="mt-2 grid gap-1">{result.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></details> : null}
       <div className="flex flex-wrap justify-center gap-2">
         {undo ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => restore()}><RotateCcw className="size-3.5" aria-hidden="true" /> Undo repair</Button> : null}
+        <OpenStuckCache error={error} backend={backend} />
         {(answer === 'broken' || error) ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => contact()}><LifeBuoy className="size-3.5" aria-hidden="true" /> Copy support report</Button> : null}
         {report ? <Button size="sm" variant="outline" onClick={() => backend.openSupport().catch((e: unknown) => setError(errorText(e)))}>Contact support</Button> : null}
       </div>

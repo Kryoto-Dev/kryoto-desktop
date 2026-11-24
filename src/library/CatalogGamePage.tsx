@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { isOnline } from '@/lib/online'
 import { gameContext } from './context'
-import { FolderOpen, Globe, Layers } from '@/ui/pixel-icons'
+import { FileArchive, FolderOpen, Globe, Layers } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Card, Fact, IconButton, Label, Modal } from '@/ui'
 import { fetchCatalogGame, type CatalogGame } from '@/lib/library'
 import { isActive, phaseOf, progressOf, type Download as DownloadItem } from '@/lib/downloads'
@@ -31,6 +31,7 @@ export function CatalogGamePage({
   onDownloads,
   onContext,
   onHaveIt,
+  onInstallFile,
 }: {
   slug: string
   /** What the list already knows, drawn while kryo.to answers. */
@@ -46,6 +47,8 @@ export function CatalogGamePage({
   onContext?: (x: number, y: number) => void
   /** It is already on this PC: point at its .exe instead of downloading (Add a game). */
   onHaveIt?: () => void
+  /** Its .7z is already downloaded (kryo.to in a browser, a mirror): install from that file. */
+  onInstallFile?: () => void
 }) {
   const [game, setGame] = useState<CatalogGame | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -119,7 +122,15 @@ export function CatalogGamePage({
       </div>
 
       {installError ? (
-        <p className="kryo-radius mx-6 mt-3 border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">{installError}</p>
+        <div className="kryo-radius mx-6 mt-3 grid gap-1 border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs">
+          <p className="text-destructive">{installError}</p>
+          {/* The download would not start: a copy from the site or a mirror does the same job. */}
+          {onInstallFile ? (
+            <button type="button" onClick={onInstallFile} className="kryo-square w-fit text-foreground underline-offset-4 hover:underline">
+              Already have the file? Install it from your PC
+            </button>
+          ) : null}
+        </div>
       ) : null}
       {versions ? (
         <Modal title={`${title}: builds`} onClose={() => setVersions(false)}>
@@ -160,11 +171,21 @@ export function CatalogGamePage({
               {game.version ? <Fact k="Build" v={game.version} /> : null}
             </dl>
           ) : null}
-          {onHaveIt ? (
-            <Button variant="ghost" size="sm" onClick={onHaveIt} className="w-fit">
-              <FolderOpen className="size-3" />
-              It's on this PC
-            </Button>
+          {onHaveIt || onInstallFile ? (
+            <div className="flex flex-wrap gap-2">
+              {onHaveIt ? (
+                <Button variant="ghost" size="sm" onClick={onHaveIt} className="w-fit">
+                  <FolderOpen className="size-3" />
+                  It's on this PC
+                </Button>
+              ) : null}
+              {onInstallFile ? (
+                <Button variant="ghost" size="sm" onClick={onInstallFile} className="w-fit">
+                  <FileArchive className="size-3" />
+                  Install from its .7z
+                </Button>
+              ) : null}
+            </div>
           ) : null}
         </Card>
       </div>
