@@ -12,7 +12,7 @@ import { RuntimesPrompt, useStartupRuntimes } from '@/boot/RuntimesPrompt'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { isTauri, exitApp, mountStore, navigateCatalog, openExternal, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
 import { isOutage, pokeHealth, useServiceHealth } from '@/lib/health'
-import { BLOCKED_LINE } from '@/shell/NetworkBlocked'
+import { BLOCKED_LINE, ESSENTIAL_STEPS } from '@/shell/NetworkBlocked'
 import { HelpButton } from '@/shell/WebView'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
@@ -300,7 +300,16 @@ export function Welcome({
 
 /** This network blocks kryo.to, and what gets around it. */
 function BlockedLine() {
-  return <p className="max-w-72 text-center text-[11px] leading-relaxed text-muted-foreground">{BLOCKED_LINE}</p>
+  return (
+    <div className="grid max-w-72 gap-1 text-[11px] leading-relaxed text-muted-foreground">
+      <p className="text-center">{BLOCKED_LINE}</p>
+      <ul className="grid list-disc gap-0.5 pl-5 text-left">
+        {ESSENTIAL_STEPS.map((s) => (
+          <li key={s}>{s}</li>
+        ))}
+      </ul>
+    </div>
+  )
 }
 
 /** Into the client without an account. */

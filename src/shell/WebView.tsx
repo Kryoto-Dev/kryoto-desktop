@@ -192,11 +192,11 @@ export function WebSlot({
   )
 }
 
-/** kryo.to's page on getting past a block, in the browser (which may get through where this app does not). */
+/** kryo.to's page on getting past a block, in the browser (which may get through where this app does not); the steps that matter are on the screen already. */
 export function HelpButton() {
   return (
     <Button onClick={() => void openExternal(BLOCKED_HELP_URL).catch(() => {})}>
-      What to do <ArrowUpRight className="size-3" aria-hidden />
+      More on kryo.to <ArrowUpRight className="size-3" aria-hidden />
     </Button>
   )
 }
