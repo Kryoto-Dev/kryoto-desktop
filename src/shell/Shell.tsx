@@ -1,25 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowUpRight,
-  Bell as BellIcon,
   Bookmark,
   ChartColumn,
-  Cloud,
   Download as DownloadIcon,
   FlaskConical,
-  FolderHeart,
-  FolderInput,
   FolderPlus,
   Eye,
   EyeOff,
   FolderOpen,
   Globe,
-  House,
-  LayoutGrid,
   LogOut,
   MessageCircle,
   MessageSquarePlus,
-  Newspaper,
   PenLine,
   Play,
   Plus,
@@ -31,6 +24,7 @@ import {
   Gamepad2,
   Layers,
   Monitor,
+  Newspaper,
   ScrollText,
   Wrench,
   Wine,
@@ -46,7 +40,8 @@ import { friendName, useFriends } from '@/hooks/useFriends'
 import { FOLD, TitleBar, useRowFold } from '@/shell/TitleBar'
 import { compactKryos } from '@/ui/KryosCoin'
 import { NavBar, type NavTabSpec, type TopTab } from '@/shell/NavBar'
-import { AdblockDialog, UrlPill, WebSlot } from '@/shell/WebView'
+import { RowSearch, type SearchAction, type SearchGame } from '@/shell/RowSearch'
+import { AdblockDialog, WebSlot } from '@/shell/WebView'
 import { BottomBar } from '@/shell/BottomBar'
 import { ServiceNotice } from '@/shell/ServiceNotice'
 import { NetworkBlocked } from '@/shell/NetworkBlocked'
@@ -307,6 +302,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
   // Menus open in their own window over the Store; only dialogs hide it, every
   // one of them: the Store is a native layer and would cover any it left up.
   const dialogs = useDialogCount()
+  // The findings cannot draw over the Store's web view, so it steps aside.
+  const [searchOpen, setSearchOpen] = useState(false)
   const online = useOnline()
   // Offline says so by itself (the title bar): the service's health only counts with a connection.
   const liveHealth = useServiceHealth()
@@ -319,6 +316,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     online &&
     (view.kind === 'web' || (view.kind === 'settings' && isWebSection(view.section))) &&
     !dialogs &&
+    !searchOpen &&
     !bigPicture &&
     !page.error &&
     !page.retrying &&
@@ -456,8 +454,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     if (page.error) pokeHealth()
   }, [page.error])
 
-  // Ctrl+F searches your library, Ctrl+, opens Settings - the keys every
-  // desktop app uses. Over the Store the page keeps its own Ctrl+F.
+  // Ctrl+F searches the library, Ctrl+, opens Settings; Ctrl+K and Ctrl+L open
+  // the row's search. Over the Store the page keeps its own Ctrl+F.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
@@ -477,7 +475,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [view.kind, go, openSettings])
+  }, [view.kind, go, openSettings, openWeb, page.url])
 
   // F11, like every other full-screen app.
   useEffect(() => {
@@ -1054,59 +1052,82 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
   // looking at the Store, or with the view on another section's page (a
   // profile, the blog), goes to its home.
   const openStore = () =>
-    openWeb(view.kind !== 'web' && tabForUrl(page.url, settings?.catalogEndpoint) === 'store' ? undefined : '/')
+    openWeb(view.kind !== 'web' && page.url && tabForUrl(page.url, settings?.catalogEndpoint) === 'store' ? undefined : '/')
   const webUrl = view.kind === 'web' ? view.url : page.url
+  // Every game on this PC, then the account's kryo.to library.
+  const searchGames: SearchGame[] = useMemo(() => {
+    const here = new Set(lib.games.map((g) => g.slug ?? g.id))
+    return [
+      ...lib.games.map((g) => ({ id: g.id, title: g.title, cover: g.cover ?? null, onOpen: () => go({ kind: 'game' as const, id: g.id }) })),
+      ...saved
+        .filter((e) => !here.has(e.slug))
+        .map((e) => ({ id: `saved:${e.slug}`, title: e.title, cover: e.cover ?? null, onOpen: () => go({ kind: 'catalog' as const, slug: e.slug }) })),
+    ]
+  }, [lib.games, saved, go])
+
+  // Every Settings section and page it can reach; `keywords` are the other words
+  // people use for them ("theme", "apply", "saves").
+  const searchActions: SearchAction[] = [
+    { id: 'settings:general', group: 'Settings', label: 'General', keywords: 'start page startup pet mascot sounds language motion animations text size', onSelect: () => openSettings('general') },
+    { id: 'settings:appearance', group: 'Settings', label: 'Appearance', keywords: 'theme colour color palette dark light radius corners font', onSelect: () => openSettings('appearance') },
+    { id: 'settings:downloads', group: 'Settings', label: 'Downloads', keywords: 'speed limit bandwidth folder install queue location', onSelect: () => openSettings('downloads') },
+    { id: 'settings:storage', group: 'Settings', label: 'Storage', keywords: 'disk space leftovers cache clean uninstall', onSelect: () => openSettings('storage') },
+    { id: 'settings:cloud', group: 'Settings', label: 'Cloud', keywords: 'save saves achievements backup sync', onSelect: () => openSettings('cloud') },
+    { id: 'settings:devices', group: 'Settings', label: 'Devices', keywords: 'phone controller qr pad mobile link', onSelect: () => openSettings('devices') },
+    { id: 'settings:notifications', group: 'Settings', label: 'Notifications', keywords: 'alert alerts inbox email push', onSelect: () => openSettings('notifications') },
+    { id: 'settings:profile', group: 'Settings', label: 'Profile', keywords: 'name username avatar picture display', onSelect: () => openSettings('profile') },
+    { id: 'settings:security', group: 'Settings', label: 'Security', keywords: 'password login sessions devices two factor 2fa', onSelect: () => openSettings('security') },
+    { id: 'settings:support', group: 'Settings', label: 'Support', keywords: 'donate supporter', onSelect: () => openSettings('support') },
+    { id: 'settings:logs', group: 'Settings', label: 'Troubleshooting', keywords: 'log logs errors debug report crash', onSelect: () => openSettings('logs') },
+    ...(account.chat && !guest
+      ? [{ id: 'settings:chat', group: 'Settings', label: 'Chat & calls', keywords: 'friends voice mic call messages', onSelect: () => openSettings('chat') }]
+      : []),
+    // Places: the client's own pages, then kryo.to's, then the dialogs.
+    { id: 'page:apply', group: 'Pages', label: 'Apply for a role', keywords: 'job staff moderator testers application', onSelect: () => openWeb('/apply') },
+    { id: 'page:store', group: 'Pages', label: 'Store home', keywords: 'front page discover', onSelect: () => openWeb('/') },
+    { id: 'page:browse', group: 'Pages', label: 'Browse the catalogue', keywords: 'store search games', onSelect: () => openWeb('/browse') },
+    { id: 'page:requests', group: 'Pages', label: 'Game requests', keywords: 'request a game', onSelect: () => openWeb('/requests') },
+    { id: 'page:library', group: 'Pages', label: 'Your library', keywords: 'games installed', onSelect: () => go({ kind: 'home' }) },
+    { id: 'page:downloads', group: 'Pages', label: 'Downloads', keywords: 'queue progress', onSelect: () => go({ kind: 'downloads' }) },
+    ...(account.friends
+      ? [{ id: 'page:friends', group: 'Pages', label: 'Friends & chat', keywords: 'messages dm social', onSelect: () => go({ kind: 'friends' }) }]
+      : []),
+    { id: 'page:blog', group: 'Pages', label: 'Blog', keywords: 'news posts', onSelect: () => openWeb('/blog') },
+    { id: 'page:collections', group: 'Pages', label: 'Collections', keywords: 'lists curated', onSelect: () => openWeb('/collections/discover') },
+    { id: 'page:playtest', group: 'Pages', label: 'Playtest', keywords: 'testers builds', onSelect: () => openWeb('/testers') },
+    { id: 'page:stats', group: 'Pages', label: 'Statistics', keywords: 'top games charts', onSelect: () => openWeb('/community?tab=stats') },
+    { id: 'page:support', group: 'Pages', label: 'Support', keywords: 'help contact', onSelect: () => openWeb('/support') },
+    { id: 'page:perks', group: 'Pages', label: 'Kryos and perks', keywords: 'coins wallet shop', onSelect: () => openWeb('/perks') },
+    { id: 'page:add', group: 'Pages', label: 'Add a game', keywords: 'import exe link install', onSelect: () => setOverlay({ kind: 'add', slug: null }) },
+    { id: 'page:bridge', group: 'Pages', label: 'Bring games from another launcher', keywords: 'steam hydra import bridge', onSelect: () => setOverlay({ kind: 'bridge' }) },
+    { id: 'page:news', group: 'Pages', label: "What's new", keywords: 'changelog update version', onSelect: () => setOverlay({ kind: 'news' }) },
+    { id: 'page:adblock', group: 'Pages', label: 'Ad blocker', keywords: 'ads shield', onSelect: () => setOverlay({ kind: 'adblock' }) },
+    { id: 'page:about', group: 'Pages', label: 'About Kryoto Desktop', keywords: 'version credits', onSelect: () => setOverlay({ kind: 'about' }) },
+  ]
+
+  // Store, Library, Community - one pill, Community's pages in a panel.
   const tabs: NavTabSpec[] = [
-    {
-      id: 'store',
-      label: 'Store',
-      onOpen: openStore,
-      items: [
-        { label: 'Home', icon: <House />, onSelect: () => openWeb('/') },
-        { label: 'Browse', icon: <LayoutGrid />, onSelect: () => openWeb('/browse') },
-        { label: 'Requests', icon: <MessageSquarePlus />, onSelect: () => openWeb('/requests') },
-      ],
-    },
-    {
-      id: 'library',
-      label: 'Library',
-      onOpen: () => go({ kind: 'home' }),
-      items: [
-        { label: 'Home', icon: <House />, onSelect: () => go({ kind: 'home' }) },
-        { label: 'Downloads', icon: <DownloadIcon />, onSelect: () => go({ kind: 'downloads' }) },
-        { label: 'Bridge', icon: <FolderInput />, onSelect: () => setOverlay({ kind: 'bridge' }) },
-      ],
-    },
+    { id: 'store', label: 'Store', onOpen: openStore },
+    { id: 'library', label: 'Library', onOpen: () => go({ kind: 'home' }) },
     {
       id: 'community',
       label: 'Community',
       onOpen: () => openWeb('/community'),
-      items: [
-        ...(account.friends && !guest ? [{ label: 'Friends & chat', icon: <MessageCircle />, onSelect: () => go({ kind: 'friends' }) }, { separator: true as const }] : []),
-        { label: 'Statistics', icon: <ChartColumn />, onSelect: () => openWeb('/community?tab=stats') },
-        { label: 'Blog', icon: <Newspaper />, onSelect: () => openWeb('/blog') },
-        { label: 'Collections', icon: <Layers />, onSelect: () => openWeb('/collections/discover') },
-        { label: 'Playtest', icon: <FlaskConical />, onSelect: () => openWeb('/testers') },
-        { separator: true },
-        { label: 'Discord', icon: <ArrowUpRight />, onSelect: () => void openExternal(DISCORD_URL) },
-        { label: 'Reddit', icon: <ArrowUpRight />, onSelect: () => void openExternal(REDDIT_URL) },
-        { label: 'YouTube', icon: <ArrowUpRight />, onSelect: () => void openExternal(YOUTUBE_URL) },
-      ],
+      panel: {
+        heading: 'Community',
+        items: [
+          { label: 'Blog', icon: <Newspaper className="size-3.5" />, onSelect: () => openWeb('/blog') },
+          { label: 'Collections', icon: <Layers className="size-3.5" />, onSelect: () => openWeb('/collections/discover') },
+          { label: 'Playtest', icon: <FlaskConical className="size-3.5" />, onSelect: () => openWeb('/testers') },
+          { label: 'Apply for a role', icon: <Sparkles className="size-3.5" />, onSelect: () => openWeb('/apply') },
+          { label: 'Statistics', icon: <ChartColumn className="size-3.5" />, onSelect: () => openWeb('/community?tab=stats') },
+          ...(account.friends && !guest
+            ? [{ label: 'Friends & chat', icon: <MessageCircle className="size-3.5" />, onSelect: () => go({ kind: 'friends' }) }]
+            : []),
+          { label: 'Discord', icon: <ArrowUpRight className="size-3.5" />, onSelect: () => void openExternal(DISCORD_URL) },
+        ],
+      },
     },
-    guest
-      ? { id: 'profile', label: 'Sign in', onOpen: signIn, items: [] }
-      : {
-          id: 'profile',
-          label: account.displayName || account.username,
-          onOpen: () => openWeb(`/user/${username}`),
-          items: [
-            { label: 'Profile', icon: <User />, onSelect: () => openWeb(`/user/${username}`) },
-            { label: 'Saved games', icon: <Bookmark />, onSelect: () => openWeb('/library') },
-            { label: 'My collections', icon: <FolderHeart />, onSelect: () => openWeb('/library?tab=collections') },
-            ...(account.friends ? [{ label: 'Friends & chat', icon: <MessageCircle />, onSelect: () => go({ kind: 'friends' }) }] : []),
-            { label: 'Notifications', icon: <BellIcon />, onSelect: () => openWeb('/notifications') },
-          ],
-        },
   ]
   const currentTab: TopTab =
     view.kind === 'web'
@@ -1188,109 +1209,40 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
   const newSettings = useNewSettings(guest)
   // The window's one row folds on a narrow window; what left it is here instead.
   const { row, fold } = useRowFold([account.displayName, account.username, account.kryos, news?.version, online, view.kind === 'web' ? view.url : ''].join('|'))
+  // What the row folds away when it runs short.
   const folded: MenuEntry[] = [
+    ...(fold >= FOLD.news ? [{ label: "What's new", onSelect: () => setOverlay({ kind: 'news' }) }] : []),
+    ...(account.controller ? [{ label: 'Big Picture', onSelect: () => setBigPicture(true) }] : []),
     ...(fold >= FOLD.fullscreen ? [{ label: 'Full screen', hint: 'F11', onSelect: () => void toggleFullscreen() }] : []),
   ]
-  const foldedProfile: MenuEntry[] =
-    fold >= FOLD.profile
-      ? [
-          { label: 'Saved games', icon: <Bookmark />, onSelect: () => openWeb('/library') },
-          { label: 'My collections', icon: <FolderHeart />, onSelect: () => openWeb('/library?tab=collections') },
-          ...(account.friends ? [{ label: 'Friends & chat', icon: <MessageCircle />, onSelect: () => go({ kind: 'friends' }) }] : []),
-          { label: 'Notifications', icon: <BellIcon />, onSelect: () => openWeb('/notifications') },
-        ]
-      : []
-  // What a menu bar held, and nothing else has a place for: help and leaving.
-  const common: MenuEntry[] = [
-    ...(account.controller ? [{ label: 'Big Picture', onSelect: () => setBigPicture(true) }] : []),
-    { separator: true },
-    { label: 'Kryoto support', onSelect: () => openWeb('/support') },
-    { label: "What's new", onSelect: () => setOverlay({ kind: 'news' }) },
-    { label: 'About Kryoto Desktop', onSelect: () => setOverlay({ kind: 'about' }) },
-    { separator: true },
+  // kryo.to's places, one press away.
+  const socials: MenuEntry[] = [
+    { label: 'Discord', icon: <ArrowUpRight />, onSelect: () => void openExternal(DISCORD_URL) },
+    { label: 'Reddit', icon: <ArrowUpRight />, onSelect: () => void openExternal(REDDIT_URL) },
+    { label: 'YouTube', icon: <ArrowUpRight />, onSelect: () => void openExternal(YOUTUBE_URL) },
   ]
-  // The menu bar beside the mark (it folds into one menu on the mark when the row is short).
-  const recent = lib.games
-    .filter((g) => g.lastPlayed)
-    .sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0))
-    .slice(0, 4)
-  const titleMenus: { label: string; items: MenuEntry[] }[] = [
-    {
-      label: 'Kryoto',
-      items: [
-        { label: 'Settings', icon: <SettingsIcon />, hint: 'Ctrl ,', onSelect: () => openSettings() },
-        { label: 'Downloads', icon: <DownloadIcon />, onSelect: () => go({ kind: 'downloads' }) },
-        { separator: true },
-        guest
-          ? { label: 'Sign in to kryo.to', icon: <User />, onSelect: signIn }
-          : { label: `Sign out ${account.username}`, icon: <LogOut />, onSelect: leaveAccount },
-        { label: 'Exit Kryoto', onSelect: () => void exitApp() },
-      ],
-    },
-    {
-      label: 'View',
-      items: [
-        { label: 'Store', onSelect: openStore },
-        { label: 'Library', onSelect: () => go({ kind: 'home' }) },
-        { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
-        { label: 'Community', onSelect: () => openWeb('/community') },
-        { label: 'Blog', onSelect: () => openWeb('/blog') },
-        ...(account.friends && !guest ? [{ label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) }] : []),
-        { separator: true },
-        { label: 'Reload page', hint: 'Ctrl R', disabled: view.kind !== 'web', onSelect: () => web.reload() },
-        { label: 'Full screen', hint: 'F11', onSelect: () => void toggleFullscreen().catch(() => {}) },
-        ...(account.controller ? [{ label: 'Big Picture', onSelect: () => setBigPicture(true) }] : []),
-      ],
-    },
-    {
-      label: 'Games',
-      items: [
-        { label: 'View games library', onSelect: () => go({ kind: 'home' }) },
-        {
-          label: 'Search your games',
-          hint: 'Ctrl F',
-          onSelect: () => {
-            go({ kind: 'home' })
-            setTimeout(() => document.getElementById('library-search')?.focus(), 30)
-          },
-        },
-        { label: 'Add a game on this PC', icon: <Plus />, onSelect: () => setOverlay({ kind: 'add', slug: null }) },
-        { label: 'Bridge', icon: <FolderInput />, onSelect: () => setOverlay({ kind: 'bridge' }) },
-        ...(recent.length
-          ? [{ separator: true } as MenuEntry, { heading: 'Recent' } as MenuEntry, ...recent.map((g) => ({ label: titleWithBranch(g.title, g.steamBranch), icon: <Play />, onSelect: () => play(g) }))]
-          : []),
-      ],
-    },
-    {
-      label: 'Help',
-      items: [
-        { label: 'Kryoto support', onSelect: () => openWeb('/support') },
-        { label: "What's new", onSelect: () => setOverlay({ kind: 'news' }) },
-        { separator: true },
-        { label: 'Discord', icon: <ArrowUpRight />, onSelect: () => void openExternal(DISCORD_URL) },
-        { label: 'Reddit', icon: <ArrowUpRight />, onSelect: () => void openExternal(REDDIT_URL) },
-        { label: 'YouTube', icon: <ArrowUpRight />, onSelect: () => void openExternal(YOUTUBE_URL) },
-        { separator: true },
-        { label: 'About Kryoto Desktop', onSelect: () => setOverlay({ kind: 'about' }) },
-      ],
-    },
-  ]
+  // The player's menu: them, the client, then out. Notifications, saved games,
+  // collections and what's new are on the row itself or one Ctrl+K away.
   const accountMenu: MenuEntry[] = guest
     ? [
         { label: 'Sign in to kryo.to', icon: <User />, onSelect: signIn },
         { label: 'Settings', icon: <SettingsIcon />, hint: 'Ctrl ,', onSelect: () => openSettings() },
         ...folded,
-        ...common,
+        { separator: true },
+        ...socials,
+        { separator: true },
         { label: 'Exit Kryoto', onSelect: () => void exitApp() },
       ]
     : [
         { label: 'View profile', icon: <User />, onSelect: () => openWeb(`/user/${username}`) },
-        ...foldedProfile,
+        ...(account.friends ? [{ label: 'Friends & chat', icon: <MessageCircle />, onSelect: () => go({ kind: 'friends' }) }] : []),
+        { separator: true },
         { label: 'Kryos and perks', icon: <Sparkles />, hint: fold >= FOLD.kryos && typeof account.kryos === 'number' ? compactKryos(account.kryos) : undefined, onSelect: () => openWeb('/perks') },
-        { label: 'Saves & achievements', icon: <Cloud />, onSelect: () => openSettings('cloud') },
         { label: 'Settings', icon: <SettingsIcon />, hint: newSettings.length ? 'New' : 'Ctrl ,', onSelect: () => openSettings(newSettings[0] ?? 'profile') },
         ...folded,
-        ...common,
+        { separator: true },
+        ...socials,
+        { separator: true },
         { label: 'Sign out', icon: <LogOut />, onSelect: leaveAccount },
         { label: 'Exit Kryoto', onSelect: () => void exitApp() },
       ]
@@ -1305,10 +1257,6 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
 
   /* ── Store helpers ── */
   const pageSlug = view.kind === 'web' ? slugOnPage(webUrl, settings?.catalogEndpoint) : null
-  const pageGame = pageSlug ? (lib.games.find((g) => g.slug === pageSlug) ?? null) : null
-  const addFromPage = pageSlug
-    ? () => (pageGame ? go({ kind: 'game', id: pageGame.id }) : setOverlay({ kind: 'add', slug: pageSlug }))
-    : null
 
   // Downloads that start while the client is open (not the resumable leftovers
   // it starts with) are news.
@@ -1522,9 +1470,9 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         account={account}
         inbox={inbox}
         news={news}
-        menus={titleMenus}
         accountMenu={accountMenu}
         newSettings={newSettings.length > 0}
+        profileActive={currentTab === 'profile'}
         rowRef={row}
         fold={fold}
         onNews={() => openWeb('/changelog')}
@@ -1536,17 +1484,22 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         nav={
           <NavBar
             current={currentTab}
-            overStore={storeVisible}
             tabs={tabs}
             canBack={canBack}
             canForward={canForward}
             onBack={back}
             onForward={forward}
+            overStore={storeVisible}
+            slotClass="w-[23rem]"
             fold={fold}
             right={
-              view.kind === 'web' ? (
-                <UrlPill page={page} actions={web} onLibrary={addFromPage} inLibrary={!!pageGame} onAdblock={() => setOverlay({ kind: 'adblock' })} compact={fold >= FOLD.addIcon} narrow={fold >= FOLD.address} />
-              ) : null
+              // One field, everywhere: games, Settings and pages, as Steam has.
+              <RowSearch
+                games={searchGames}
+                actions={searchActions}
+                onOpenSlug={(slug) => openWeb(`/game/${slug}`)}
+                onOpenChange={setSearchOpen}
+              />
             }
           />
         }
