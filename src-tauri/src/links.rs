@@ -173,9 +173,11 @@ fn register_os() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     // Best effort: without xdg-mime the file is still found by most desktops.
-    let _ = std::process::Command::new("xdg-mime")
-        .args(["default", name, &format!("x-scheme-handler/{SCHEME}")])
-        .status();
+    let mut cmd = std::process::Command::new("xdg-mime");
+    cmd.args(["default", name, &format!("x-scheme-handler/{SCHEME}")]);
+    // As the desktop would run it, not on the AppImage's libraries (KB-0005).
+    crate::launch::clean_appimage_env(&mut cmd);
+    let _ = cmd.status();
     Ok(())
 }
 

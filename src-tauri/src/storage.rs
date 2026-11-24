@@ -1461,7 +1461,10 @@ mod tests {
         let drive = temp.ancestors().last().unwrap().to_path_buf();
         assert_eq!(too_wide(&drive, None), Some("a whole drive"));
         assert_eq!(too_wide(&temp, Some(&temp)), Some("your home folder"));
-        assert_eq!(too_wide(temp.parent().unwrap(), Some(&temp)), Some("your home folder"));
+        // A folder holding the home folder: on Linux the temp folder's parent
+        // is `/`, a drive, so the home stands one level below the temp folder.
+        let home = temp.join("kryoto-home");
+        assert_eq!(too_wide(&temp, Some(&home)), Some("your home folder"));
         assert_eq!(too_wide(&temp.join("Kryoto Games"), Some(&temp)), None);
     }
 

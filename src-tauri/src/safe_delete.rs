@@ -464,19 +464,62 @@ fn bin_on(folder: &Path, bytes: u64) -> Bin {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn bin_on(_folder: &Path, _bytes: u64) -> Bin {
-    if cfg!(target_os = "linux") && gio().is_some() {
-        Bin::Yes
-    } else {
-        Bin::No("This system has no Trash Kryoto can use.".into())
+    match gio_runs() {
+        Ok(()) => Bin::Yes,
+        Err(why) => Bin::No(why),
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
+fn bin_on(_folder: &Path, _bytes: u64) -> Bin {
+    Bin::No("This system has no Trash Kryoto can use.".into())
+}
+
+/// The system's `gio`, found on the PATH the desktop gave us: never a copy
+/// inside the AppImage.
+#[cfg(target_os = "linux")]
 fn gio() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join("gio")).find(|p| p.is_file())
+    let appdir = std::env::var_os("APPDIR").filter(|d| !d.is_empty()).map(PathBuf::from);
+    std::env::split_paths(&path)
+        .filter(|d| appdir.as_ref().is_none_or(|a| !d.starts_with(a)))
+        .map(|d| d.join("gio"))
+        .find(|p| p.is_file())
+}
+
+/// `gio` as the desktop would run it: without the AppImage's library paths,
+/// which made the system's gio load our older GLib and fail ("undefined
+/// symbol: g_unix_mount_entry_get_options") after the player had confirmed.
+#[cfg(target_os = "linux")]
+fn gio_command() -> Option<std::process::Command> {
+    let mut cmd = std::process::Command::new(gio()?);
+    crate::linux_open::clean(&mut cmd);
+    cmd.stdin(std::process::Stdio::null());
+    Some(cmd)
+}
+
+/// Whether the Trash can really be used here: `gio` is there and runs, asked
+/// once per session, so a system where it cannot says so before the player
+/// confirms rather than failing after.
+#[cfg(target_os = "linux")]
+fn gio_runs() -> Result<(), String> {
+    static ANSWER: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    ANSWER
+        .get_or_init(|| {
+            let mut cmd = gio_command().ok_or_else(|| "This system has no Trash Kryoto can use (gio is not installed).".to_string())?;
+            match cmd.args(["help", "trash"]).output() {
+                Ok(out) if out.status.success() => Ok(()),
+                Ok(out) => {
+                    let said = String::from_utf8_lossy(&out.stderr);
+                    let said = said.lines().next().unwrap_or("").trim();
+                    Err(format!("This system's Trash cannot be used from Kryoto (gio did not run: {said})."))
+                }
+                Err(e) => Err(format!("This system's Trash cannot be used from Kryoto (gio did not run: {e}).")),
+            }
+        })
+        .clone()
 }
 
 /// What an uninstall did.
@@ -569,9 +612,10 @@ fn trash(paths: &[PathBuf]) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn trash(paths: &[PathBuf]) -> Result<(), String> {
-    let gio = gio().ok_or("no gio")?;
+    gio_runs()?;
     for chunk in paths.chunks(200) {
-        let out = std::process::Command::new(&gio).arg("trash").arg("--").args(chunk).output().map_err(|e| e.to_string())?;
+        let mut cmd = gio_command().ok_or("no gio")?;
+        let out = cmd.arg("trash").arg("--").args(chunk).output().map_err(|e| e.to_string())?;
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }

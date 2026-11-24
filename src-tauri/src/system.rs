@@ -1065,7 +1065,12 @@ pub fn os_dark() -> Option<bool> {
 /// GNOME's (and most desktops') color-scheme preference.
 #[cfg(not(windows))]
 pub fn os_dark() -> Option<bool> {
-    let out = std::process::Command::new("gsettings").args(["get", "org.gnome.desktop.interface", "color-scheme"]).output().ok()?;
+    let mut cmd = std::process::Command::new("gsettings");
+    cmd.args(["get", "org.gnome.desktop.interface", "color-scheme"]);
+    // The system's gsettings is GLib's: on the AppImage's older GLib it fails
+    // like gio did (KB-0005, the uninstall's Trash).
+    crate::launch::clean_appimage_env(&mut cmd);
+    let out = cmd.output().ok()?;
     let scheme = String::from_utf8_lossy(&out.stdout);
     match scheme.trim().trim_matches('\'') {
         "prefer-dark" => Some(true),

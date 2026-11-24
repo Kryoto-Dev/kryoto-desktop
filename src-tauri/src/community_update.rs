@@ -241,6 +241,8 @@ fn dotnet() -> Result<PathBuf, String> {
         let mut cmd = std::process::Command::new(&c);
         cmd.arg("--list-runtimes");
         no_window(&mut cmd);
+        // The system's dotnet, not on the AppImage's bundled libraries.
+        crate::launch::clean_appimage_env(&mut cmd);
         let Ok(out) = cmd.output() else { continue };
         let text = String::from_utf8_lossy(&out.stdout);
         let ok = text.lines().any(|l| {
@@ -348,6 +350,7 @@ async fn run<R: Runtime>(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         no_window(&mut cmd);
+        crate::launch::clean_appimage_env(&mut cmd);
         let out = tauri::async_runtime::spawn_blocking(move || cmd.output()).await.map_err(|e| e.to_string())?.map_err(|e| format!("DepotDownloader did not start: {e}"))?;
         if !out.status.success() {
             let tail: String = String::from_utf8_lossy(&out.stdout).lines().chain(String::from_utf8_lossy(&out.stderr).lines()).rev().take(3).collect::<Vec<_>>().join(" / ");
