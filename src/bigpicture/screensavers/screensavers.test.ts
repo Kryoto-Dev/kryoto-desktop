@@ -100,11 +100,11 @@ test('cells are the same share of any 16:9 screen, in whole pixels', () => {
 })
 
 test('shuffle plays every one before any comes back, never the same twice in a row', () => {
-  const ids = ['mark', 'clock', 'field', 'rain', 'snake']
+  const ids = ['mark', 'clock', 'field', 'snake']
   for (let seed = 1; seed < 40; seed++) {
     const order = shuffleOrder(ids, 6, seeded(seed))
-    assert.equal(order.length, 30)
-    for (let round = 0; round < 6; round++) assert.deepEqual(order.slice(round * 5, round * 5 + 5).sort(), [...ids].sort())
+    assert.equal(order.length, 24)
+    for (let round = 0; round < 6; round++) assert.deepEqual(order.slice(round * 4, round * 4 + 4).sort(), [...ids].sort())
     for (let i = 1; i < order.length; i++) assert.notEqual(order[i], order[i - 1], `seed ${seed} at ${i}`)
   }
 })

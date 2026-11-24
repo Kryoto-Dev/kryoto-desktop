@@ -32,22 +32,16 @@ export const LOW = 2
 export const HALF = 3
 export const FULL = 4
 /**
- * Half a trace: a field of dots far from anything lit (Rain's sky), so a whole
- * screen of grid reads as a grid and not as grey. Never used for a dot that
- * belongs to a shape.
- */
-export const FAINT = 5
-/**
  * Brighter than full: the light of a sweep passing, and nothing else, so the
  * passing light is the brightest thing on screen and a large lit shape is not.
  */
-export const PEAK = 6
+export const PEAK = 5
 /**
  * components/ui/matrix.tsx's inks (full, half, low, trace), set a little
  * lower for a TV in a dark room: full is the foreground at 0.8, and only PEAK
- * reaches the foreground itself. Then FAINT and PEAK.
+ * reaches the foreground itself.
  */
-export const INK_ALPHA = [0, 0.12, 0.26, 0.48, 0.8, 0.06, 1] as const
+export const INK_ALPHA = [0, 0.12, 0.26, 0.48, 0.8, 1] as const
 
 const LEVEL_MASK = 7
 const ACCENT = 8

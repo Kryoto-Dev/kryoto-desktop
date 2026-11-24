@@ -12,7 +12,7 @@ import { lastPlayedTitle, saverTitles } from './screensavers/titles'
 /**
  * Big Picture's screensaver (suggestion #107): after a few minutes with no
  * button, key, click or pointer, one of Kryoto's screensavers plays on black
- * (screensavers/: Mark, the default, Clock, Field, Rain, Snake, or all of
+ * (screensavers/: Mark, the default, Clock, Field, Snake, or all of
  * them in turn). Any input leaves it, and only wakes the screen: that press
  * does nothing else.
  *
@@ -66,7 +66,7 @@ export function screensaverWait(): number {
 export function setScreensaverWait(minutes: number) {
   write(WAIT_KEY, String(minutes))
 }
-/** Which one plays: Mark unless another was picked. */
+/** Which one plays: Mark unless another was picked (a choice that no longer exists, like Rain from the previews, is Mark again). */
 export function screensaverVariant(): SaverId {
   const v = read(WHICH_KEY)
   return (SAVER_IDS as readonly string[]).includes(v ?? '') ? (v as SaverId) : DEFAULT_SAVER
