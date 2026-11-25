@@ -1325,6 +1325,9 @@ pub fn asks_for_folder(settings: &crate::settings::Settings, installed: bool) ->
 // `async`: off the window's thread, as it saves the settings and the queue.
 #[tauri::command(async)]
 pub fn download_pick_folder(app: AppHandle, id: String, folder: String, always_default: bool) -> Result<(), String> {
+    // The answer starts the download: not on a version kryo.to no longer
+    // allows (required.rs). The question stays for after the update.
+    crate::required::refuse()?;
     let mut settings = crate::settings::load(&app);
     let folders = crate::settings::all_folders(&settings);
     let folder = folders.iter().find(|f| crate::settings::same_path(f, &folder)).cloned().ok_or("That is not one of your library folders.")?;
@@ -3749,6 +3752,9 @@ fn waiting_order<R: Runtime>(app: &AppHandle<R>, active: Option<&str>) -> Vec<St
 
 /// Mark a stopped download queued again and start its task.
 fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    // Resume, Retry and Move to now, from here, the phone or Remote: a
+    // version kryo.to no longer allows (required.rs) carries nothing on.
+    crate::required::refuse()?;
     if let Some(flag) = app.state::<Downloads>().controls.lock().map_err(|_| "Download controls are unavailable.")?.get(id) {
         return if flag.load(Ordering::SeqCst) == 0 { Ok(()) } else { Err("Wait for the download to stop, then try again.".into()) };
     }
@@ -6193,6 +6199,8 @@ pub fn download_resume(app: AppHandle, id: String) -> Result<(), String> {
 /// or replaced archive is what the check is there to catch.
 #[tauri::command]
 pub fn download_install_anyway(app: AppHandle, id: String) -> Result<(), String> {
+    // Before the row is marked as checked: refused, it still asks once updated.
+    crate::required::refuse()?;
     let d = edit(&app, &id, |_| {}).ok_or("That download is gone.")?;
     if d.status != Status::Failed || !d.hash_mismatch || !Path::new(&d.archive_path).is_file() {
         return Err("There is no unchecked archive to install. Retry to download it again.".into());
@@ -6345,7 +6353,15 @@ mod tests {
     #[test]
     fn a_blocked_version_starts_no_download() {
         let src = include_str!("downloads.rs");
-        assert!(crate::required::refuses_before(src, "pub fn enqueue_collection<", "list.insert("));
+        for (item, then) in [
+            ("pub fn enqueue_collection<", "list.insert("),
+            // Resume, Retry, Move to now, a sign-in's retry.
+            ("fn requeue<", "edit(app, id"),
+            ("pub fn download_install_anyway(", "d.hash_mismatch = false"),
+            ("pub fn download_pick_folder(", "edit(&app, &id"),
+        ] {
+            assert!(crate::required::refuses_before(src, item, then), "{item} must refuse first");
+        }
     }
 
     /// A failed row from last week still says the build kryo.to served then.
