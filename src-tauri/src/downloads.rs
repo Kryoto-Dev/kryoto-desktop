@@ -2258,12 +2258,17 @@ fn signed_out<R: Runtime>(app: &AppHandle<R>, d: &Download) -> String {
 
 /// A row stopped only to wait for a sign-in (`signed_out`): not an app error.
 fn waits_for_sign_in(error: &str) -> bool {
-    error == crate::phone::SIGNED_OUT || error == ADDON_SIGNED_OUT
+    error == crate::phone::SIGNED_OUT || error == ADDON_SIGNED_OUT || error == REFUSED_SIGNED_OUT
 }
 
 /// An add-on row while nobody is signed in to kryo.to here (see `signed_out`).
 pub const ADDON_SIGNED_OUT: &str =
     "You are signed out of kryo.to, so the app cannot fetch this add-on by itself. Sign in and it carries on, or press Download on it in the game's download window.";
+
+/// Our own link refused with nobody signed in here (`refused_ours`): it waits
+/// for a sign-in too. It says "once you are signed in", as the others do, so
+/// the bottom bar counts it as waiting, not failed.
+const REFUSED_SIGNED_OUT: &str = "kryo.to refused the link: it was made for another connection than the one this app downloads over (a VPN, a proxy, or a mobile or satellite line can do this). Sign in to kryo.to in Kryoto Desktop: the app then asks for the link over its own connection, and the download carries on by itself once you are signed in.";
 
 /// Our own link refused (made for another network, or run out), and no
 /// family passes: this app mints the same file again for this PC, so the
@@ -2275,8 +2280,13 @@ async fn remint_same_file<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     let Some(file) = link_file(&before.url) else { return false };
     if let Err(e) = mint_link(app, id).await {
         // An error, so it reaches the reports: until 0.3.9 nothing said why
-        // a refused link was never replaced (KB-0072).
-        crate::logging::error("download", &format!("{id}: could not mint the link again: {e}"));
+        // a refused link was never replaced (KB-0072). Nobody signed in is
+        // only a wait for a sign-in.
+        if waits_for_sign_in(&e) {
+            crate::logging::warn("download", &format!("{id}: could not mint the link again: {e}"));
+        } else {
+            crate::logging::error("download", &format!("{id}: could not mint the link again: {e}"));
+        }
         return false;
     }
     let after = edit(app, id, |_| {});
@@ -4161,7 +4171,7 @@ fn refused_ours<R: Runtime>(app: &AppHandle<R>, id: &str, code: u16) -> String {
 fn refused_own_text(code: u16, signed_in: bool) -> String {
     match (code, signed_in) {
         (410, _) => refused_text(410, false),
-        (_, false) => "kryo.to refused the link: it was made for another connection than the one this app downloads over (a VPN, a proxy, or a mobile or satellite line can do this). Sign in to kryo.to in Kryoto Desktop: the app then asks for the link over its own connection and carries on by itself.".into(),
+        (_, false) => REFUSED_SIGNED_OUT.into(),
         (_, true) => "kryo.to refused the link three times: this PC reaches kryo.to and its download server from different networks (a VPN, a proxy, or a mobile or satellite line that changes address can do this). Press Retry, turn the VPN or proxy off for kryo.to, or download the game from a mirror on its page.".into(),
     }
 }
@@ -7332,6 +7342,13 @@ mod tests {
     fn a_wait_for_a_sign_in_is_not_an_app_error() {
         assert!(waits_for_sign_in(crate::phone::SIGNED_OUT));
         assert!(waits_for_sign_in(ADDON_SIGNED_OUT));
+        // Our own link refused with nobody signed in: it waits for a sign-in too.
+        let refused = refused_own_text(403, false);
+        assert!(waits_for_sign_in(&refused), "{refused}");
+        // The bottom bar counts it as waiting by these words (BottomBar.tsx).
+        assert!(refused.contains("once you are signed in"), "{refused}");
+        assert!(!waits_for_sign_in(&refused_own_text(403, true)));
+        assert!(!waits_for_sign_in(&refused_own_text(410, false)), "a link run out does not wait");
         assert!(!waits_for_sign_in("The connection kept dropping (timed out). Resume to try again."));
         assert!(!waits_for_sign_in("kryo.to wants a check only its page can pass. Press Download on X's page, or Retry later."));
     }
