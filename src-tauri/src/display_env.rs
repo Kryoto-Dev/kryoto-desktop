@@ -384,6 +384,22 @@ pub fn on_cpu(compositing_off: bool, drawing: Option<Drawing>) -> bool {
     compositing_off || drawing == Some(Drawing::Cpu)
 }
 
+/// Settings > Graphics > Still backgrounds: the player's choice, else on
+/// while drawing on the CPU, where every moving frame costs the processor.
+pub fn still_backgrounds(choice: Option<bool>, on_cpu: bool) -> bool {
+    choice.unwrap_or(on_cpu)
+}
+
+/// Still backgrounds for this run. Always off outside Linux: Windows has no
+/// graphics modes and draws its pages on the GPU.
+pub fn still_now(choice: Option<bool>) -> bool {
+    #[cfg(target_os = "linux")]
+    let on_cpu = linux::current().is_some_and(|s| s.on_cpu);
+    #[cfg(not(target_os = "linux"))]
+    let on_cpu = false;
+    cfg!(target_os = "linux") && still_backgrounds(choice, on_cpu)
+}
+
 // ---- The machine (Linux) ------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
@@ -976,6 +992,9 @@ pub fn display_rendered(app: tauri::AppHandle, webgl: Option<bool>, renderer: Op
         if let Some(webgl) = webgl {
             linux::note_renderer(webgl, renderer);
             let _ = app.emit_to("main", "display-state", ());
+            // The Store may have loaded before WebGL answered: a software
+            // renderer turns Still backgrounds on there too.
+            crate::store_still(&app, crate::settings::load(&app).still_backgrounds);
         }
         if let Some(f) = linux::probe_file() {
             let _ = std::fs::remove_file(f);
@@ -1284,6 +1303,18 @@ mod tests {
         assert!(!on_cpu(false, Some(Drawing::Gpu)));
         assert!(!on_cpu(false, Some(Drawing::NoWebgl)));
         assert!(!on_cpu(false, None));
+    }
+
+    /// report-A: on by itself where the CPU draws every frame; the player's
+    /// choice wins either way.
+    #[test]
+    fn still_backgrounds_follow_the_cpu_until_picked() {
+        assert!(still_backgrounds(None, true));
+        assert!(!still_backgrounds(None, false));
+        assert!(!still_backgrounds(Some(false), true));
+        assert!(still_backgrounds(Some(true), false));
+        #[cfg(not(target_os = "linux"))]
+        assert!(!still_now(Some(true)), "Windows keeps its backgrounds");
     }
 
     #[test]

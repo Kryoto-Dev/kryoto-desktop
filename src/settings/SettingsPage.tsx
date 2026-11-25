@@ -4,7 +4,7 @@ import { artSrc } from '@/lib/art'
 import { Wand2, Bell, Cloud, Download, FolderInput, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, ChevronDown } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Check, Dropdown, Section, Segmented, inputCls } from '@/ui'
 import { call, errorText, on } from '@/lib/bridge'
-import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useDisplayState, useSettings, type DisplayMode, PET_MASCOTS, PET_SIZES, type PetMascot, type Settings } from '@/lib/settings'
+import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, stillBackgrounds, useDisplayState, useSettings, type DisplayMode, PET_MASCOTS, PET_SIZES, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, openBigPicture, openSetup, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -458,7 +458,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
               <Check checked={s.sharePlaytime} onChange={(v) => set('sharePlaytime', v)} label="Share my play time and Desktop activity with kryo.to" />
             </Section>
             <DiscordPane s={s} patch={patch} />
-            <GraphicsSection />
+            <GraphicsSection s={s} set={set} />
             <SoundsPane />
           </>
         ) : null}
@@ -612,7 +612,7 @@ const DISPLAY_HINT: Record<DisplayMode, string> = {
  * How the Linux build draws its window (src-tauri/src/display_env.rs). Shown
  * only there; takes effect on the next start.
  */
-function GraphicsSection() {
+function GraphicsSection({ s, set }: { s: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
   const state = useDisplayState()
   const [picked, setPicked] = useState<DisplayMode | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -652,6 +652,9 @@ function GraphicsSection() {
         <code className="select-text">--safe-graphics</code>.
       </p>
       {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
+      {/* report-A: a moving wall costs the processor on every frame. */}
+      <Check checked={stillBackgrounds(s, state)} onChange={(v) => set('stillBackgrounds', v)} label="Still backgrounds" />
+      <p className="text-[11px] text-muted-foreground">The welcome screen&apos;s covers and the Store&apos;s animations hold still. On by itself while drawing on the CPU.</p>
     </Section>
   )
 }
