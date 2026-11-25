@@ -193,6 +193,22 @@ try {
     assert(await nav.evaluate(() => window.navFixture.calls.includes('menu_close')))
     await nav.close()
   })
+  await check('the sign-in box shows its page again when sent back to a sign-in page', async () => {
+    const signin = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    signin.on('pageerror', e => failures.push(e.message))
+    await signin.goto(`${base}/test/signin.html`)
+    await signin.waitForFunction(() => window.signinFixture.shown() === true)
+    // Signed in: the page moves on, and the box says so over a hidden page.
+    await signin.evaluate(() => window.signinFixture.at('https://kryo.to/'))
+    await signin.waitForFunction(() => window.signinFixture.shown() === false)
+    // The site sends it back to have the email checked: shown once it has loaded there.
+    await signin.evaluate(() => window.signinFixture.at('https://kryo.to/verify-email', true))
+    await signin.waitForTimeout(300)
+    assert.equal(await signin.evaluate(() => window.signinFixture.shown()), false)
+    await signin.evaluate(() => window.signinFixture.at('https://kryo.to/verify-email'))
+    await signin.waitForFunction(() => window.signinFixture.shown() === true, null, { timeout: 5_000 })
+    await signin.close()
+  })
   await page.goto(`${base}/test/ui.html`)
   await check('loading is distinct from an empty download list', async () => {
     await expectText('#downloads', 'Loading downloads')
