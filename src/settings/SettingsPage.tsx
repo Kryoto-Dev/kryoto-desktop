@@ -4,7 +4,7 @@ import { artSrc } from '@/lib/art'
 import { Wand2, Bell, Cloud, Download, FolderInput, HardDrive, Heart, LogOut, MessageCircle, Palette, Package, ScrollText, Shield, SlidersHorizontal, Smartphone, User, ChevronDown } from '@/ui/pixel-icons'
 import { AsciiBar, Button, Caption, Check, Dropdown, Section, Segmented, inputCls } from '@/ui'
 import { call, errorText, on } from '@/lib/bridge'
-import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, PET_MASCOTS, PET_SIZES, type PetMascot, type Settings } from '@/lib/settings'
+import { displayApi, GAME_LANGUAGES, PLAYER_NAME_MAX, settingsApi, useDisplayState, useSettings, type DisplayMode, PET_MASCOTS, PET_SIZES, type PetMascot, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, openBigPicture, openSetup, openStorePage, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -613,15 +613,9 @@ const DISPLAY_HINT: Record<DisplayMode, string> = {
  * only there; takes effect on the next start.
  */
 function GraphicsSection() {
-  const [state, setState] = useState<DisplayState | null>(null)
+  const state = useDisplayState()
   const [picked, setPicked] = useState<DisplayMode | null>(null)
   const [error, setError] = useState<string | null>(null)
-  useEffect(() => {
-    void displayApi
-      .state()
-      .then(setState)
-      .catch(() => setState(null))
-  }, [])
   if (!state) return null
   const mode = picked ?? state.mode
   const choose = (m: DisplayMode) => {
@@ -646,6 +640,12 @@ function GraphicsSection() {
         {state.healed ? 'The last start did not draw its window, so Kryoto switched to Compatible. ' : ''}
         Now: {state.reason}.{picked && picked !== state.mode ? ' Restart Kryoto to use the new setting.' : ''}
       </p>
+      {/* report-A: Mesa's software renderer, whatever the mode asked for. */}
+      {state.drawing === 'cpu' ? (
+        <p className="text-[11px] text-foreground">
+          Drawing on the CPU: the graphics driver is not in use.{state.renderer ? ` WebGL's renderer is ${state.renderer}.` : ''}
+        </p>
+      ) : null}
       {/* KB-0377: a window that turns black cannot reach this page. */}
       <p className="text-[11px] text-muted-foreground">
         Window black or flickering? The tray icon&apos;s menu has Start in compatible graphics, or start Kryoto with{' '}

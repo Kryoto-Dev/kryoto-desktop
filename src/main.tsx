@@ -10,6 +10,7 @@ import { installWindowDrag } from './lib/window-drag'
 import { call } from './lib/bridge'
 import { isTauri } from './lib/window'
 import { installTextSizeKeys } from './lib/text-size'
+import { webglRenderer } from './lib/settings'
 import './styles.css'
 import { PixelIconMotion } from '@/ui/pixel-icons-motion'
 
@@ -56,7 +57,13 @@ createRoot(document.getElementById('root')!).render(
 )
 
 // The first frame is on screen: tell the Linux build this start drew, so it
-// does not fall back to its compatible renderer next time (display_env.rs).
+// does not fall back to its compatible renderer next time (display_env.rs),
+// and which renderer WebGL got, so drawing on the CPU is said (report-A). The
+// app says whether to ask: on Linux, once per run (`display_webgl_ask`).
 if (label === 'main' && isTauri()) {
-  requestAnimationFrame(() => requestAnimationFrame(() => void call('display_rendered').catch(() => {})))
+  const drew = async () => {
+    const ask = await call<boolean>('display_webgl_ask').catch(() => false)
+    await call('display_rendered', ask ? webglRenderer() : {})
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => void drew().catch(() => {})))
 }

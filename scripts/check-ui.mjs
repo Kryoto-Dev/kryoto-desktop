@@ -698,6 +698,39 @@ try {
       assert.equal(await linux.getByText('On Linux', { exact: true }).count(), 0)
     } finally { await context.close() }
   })
+  await check('Settings > Graphics says when the Linux build draws on the CPU, and only there', async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15' })
+    await context.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    const graphics = async (page, query) => {
+      page.on('pageerror', e => failures.push(e.message))
+      await page.goto(`${base}${query}`)
+      await page.getByRole('complementary', { name: 'Your games' }).waitFor()
+      await page.getByRole('button', { name: 'Account menu' }).click()
+      await page.getByRole('menuitem', { name: /Settings/ }).click()
+      await page.getByRole('button', { name: 'General', exact: true }).click()
+      await page.getByText('Built-in browser', { exact: true }).waitFor()
+    }
+    try {
+      const software = await context.newPage()
+      await graphics(software, '?software')
+      await software.getByText("Drawing on the CPU: the graphics driver is not in use. WebGL's renderer is llvmpipe (LLVM 19.1.7, 256 bits).", { exact: true }).waitFor()
+      const gpu = await context.newPage()
+      await graphics(gpu, '')
+      await gpu.getByText('Graphics', { exact: true }).waitFor()
+      await gpu.getByText(/^Now: Automatic/).waitFor()
+      assert.equal(await gpu.getByText(/Drawing on the CPU/).count(), 0)
+    } finally { await context.close() }
+    // Windows has no graphics modes, so no section.
+    const winContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0' })
+    await winContext.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    const windows = await winContext.newPage()
+    try {
+      await graphics(windows, '?software')
+      await windows.waitForTimeout(300)
+      assert.equal(await windows.getByText(/^Now: /).count(), 0)
+      assert.equal(await windows.getByText(/Drawing on the CPU/).count(), 0)
+    } finally { await winContext.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }

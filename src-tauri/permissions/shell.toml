@@ -21,7 +21,7 @@ commands.allow = [
   "required_check", "required_held",
   "preview_report_screenshot", "preview_report_send", "preview_reports_mine",
   "pet_menu", "pet_drag", "pet_mascot", "pet_size", "pet_hit", "pet_shown",
-  "display_rendered",
+  "display_rendered", "display_webgl_ask",
   "game_logs",
   "game_log_read",
   "game_logs_folder",
