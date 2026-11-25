@@ -1904,6 +1904,24 @@ pub fn safe_name(name: &str) -> String {
 /// no plain spelling (a Japanese title) is left out; when nothing is left,
 /// `fallback` (the kryo.to slug) names it.
 pub fn plain_name(name: &str, fallback: Option<&str>) -> String {
+    let out = latin(name);
+    let named = out.chars().any(|c| c.is_ascii_alphanumeric());
+    match fallback.filter(|_| !named) {
+        Some(slug) => safe_name(slug),
+        None => safe_name(&out),
+    }
+}
+
+/// `name` in plain Latin letters (`Ōkami` is `Okami`, `Baldur’s` is
+/// `Baldur's`), leaving out what has no plain spelling: a folder's name, and
+/// what online-fix.me's Latin-only search can find a title by.
+pub fn latin(name: &str) -> String {
+    latin_with(name, |_| "")
+}
+
+/// `latin`, with `other` saying what a character with no plain spelling
+/// becomes.
+pub fn latin_with(name: &str, other: impl Fn(char) -> &'static str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
         if c.is_ascii() {
@@ -1924,49 +1942,53 @@ pub fn plain_name(name: &str, fallback: Option<&str>) -> String {
             'à'..='å' | 'ā' | 'ă' | 'ą' => "a",
             'Æ' => "AE",
             'æ' => "ae",
-            'Ç' | 'Ć' | 'Č' => "C",
-            'ç' | 'ć' | 'č' => "c",
+            'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => "C",
+            'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
             'Ď' | 'Đ' | 'Ð' => "D",
             'ď' | 'đ' | 'ð' => "d",
-            'È'..='Ë' | 'Ē' | 'Ė' | 'Ę' | 'Ě' => "E",
-            'è'..='ë' | 'ē' | 'ė' | 'ę' | 'ě' => "e",
-            'Ğ' => "G",
-            'ğ' => "g",
-            'Ì'..='Ï' | 'Ī' | 'İ' => "I",
-            'ì'..='ï' | 'ī' | 'ı' => "i",
-            'Ł' => "L",
-            'ł' => "l",
-            'Ñ' | 'Ń' | 'Ň' => "N",
-            'ñ' | 'ń' | 'ň' => "n",
-            'Ò'..='Ö' | 'Ø' | 'Ō' | 'Ő' => "O",
-            'ò'..='ö' | 'ø' | 'ō' | 'ő' => "o",
+            'È'..='Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => "E",
+            'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+            'Ĝ' | 'Ğ' | 'Ġ' | 'Ģ' => "G",
+            'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+            'Ĥ' | 'Ħ' => "H",
+            'ĥ' | 'ħ' => "h",
+            'Ì'..='Ï' | 'Ĩ' | 'Ī' | 'Ĭ' | 'Į' | 'İ' => "I",
+            'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+            'Ĵ' => "J",
+            'ĵ' => "j",
+            'Ķ' => "K",
+            'ķ' => "k",
+            'Ĺ' | 'Ļ' | 'Ľ' | 'Ŀ' | 'Ł' => "L",
+            'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+            'Ñ' | 'Ń' | 'Ņ' | 'Ň' => "N",
+            'ñ' | 'ń' | 'ņ' | 'ň' => "n",
+            'Ò'..='Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' | 'Ơ' => "O",
+            'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' | 'ơ' => "o",
             'Œ' => "OE",
             'œ' => "oe",
-            'Ř' => "R",
-            'ř' => "r",
-            'Ś' | 'Š' | 'Ş' => "S",
-            'ś' | 'š' | 'ş' => "s",
+            'Ŕ' | 'Ŗ' | 'Ř' => "R",
+            'ŕ' | 'ŗ' | 'ř' => "r",
+            'Ś' | 'Ŝ' | 'Š' | 'Ş' | 'Ș' => "S",
+            'ś' | 'ŝ' | 'š' | 'ş' | 'ș' => "s",
             'ß' => "ss",
-            'Ť' => "T",
-            'ť' => "t",
+            'Ţ' | 'Ť' | 'Ŧ' | 'Ț' => "T",
+            'ţ' | 'ť' | 'ŧ' | 'ț' => "t",
             'Þ' => "Th",
             'þ' => "th",
-            'Ù'..='Ü' | 'Ū' | 'Ů' | 'Ű' => "U",
-            'ù'..='ü' | 'ū' | 'ů' | 'ű' => "u",
-            'Ý' | 'Ÿ' => "Y",
-            'ý' | 'ÿ' => "y",
+            'Ù'..='Ü' | 'Ũ' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' | 'Ư' => "U",
+            'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' | 'ư' => "u",
+            'Ŵ' => "W",
+            'ŵ' => "w",
+            'Ý' | 'Ÿ' | 'Ŷ' => "Y",
+            'ý' | 'ÿ' | 'ŷ' => "y",
             'Ź' | 'Ż' | 'Ž' => "Z",
             'ź' | 'ż' | 'ž' => "z",
             // ™, ®, ©, symbols and scripts with no plain spelling.
-            _ => "",
+            _ => other(c),
         };
         out.push_str(plain);
     }
-    let named = out.chars().any(|c| c.is_ascii_alphanumeric());
-    match fallback.filter(|_| !named) {
-        Some(slug) => safe_name(slug),
-        None => safe_name(&out),
-    }
+    out
 }
 
 
@@ -7757,6 +7779,7 @@ mod tests {
         assert_eq!(plain_name("Ōkami HD", None), "Okami HD");
         assert_eq!(plain_name("Pokémon™ Legends – Z-A", None), "Pokemon Legends - Z-A");
         assert_eq!(plain_name("Mörkö: Straße… 2", None), "Morko Strasse... 2");
+        assert_eq!(plain_name("Ștefan și Țara", None), "Stefan si Tara");
         assert_eq!(plain_name("ドラゴンクエスト", Some("dragon-quest")), "dragon-quest");
         assert_eq!(plain_name("ドラゴンクエスト", None), "Game");
         assert_eq!(plain_name("Half-Life: Alyx?", None), "Half-Life Alyx");
