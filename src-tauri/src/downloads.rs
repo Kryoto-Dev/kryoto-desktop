@@ -3469,12 +3469,15 @@ async fn check_own_file<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<Ato
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     if d.not_verified {
         crate::logging::warn("download", &format!("{id}: installing {} for {slug}, matching no file kryo.to lists, at the player's word", d.file_name));
+        // The add-on the dialog named it, by kryo.to's name for its file or
+        // its size too: else a language pack went over its game as the game.
+        let addon = crate::from_file::addon_of(listing.as_ref(), &d.file_name, size);
         edit(app, id, |d| {
             d.sha256 = None;
             // Its own name's build, if it says one: never kryo.to's current one.
             d.meta.version = crate::from_file::version_in_name(&d.file_name);
             if d.addon.is_none() {
-                d.addon = dlc_label(&d.file_name);
+                d.addon = addon.clone();
             }
         });
         return Ok(());

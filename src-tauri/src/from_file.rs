@@ -267,6 +267,18 @@ pub fn guess_release(json: &serde_json::Value, file_name: &str, size: u64) -> Gu
     Guess { version: None, addon, size_match: listed.then_some(false) }
 }
 
+/// The add-on a file is, as the dialog says it before the file is read: by
+/// kryo.to's listing when it answered (`guess_release`), else by a DLC's
+/// naming. A file installed at the player's word goes in as this, so a
+/// language pack the dialog named is never unpacked over its game as if it
+/// were the game.
+pub fn addon_of(listing: Option<&serde_json::Value>, file_name: &str, size: u64) -> Option<String> {
+    match listing {
+        Some(json) => guess_release(json, file_name, size).addon,
+        None => downloads::dlc_label(file_name),
+    }
+}
+
 /// 7-Zip's own test of every file in the archive (`7z t`), with progress over
 /// the archive's size. `Ok(true)` when it passed, `Ok(false)` when no 7-Zip on
 /// this PC could run it (the headers were still checked, `check_file`), `Err`
@@ -408,11 +420,9 @@ pub async fn archive_look(app: AppHandle, path: String, slug: Option<String>) ->
         let guess = guess_release(json, &file_name, size);
         look.title = look.title.or_else(|| json["title"].as_str().map(String::from));
         look.version = guess.version;
-        look.addon = guess.addon;
         look.size_match = guess.size_match;
-    } else {
-        look.addon = downloads::dlc_label(&file_name);
     }
+    look.addon = addon_of(listing.as_ref(), &file_name, size);
     look.installed = crate::library::load(&app).is_ok_and(|games| games.iter().any(|g| g.slug.as_deref() == Some(slug.as_str()) && g.launcher.is_none()));
     look.slug = Some(slug);
     Ok(look)
@@ -549,6 +559,28 @@ mod tests {
         // A listing without sizes cannot say either way.
         let bare = json!({ "releases": [{ "version": "1", "primary": true, "hashes": [{ "sha256": "a".repeat(64) }] }] });
         assert_eq!(guess_release(&bare, "x.7z", 5).size_match, None);
+    }
+
+    /// A language pack kryo.to has since uploaded again matches no hash, and
+    /// its name has no DLC in it: it is still the add-on the dialog named, so
+    /// Install anyway puts it into the game instead of over it as the game.
+    #[test]
+    fn a_file_installed_at_the_players_word_is_the_add_on_the_dialog_named() {
+        let mut json = listing(&"a".repeat(64), &"b".repeat(64), &"c".repeat(64));
+        json["addons"].as_array_mut().unwrap().push(json!({
+            "id": "33", "label": "Language: Polish", "kind": "addon",
+            "links": [{ "name": "Captain Hardcore - Language Polish - kryoto.7z" }],
+            "hashes": [{ "sha256": "e".repeat(64), "bytes": 66 }]
+        }));
+        let pack = "Captain Hardcore - Language Polish - kryoto.7z";
+        assert_eq!(addon_of(Some(&json), pack, 70).as_deref(), Some("Language: Polish"));
+        assert_eq!(addon_of(Some(&json), "Captain Hardcore - DLC Firebird - kryoto.7z", 5).as_deref(), Some("DLC: Firebird"));
+        // The game's own size, whatever the name: the game.
+        assert_eq!(addon_of(Some(&json), pack, 1000), None);
+        assert_eq!(addon_of(Some(&json), "Captain Hardcore v1.3 - kryoto.7z", 5), None);
+        // kryo.to not reached: only a DLC's naming says it, as in the dialog.
+        assert_eq!(addon_of(None, "Captain Hardcore - DLC Firebird - kryoto.7z", 5).as_deref(), Some("DLC: Firebird"));
+        assert_eq!(addon_of(None, pack, 5), None);
     }
 
     #[test]
