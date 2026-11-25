@@ -141,6 +141,11 @@ export type Scene = {
 export type Runner = {
   /** Fill `scene.grid.cells` for `t` ms after the start. */
   frame: (t: number) => void
+  /**
+   * With motion reduced, how long until the still frame changes, when that
+   * depends on what is showing (Shuffle). Otherwise the spec's `stillFor`.
+   */
+  stillFor?: (now: Date) => number
 }
 
 export type VariantSpec = {
@@ -377,7 +382,7 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
   }
   const schedule = () => {
     if (stopped || document.hidden || timer || raf) return
-    const delay = reduced ? (spec.stillFor?.(new Date()) ?? STILL_MS) : capDelay(last, performance.now(), opts.fps)
+    const delay = reduced ? ((runner.stillFor ?? spec.stillFor)?.(new Date()) ?? STILL_MS) : capDelay(last, performance.now(), opts.fps)
     timer = window.setTimeout(() => {
       timer = 0
       raf = requestAnimationFrame(frame)

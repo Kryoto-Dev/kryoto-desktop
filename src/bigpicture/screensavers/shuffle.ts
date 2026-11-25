@@ -1,10 +1,10 @@
-import { hash, OFF, type Runner, type Scene, type VariantSpec } from './engine.ts'
+import { hash, OFF, STILL_MS, type Runner, type Scene, type VariantSpec } from './engine.ts'
 
 /**
  * Shuffle: the other screensavers in turn, a few minutes each, every one
  * before any comes back, never the same one twice in a row. Between two, the
  * picture goes out dot by dot into the dark and the next one comes in the same
- * way.
+ * way. With motion reduced, each one's still frames in turn, with no dissolve.
  */
 
 /** Each one shows this long. */
@@ -56,9 +56,12 @@ export function makeShuffle(children: readonly VariantSpec[]): VariantSpec {
       scene.setScale(spec.scale ?? 1, spec.rowPitch)
       let child = spec.make(scene)
       let from = 0
+      // When the last still was drawn: the next one comes by the end of the turn.
+      let drawn = 0
       let dissolve = ranks(scene.grid.cells.length, seed)
-      // In thumbnails, a turn is short enough to see.
-      const turn = scene.thumb ? 9_000 : SHUFFLE_MS
+      // In thumbnails, a turn is short enough to see; with motion reduced, a
+      // thumbnail's still lasts as long as the full screen's.
+      const turn = scene.thumb && !scene.reduced ? 9_000 : SHUFFLE_MS
 
       const next = (t: number) => {
         index++
@@ -76,7 +79,11 @@ export function makeShuffle(children: readonly VariantSpec[]): VariantSpec {
 
       return {
         frame(t: number) {
-          if (scene.reduced) return child.frame(t)
+          if (scene.reduced) {
+            if (t - from >= turn) next(t)
+            drawn = t
+            return child.frame(t)
+          }
           let local = t - from
           if (local >= turn) {
             next(t)
@@ -89,6 +96,11 @@ export function makeShuffle(children: readonly VariantSpec[]): VariantSpec {
           if (local < DISSOLVE_MS) p = 1 - local / DISSOLVE_MS
           else if (local > turn - DISSOLVE_MS) p = (local - (turn - DISSOLVE_MS)) / DISSOLVE_MS
           if (p > 0) for (let i = 0; i < cells.length; i++) if (dissolve[i]! < p) cells[i] = OFF
+        },
+        // A new still when the one showing wants it (Clock, each minute), and
+        // no later than the end of its turn.
+        stillFor(now: Date) {
+          return Math.max(0, Math.min(spec.stillFor?.(now) ?? STILL_MS, from + turn - drawn))
         },
       }
     },
