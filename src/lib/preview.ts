@@ -327,6 +327,7 @@ const previewAddons: Record<string, Record<string, unknown>[]> = {
     addonFixture(9006, 'DLC: Silksong Preview Pack', '95 MB'),
     addonFixture(9007, 'DLC: Gods and Glory Costume Set', '60 MB'),
     addonFixture(9008, 'DLC: Voidheart Edition Extras', '150 MB'),
+    addonFixture(9009, 'Language: Polish', '30 MB', { source: 'Language', language: 'polish', links: [{ name: 'Hollow Knight - Language Polish - Kryoto.7z' }] }),
   ],
   terraria: [
     addonFixture(9101, 'Japanese language pack', '45 MB', { source: 'Language', note: 'Menus and dialogue in Japanese.' }),
@@ -370,6 +371,12 @@ export function startPreview() {
           // An add-on goes into its game (addons.rs `install`).
           const list = ((owner.addons as Record<string, unknown>[] | undefined) ?? []).filter((a) => a.file !== d.fileName)
           if (!d.repair) owner.addons = [...list, { label: d.addon, file: d.fileName, files: [`DLC/${String(d.fileName)}.pak`], replaced: [], installedAt: now() }]
+          // The language pack Add asked for: the game takes its language now (addons.rs `language_on_landing`).
+          const asked = owner.askedPack as { label: string; language: string } | null | undefined
+          if (asked && asked.label.toLowerCase() === String(d.addon).toLowerCase()) {
+            owner.askedPack = null
+            if (owner.gameLanguage == null && settings.gameLanguage !== asked.language) owner.gameLanguage = asked.language
+          }
           previewBus.emit('library-changed', null)
           previewBus.emit('notify', { title: `${String(d.addon).replace(/^DLC: /, '')} applied`, body: `Added to ${String(owner.title)}.`, gameId: owner.id })
         } else {
@@ -795,7 +802,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     const i = games.findIndex((g) => g.id === next.id)
     const old = games[i]
     if (!old) return clone(next)
-    games[i] = { ...next, playtimeSeconds: old.playtimeSeconds, lastPlayed: old.lastPlayed }
+    games[i] = { ...next, playtimeSeconds: old.playtimeSeconds, lastPlayed: old.lastPlayed, askedPack: old.askedPack }
     return clone(games[i])
   },
   library_add: (a) => {
@@ -867,6 +874,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     const g = games.find((x) => x.id === a.gameId)
     if (!g) throw new Error('That game is no longer in the library.')
     if (running.has(String(g.id))) throw new Error(`Close ${String(g.title)} first: its files are in use.`)
+    if (a.pack) g.askedPack = a.pack
     const challenge = typeof location !== 'undefined' && location.search.includes('addonchallenge')
     const queued: string[] = []
     for (const want of a.ids as string[]) {

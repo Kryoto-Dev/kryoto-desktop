@@ -90,6 +90,9 @@ pub struct LibraryGame {
     /// Add-ons put into it (language packs, the Online add-on), with the files
     /// each wrote, for Undo.
     pub addons: Vec<crate::addons::InstalledAddon>,
+    /// The language pack Add was last pressed on, until it lands: then the
+    /// game starts in its language (addons.rs `language_on_landing`).
+    pub asked_pack: Option<crate::addons::AskedPack>,
     /// Kryoto Online set up on this PC (not from a kryo.to add-on), for Undo.
     pub online: Option<crate::online::LocalOnline>,
     pub repair: Option<crate::repair::LocalRepair>,
@@ -1321,6 +1324,7 @@ pub fn library_save(app: AppHandle, game: LibraryGame) -> Result<LibraryGame, St
         }
         // Only applying and undoing change these, never the Properties window.
         next.addons = slot.addons.clone();
+        next.asked_pack = slot.asked_pack.clone();
         next.online = slot.online.clone();
         let had_repair = next.repair.is_some() || slot.repair.is_some();
         next.repair = slot.repair.clone();

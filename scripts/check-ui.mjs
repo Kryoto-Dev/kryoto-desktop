@@ -698,6 +698,35 @@ try {
       assert.equal(await linux.getByText('On Linux', { exact: true }).count(), 0)
     } finally { await context.close() }
   })
+  await check("a language pack sets the game's Language once it lands, and one that fails leaves it", async () => {
+    // The preview backend's own record of the game, as the app would reload it.
+    const languageOf = (p, id) => p.evaluate(async (id) => {
+      const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(`/src/lib/${name}.ts`))
+      const preview = await import(loaded('preview'))
+      return (await preview.previewCall('library_list', {})).find(g => g.id === id)?.gameLanguage ?? null
+    }, id)
+    for (const failing of [true, false]) {
+      const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+      page.on('pageerror', e => failures.push(e.message))
+      await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+      try {
+        await page.goto(failing ? `${base}?addonchallenge` : base)
+        await page.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Hollow Knight', exact: true }).click()
+        const row = page.getByRole('region', { name: 'Hollow Knight', exact: true }).locator('[data-addon-row="Polish"]')
+        await row.getByRole('button', { name: 'Add', exact: true }).click()
+        await row.getByRole('button', { name: 'Add', exact: true }).waitFor({ state: 'detached' })
+        // Queued is not in: the game still follows Settings.
+        assert.equal(await languageOf(page, 'hollow-knight'), null)
+        if (failing) {
+          await row.getByRole('button', { name: 'Download window', exact: true }).waitFor()
+          assert.equal(await languageOf(page, 'hollow-knight'), null)
+        } else {
+          await row.getByRole('button', { name: 'Remove', exact: true }).waitFor({ timeout: 30_000 })
+          assert.equal(await languageOf(page, 'hollow-knight'), 'polish')
+        }
+      } finally { await page.close() }
+    }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
