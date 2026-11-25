@@ -409,6 +409,9 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
     scale = spec.scale ?? 1
     rowPitch = spec.rowPitch ?? ROW_PITCH
     layout()
+    // The start screen's scene underneath only if the new start asks for it
+    // again: Shuffle starts over on another screensaver than Field.
+    opts.onUnderlay?.(null)
     runner = spec.make(scene)
     if (reduced) {
       window.clearTimeout(timer)

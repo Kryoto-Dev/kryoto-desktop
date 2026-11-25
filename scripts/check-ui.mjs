@@ -596,6 +596,22 @@ try {
       assert(drawn.palette > 0, `a new palette redraws: ${JSON.stringify(drawn)}`)
     } finally { await saver.close() }
   })
+  await check("a new window size starts the screensaver over without the last one's start-screen scene", async () => {
+    const saver = await saverPage()
+    try {
+      // As Shuffle on Field, starting over on a screensaver that wants nothing underneath.
+      await saver.evaluate(() => {
+        let starts = 0
+        const spec = { id: 'test', name: 'Test', make: scene => { if (starts++ === 0) scene.underlay('splash'); return { frame: () => {} } } }
+        window.stopSaver = window.saverFixture.mount(spec)
+      })
+      assert.deepEqual(await saver.evaluate(() => window.saverFixture.underlays), ['splash'])
+      await saver.setViewportSize({ width: 640, height: 360 })
+      await saver.waitForFunction(() => window.saverFixture.underlays.length > 1)
+      assert.equal(await saver.evaluate(() => window.saverFixture.underlays.at(-1)), null)
+      await saver.evaluate(() => window.stopSaver())
+    } finally { await saver.close() }
+  })
   await check('a Settings switch does not undo where saves are kept, chosen on the same page', async () => {
     const cloud = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     cloud.on('pageerror', e => failures.push(e.message))
