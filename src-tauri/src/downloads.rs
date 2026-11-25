@@ -5472,6 +5472,15 @@ fn extract_in_place(
             Failure::Other(text) => format!("HatchZip could not unpack it: {}. Press Retry to carry on from where it stopped.", first_line(&text)),
         }
     };
+    // Unreadable as it stands: a fresh copy, unpacked with 7-Zip, which
+    // carries on past a damaged file and says which (KB-0338).
+    let unreadable = |text: &str| -> String {
+        hatchzip::forget(archive);
+        let _ = std::fs::remove_file(archive);
+        let _ = std::fs::remove_dir_all(staging);
+        crate::logging::warn("hatchzip", &format!("{title}: {}; the archive goes and the next try unpacks with 7-Zip", first_line(text)));
+        HATCHZIP_UNREADABLE.into()
+    };
     // A block too big for the memory free: 7-Zip, before anything is eaten
     // (hatchzip.rs "Memory").
     if !resuming && !hatchzip::fits_in_memory(archive) {
@@ -5519,8 +5528,16 @@ fn extract_in_place(
             // dictionary in memory instead of one per core.
             if !untouched && hatchzip::out_of_memory(&text) && hatchzip::resumes(archive) && stop.load(Ordering::SeqCst) == RUN {
                 crate::logging::warn("hatchzip", &format!("{title}: {}; carrying on one block at a time", first_line(&text)));
-                if hatchzip::extract(tool, archive, staging, hatchzip::KEEP_FREE, unpacked, progress, stop, true).is_ok() {
-                    return Ok(Some(()));
+                match hatchzip::extract(tool, archive, staging, hatchzip::KEEP_FREE, unpacked, progress, stop, true) {
+                    Ok(()) => return Ok(Some(())),
+                    // Out of memory even so: only a fresh copy is left, below.
+                    Err(Failure::Other(again)) if hatchzip::out_of_memory(&again) || hatchzip::refused(&again) => {}
+                    Err(Failure::Other(again)) if hatchzip::unreadable(&again) => return Err(unreadable(&again)),
+                    // Paused, quit, or the drive full: the archive, its place
+                    // and what is unpacked all stay, so Resume or Retry
+                    // carries on. Thrown away, the whole game was downloaded
+                    // again (117 GB for Red Dead Redemption 2).
+                    Err(f) => return Err(explain(f)),
                 }
             }
             hatchzip::forget(archive);
@@ -5533,15 +5550,7 @@ fn extract_in_place(
             let _ = std::fs::remove_file(archive);
             Err(if hatchzip::refused(&text) { HATCHZIP_REFUSED } else { HATCHZIP_MEMORY }.into())
         }
-        // Unreadable as it stands: a fresh copy, unpacked with 7-Zip, which
-        // carries on past a damaged file and says which (KB-0338).
-        Err(Failure::Other(text)) if hatchzip::unreadable(&text) => {
-            hatchzip::forget(archive);
-            let _ = std::fs::remove_file(archive);
-            let _ = std::fs::remove_dir_all(staging);
-            crate::logging::warn("hatchzip", &format!("{title}: {}; the archive goes and the next try unpacks with 7-Zip", first_line(&text)));
-            Err(HATCHZIP_UNREADABLE.into())
-        }
+        Err(Failure::Other(text)) if hatchzip::unreadable(&text) => Err(unreadable(&text)),
         Err(f) => Err(explain(f)),
     }
 }
@@ -7064,6 +7073,64 @@ mod tests {
         let tool = fake_hatchzip(&dir, "something else went wrong", 1);
         let got = extract_in_place(&tool, &archive, &dir.join("staging"), &dir, "Forza Horizon 6", 20, None, false, &|_, _| {}, &stop);
         assert!(got.as_ref().is_err_and(|e| e.starts_with("HatchZip could not unpack it")), "{got:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A stand-in for HatchZip that runs out of memory the first time, and
+    /// exits with `then` every time after (the run one block at a time).
+    fn fake_hatchzip_then(dir: &Path, then: u8) -> PathBuf {
+        let said = "dictionary allocation too large";
+        #[cfg(windows)]
+        {
+            let tool = dir.join("hatchzip.cmd");
+            std::fs::write(&tool, format!("@echo off\r\nif exist \"%~dp0ran\" exit /b {then}\r\necho.>\"%~dp0ran\"\r\necho error: {said} 1>&2\r\nexit /b 1\r\n")).unwrap();
+            tool
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = dir.join("hatchzip");
+            std::fs::write(&tool, format!("#!/bin/sh\nhere=$(dirname \"$0\")\nif [ -f \"$here/ran\" ]; then exit {then}; fi\n: > \"$here/ran\"\necho \"error: {said}\" >&2\nexit 1\n")).unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            tool
+        }
+    }
+
+    /// Red Dead Redemption 2, 117 GB: out of memory part way, the unpack
+    /// carries on one block at a time, which takes hours. A Pause, a quit or
+    /// a full drive in that run used to throw away the archive, its place and
+    /// what was unpacked, and the whole game was downloaded again.
+    #[test]
+    fn a_pause_while_carrying_on_one_block_at_a_time_keeps_everything() {
+        let stop = AtomicU8::new(RUN);
+        for (code, name) in [(130u8, "paused"), (3, "full")] {
+            let dir = scratch(&format!("hz-retry-{name}"));
+            let archive = dir.join("RDR2 - Kryoto.7z");
+            std::fs::write(&archive, b"0123456789").unwrap();
+            let place = dir.join("RDR2 - Kryoto.7z.hatchzip");
+            std::fs::write(&place, b"x").unwrap();
+            let staging = dir.join("staging");
+            std::fs::create_dir_all(&staging).unwrap();
+            std::fs::write(staging.join("unpacked.bin"), b"x").unwrap();
+            let tool = fake_hatchzip_then(&dir, code);
+            let got = extract_in_place(&tool, &archive, &staging, &dir, "Red Dead Redemption 2", 20, None, true, &|_, _| {}, &stop);
+            assert!(dir.join("ran").is_file(), "{name}: the first run ran out of memory");
+            assert!(got.as_ref().is_err_and(|e| e != HATCHZIP_MEMORY), "{name}: {got:?}");
+            if code == 130 {
+                assert_eq!(got.as_ref().err().map(String::as_str), Some(STOPPED), "a Pause stays a Pause");
+            }
+            assert!(archive.is_file() && place.is_file() && staging.join("unpacked.bin").is_file(), "{name}: everything stays to carry on from");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        // Out of memory even one block at a time: only a fresh copy is left.
+        let dir = scratch("hz-retry-memory");
+        let archive = dir.join("RDR2 - Kryoto.7z");
+        std::fs::write(&archive, b"0123456789").unwrap();
+        std::fs::write(dir.join("RDR2 - Kryoto.7z.hatchzip"), b"x").unwrap();
+        let tool = fake_hatchzip(&dir, "dictionary allocation too large", 1);
+        let got = extract_in_place(&tool, &archive, &dir.join("staging"), &dir, "Red Dead Redemption 2", 20, None, true, &|_, _| {}, &stop);
+        assert_eq!(got.as_ref().err().map(String::as_str), Some(HATCHZIP_MEMORY));
+        assert!(!archive.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 
