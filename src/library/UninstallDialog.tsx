@@ -110,11 +110,16 @@ export function UninstallDialog({
     setError(null)
     const gone: string[] = []
     let deleted = false
+    // Only games whose files go may share a folder, and they go first: one
+    // that keeps its files still holds the folder around it while that is
+    // deleted, which it no longer would once it had left the Library.
+    const going = games.filter((g) => deleting(g.id))
+    const together = going.map((g) => g.id)
     try {
-      for (const g of games) {
+      for (const g of [...going, ...games.filter((x) => !deleting(x.id))]) {
         setCurrent(g.id)
         try {
-          deleted = (await library.remove(g.id, deleting(g.id), hasPrefix && deletePrefix, games.map((x) => x.id), permanent(g.id))) || deleted
+          deleted = (await library.remove(g.id, deleting(g.id), hasPrefix && deletePrefix, together, permanent(g.id))) || deleted
         } catch (e) {
           const text = errorText(e)
           if (text.startsWith(BIN_REFUSED)) setForGood((f) => [...f, g.id])

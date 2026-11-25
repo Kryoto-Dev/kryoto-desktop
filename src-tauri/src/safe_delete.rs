@@ -86,6 +86,13 @@ const SLACK: u64 = 5 << 30;
 /// Settle what an uninstall of `game` deletes. `leaving` are the games
 /// uninstalled in the same go (Settings > Storage), which may share a folder.
 pub fn plan(known: &Known, game: &LibraryGame, leaving: &[&str]) -> Verdict {
+    settle(known, game, leaving, true)
+}
+
+/// [`plan`]. With `narrow`, only the games of `leaving` whose own uninstall
+/// deletes their files may share the folder ([`going_with`]); without, all of
+/// them, for working that out.
+fn settle(known: &Known, game: &LibraryGame, leaving: &[&str], narrow: bool) -> Verdict {
     if let Some(who) = game.launcher.as_deref() {
         return Verdict::ListOnly(format!("{} keeps this game, so it stays installed there. Only its place in your Kryoto Library goes.", launcher_name(who)));
     }
@@ -147,7 +154,8 @@ pub fn plan(known: &Known, game: &LibraryGame, leaving: &[&str]) -> Verdict {
             ));
         }
     }
-    let found = match guard(known, game, leaving, &folder) {
+    let going = if narrow { going_with(known, game, &folder, leaving) } else { leaving.to_vec() };
+    let found = match guard(known, game, &going, &folder) {
         Ok(found) => found,
         Err(why) => return Verdict::Refused(why),
     };
@@ -210,6 +218,32 @@ pub fn guard(known: &Known, game: &LibraryGame, leaving: &[&str], folder: &Path)
         return Err(format!("{} also holds {}, another game in your library, so Kryoto deletes nothing in it.", show(folder), other.title));
     }
     walk(folder, game, known.games, leaving)
+}
+
+/// The games of `leaving` that may share `folder` with `game`: those inside
+/// it whose own uninstall deletes their files. One that only leaves the
+/// Library, or is refused, keeps its files where they are, so it still holds
+/// the folder like any other game (a batch uninstall in Settings > Storage
+/// took a game added by hand along with the folder around it). One whose
+/// folder is gone has nothing there to keep.
+fn going_with<'a>(known: &Known, game: &LibraryGame, folder: &Path, leaving: &[&'a str]) -> Vec<&'a str> {
+    leaving
+        .iter()
+        .copied()
+        .filter(|id| {
+            *id == game.id
+                || known.games.iter().find(|g| g.id == *id).is_some_and(|g| {
+                    inside(g, game, folder) && (std::fs::symlink_metadata(&g.install_dir).is_err() || matches!(settle(known, g, leaving, false), Verdict::Delete(_)))
+                })
+        })
+        .collect()
+}
+
+/// `g`'s folder is in `folder`, by its words or on the disk.
+fn inside(g: &LibraryGame, game: &LibraryGame, folder: &Path) -> bool {
+    path_is_in(&g.install_dir, &folder.to_string_lossy())
+        || path_is_in(&g.install_dir, &game.install_dir)
+        || dunce::canonicalize(&g.install_dir).is_ok_and(|d| d.starts_with(folder))
 }
 
 /// Something says Kryoto installed `game`, beyond the fields "Add a game"
@@ -342,12 +376,7 @@ fn system_dirs() -> Vec<PathBuf> {
 /// disk: one whose folder is gone still counts (KB-0375: those were exactly
 /// the games that went).
 fn entry_inside<'a>(known: &'a Known, game: &LibraryGame, leaving: &[&str], folder: &Path) -> Option<&'a LibraryGame> {
-    let words = folder.to_string_lossy();
-    known.games.iter().filter(|g| g.id != game.id && !leaving.contains(&g.id.as_str()) && !g.install_dir.trim().is_empty()).find(|g| {
-        path_is_in(&g.install_dir, &words)
-            || path_is_in(&g.install_dir, &game.install_dir)
-            || dunce::canonicalize(&g.install_dir).is_ok_and(|d| d.starts_with(folder))
-    })
+    known.games.iter().filter(|g| g.id != game.id && !leaving.contains(&g.id.as_str()) && !g.install_dir.trim().is_empty()).find(|g| inside(g, game, folder))
 }
 
 /// Every file in `folder` with its size, never following a link. Refused
@@ -1035,6 +1064,41 @@ mod tests {
         let games = vec![ga.clone(), gb.clone()];
         assert!(matches!(plan(&known(&games, &folders), &ga, &["pack"]), Verdict::Refused(_)));
         assert!(matches!(plan(&known(&games, &folders), &ga, &["pack", "extra"]), Verdict::Delete(_)));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// One picked with it that only leaves the Library, or is refused, keeps
+    /// its files, so it still holds the folder around it.
+    #[test]
+    fn games_leaving_together_that_keep_their_files_hold_the_folder() {
+        let base = scratch("together-kept");
+        let doom = base.join("Doom");
+        put(&doom.join("Doom.exe"), b"doom");
+        let inner = doom.join("gzdoom");
+        put(&inner.join("gzdoom.exe"), b"mine");
+        let ga = game("doom", &doom);
+        mark(&ga);
+        let mut by_hand = game("gzdoom", &inner);
+        by_hand.added_by_hand = true;
+        let folders = vec![text(&base)];
+        let games = vec![ga.clone(), by_hand.clone()];
+        let k = known(&games, &folders);
+        assert!(matches!(plan(&k, &by_hand, &["doom", "gzdoom"]), Verdict::ListOnly(_)));
+        assert!(refused(&plan(&k, &ga, &["doom", "gzdoom"])).contains("gzdoom"));
+        // Installed by Kryoto but refused itself: no record, and a folder not named for it.
+        let engine = game("engine", &inner);
+        mark(&engine);
+        let games = vec![ga.clone(), engine.clone()];
+        let k = known(&games, &folders);
+        assert!(matches!(plan(&k, &engine, &["doom", "engine"]), Verdict::Refused(_)));
+        assert!(refused(&plan(&k, &ga, &["doom", "engine"])).contains("engine"));
+        assert!(inner.join("gzdoom.exe").exists());
+        // One whose folder is gone, deleted by hand, keeps nothing there.
+        std::fs::remove_dir_all(&inner).unwrap();
+        let games = vec![ga.clone(), by_hand];
+        let k = known(&games, &folders);
+        assert!(refused(&plan(&k, &ga, &["doom"])).contains("gzdoom"));
+        assert!(matches!(plan(&k, &ga, &["doom", "gzdoom"]), Verdict::Delete(_)));
         let _ = std::fs::remove_dir_all(base);
     }
 
