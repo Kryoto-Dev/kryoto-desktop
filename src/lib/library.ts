@@ -145,7 +145,18 @@ export const vrApi = { status: () => call<VrStatus>('vr_status') }
 /** Play time Play can give back (src-tauri library.rs `playtime_offer`). */
 export type PlaytimeOffer = { seconds: number; source: 'folder' | 'account' | 'both' }
 
-export type InstalledAddon = { label: string; file: string; files: string[]; /** Game files it replaced, kept for Undo (missing: applied before 0.3.0). */ replaced?: string[]; installedAt: number }
+export type InstalledAddon = {
+  label: string
+  file: string
+  files: string[]
+  /** Game files it replaced, kept for Undo (missing: applied before 0.3.0). */
+  replaced?: string[]
+  installedAt: number
+  /** A language pack's Steam code, as Add said it. */
+  language?: string | null
+  /** Landing it set the game's Language (missing: applied before Kryoto kept this). */
+  setLanguage?: boolean | null
+}
 
 /** One of a game's add-ons on kryo.to (`/api/games/<slug>/downloads`). */
 export type KryoAddon = {

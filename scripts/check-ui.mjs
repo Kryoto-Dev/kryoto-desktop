@@ -828,6 +828,35 @@ try {
       } finally { await page.close() }
     }
   })
+  await check('removing a language pack puts back only the Language it set, never one the player picked', async () => {
+    const backend = (p, fn, arg) => p.evaluate(async ([fn, arg]) => {
+      const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(`/src/lib/${name}.ts`))
+      const preview = await import(loaded('preview'))
+      const game = (await preview.previewCall('library_list', {})).find(g => g.id === 'hollow-knight')
+      if (fn === 'pick') await preview.previewCall('library_save', { game: { ...game, gameLanguage: arg } })
+      return game.gameLanguage ?? null
+    }, [fn, arg])
+    for (const picked of [null, 'polish']) {
+      const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+      page.on('pageerror', e => failures.push(e.message))
+      await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+      try {
+        await page.goto(base)
+        const rail = page.getByRole('complementary', { name: 'Your games' })
+        await rail.waitFor()
+        if (picked) await backend(page, 'pick', picked)
+        await rail.getByRole('button', { name: 'Hollow Knight', exact: true }).click()
+        const row = page.getByRole('region', { name: 'Hollow Knight', exact: true }).locator('[data-addon-row="Polish"]')
+        await row.getByRole('button', { name: 'Add', exact: true }).click()
+        await row.getByRole('button', { name: 'Remove', exact: true }).click({ timeout: 30_000 })
+        assert.equal(await backend(page, 'read'), 'polish')
+        await page.getByRole('dialog', { name: 'Remove the Polish language pack', exact: true }).getByRole('button', { name: 'Remove', exact: true }).click()
+        await row.getByRole('button', { name: 'Add', exact: true }).waitFor()
+        // Set by the pack: back on Settings. Picked in Properties first: still the player's.
+        assert.equal(await backend(page, 'read'), picked)
+      } finally { await page.close() }
+    }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
