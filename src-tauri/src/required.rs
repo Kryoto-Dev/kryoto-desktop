@@ -170,6 +170,18 @@ fn refusal(now: Option<&Required>) -> Result<(), String> {
     Ok(())
 }
 
+/// For the tests beside the commands that can do harm: whether `item` in
+/// `src` asks `refuse` before it first does `then`. The commands need a
+/// running app, so the order is checked in their source, the way lib.rs
+/// checks that every command is allowed.
+#[cfg(test)]
+pub(crate) fn refuses_before(src: &str, item: &str, then: &str) -> bool {
+    let at = src.find(item).unwrap_or_else(|| panic!("{item} is gone"));
+    let rest = &src[at..];
+    let did = rest.find(then).unwrap_or_else(|| panic!("{item} no longer does {then}"));
+    rest[..did].contains("crate::required::refuse()?")
+}
+
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
