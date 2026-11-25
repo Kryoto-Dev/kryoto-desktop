@@ -209,8 +209,10 @@ fn settings(g: &mut LutrisGame, raw: &str, home: Option<&Path>) {
             if e.starts_with('/') || Path::new(&e).is_absolute() {
                 e
             } else {
-                // Lutris: a relative exe is in the working folder, else the game's folder.
-                match working.as_deref().or(g.directory.as_deref()) {
+                // Lutris joins a relative exe onto the game's folder; the
+                // working folder is only where it starts, so it is the base
+                // only for a game with no folder.
+                match g.directory.as_deref().or(working.as_deref()) {
                     Some(base) => Path::new(base).join(&e).to_string_lossy().into_owned(),
                     None => e,
                 }
@@ -608,6 +610,17 @@ mod tests {
         assert_eq!(std::fs::read(data.join("pga.db")).unwrap(), before);
         assert!(!data.join("pga.db-journal").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_relative_exe_is_in_the_games_folder_not_where_it_starts() {
+        let mut g = LutrisGame { directory: Some("/games/foo".into()), ..Default::default() };
+        settings(&mut g, "game:\n  exe: drive_c/Foo/bin/foo.exe\n  working_dir: /games/foo/drive_c/Foo\n", None);
+        assert_eq!(Path::new(g.exe.as_deref().unwrap()), Path::new("/games/foo/drive_c/Foo/bin/foo.exe"));
+        // No folder in Lutris's library: the working folder is all there is.
+        let mut g = LutrisGame::default();
+        settings(&mut g, "game:\n  exe: bin/foo.exe\n  working_dir: /games/bar\n", None);
+        assert_eq!(Path::new(g.exe.as_deref().unwrap()), Path::new("/games/bar/bin/foo.exe"));
     }
 
     #[test]
