@@ -30,6 +30,13 @@ export function useRequiredUpdate(): RequiredState | null {
           if (alive) setState(r)
         })
         .catch(() => {})
+    // What holds since start (the answer kept from last time): a blocked
+    // copy shows its screen at once, not once kryo.to has answered.
+    void call<RequiredState | null>('required_held')
+      .then((r) => {
+        if (alive && r) setState((s) => s ?? r)
+      })
+      .catch(() => {})
     ask()
     const timer = window.setInterval(ask, EVERY_MS)
     window.addEventListener('online', ask)

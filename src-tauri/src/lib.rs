@@ -2100,6 +2100,9 @@ pub fn run() {
             if let Ok(dir) = app.path().app_data_dir() {
                 keyring_memory::set_dir(dir);
             }
+            // Before the phone, Remote, a second copy or the window can ask
+            // for anything: a version kryo.to blocked last time stays blocked.
+            required::init(app.handle());
             // `--tray` only ever comes from the start-with-Windows entry. With
             // the switch off, that entry is left over (settings reset or
             // restored, an old install): take it away and don't start.
@@ -2388,6 +2391,7 @@ pub fn run() {
             links::take_pending_link,
             update_mirror::update_check_mirror,
             required::required_check,
+            required::required_held,
             required::store_required_check,
             store_mint_release,
             display_env::display_rendered,
@@ -2704,6 +2708,18 @@ mod tests {
             .filter(|c| !allowed.contains(&format!("\"{c}\"")))
             .collect();
         assert!(missing.is_empty(), "add to permissions/shell.toml: {missing:?}");
+    }
+
+    /// A version kryo.to blocked last time is blocked from its first moment
+    /// (required.rs): the kept answer is read before anything that takes
+    /// requests or carries work on is started.
+    #[test]
+    fn the_kept_required_answer_is_read_first() {
+        let src = include_str!("lib.rs");
+        let seed = src.find("required::init(app.handle())").expect("required::init in setup");
+        for later in ["remote::start(app", "downloads::init(app", "system::serve_instance(app", "phone::start_if_enabled(app"] {
+            assert!(seed < src.find(later).unwrap(), "{later} runs before required::init");
+        }
     }
 
     /// The friends list reaches only its own routes through the Store's session.

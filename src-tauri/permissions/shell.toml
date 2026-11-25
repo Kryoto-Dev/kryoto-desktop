@@ -18,7 +18,7 @@ commands.allow = [
   "online_fix_state", "online_fix_lookup", "online_fix_get", "online_fix_from_file", "online_fix_open_page",
   "take_pending_link",
   "update_check_mirror",
-  "required_check",
+  "required_check", "required_held",
   "preview_report_screenshot", "preview_report_send", "preview_reports_mine",
   "pet_menu", "pet_drag", "pet_mascot", "pet_size", "pet_hit", "pet_shown",
   "display_rendered",
