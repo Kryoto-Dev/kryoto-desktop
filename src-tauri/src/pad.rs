@@ -604,6 +604,31 @@ struct Axes {
     rt: f32,
 }
 
+impl Axes {
+    /// The same pad at rest, if it was not: said last for a pad that went with
+    /// its stick held, or the shell keeps repeating the direction it held.
+    fn let_go(&self) -> Option<Axes> {
+        let rest = Axes { id: self.id, ..Axes::default() };
+        (*self != rest).then_some(rest)
+    }
+}
+
+/// Forget the pads that are gone from what the shell was last told of their
+/// sticks, and `say` each one's let-go. Said at once, in front or not: the
+/// shell keeps stepping in the background too, and the pad is not coming back
+/// to say it.
+fn let_go_gone(sent: &mut HashMap<u32, Axes>, here: impl Fn(&u32) -> bool, mut say: impl FnMut(Axes)) {
+    sent.retain(|id, a| {
+        if here(id) {
+            return true;
+        }
+        if let Some(rest) = a.let_go() {
+            say(rest);
+        }
+        false
+    });
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ButtonEvent {
@@ -661,6 +686,16 @@ struct Pair {
     merged: bool,
     /// What the shell was last told of the merged pair.
     sent: Merged,
+}
+
+impl Pair {
+    /// What the shell still holds from the merged pair, let go: each button it
+    /// was told is down, then the sticks at rest if they were not.
+    fn let_go(&self) -> (Vec<ButtonEvent>, Option<Axes>) {
+        let s = &self.sent;
+        let up = s.pressed.iter().map(|c| ButtonEvent { id: self.left, control: *c, pressed: false }).collect();
+        (up, Axes { id: self.left, lx: s.lx, ly: s.ly, rx: s.rx, ry: s.ry, lt: s.lt, rt: s.rt }.let_go())
+    }
 }
 
 /// A pad's serial, as SDL has it for the open joystick.
@@ -852,12 +887,15 @@ impl<R: Runtime> Reader<'_, R> {
         }
 
         // A merged pair that lost a half: tell the player, and let go of what
-        // the shell still holds from it.
+        // the shell still holds from it, its buttons and its sticks. At once,
+        // in front or not: the pair is dropped here, so nothing says it later.
         for gone in self.pairs.iter().filter(|p| p.merged && !next.iter().any(|n| n.merged && n.key == p.key)) {
-            if self.focused {
-                for control in &gone.sent.pressed {
-                    let _ = self.app.emit("pad-button", ButtonEvent { id: gone.left, control: *control, pressed: false });
-                }
+            let (up, rest) = gone.let_go();
+            for b in up {
+                let _ = self.app.emit("pad-button", b);
+            }
+            if let Some(rest) = rest {
+                let _ = self.app.emit("pad-axes", rest);
             }
             if cfg.joycons.get(&gone.key) == Some(&true) {
                 let left = if self.devs.contains_key(&gone.left) { None } else { Some(Side::Left) };
@@ -1492,6 +1530,11 @@ fn run<R: Runtime>(app: &AppHandle<R>, rx: mpsc::Receiver<Req>, back: mpsc::Send
         #[cfg(windows)]
         thread_messages();
 
+        // A pad gone with its stick held: the shell hears it let go.
+        let_go_gone(&mut sent, |id| r.devs.contains_key(id), |rest| {
+            let _ = app.emit("pad-axes", rest);
+        });
+
         // Sticks and triggers at most 30 times a second, while in front.
         if r.focused && sent_at.elapsed() >= Duration::from_millis(33) && !dirty.is_empty() {
             sent_at = Instant::now();
@@ -1785,6 +1828,32 @@ mod tests {
         assert!(!inactive_stratus_interface(0x0111, 0x1434, "0300a408110100003414000000007701"));
         assert!(!inactive_stratus_interface(0x045e, 0x028e, "0300a4085e0400008e02000000007701"));
         assert!(!inactive_stratus_interface(0x1038, 0x1434, "invalid"));
+    }
+
+    #[test]
+    fn a_pad_gone_with_its_stick_held_is_let_go() {
+        let rest = |id| Axes { id, ..Axes::default() };
+        let mut sent = HashMap::from([(1, Axes { id: 1, ly: -0.9, ..Axes::default() }), (2, Axes { id: 2, lx: 0.8, ..Axes::default() }), (3, rest(3))]);
+        let mut said = Vec::new();
+        // Pad 1 is still here; 2 went with its stick held, 3 went at rest.
+        let_go_gone(&mut sent, |id| *id == 1, |a| said.push(a));
+        assert!(said == vec![rest(2)]);
+        assert_eq!(sent.keys().copied().collect::<Vec<_>>(), vec![1]);
+        // Said once: the next pass has nothing more to say.
+        let_go_gone(&mut sent, |id| *id == 1, |a| said.push(a));
+        assert_eq!(said.len(), 1);
+    }
+
+    #[test]
+    fn a_merged_pair_gone_lets_go_of_its_buttons_and_sticks() {
+        let held = Merged { pressed: vec![Control::South], ly: 0.7, ..Merged::default() };
+        let pair = Pair { key: "k".into(), left: 4, right: 5, way: Way::Kryoto, merged: true, sent: held };
+        let (up, rest) = pair.let_go();
+        assert_eq!(up.iter().map(|b| (b.id, b.control, b.pressed)).collect::<Vec<_>>(), vec![(4, Control::South, false)]);
+        assert!(rest == Some(Axes { id: 4, ..Axes::default() }));
+        let idle = Pair { sent: Merged::default(), ..pair };
+        let (up, rest) = idle.let_go();
+        assert!(up.is_empty() && rest.is_none());
     }
 
     #[test]
