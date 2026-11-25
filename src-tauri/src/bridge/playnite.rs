@@ -42,7 +42,7 @@ pub(super) fn incoming(g: PlayniteGame) -> Incoming {
     let (executable, launch_options, cannot) = match (&g.play, &g.no_play) {
         // Not installed: left in Playnite, as "not on this PC".
         _ if !g.installed => (None, None, None),
-        (Some(p), _) => (Some(p.executable.clone()), p.arguments.clone(), None),
+        (Some(p), _) => (Some(p.executable.clone()), super::arguments_line(p.arguments.as_deref()), None),
         (None, Some(no)) => (None, None, Some(why(no))),
         (None, None) => (None, None, Some(why(&NoPlay::Nothing))),
     };
@@ -124,8 +124,15 @@ mod tests {
     #[test]
     fn a_game_with_a_program_comes_with_its_arguments_and_pictures() {
         let h = incoming(game(Some(Play { executable: r"D:\Games\Lantern\Lantern.exe".into(), arguments: Some("-windowed".into()) }), None, true));
-        assert_eq!((h.key.as_str(), h.executable.as_deref(), h.launch_options.as_deref(), h.cannot), ("g1", Some(r"D:\Games\Lantern\Lantern.exe"), Some("-windowed"), None));
+        assert_eq!((h.key.as_str(), h.executable.as_deref(), h.launch_options.as_deref(), h.cannot), ("g1", Some(r"D:\Games\Lantern\Lantern.exe"), Some("%command% -windowed"), None));
         assert_eq!((h.playtime_seconds, h.custom_cover.as_deref(), h.cover), (5_400, Some(r"C:\pn\files\g1\c.jpg"), None));
+    }
+
+    #[test]
+    fn arguments_that_look_like_settings_reach_the_game() {
+        let h = incoming(game(Some(Play { executable: r"D:\Games\UT3\UT3.exe".into(), arguments: Some("ResX=1920 ResY=1080 -windowed".into()) }), None, true));
+        let read = crate::launch::parse_line(h.launch_options.as_deref().unwrap());
+        assert_eq!((read.env.len(), read.extra_args.as_str()), (0, "ResX=1920 ResY=1080 -windowed"));
     }
 
     #[test]
