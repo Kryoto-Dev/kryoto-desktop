@@ -29,6 +29,7 @@ import { VrPane } from '@/settings/VrPane'
 import { Bridge } from '@/library/Bridge'
 import { DiscordPane } from '@/settings/DiscordPane'
 import { GameUpdatesSection } from '@/settings/GameUpdatesSection'
+import { DownloadOrderSection } from '@/settings/DownloadOrderSection'
 import { DefenderSection } from '@/settings/DefenderSection'
 import { anchorId, revealSetting } from '@/lib/settings-links'
 import { useSettled } from '@/hooks/useSettled'
@@ -382,6 +383,7 @@ function DesktopPane({ section, account, reveal }: { section: SettingsSection; a
                 <HatchZipExplainer compact className="pt-3" />
               </details>
             </Section>
+            <DownloadOrderSection settings={s} set={set} />
             <Section title="Connections" hint="More may improve speed if the filehost allows it.">
               <Segmented
                 label="Download connections" value={String(s.connections)}

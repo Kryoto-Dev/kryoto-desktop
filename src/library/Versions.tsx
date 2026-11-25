@@ -82,7 +82,8 @@ export function sourceItems(
  * Every download choice in the app: the action, and an arrow beside it to
  * pick where from - our copy, or one of the release's mirrors (kryo.to's
  * download buttons are the same, components/game-downloads.tsx). The action
- * takes the first source, so with our copy archived it goes to the first
+ * takes the first source: the player's first pick in Settings > Downloads
+ * that the build has, else our copy, and with our copy archived the first
  * mirror Kryoto can fetch. One source, no arrow.
  */
 export function SourceSplitButton({

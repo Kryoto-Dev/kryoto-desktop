@@ -153,6 +153,7 @@ const settings: Record<string, unknown> = {
   connections: 16,
   speedLimitMb: 0,
   speedInBits: false,
+  downloadOrder: [] as string[],
   catalogEndpoint: '',
   savesEndpoint: '',
   achievementsEndpoint: '',
@@ -1334,6 +1335,12 @@ Object.assign(HANDLERS, {
       if (host === 'filez.stream' && /#[A-Za-z0-9_-]{43}$/.test(u)) return { host: 'filez.stream', kind: 'api' }
       return null
     }),
+  // Every host `known_hosts` names, as a Windows build lists them (VikingFile
+  // is on Windows only), for the download order in Settings > Downloads.
+  download_hosts: () => [
+    'filez.stream', 'Pixeldrain', 'Gofile', 'Buzzheavier', 'MediaFire', 'FuckingFast', 'Mocha', 'catbox',
+    'VikingFile', 'DropDrive', 'FileDitch', '1fichier', 'AkiraBox', 'Qiwi', 'DataNodes', 'KrakenFiles', 'Send.cm',
+  ],
   // A mirror download: its page is solved in the background, then it comes down like ours.
   download_mirror: (a: Record<string, unknown>) => {
     const id = `dl-${Date.now()}`

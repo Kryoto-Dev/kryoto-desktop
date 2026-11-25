@@ -355,6 +355,13 @@ fn mirror_hosts(urls: Vec<String>) -> Vec<Option<MirrorHost>> {
         .collect()
 }
 
+/// The mirror hosts Kryoto downloads from itself, by name, for the download
+/// order in Settings > Downloads (suggestion #110).
+#[tauri::command]
+fn download_hosts() -> Vec<&'static str> {
+    resolvers::known_hosts()
+}
+
 /// Only plain web navigation stays inside the web view. Everything else
 /// (file:, javascript:, data:, custom schemes) is blocked and reported.
 /// A file of ours (dl.kryo.to's signed `/d/<token>` links, or the debug
@@ -2620,6 +2627,7 @@ pub fn run() {
             downloads::downloads_when_done_get,
             download_mirror,
             mirror_hosts,
+            download_hosts,
             compat::compat_tools,
             compat::compat_status,
             compat::compat_install,

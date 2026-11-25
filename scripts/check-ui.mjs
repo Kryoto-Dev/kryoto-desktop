@@ -532,6 +532,67 @@ try {
       assert.ok(now.seenNotices.includes('check-seen'), `seen: ${JSON.stringify(now.seenNotices)}`)
     } finally { await cloud.close() }
   })
+  await check('the download order in Settings ranks every host, and a build downloads from the first one it has', async () => {
+    const order = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    order.on('pageerror', e => failures.push(e.message))
+    await order.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+    await order.route('**/api/games/celeste/downloads', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ releases: [
+      { id: 2, version: '1.4', primary: true, links: [{ url: '/api/download/v/2' }, { url: 'https://pixeldrain.com/u/abc' }, { url: 'https://gofile.io/d/xyz' }] },
+    ] }) }))
+    try {
+      await order.goto(base)
+      const rail = order.getByRole('complementary', { name: 'Your games' })
+      await rail.waitFor()
+      // Every mirror download asked for, by its page.
+      await order.evaluate(async () => {
+        const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(`/src/lib/${name}.ts`))
+        const bridge = await import(loaded('bridge'))
+        const preview = await import(loaded('preview'))
+        window.mirrorsAsked = []
+        bridge.useWebBackend({
+          call: (c, a) => { if (c === 'download_mirror') window.mirrorsAsked.push(a.url); return preview.previewCall(c, a) },
+          on: (e, h) => preview.previewBus.on(e, h),
+        })
+      })
+      await order.getByRole('button', { name: 'Account menu' }).click()
+      await order.getByRole('menuitem', { name: /Settings/ }).click()
+      // The Settings section, not the top bar's Downloads.
+      await order.getByRole('button', { name: 'Downloads', exact: true }).and(order.getByText('Downloads', { exact: true })).click()
+      const list = order.getByRole('list', { name: 'Download order' })
+      const names = () => list.getByRole('listitem').allInnerTexts().then(t => t.map(x => x.replace(/^\d+\s*/, '').trim()))
+      // Untouched: kryo.to's order, our copy first, every host the app fetches from after it.
+      await list.getByRole('listitem').filter({ hasText: 'Gofile' }).waitFor()
+      assert.deepEqual((await names()).slice(0, 4), ["Kryoto's own copy", 'filez.stream', 'Pixeldrain', 'Gofile'])
+      assert.equal(await list.getByRole('button', { name: "Move Kryoto's own copy up" }).isDisabled(), true)
+      // Nothing is handed on in kryo.to's order, and the hint does not say it is.
+      const handsOn = order.getByText(/the next one below it that the build has takes over/)
+      assert.equal(await handsOn.count(), 0)
+      for (let i = 0; i < 3; i++) await list.getByRole('button', { name: 'Move Gofile up', exact: true }).click()
+      await order.waitForFunction(() => document.querySelector('[aria-label="Download order"] li')?.textContent?.includes('Gofile'))
+      assert.deepEqual((await names()).slice(0, 4), ['Gofile', "Kryoto's own copy", 'filez.stream', 'Pixeldrain'])
+      const saved = () => order.evaluate(async () => (await (await import('/src/lib/bridge.ts')).call('settings_get')).downloadOrder)
+      for (let i = 0; i < 20 && (await saved())?.[0] !== 'Gofile'; i++) await order.waitForTimeout(100)
+      assert.deepEqual((await saved()).slice(0, 2), ['Gofile', 'kryoto'])
+      await order.getByRole('button', { name: "Use kryo.to's order", exact: true }).waitFor()
+      await handsOn.waitFor()
+      // Celeste's build has our copy, Pixeldrain and Gofile: its download starts from Gofile.
+      await order.getByRole('button', { name: 'Library', exact: true }).click()
+      await rail.getByRole('button', { name: 'Celeste', exact: true }).click()
+      const region = order.getByRole('region', { name: 'Celeste', exact: true })
+      await region.getByRole('button', { name: 'Manage', exact: true }).click()
+      await order.getByRole('menuitem', { name: 'Properties', exact: true }).click()
+      await order.getByRole('button', { name: 'Builds', exact: true }).click()
+      const build = order.getByRole('dialog').getByRole('listitem').filter({ hasText: 'Current' })
+      await build.getByText('from Gofile').waitFor()
+      await build.getByRole('button', { name: 'Download from', exact: true }).click()
+      const menu = await order.getByRole('menu').getByRole('menuitem').allInnerTexts()
+      assert.deepEqual(menu.map(t => t.split('\n')[0].trim()), ['Gofile', 'kryo.to', 'Pixeldrain'])
+      await order.keyboard.press('Escape')
+      await build.getByRole('button', { name: /from Gofile/ }).click()
+      await order.waitForFunction(() => window.mirrorsAsked.length > 0)
+      assert.deepEqual(await order.evaluate(() => window.mirrorsAsked), ['https://gofile.io/d/xyz'])
+    } finally { await order.close() }
+  })
   await check('the Troubleshooting log stays where it was scrolled, and Refresh goes to the newest lines', async () => {
     const logs = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     logs.on('pageerror', e => failures.push(e.message))
