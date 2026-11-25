@@ -20,8 +20,11 @@
  * - With motion reduced, one still frame, changed every few minutes.
  *
  * Kept free of imports from the app (and of the DOM at load time) so the pure
- * parts run under `pnpm test`.
+ * parts run under `pnpm test`; lib/motion.ts is the one exception, and it
+ * imports nothing itself.
  */
+
+import { reducedMotion } from '../../lib/motion.ts'
 
 /* ── Cells ─────────────────────────────────────────────────── */
 
@@ -204,10 +207,6 @@ export type MountOptions = {
   onUnderlay?: (kind: 'splash' | null) => void
   /** Measured for performance checks: the work of each frame, in ms. */
   onFrame?: (ms: number) => void
-}
-
-function reducedMotion() {
-  return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 }
 
 /**

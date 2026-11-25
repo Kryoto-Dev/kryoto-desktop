@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from 'react'
 import { asciiPaths, CELL_H, CELL_W, SCRAMBLE, word } from '@/ui/ascii/cells'
+import { reducedMotion } from '@/lib/motion'
 import { cn } from '@/lib/utils'
 
 /**
@@ -45,10 +46,6 @@ const clamp = (v: number, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, v))
 function rand(a: number, b = 0) {
   const n = Math.sin(a * 127.1 + b * 311.7 + 7.3) * 43758.5453
   return n - Math.floor(n)
-}
-
-function reducedMotion() {
-  return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 }
 
 /**

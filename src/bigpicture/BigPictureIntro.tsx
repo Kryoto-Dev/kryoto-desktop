@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { SplashScene } from '@/boot/SplashScene'
+import { reducedMotion } from '@/lib/motion'
 import { play } from '@/lib/sound'
 
 /**
@@ -17,10 +18,6 @@ const FADE_MS = 350
 const LIGHTS_AT_MS = 1745
 /** Where the sound's chord sits (sound-recipes.ts, `bpIntro`). */
 const CHORD_AT_MS = 900
-
-function reducedMotion() {
-  return typeof window !== 'undefined' && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || document.documentElement.dataset.motion === 'reduced')
-}
 
 export function BigPictureIntro({ onDone }: { onDone: () => void }) {
   const [lit, setLit] = useState(false)

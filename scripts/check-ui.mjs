@@ -513,6 +513,52 @@ try {
       assert.equal(await notify.isChecked(), false)
     } finally { await pads.close() }
   })
+  const saverPage = async () => {
+    const saver = await browser.newPage({ viewport: { width: 800, height: 450 } })
+    saver.on('pageerror', e => failures.push(e.message))
+    await saver.goto(`${base}/test/saver.html`)
+    await saver.waitForFunction(() => document.querySelector('#loaded')?.textContent === 'true')
+    return saver
+  }
+  await check("the screensaver holds a still frame with Kryoto's own Reduce motion on", async () => {
+    const saver = await saverPage()
+    try {
+      // Only Kryoto's setting: the system still allows motion.
+      assert.equal(await saver.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), false)
+      const frames = await saver.evaluate(async () => {
+        document.documentElement.dataset.motion = 'reduced'
+        const stop = window.saverFixture.mount('mark')
+        await new Promise(r => setTimeout(r, 1500))
+        stop()
+        return window.saverFixture.frames
+      })
+      assert.equal(frames, 1)
+    } finally { await saver.close() }
+  })
+  await check("Field's start-screen scene moves only with the still frame when Kryoto's Reduce motion is on", async () => {
+    const saver = await browser.newPage({ viewport: { width: 800, height: 450 } })
+    saver.on('pageerror', e => failures.push(e.message))
+    try {
+      await saver.clock.install()
+      await saver.goto(`${base}/test/saver.html`)
+      await saver.clock.runFor(500)
+      const place = () => saver.evaluate(() => document.querySelector('#shown [style*="translate"]')?.getAttribute('style') ?? null)
+      await saver.evaluate(() => {
+        document.documentElement.dataset.motion = 'reduced'
+        window.stopSaver = window.saverFixture.show('field')
+      })
+      await saver.clock.runFor(1_000)
+      const first = await place()
+      assert.ok(first, 'the start-screen scene is underneath')
+      // Past the 90 seconds it moves after with motion allowed.
+      await saver.clock.runFor(100_000)
+      assert.equal(await place(), first)
+      // And on once the still frame's few minutes are up.
+      await saver.clock.runFor(90_000)
+      assert.notEqual(await place(), first)
+      await saver.evaluate(() => window.stopSaver())
+    } finally { await saver.close() }
+  })
   await check('a Settings switch does not undo where saves are kept, chosen on the same page', async () => {
     const cloud = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     cloud.on('pageerror', e => failures.push(e.message))
