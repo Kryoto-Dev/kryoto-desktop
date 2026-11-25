@@ -5,7 +5,31 @@ import { errorText, isTauri } from '@/lib/bridge'
 import { pickPath } from '@/lib/pick'
 import { artSrc } from '@/lib/art'
 import { coverFor, fetchArtwork, heroFor, importArtwork, searchArtwork, titleKey, type Artwork, type ArtMatch } from '@/lib/game-artwork'
+import { iconsFor } from '@/lib/game-icon'
+import { cn } from '@/lib/utils'
 import { Art } from '@/library/Art'
+
+type Slot = 'customCover' | 'customHero' | 'customIcon'
+
+const PICK_TITLE: Record<Slot, string> = {
+  customCover: 'Choose a cover picture',
+  customHero: 'Choose a banner picture',
+  customIcon: 'Choose an icon picture',
+}
+
+/**
+ * The three pictures a game has, each in its own shape. The icon is the square
+ * one on the Library list; without one the list draws the cover, so that is
+ * what its box shows until a picture is chosen.
+ */
+function slots(value: Artwork) {
+  const [icon, ...iconFallback] = iconsFor(value)
+  return [
+    { slot: 'customCover', label: 'Cover', src: coverFor(value), fallback: [value.cover, value.header], shape: 'aspect-[2/3]' },
+    { slot: 'customHero', label: 'Banner', src: heroFor(value), fallback: [value.hero, value.header, coverFor(value)], shape: 'aspect-[96/31]' },
+    { slot: 'customIcon', label: 'Icon', src: icon, fallback: [...iconFallback, value.header], shape: 'aspect-square' },
+  ] as const satisfies readonly { slot: Slot; label: string; src: string | null | undefined; fallback: (string | null | undefined)[]; shape: string }[]
+}
 
 export function ArtworkEditor({ title, value, adult = false, onChange, onBusy }: {
   title: string
@@ -27,7 +51,7 @@ export function ArtworkEditor({ title, value, adult = false, onChange, onBusy }:
   async function useSteam(match: ArtMatch, signal?: AbortSignal) {
     const art = await fetchArtwork(match.appid, signal)
     signal?.throwIfAborted()
-    onChange({ ...art, customCover: null, customHero: null })
+    onChange({ ...art, customCover: null, customHero: null, customIcon: null })
     setMatches(null)
     setNote(`Using Steam artwork for ${match.title}.`)
   }
@@ -53,14 +77,14 @@ export function ArtworkEditor({ title, value, adult = false, onChange, onBusy }:
     }
   }
 
-  async function choose(slot: 'customCover' | 'customHero') {
+  async function choose(slot: Slot) {
     // The file window first, outside `run`: busy only while the picture is
     // copied. Held across the window too, a window whose answer never came
     // left Choose picture greyed out for good (KB-0020, firesync).
     setError(null)
     let path: string | null
     try {
-      path = await pickPath({ title: slot === 'customCover' ? 'Choose a cover picture' : 'Choose a banner picture', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif'] })
+      path = await pickPath({ title: PICK_TITLE[slot], extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif'] })
     } catch (e) {
       setError(`The file window did not open: ${errorText(e)}`)
       return
@@ -77,10 +101,10 @@ export function ArtworkEditor({ title, value, adult = false, onChange, onBusy }:
 
   return (
     <Section title="Artwork" hint="Choose Steam artwork or your own pictures. Custom pictures are copied into Kryoto's app storage and kept when the artwork cache is cleared.">
-      <div className="grid grid-cols-[7rem_1fr] items-start gap-4">
-        {([['customCover', 'Cover', coverFor(value)], ['customHero', 'Banner', heroFor(value)]] as const).map(([slot, label, src]) => (
+      <div className="grid grid-cols-[7rem_1fr_7rem] items-start gap-4">
+        {slots(value).map(({ slot, label, src, fallback, shape }) => (
           <div key={slot} className="grid min-w-0 gap-2">
-            <Art src={src} fallback={slot === 'customCover' ? [value.cover, value.header] : [value.hero, value.header, coverFor(value)]} title={label} adult={adult} className={slot === 'customCover' ? 'aspect-[2/3] w-full object-cover' : 'aspect-[96/31] w-full object-cover'} />
+            <Art src={src} fallback={fallback} title={label} adult={adult} className={cn(shape, 'w-full object-cover')} />
             <span className="text-xs font-bold text-foreground">{label}</span>
             <Button size="sm" disabled={busy || !isTauri()} aria-label={`Choose ${label.toLowerCase()} picture`} onClick={() => choose(slot)}>
               <ImagePlus className="size-3.5" /> Choose picture

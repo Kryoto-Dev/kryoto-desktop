@@ -184,7 +184,7 @@ pub async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> 
 static DIRECT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /// The AppID in a Steam picture's address (`.../apps/<appid>/...`).
-fn steam_app(url: &str) -> Option<&str> {
+pub(crate) fn steam_app(url: &str) -> Option<&str> {
     let (_, rest) = url.split_once("/apps/")?;
     let id = rest.split('/').next()?;
     (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)

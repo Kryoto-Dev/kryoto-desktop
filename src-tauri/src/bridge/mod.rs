@@ -923,6 +923,7 @@ async fn import_kept(app: &AppHandle, p: &'static dyn Provider, incoming: Vec<In
                 g.hero = a.hero.clone().or(g.hero);
                 g.logo = a.logo.clone().or(g.logo);
                 g.header = a.header.clone().or(g.header);
+                g.icon = a.icon.clone().or(g.icon);
             }
             g.id = unique_id(games, &h.title);
             g.added_at = now();

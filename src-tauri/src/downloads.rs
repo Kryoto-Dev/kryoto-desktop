@@ -5892,6 +5892,8 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .filter_map(|(rel, size)| Some((dest.join(&rel).strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/"), size)))
         .collect();
     let game = library::upsert_installed(app, installed_entry(&item, &title, &root, executable))?;
+    // kryo.to lists no icon: Steam's, for the Library's list.
+    library::fill_icons(app);
     // Only now, with the library saying so, is the update done; until here a
     // crash leaves the journal at "applying" and the next start rolls it back.
     if let Some(mut j) = journal {

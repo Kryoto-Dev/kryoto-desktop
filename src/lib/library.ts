@@ -65,6 +65,9 @@ export type LibraryGame = {
   hero: string | null
   customCover?: string | null
   customHero?: string | null
+  /** Steam's small square icon, for the Library list; the cover stands in without one. */
+  icon?: string | null
+  customIcon?: string | null
   /** The transparent title logo, when Steam has one. */
   logo?: string | null
   /** The wide store header, for rows and cards. */
@@ -384,6 +387,7 @@ export const library = {
       hero: game.hero ?? art?.hero ?? null,
       logo: game.logo ?? art?.logo ?? null,
       header: game.header ?? art?.header ?? null,
+      icon: game.icon ?? art?.icon ?? null,
     } })
   },
   save: (game: LibraryGame) => call<LibraryGame>('library_save', { game }),
@@ -394,8 +398,8 @@ export const library = {
   updateBackup: (slug: string) => call<UpdateBackup | null>('game_update_backup', { slug }),
   /** Put the build from before the last update back. */
   undoUpdate: (slug: string) => call<void>('game_update_undo', { slug }),
-  refreshArtwork: (id: string, art: { cover: string | null; hero: string | null; logo?: string | null; header?: string | null }) =>
-    call<LibraryGame>('library_artwork', { id, ...art, logo: art.logo ?? null, header: art.header ?? null }),
+  refreshArtwork: (id: string, art: { cover: string | null; hero: string | null; logo?: string | null; header?: string | null; icon?: string | null }) =>
+    call<LibraryGame>('library_artwork', { id, ...art, logo: art.logo ?? null, header: art.header ?? null, icon: art.icon ?? null }),
   /** `deletePrefix`: on Linux, its Wine prefix goes too. `together`: the games
    *  uninstalled in the same go, which may share its folder. `permanent`: the
    *  player was told it cannot go to the Recycle Bin and said yes. */

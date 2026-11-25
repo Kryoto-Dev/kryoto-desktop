@@ -24,6 +24,8 @@ pub struct SteamArt {
     pub hero: Option<String>,
     pub header: Option<String>,
     pub logo: Option<String>,
+    /// The small square icon Steam shows in its own library list.
+    pub icon: Option<String>,
 }
 
 fn client() -> Result<reqwest::Client, String> {
@@ -101,7 +103,7 @@ pub async fn steam_art(appid: String) -> Result<SteamArt, String> {
         .await
         .map_err(|_| "Artwork is unavailable for this game. You can choose your own pictures.".to_string())?;
     let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let art = art_from_assets(&json["response"]["store_items"][0]["assets"]);
+    let art = art_from_assets(&id, &json["response"]["store_items"][0]["assets"]);
     if art == SteamArt::default() {
         return Err("Artwork is unavailable for this game. You can choose your own pictures.".into());
     }
@@ -134,15 +136,15 @@ fn art_of_items(json: &serde_json::Value) -> HashMap<String, SteamArt> {
     items
         .iter()
         .filter_map(|item| {
-            let art = art_from_assets(&item["assets"]);
             let id = item["appid"].as_u64()?.to_string();
+            let art = art_from_assets(&id, &item["assets"]);
             (art != SteamArt::default()).then_some((id, art))
         })
         .collect()
 }
 
 /// The URLs in a GetItems `assets` object (kryo.to's `artFromAssets`).
-fn art_from_assets(assets: &serde_json::Value) -> SteamArt {
+fn art_from_assets(appid: &str, assets: &serde_json::Value) -> SteamArt {
     const BASE: &str = "https://shared.akamai.steamstatic.com/store_item_assets/";
     let Some(format) = assets["asset_url_format"].as_str().filter(|f| f.contains("${FILENAME}")) else { return SteamArt::default() };
     let url = |keys: &[&str]| {
@@ -155,7 +157,16 @@ fn art_from_assets(assets: &serde_json::Value) -> SteamArt {
         hero: url(&["library_hero_2x", "library_hero"]),
         header: url(&["header", "header_2x"]),
         logo: url(&["library_logo_2x", "library_logo"]),
+        icon: community_icon(appid, assets),
     }
+}
+
+/// The square icon. GetItems names only its hash, and the picture is under
+/// Steam's community assets rather than beside the store art.
+fn community_icon(appid: &str, assets: &serde_json::Value) -> Option<String> {
+    let hash = assets["community_icon"].as_str()?;
+    let ok = hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()) && !appid.is_empty() && appid.bytes().all(|b| b.is_ascii_digit());
+    ok.then(|| format!("https://shared.akamai.steamstatic.com/community_assets/images/apps/{appid}/{hash}.jpg"))
 }
 
 #[cfg(test)]
@@ -193,9 +204,20 @@ mod tests {
     #[test]
     fn assets_become_hashed_urls() {
         let assets = serde_json::json!({"asset_url_format": "steam/apps/1145360/${FILENAME}?t=1", "library_hero": "abc/library_hero.jpg", "header": "header.jpg"});
-        let art = art_from_assets(&assets);
+        let art = art_from_assets("1145360", &assets);
         assert_eq!(art.hero.as_deref(), Some("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1145360/abc/library_hero.jpg?t=1"));
         assert_eq!(art.capsule, None);
-        assert_eq!(art_from_assets(&serde_json::json!({})), SteamArt::default());
+        assert_eq!(art_from_assets("1145360", &serde_json::json!({})), SteamArt::default());
+    }
+
+    #[test]
+    fn the_icon_comes_from_its_hash() {
+        let assets = serde_json::json!({"asset_url_format": "steam/apps/620/${FILENAME}", "community_icon": "25a5a16b2423bf7487ac5340b5b0948cef48c5f8"});
+        assert_eq!(art_from_assets("620", &assets).icon.as_deref(), Some("https://shared.akamai.steamstatic.com/community_assets/images/apps/620/25a5a16b2423bf7487ac5340b5b0948cef48c5f8.jpg"));
+        // Anything but a plain hash is never put into an address.
+        for bad in ["", "../x", "25a5a16b2423bf7487ac5340b5b0948cef48c5f8/../a", "zza5a16b2423bf7487ac5340b5b0948cef48c5f8", "../5a16b2423bf7487ac5340b5b0948cef48c5f8"] {
+            assert_eq!(community_icon("620", &serde_json::json!({"community_icon": bad})), None);
+        }
+        assert_eq!(community_icon("", &assets), None);
     }
 }

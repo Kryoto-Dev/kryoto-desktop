@@ -2146,6 +2146,7 @@ pub fn run() {
             game_update::recover_on_start(app.handle());
             library::recover_sessions(app.handle());
             library::fill_branches(app.handle());
+            library::fill_icons(app.handle());
             art::prune(app.handle(), 512 * 1024 * 1024);
             if let Some(l) = listener.take() {
                 system::serve_instance(app.handle().clone(), l);

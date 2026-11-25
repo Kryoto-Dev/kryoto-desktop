@@ -715,6 +715,46 @@ try {
       assert.equal(await region.getByText('This copy does not record achievements', { exact: true }).count(), 0)
     } finally { await page.close() }
   })
+  await check("a game's row in the list shows its square icon, its cover when the icon does not load, and Properties has an Icon slot", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 860 } })
+    await page.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    page.on('pageerror', e => failures.push(e.message))
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
+    let iconMissing = false
+    await page.route('**/api/steam/image.jpg?**', route => {
+      const url = new URL(route.request().url()).searchParams.get('url') ?? ''
+      if (iconMissing && url.includes('/community_assets/')) return route.fulfill({ status: 404, body: '' })
+      return route.fulfill({ status: 200, contentType: 'image/png', body: png })
+    })
+    const sidebar = page.getByRole('complementary', { name: 'Your games' })
+    const thumb = (name) => sidebar.getByRole('button', { name, exact: true }).locator('img').first()
+    const shown = async (name) => decodeURIComponent((await thumb(name).getAttribute('src')) ?? '')
+    try {
+      await page.goto(base)
+      await thumb('Hollow Knight').waitFor()
+      assert.match(await shown('Hollow Knight'), /community_assets\/images\/apps\/367520\/f6ab055c\w+\.jpg/)
+      // A game from before icons draws its cover, as the list always did.
+      assert.match(await shown('Celeste'), /\/504230\/library_600x900\.jpg/)
+      await sidebar.getByRole('button', { name: 'Hollow Knight', exact: true }).click({ button: 'right' })
+      await page.getByRole('menu').getByText('Properties', { exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Hollow Knight', exact: true })
+      await dialog.getByText('Artwork', { exact: true }).first().click()
+      await dialog.getByText('Icon', { exact: true }).waitFor()
+      const choose = dialog.getByRole('button', { name: 'Choose icon picture', exact: true })
+      assert.equal(await choose.isDisabled(), true, 'local pictures only in the desktop app')
+      const art = choose.locator('xpath=..').locator('img').first()
+      await art.waitFor()
+      const box = await art.boundingBox()
+      assert.ok(box && Math.abs(box.width - box.height) <= 1, `the icon box is square: ${JSON.stringify(box)}`)
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+      iconMissing = true
+      await page.reload()
+      await page.waitForFunction(() => {
+        const row = [...document.querySelectorAll('aside button')].find((b) => b.textContent?.trim() === 'Hollow Knight')
+        return decodeURIComponent(row?.querySelector('img')?.getAttribute('src') ?? '').includes('/367520/library_600x900.jpg')
+      })
+    } finally { await page.close() }
+  })
   await check('a game shows its Linux compatibility and setup through the shared renderer, and an untested game shows none', async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' })
     const linux = await context.newPage()

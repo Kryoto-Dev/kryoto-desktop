@@ -90,6 +90,8 @@ const games = [
     version: 'b20488383',
   }),
   game(367520, 'Hollow Knight', {
+    // Steam's square icon for the Library list; the other games draw their covers there.
+    icon: 'https://shared.akamai.steamstatic.com/community_assets/images/apps/367520/f6ab055c2366237200b1a31cccbd6cf81e436d72.jpg',
     playtimeSeconds: 162000,
     lastPlayed: now() - 3600 * 3,
     source: 'Steam (DRM-free)',
@@ -787,7 +789,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   library_artwork: (a) => {
     const game = games.find((g) => g.id === a.id)
     if (!game) throw new Error('Game not found.')
-    for (const key of ['cover', 'hero', 'logo', 'header']) if (a[key]) game[key] = a[key]
+    for (const key of ['cover', 'hero', 'logo', 'header', 'icon']) if (a[key]) game[key] = a[key]
     return clone(game)
   },
   game_running: () => [...running],

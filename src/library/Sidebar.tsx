@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { artSrc, reportArt } from '@/lib/art'
 import { coverFor } from '@/lib/game-artwork'
+import { iconsFor } from '@/lib/game-icon'
 import { usePersisted } from '@/hooks/usePersisted'
 import { ChevronDown, ChevronRight, CircleCheck, Check, Download as DownloadIcon, ExternalLink, EyeOff, Home, ListChecks, Plus, Search, Square, Trash2, X } from '@/ui/pixel-icons'
 import { ContextMenu, asciiTrack, Dropdown, type MenuEntry } from '@/ui'
@@ -254,7 +255,7 @@ export function Sidebar({
           <span aria-hidden className={cn('kryo-radius grid size-4 shrink-0 place-items-center border', on ? 'border-primary bg-primary text-primary-foreground' : 'border-border text-transparent')}>
             <Check className="size-2.5" />
           </span>
-          <Thumb cover={cover} blur={!!adultBlur(adult, showAdult)} />
+          <Thumb art={game ? [...iconsFor(game), cover] : [cover]} blur={!!adultBlur(adult, showAdult)} />
           <span className="min-w-0 grow truncate">{game?.title ?? title}</span>
         </button>
       )
@@ -275,7 +276,7 @@ export function Sidebar({
           !game && !here && 'opacity-55 hover:opacity-100',
         )}
       >
-        <Thumb cover={cover} blur={!!adultBlur(adult, showAdult)} />
+        <Thumb art={game ? [...iconsFor(game), cover] : [cover]} blur={!!adultBlur(adult, showAdult)} />
         <span className="min-w-0 grow truncate">{game?.title ?? title}</span>
         {!game ? <DownloadIcon className="size-3 shrink-0" aria-label="Not installed" /> : null}
       </button>
@@ -295,7 +296,7 @@ export function Sidebar({
           g.id === selectedId ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
         )}
       >
-        <Thumb cover={coverFor(g)} blur={!!adultBlur(g.nsfw, showAdult)} />
+        <Thumb art={iconsFor(g)} blur={!!adultBlur(g.nsfw, showAdult)} />
         <span className="min-w-0 grow truncate">{g.title}</span>
         <BranchTag branch={g.steamBranch} title={g.title} copy={copyLabel(g, games)} />
         {running.has(g.id) ? (
@@ -554,11 +555,17 @@ export function Sidebar({
   )
 }
 
-/** A row's small cover. */
-function Thumb({ cover, blur }: { cover: string | null | undefined; blur: boolean }) {
+/** A row's small square picture: the first of `art` that loads (lib/game-icon.ts). */
+function Thumb({ art, blur }: { art: (string | null | undefined)[]; blur: boolean }) {
+  const [failed, setFailed] = useState<string[]>([])
+  const src = art.find((u): u is string => !!u && !failed.includes(u))
   const corners = { borderRadius: 'min(var(--kryo-radius), 6px)' }
-  if (!cover) return <span className="size-6 shrink-0 bg-secondary" style={corners} />
-  return <img decoding="async" src={artSrc(cover) ?? undefined} onError={() => reportArt(cover, 'sidebar')} alt="" className={cn('size-6 shrink-0 object-cover', blur && 'blur-[3px]')} style={corners} />
+  if (!src) return <span className="size-6 shrink-0 bg-secondary" style={corners} />
+  const fail = () => {
+    reportArt(src, 'sidebar')
+    setFailed((f) => [...f, src])
+  }
+  return <img decoding="async" src={artSrc(src) ?? undefined} onError={fail} alt="" className={cn('size-6 shrink-0 object-cover', blur && 'blur-[3px]')} style={corners} />
 }
 
 /** A heading in the rail. With `onToggle`, what is under it folds away. */
