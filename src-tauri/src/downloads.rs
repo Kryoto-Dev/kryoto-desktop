@@ -197,6 +197,12 @@ pub(crate) fn own_archive(d: &Download) -> Option<String> {
     (!d.from_file && !d.archive_path.is_empty()).then(|| d.archive_path.clone())
 }
 
+/// `own_archive`, unless another row holds the same file (two rows saved
+/// before each claimed a path of its own): deleting it would take theirs.
+pub(crate) fn unshared_archive<R: Runtime>(app: &AppHandle<R>, d: &Download) -> Option<String> {
+    own_archive(d).filter(|p| !held_elsewhere(app, &d.id, p))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Mirror {
@@ -2034,7 +2040,7 @@ fn already_had<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     let Some(game) = installed_build_in(&games, &d).filter(|g| Path::new(&g.install_dir).is_dir()) else { return false };
     let body = format!("{} is already in your Library, on this build.", game.title);
     let _ = app.emit("notify", Notice::new("Already installed", &body, Some(game.id.clone())));
-    if let Some(path) = own_archive(&d) {
+    if let Some(path) = unshared_archive(app, &d) {
         let _ = std::fs::remove_file(path);
     }
     drop_row(app, id);
@@ -2373,6 +2379,19 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
             client = ours;
         }
     }
+    // Two rows saved before each claimed its own archive can share one file:
+    // this one starts over in a file of its own instead of writing into the
+    // other's.
+    if edit(app, id, |_| {}).is_some_and(|d| !d.from_file && held_elsewhere(app, id, &d.archive_path)) {
+        crate::logging::warn("download", &format!("{id}: its archive is another download's too; starting over in its own file"));
+        edit(app, id, |d| {
+            d.archive_path.clear();
+            d.received = 0;
+            d.synced = None;
+            d.segments.clear();
+            d.verified = false;
+        });
+    }
     let already_complete = {
         let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
         let fetched = fully_fetched(&d);
@@ -2485,14 +2504,13 @@ async fn fetch_filez<R: Runtime>(
         crate::storage::check_download_room(&dir, &install_parent(app, &d, settings), file.size, file.size, install_size(&d), unpacks_in_place(&d), &d.meta.title)?;
         let name = safe_name(&file.name);
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot write to {}: {e}", dir.display()))?;
-        let path = dir.join(&name);
+        let path = claim(app, id, &dir, &name);
         crate::hatchzip::forget(&path);
         let f = std::fs::File::create(&path).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
         f.set_len(file.size).map_err(|e| format!("Cannot make room for {}: {e}", path.display()))?;
         drop(f);
         edit(app, id, |d| {
             d.file_name = name.clone();
-            d.archive_path = path.to_string_lossy().into_owned();
             name_from_file(d);
             d.total = Some(file.size);
             d.received = 0;
@@ -3075,7 +3093,7 @@ fn received_now<R: Runtime>(app: &AppHandle<R>, id: &str) -> u64 {
 
 /// Throw away what was fetched so far, so the next try starts from zero.
 fn discard<R: Runtime>(app: &AppHandle<R>, id: &str) {
-    if let Some(path) = edit(app, id, |_| {}).as_ref().and_then(own_archive) {
+    if let Some(path) = edit(app, id, |_| {}).and_then(|d| unshared_archive(app, &d)) {
         let _ = std::fs::remove_file(&path);
         crate::hatchzip::forget(Path::new(&path));
     }
@@ -3761,6 +3779,8 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     if let Some(flag) = app.state::<Downloads>().controls.lock().map_err(|_| "Download controls are unavailable.")?.get(id) {
         return if flag.load(Ordering::SeqCst) == 0 { Ok(()) } else { Err("Wait for the download to stop, then try again.".into()) };
     }
+    // Worked out before `edit`, which holds the list.
+    let doomed = edit(app, id, |_| {}).and_then(|d| unshared_archive(app, &d));
     edit(app, id, |d| {
         // Retry on an archive that failed its check: that copy is thrown away
         // and the download starts over (Install anyway clears the flag first).
@@ -3768,7 +3788,9 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
         if d.hash_mismatch && d.from_file {
             d.hash_mismatch = false;
         } else if d.hash_mismatch {
-            let _ = std::fs::remove_file(&d.archive_path);
+            if let Some(path) = &doomed {
+                let _ = std::fs::remove_file(path);
+            }
             d.hash_mismatch = false;
             d.received = 0;
             d.segments.clear();
@@ -3832,7 +3854,7 @@ fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> 
                 d.received = 0;
             }
         });
-        let (archive, staging) = row.map(|d| (own_archive(&d), d.staging)).unwrap_or_default();
+        let (archive, staging) = row.map(|d| (unshared_archive(app, &d), d.staging)).unwrap_or_default();
         edit(app, id, |d| d.staging = None);
         set_status(app, id, Status::Canceled, None);
         clear_leftovers(archive, staging);
@@ -4283,10 +4305,9 @@ async fn transfer<R: Runtime>(
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
         let dir = archive_dir(settings);
         std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
-        path = dir.join(&name);
+        path = claim(app, id, &dir, &name);
         edit(app, id, |d| {
             d.file_name = name.clone();
-            d.archive_path = path.to_string_lossy().into_owned();
             name_from_file(d);
         });
     }
@@ -4634,7 +4655,7 @@ async fn transfer_parallel<R: Runtime>(
         let dir = archive_dir(settings);
         crate::storage::check_download_room(&dir, &install_parent(app, &item, settings), total, total, install_size(&item), unpacks_in_place(&item), &item.meta.title).map_err(Transfer::Fatal)?;
         std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
-        let path = dir.join(&name);
+        let path = claim(app, id, &dir, &name);
         crate::hatchzip::forget(&path);
         let file = std::fs::File::create(&path).map_err(|e| Transfer::Fatal(format!("Cannot write {}: {e}", path.display())))?;
         file.set_len(total).map_err(|e| Transfer::Fatal(format!("Cannot make room for {}: {e}", path.display())))?;
@@ -4642,7 +4663,6 @@ async fn transfer_parallel<R: Runtime>(
         let segments = split(total, connections);
         edit(app, id, |d| {
             d.file_name = name.clone();
-            d.archive_path = path.to_string_lossy().into_owned();
             name_from_file(d);
             d.total = Some(total);
             d.received = 0;
@@ -4889,6 +4909,83 @@ fn archive_dir(settings: &crate::settings::Settings) -> PathBuf {
         "" => Path::new(&settings.library_dir).join("_downloads"),
         own => PathBuf::from(own),
     }
+}
+
+/// Another row still needs the file at `path`: one not finished, the player's
+/// own file, an installed game's kept archive (Get the files back reads it),
+/// or a cancelled one whose task (`running`) has not let go of it yet. Two
+/// mirrors of one release send the same file name, and a second row used to
+/// write over the first's archive, and its Cancel deleted the other's.
+fn archive_shared(list: &[Download], running: &[String], id: &str, path: &str) -> bool {
+    !path.is_empty()
+        && list.iter().any(|d| {
+            d.id != id
+                && crate::settings::same_path(&d.archive_path, path)
+                && match d.status {
+                    _ if d.from_file => true,
+                    Status::Canceled => running.contains(&d.id),
+                    Status::Installed => Path::new(&d.archive_path).is_file(),
+                    _ => true,
+                }
+        })
+}
+
+/// The rows with a task behind them. Read before the list is locked, never
+/// while it is.
+fn running_ids<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    app.state::<Downloads>().controls.lock().map(|c| c.keys().cloned().collect()).unwrap_or_default()
+}
+
+fn held_elsewhere<R: Runtime>(app: &AppHandle<R>, id: &str, path: &str) -> bool {
+    let running = running_ids(app);
+    app.state::<Downloads>().list.lock().is_ok_and(|list| archive_shared(&list, &running, id, path))
+}
+
+/// `name` with ` (n)` before its extension; a split archive's volume number
+/// stays last (`Game (2).7z.001`).
+fn numbered_name(name: &str, n: usize) -> String {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((rest, volume)) if !volume.is_empty() && volume.bytes().all(|b| b.is_ascii_digit()) => match rest.rsplit_once('.') {
+            Some((stem, kind)) if !stem.is_empty() => (stem, format!(".{kind}.{volume}")),
+            _ => (rest, format!(".{volume}")),
+        },
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    format!("{stem} ({n}){ext}")
+}
+
+/// Where this row's archive goes: `name` in `dir`, else `name (2)`, `name (3)`
+/// ... when another row holds it. A row keeps the numbered path it already
+/// has, so starting over does not leave its old file behind.
+fn claim_archive_path(list: &[Download], running: &[String], id: &str, dir: &Path, name: &str) -> PathBuf {
+    let own = list.iter().find(|d| d.id == id).map(|d| d.archive_path.as_str()).unwrap_or_default();
+    let mut free = None;
+    for n in 1..=list.len() + 1 {
+        let path = dir.join(if n == 1 { name.to_string() } else { numbered_name(name, n) });
+        let text = path.to_string_lossy();
+        if archive_shared(list, running, id, &text) {
+            continue;
+        }
+        if crate::settings::same_path(own, &text) {
+            return path;
+        }
+        free.get_or_insert(path);
+    }
+    free.unwrap_or_else(|| dir.join(name))
+}
+
+/// `claim_archive_path`, written to the row under the same lock, so two
+/// downloads starting together never pick the same file.
+fn claim<R: Runtime>(app: &AppHandle<R>, id: &str, dir: &Path, name: &str) -> PathBuf {
+    let running = running_ids(app);
+    let state = app.state::<Downloads>();
+    let Ok(mut list) = state.list.lock() else { return dir.join(name) };
+    let path = claim_archive_path(&list, &running, id, dir, name);
+    if let Some(d) = list.iter_mut().find(|d| d.id == id) {
+        d.archive_path = path.to_string_lossy().into_owned();
+    }
+    path
 }
 
 /// The folder a download installs into: an update goes where the game already
@@ -5357,7 +5454,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let _ = j.save();
         crate::game_update::drop_previous(&j);
     }
-    if let Some(path) = own_archive(&item).filter(|_| settings.delete_archives) {
+    if let Some(path) = unshared_archive(app, &item).filter(|_| settings.delete_archives) {
         let _ = std::fs::remove_file(path);
     }
     // Its art on disk now, so the Library shows it with no connection.
@@ -6287,7 +6384,7 @@ pub fn download_cancel(app: AppHandle, state: State<'_, Downloads>, id: String) 
     // Not running (paused or failed): tidy up here, the files in the background.
     let (archive, staging) = edit(&app, &id, |_| {})
         .filter(|d| d.status != Status::Installed)
-        .map(|d| (own_archive(&d), d.staging))
+        .map(|d| (unshared_archive(&app, &d), d.staging))
         .unwrap_or_default();
     edit(&app, &id, |d| {
         if !d.from_file {
@@ -6909,6 +7006,70 @@ mod tests {
         assert_eq!(safe_name("Half-Life: Alyx?"), "Half-Life Alyx");
         assert_eq!(safe_name("..\\..\\x"), "x");
         assert_eq!(safe_name("   "), "Game");
+    }
+
+    /// A second mirror of one release sends the same file name. It used to
+    /// truncate the first row's archive, and Cancel on the first deleted it.
+    #[test]
+    fn a_second_download_of_the_same_file_gets_its_own_archive() {
+        // A folder that is not there, so no installed row's archive is found.
+        let dir = &std::env::temp_dir().join(format!("kryoto-claim-none-{}", std::process::id()));
+        let at = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let row = |id: &str, status: Status, path: &str| Download { id: id.into(), status, archive_path: path.into(), ..Default::default() };
+        let new = row("b", Status::Queued, "");
+        let idle: &[String] = &[];
+        for status in [Status::Failed, Status::Paused, Status::Downloading] {
+            let list = [row("a", status, &at("X.7z")), new.clone()];
+            assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X (2).7z"), "{status:?}");
+            assert!(archive_shared(&list, idle, "b", &at("X.7z")));
+        }
+        // Finished with, or its archive already gone: free to take.
+        for status in [Status::Installed, Status::Canceled] {
+            let list = [row("a", status, &at("X.7z")), new.clone()];
+            assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X.7z"), "{status:?}");
+            assert!(!archive_shared(&list, idle, "b", &at("X.7z")));
+        }
+        // Cancelled, but its task still has the file open until it stops.
+        let list = [row("a", Status::Canceled, &at("X.7z")), new.clone()];
+        assert_eq!(claim_archive_path(&list, &["a".to_string()], "b", dir, "X.7z"), dir.join("X (2).7z"));
+        // The player's own file is theirs whatever its row says.
+        let mut theirs = row("a", Status::Installed, &at("X.7z"));
+        theirs.from_file = true;
+        assert_eq!(claim_archive_path(&[theirs, new.clone()], idle, "b", dir, "X.7z"), dir.join("X (2).7z"));
+        // Its own path is no other row's, and an empty path is nobody's.
+        let list = [row("b", Status::Failed, &at("X.7z"))];
+        assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X.7z"));
+        assert!(!archive_shared(&[row("a", Status::Failed, "")], idle, "b", ""));
+        let list = [row("a", Status::Failed, &at("X.7z")), row("c", Status::Paused, &at("X (2).7z")), new.clone()];
+        assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X (3).7z"));
+        assert_eq!(claim_archive_path(&[row("a", Status::Failed, &at("Game")), new.clone()], idle, "b", dir, "Game"), dir.join("Game (2)"));
+        // A row that got `X (2).7z` keeps it when it starts over after the first is gone.
+        let list = [row("b", Status::Downloading, &at("X (2).7z"))];
+        assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X (2).7z"));
+    }
+
+    #[test]
+    fn a_numbered_archive_keeps_its_kind_and_volume() {
+        assert_eq!(numbered_name("X.7z", 2), "X (2).7z");
+        assert_eq!(numbered_name("Game.7z.001", 2), "Game (2).7z.001");
+        assert_eq!(numbered_name("Game.001", 3), "Game (3).001");
+        assert_eq!(numbered_name("Game v1.2.zip", 2), "Game v1.2 (2).zip");
+        assert_eq!(numbered_name("Game", 2), "Game (2)");
+        assert_eq!(numbered_name(".7z", 2), ".7z (2)");
+    }
+
+    /// An installed game's archive kept on disk is what Get the files back
+    /// reads, so a new download of the same file does not write over it.
+    #[test]
+    fn a_kept_archive_of_an_installed_game_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("kryoto-claim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kept = dir.join("X.7z");
+        std::fs::write(&kept, b"7z").unwrap();
+        let installed = Download { id: "a".into(), status: Status::Installed, archive_path: kept.to_string_lossy().into_owned(), ..Default::default() };
+        let list = [installed, Download { id: "b".into(), status: Status::Queued, ..Default::default() }];
+        assert_eq!(claim_archive_path(&list, &[], "b", &dir, "X.7z"), dir.join("X (2).7z"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

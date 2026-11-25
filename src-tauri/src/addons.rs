@@ -173,7 +173,7 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
         }
         Ok(())
     })?;
-    if let Some(path) = downloads::own_archive(&item).filter(|_| settings.delete_archives) {
+    if let Some(path) = downloads::unshared_archive(app, &item).filter(|_| settings.delete_archives) {
         let _ = std::fs::remove_file(path);
     }
     downloads::finish_as(app, id, &game);
@@ -372,7 +372,7 @@ async fn install_fix<R: Runtime>(
         crate::logging::error("addons", &format!("{label} on {}: {e}", game.title));
         e
     })?;
-    if let Some(path) = downloads::own_archive(item).filter(|_| settings.delete_archives) {
+    if let Some(path) = downloads::unshared_archive(app, item).filter(|_| settings.delete_archives) {
         let _ = std::fs::remove_file(path);
     }
     downloads::finish_as(app, id, game);
