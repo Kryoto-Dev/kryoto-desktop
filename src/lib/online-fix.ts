@@ -85,6 +85,7 @@ export function onlineFixView(s: OnlineFixState): OnlineFixView | null {
     case 'unreachable':
       return { ...NONE, line: 'online-fix.me did not answer. It may be down or blocked where you are. Try again later, or download the fix in your browser and use I have the file.', retry: true, openPage: true, fromFile: true }
     default:
-      return { ...NONE, line: 'online-fix.me has no online fix for this game.' }
+      // The reason when the folder gives one (only an Xbox app fix there).
+      return { ...NONE, line: l.detail ?? 'online-fix.me has no online fix for this game.' }
   }
 }
