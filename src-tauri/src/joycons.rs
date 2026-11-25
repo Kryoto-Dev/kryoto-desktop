@@ -65,9 +65,10 @@ impl Side {
     }
 }
 
-/// Which half of a pair this pad is, if it is one.
+/// Which half of a pair this pad is, if it is one. joycond's combined pair
+/// reports the left half's product, but it is a whole pad, never a half.
 pub fn side_of(vendor: Option<u16>, product: Option<u16>, name: &str) -> Option<Side> {
-    if vendor != Some(NINTENDO) {
+    if vendor != Some(NINTENDO) || is_pair_device(vendor, product, name) {
         return None;
     }
     match product? {
@@ -398,6 +399,9 @@ mod tests {
         assert_eq!(side_of(Some(NINTENDO), Some(GRIP), "Charging Grip"), None);
         assert_eq!(side_of(Some(NINTENDO), Some(0x2009), "Pro Controller"), None);
         assert_eq!(side_of(Some(NINTENDO), Some(PAIR), "Joy-Con (L/R)"), None);
+        // joycond's combined pair, under a half's product: one pad, not a left to pair again.
+        assert_eq!(side_of(Some(NINTENDO), Some(LEFT), "Nintendo Switch Joy-Con (L/R)"), None);
+        assert_eq!(side_of(Some(NINTENDO), Some(RIGHT), "Nintendo Switch Combined Joy-Cons (L/R)"), None);
         assert_eq!(side_of(Some(0x045e), Some(LEFT), "Joy-Con (L)"), None);
         assert_eq!(side_of(None, None, "Joy-Con (L)"), None);
         // One pad already: SDL's combined pair and joycond's.
