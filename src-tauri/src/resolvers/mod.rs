@@ -130,39 +130,59 @@ fn page_host(url: &str) -> Option<&'static str> {
     PAGE_HOSTS.iter().find(|(d, _)| domain_match(&host, d)).map(|(_, name)| *name)
 }
 
+/// Whether a link is one host's.
+type LinkTest = fn(&str) -> bool;
+
+/// The hosts a resolver answers for by their links, in the order `classify`
+/// checks them, before the page hosts. `known_hosts` reads the names from
+/// here too, so a host added or renamed here is one a player can rank.
+const RESOLVED_HOSTS: &[(LinkTest, Kind, &str)] = &[
+    // filez.stream: a file link with its key, fetched and decrypted here
+    // (filez.rs). Without the key nothing can open it (see `never_opened`).
+    (filez_link, Kind::Api, "filez.stream"),
+    (pixeldrain::matches, Kind::Api, "Pixeldrain"),
+    (gofile::matches, Kind::Api, "Gofile"),
+    (buzzheavier::matches, Kind::Api, "Buzzheavier"),
+    (mediafire::matches, Kind::Api, "MediaFire"),
+    (simple::fuckingfast_matches, Kind::Api, "FuckingFast"),
+    // Our own Mocha shares: dl.kryo.to signs a direct link (mocha.rs). Any
+    // other Mocha link is a page host below.
+    (mocha_share, Kind::Api, "Mocha"),
+    (direct_link, Kind::Direct, "catbox"),
+];
+
+fn filez_link(url: &str) -> bool {
+    filez::matches(url) && filez::parse(url).is_some()
+}
+
+fn mocha_share(url: &str) -> bool {
+    mocha::share_token(url).is_some()
+}
+
+fn direct_link(url: &str) -> bool {
+    host_matches(url, &DIRECT_RE) || dev_direct(url)
+}
+
+/// Every host name `classify` can give, once each, in the order it checks
+/// them: what a player can rank in Settings > Downloads (suggestion #110).
+pub fn known_hosts() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    for name in RESOLVED_HOSTS.iter().map(|(_, _, n)| *n).chain(PAGE_HOSTS.iter().map(|(_, n)| *n)) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// What kind of mirror `url` is, and the host's name. `None` for a link no
 /// resolver knows (MEGA's encrypted transfers, torrents, unknown sites).
 pub fn classify(url: &str) -> Option<(Kind, &'static str)> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return None;
     }
-    // filez.stream: a file link with its key, fetched and decrypted here
-    // (filez.rs). Without the key nothing can open it (see `never_opened`).
-    if filez::matches(url) && filez::parse(url).is_some() {
-        return Some((Kind::Api, "filez.stream"));
-    }
-    if pixeldrain::matches(url) {
-        return Some((Kind::Api, "Pixeldrain"));
-    }
-    if gofile::matches(url) {
-        return Some((Kind::Api, "Gofile"));
-    }
-    if buzzheavier::matches(url) {
-        return Some((Kind::Api, "Buzzheavier"));
-    }
-    if mediafire::matches(url) {
-        return Some((Kind::Api, "MediaFire"));
-    }
-    if simple::fuckingfast_matches(url) {
-        return Some((Kind::Api, "FuckingFast"));
-    }
-    // Our own Mocha shares: dl.kryo.to signs a direct link (mocha.rs). Any
-    // other Mocha link is a page host below.
-    if mocha::share_token(url).is_some() {
-        return Some((Kind::Api, "Mocha"));
-    }
-    if host_matches(url, &DIRECT_RE) || dev_direct(url) {
-        return Some((Kind::Direct, "catbox"));
+    if let Some(&(_, kind, name)) = RESOLVED_HOSTS.iter().find(|(matches, _, _)| matches(url)) {
+        return Some((kind, name));
     }
     page_host(url).map(|name| (Kind::Page, name))
 }
@@ -294,6 +314,39 @@ pub(crate) fn client(redirects: bool) -> reqwest::Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Suggestion #110: the hosts a player can rank are exactly the names
+    /// `classify` gives, once each. A link of every host's, by the name it
+    /// must come back as: a host renamed in `classify` and not here fails.
+    #[test]
+    fn every_host_classify_names_can_be_ranked_once() {
+        let mut seen: Vec<&str> = Vec::new();
+        for (url, want) in [
+            ("https://filez.stream/Ab12Cd34#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "filez.stream"),
+            ("https://pixeldrain.com/u/abcd1234", "Pixeldrain"),
+            ("https://gofile.io/d/dc1V9W", "Gofile"),
+            ("https://buzzheavier.com/AbCd1234", "Buzzheavier"),
+            ("https://www.mediafire.com/file/abc/x.7z/file", "MediaFire"),
+            ("https://fuckingfast.co/abc123", "FuckingFast"),
+            ("https://mocha.my/share/pvpgaoYk-6So_SEvo", "Mocha"),
+            ("https://files.catbox.moe/x.7z", "catbox"),
+        ] {
+            assert_eq!(classify(url).map(|c| c.1), Some(want), "{url}");
+            seen.push(want);
+        }
+        for &(domain, want) in PAGE_HOSTS {
+            assert_eq!(classify(&format!("https://{domain}/f/abc")).map(|c| c.1), Some(want), "{domain}");
+            seen.push(want);
+        }
+        // Mocha is both an API host (our shares) and a page host.
+        let mut once: Vec<&str> = Vec::new();
+        for name in seen {
+            if !once.contains(&name) {
+                once.push(name);
+            }
+        }
+        assert_eq!(known_hosts(), once);
+    }
 
     #[test]
     fn classifies_the_hosts_kryo_mirrors_to() {

@@ -68,6 +68,12 @@ pub struct Settings {
     /// Speeds shown in megabits a second (Mbps, as internet plans are sold)
     /// instead of megabytes a second (suggestion #105). Display only.
     pub speed_in_bits: bool,
+    /// Where downloads come from first (suggestion #110): mirror hosts by the
+    /// name the resolvers give them (`Pixeldrain`), and `kryoto` for our own
+    /// copy, best first. A build starts from the first one it has, and a
+    /// source that fails hands on to the next one it has. Empty: our copy
+    /// first, then kryo.to's own order, and nothing handed on.
+    pub download_order: Vec<String>,
     /// Optional local or staging Kryo.to origin for development.
     pub catalog_endpoint: String,
     /// Linux: MangoHud's overlay on every Windows game (when it is installed).
@@ -272,6 +278,7 @@ impl Default for Settings {
             connections: 16,
             speed_limit_mb: 0,
             speed_in_bits: false,
+            download_order: Vec::new(),
             catalog_endpoint: String::new(),
             linux_mangohud: false,
             linux_gamemode: false,
@@ -543,6 +550,17 @@ fn clean_seen_notices(list: &mut Vec<String>, version: &str) {
     }
 }
 
+/// The download order as it is kept: each source once, no blanks.
+fn clean_download_order(order: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for host in order.iter().map(|h| h.trim()).filter(|h| !h.is_empty()) {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(host)) {
+            out.push(host.to_string());
+        }
+    }
+    out
+}
+
 #[tauri::command(async)]
 pub fn settings_get(app: AppHandle) -> Settings {
     load(&app)
@@ -575,6 +593,7 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
         settings.cloud_saves_find = "precise".into();
     }
     settings.cloud_saves_keep_local = settings.cloud_saves_keep_local.clamp(1, 20);
+    settings.download_order = clean_download_order(&settings.download_order);
     if !matches!(settings.saves_mode.as_str(), "" | "account" | "local" | "patchbay") {
         settings.saves_mode = String::new();
     }
@@ -695,7 +714,7 @@ mod tests {
         std::fs::remove_file(backup).unwrap();
         std::fs::remove_file(path).unwrap();
     }
-    use super::{catalog_endpoint, clean_seen_notices, is_catalog_origin, normalize_catalog_endpoint, read_settings_file, recovery_defaults, recover_settings_file, save_settings_file, Settings, DEFAULT_CATALOG_ENDPOINT};
+    use super::{catalog_endpoint, clean_download_order, clean_seen_notices, is_catalog_origin, normalize_catalog_endpoint, read_settings_file, recovery_defaults, recover_settings_file, save_settings_file, Settings, DEFAULT_CATALOG_ENDPOINT};
 
     #[test]
     fn a_full_seen_list_keeps_the_notice_just_seen() {
@@ -781,5 +800,12 @@ mod tests {
         assert!(is_catalog_origin(&"http://localhost:3000/game/demo".parse().unwrap(), &settings));
         assert!(!is_catalog_origin(&"https://kryo.to/game/demo".parse().unwrap(), &settings));
         assert_eq!(catalog_endpoint(&Settings::default()), DEFAULT_CATALOG_ENDPOINT);
+    }
+
+    #[test]
+    fn the_download_order_keeps_each_source_once() {
+        let order = ["Gofile", " kryoto ", "", "gofile", "Pixeldrain"].map(String::from);
+        assert_eq!(clean_download_order(&order), ["Gofile", "kryoto", "Pixeldrain"]);
+        assert!(Settings::default().download_order.is_empty());
     }
 }

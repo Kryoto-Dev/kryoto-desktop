@@ -3,6 +3,7 @@ import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { automaticArtwork, coverFor } from '@/lib/game-artwork'
 import { autofixBlock } from '@/lib/autofix'
+import { orderSources } from '@/lib/download-order'
 import type { FilesRestored, FilesState } from '@/lib/release-files'
 import type { OnlineFixState } from '@/lib/online-fix'
 
@@ -252,7 +253,9 @@ type RawRelease = {
 /**
  * A game's releases, newest first, each with the ways Kryoto can get it. Our
  * own copy leads (fastest, and checked against its hash); mirrors the app
- * resolves by itself follow, API hosts before page hosts.
+ * resolves by itself follow, API hosts before page hosts. A download order
+ * set in Settings > Downloads goes before both (suggestion #110), so every
+ * download button starts with the player's first pick the build has.
  */
 export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
   const res = await fetchGameApi(slug, '/downloads')
@@ -274,6 +277,7 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
     const kinds = await call<({ host: string; kind: string } | null)[]>('mirror_hosts', { urls: external }).catch(() => [])
     external.forEach((u, i) => known.set(u, kinds[i] ?? null))
   }
+  const order = (await call<{ downloadOrder?: string[] }>('settings_get').catch(() => null))?.downloadOrder ?? []
   return raw.map((r) => {
     const links = r.links ?? []
     const ours = links.some((l) => l.url?.startsWith('/api/download/'))
@@ -295,7 +299,7 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
       createdAt: r.created_at ?? null,
       primary: !!r.primary,
       archived: !!r.archived,
-      sources: [...(ours && !r.archived ? [{ kind: 'ours' } as const] : []), ...mirrors],
+      sources: orderSources([...(ours && !r.archived ? [{ kind: 'ours' } as const] : []), ...mirrors], order),
       elsewhere,
     }
   })

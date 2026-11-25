@@ -189,6 +189,12 @@ pub struct Download {
     /// The player chose to install it although it matches no file kryo.to
     /// lists: it goes in marked "not verified against Kryoto's copy".
     pub not_verified: bool,
+    /// The sources this row already failed at: a mirror handed on from by
+    /// the player's download order (`hand_on`), or our own copy a mirror
+    /// took over from (`take_over_from_mirror`). Never gone back to, so a
+    /// row cannot go round them for ever. A Retry clears it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tried_sources: Vec<String>,
 }
 
 /// The archive this row may delete: one the app downloaded. A player's own
@@ -2348,61 +2354,19 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
         };
     }
 
-    let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
-    let (mut client, mut connections) = (client.clone(), settings.connections);
-    // Our own link: see `own_client`. The pass from an earlier run goes back in.
-    let jar = Arc::new(reqwest::cookie::Jar::default());
-    if !is_mirror {
-        if let Some((pass, url)) = edit(app, id, |_| {}).and_then(|d| Some((d.resume_pass?, url::Url::parse(&d.url).ok()?))) {
-            jar.add_cookie_str(&pass, &url);
+    // A mirror that fails hands the row on to the next source in the
+    // player's download order (`hand_on`), and it is fetched again from there.
+    let client = loop {
+        match fetch_source(app, id, flag, &settings, &client).await {
+            Ok(Some(client)) => break client,
+            Ok(None) => return settle_stopped(app, id, flag),
+            Err((why, blame)) => match hand_on(app, id, flag, &settings, &why, blame).await {
+                HandOn::Moved => {}
+                HandOn::Stopped => return settle_stopped(app, id, flag),
+                HandOn::Stands => return Err(why),
+            },
         }
-    }
-    if !is_mirror {
-        if let Some(ours) = own_client(app, id, &jar) {
-            client = ours;
-        }
-    }
-    let already_complete = {
-        let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
-        let fetched = !d.archive_path.is_empty() && d.total.is_some_and(|t| t > 0 && d.received >= t) && d.segments.iter().all(|s| s.done >= s.len());
-        // Fetched once, but the file has gone since (an antivirus took it, or
-        // somebody tidied the folder): Retry fetches it again. It used to fail
-        // the same way for ever, "Could not read the archive to check it".
-        // An unpack in place has eaten its archive on purpose.
-        let path = Path::new(&d.archive_path);
-        let there = path.is_file() || crate::hatchzip::resumes(path);
-        if fetched && !there {
-            crate::logging::warn("download", &format!("{id}: the finished archive is gone; fetching it again"));
-            discard(app, id);
-        }
-        fetched && there
     };
-    if !already_complete {
-        if is_mirror {
-            match mirror_client(app, id, flag, false, settings.connections).await {
-                Ok(v) => (client, connections) = v,
-                Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
-                Err(e) => return Err(e),
-            }
-        }
-        set_status(app, id, Status::Downloading, None);
-        let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
-        // filez.stream: ciphertext by the host's grants, opened chunk by chunk here.
-        let filez = if is_mirror { edit(app, id, |_| {}).and_then(|d| crate::resolvers::filez::file_for(&d.url)) } else { None };
-        let done = match filez {
-            Some(file) => fetch_filez(app, id, flag, &mut client, &settings, &limiter, file).await?,
-            None => {
-                let fetched = fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror, &jar).await;
-                if !is_mirror {
-                    keep_resume_pass(app, id, &jar);
-                }
-                fetched?
-            }
-        };
-        if !done {
-            return settle_stopped(app, id, flag);
-        }
-    }
     identify(app, id, &client).await;
     // A DLC kryo.to's answer did not place (it was out of reach, or leaves links
     // out for this caller) still says what it is in its name.
@@ -2429,6 +2393,74 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
         Err(_) if flag.load(Ordering::SeqCst) != RUN => settle_stopped(app, id, flag),
         done => done,
     }
+}
+
+/// Fetch the archive from the row's source, our own link or its mirror.
+/// `Ok(None)`: paused or cancelled. The error says whether the source is to
+/// blame (its page could not be solved), which another source may get past.
+async fn fetch_source<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    flag: &Arc<AtomicU8>,
+    settings: &crate::settings::Settings,
+    client: &reqwest::Client,
+) -> Result<Option<reqwest::Client>, (String, bool)> {
+    let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
+    let (mut client, mut connections) = (client.clone(), settings.connections);
+    // Our own link: see `own_client`. The pass from an earlier run goes back in.
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    if !is_mirror {
+        if let Some((pass, url)) = edit(app, id, |_| {}).and_then(|d| Some((d.resume_pass?, url::Url::parse(&d.url).ok()?))) {
+            jar.add_cookie_str(&pass, &url);
+        }
+    }
+    if !is_mirror {
+        if let Some(ours) = own_client(app, id, &jar) {
+            client = ours;
+        }
+    }
+    let already_complete = {
+        let d = edit(app, id, |_| {}).ok_or(("The download is gone.".to_string(), false))?;
+        let fetched = !d.archive_path.is_empty() && d.total.is_some_and(|t| t > 0 && d.received >= t) && d.segments.iter().all(|s| s.done >= s.len());
+        // Fetched once, but the file has gone since (an antivirus took it, or
+        // somebody tidied the folder): Retry fetches it again. It used to fail
+        // the same way for ever, "Could not read the archive to check it".
+        // An unpack in place has eaten its archive on purpose.
+        let path = Path::new(&d.archive_path);
+        let there = path.is_file() || crate::hatchzip::resumes(path);
+        if fetched && !there {
+            crate::logging::warn("download", &format!("{id}: the finished archive is gone; fetching it again"));
+            discard(app, id);
+        }
+        fetched && there
+    };
+    if !already_complete {
+        if is_mirror {
+            match mirror_client(app, id, flag, false, settings.connections).await {
+                Ok(v) => (client, connections) = v,
+                Err(_) if flag.load(Ordering::SeqCst) != RUN => return Ok(None),
+                Err(e) => return Err((e, true)),
+            }
+        }
+        set_status(app, id, Status::Downloading, None);
+        let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
+        // filez.stream: ciphertext by the host's grants, opened chunk by chunk here.
+        let filez = if is_mirror { edit(app, id, |_| {}).and_then(|d| crate::resolvers::filez::file_for(&d.url)) } else { None };
+        let done = match filez {
+            Some(file) => fetch_filez(app, id, flag, &mut client, settings, &limiter, file).await.map_err(|e| (e, false))?,
+            None => {
+                let fetched = fetch_all(app, id, flag, &mut client, &mut connections, settings, &limiter, is_mirror, &jar).await;
+                if !is_mirror {
+                    keep_resume_pass(app, id, &jar);
+                }
+                fetched.map_err(|e| (e, false))?
+            }
+        };
+        if !done {
+            return Ok(None);
+        }
+    }
+    Ok(Some(client))
 }
 
 /// Fetch every byte of the archive, riding out dropped connections.
@@ -2924,13 +2956,46 @@ async fn fetch_all<R: Runtime>(
 /// minute of trying; it used to retry for as long as each try moved a byte.
 const OWN_CUTS_BEFORE_MIRROR: u32 = 6;
 
+/// A game's `/downloads` listing on kryo.to: with the player's session when
+/// there is one (it lists what this account may fetch), else as anyone.
+async fn sources_listing<R: Runtime>(app: &AppHandle<R>, slug: &str, settings: &crate::settings::Settings) -> Result<serde_json::Value, String> {
+    if let Ok(session) = crate::phone::session(app) {
+        return crate::phone::listing(&session, slug).await;
+    }
+    let endpoint = crate::settings::catalog_endpoint(settings);
+    client_builder()
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(format!("{endpoint}/api/games/{slug}/downloads"))
+        .send()
+        .await
+        .map_err(|e| crate::logging::why(&e.without_url()))?
+        .json()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The build a row downloads in a listing: its version, else the current one.
+fn listed_build<'a>(listing: &'a serde_json::Value, release: Option<&str>) -> Option<&'a serde_json::Value> {
+    let releases: Vec<&serde_json::Value> = listing["releases"].as_array().into_iter().flatten().collect();
+    release
+        .and_then(|v| releases.iter().find(|r| r["version"].as_str() == Some(v)))
+        .or_else(|| releases.iter().find(|r| r["primary"].as_bool() == Some(true)))
+        .copied()
+}
+
+/// The build has our own copy: a link of kryo.to's own, and not archived
+/// (an archived build is on its mirrors only), as the Library reads it.
+fn has_own_copy(listing: &serde_json::Value, release: Option<&str>) -> bool {
+    listed_build(listing, release).is_some_and(|r| {
+        r["archived"].as_bool() != Some(true)
+            && r["links"].as_array().into_iter().flatten().filter_map(|l| l["url"].as_str()).any(|u| u.starts_with("/api/download/"))
+    })
+}
+
 /// The mirror pages kryo.to lists for the build a row downloads, in its order.
 fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<String> {
-    let releases: Vec<&serde_json::Value> = listing["releases"].as_array().into_iter().flatten().collect();
-    let build = release
-        .and_then(|v| releases.iter().find(|r| r["version"].as_str() == Some(v)))
-        .or_else(|| releases.iter().find(|r| r["primary"].as_bool() == Some(true)));
-    build
+    listed_build(listing, release)
         .map(|r| {
             r["links"]
                 .as_array()
@@ -2948,7 +3013,9 @@ fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<Strin
 /// the game's mirrors carries it on, from where every range got to. A mirror
 /// is only taken when its file is this one: the same size, and the same first
 /// bytes as what is on disk (the 7z start header, which names the archive's
-/// end). The checksum at the end still checks every byte. The mirror's
+/// end). The checksum at the end still checks every byte. Mirrors are asked
+/// in the player's download order, and never one this row already failed at;
+/// once one takes over, our copy counts as failed for this row. The mirror's
 /// client, its connection count and its name.
 async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8, settings: &crate::settings::Settings) -> Result<(reqwest::Client, u32, String), String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
@@ -2957,21 +3024,8 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
         return Err("the game is no longer on kryo.to".into());
     }
     let total = d.total.ok_or("the file's size is not known yet")?;
-    let endpoint = crate::settings::catalog_endpoint(settings);
-    let listing = match crate::phone::session(app) {
-        Ok(session) => crate::phone::listing(&session, &slug).await?,
-        Err(_) => client_builder()
-            .build()
-            .map_err(|e| e.to_string())?
-            .get(format!("{endpoint}/api/games/{slug}/downloads"))
-            .send()
-            .await
-            .map_err(|e| crate::logging::why(&e.without_url()))?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?,
-    };
-    let pages = mirror_pages(&listing, d.release.as_deref());
+    let listing = sources_listing(app, &slug, settings).await?;
+    let pages = pages_in_order(mirror_pages(&listing, d.release.as_deref()), &settings.download_order, &d.tried_sources);
     if pages.is_empty() {
         return Err("the game has no mirror Kryoto downloads from".into());
     }
@@ -3037,6 +3091,11 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
         .await;
         match taken {
             Ok((client, n)) => {
+                edit(app, id, |row| {
+                    if !row.tried_sources.iter().any(|t| t == OWN_SOURCE) {
+                        row.tried_sources.push(OWN_SOURCE.to_string());
+                    }
+                });
                 persist(app);
                 return Ok((client, n, host));
             }
@@ -3057,7 +3116,155 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
     Err(why.join("; "))
 }
 
-/// Bytes of the download on disk now.
+/// Our own copy, by name in the player's download order (Settings >
+/// Downloads); mirror hosts go by the name the resolvers give them.
+pub const OWN_SOURCE: &str = "kryoto";
+
+/// Where a source stands in the player's download order: its place, or
+/// after every name the order has.
+fn rank_in(order: &[String], name: &str) -> usize {
+    order.iter().position(|o| o.eq_ignore_ascii_case(name)).unwrap_or(order.len())
+}
+
+/// The mirror pages our own server's row may carry on from, in the
+/// player's download order (the hosts it ranks, by their place, then the
+/// rest as kryo.to lists them), without the hosts this row already failed at.
+fn pages_in_order(pages: Vec<String>, order: &[String], tried: &[String]) -> Vec<String> {
+    let host = |p: &str| crate::resolvers::classify(p).map(|(_, h)| h).unwrap_or_default();
+    let mut pages: Vec<String> = pages.into_iter().filter(|p| !tried.iter().any(|t| t.eq_ignore_ascii_case(host(p)))).collect();
+    pages.sort_by_key(|p| rank_in(order, host(p)));
+    pages
+}
+
+/// What every text says whose host's copy is gone or wrong for good: a 404
+/// or 451, a web page or another file where the archive should be, a copy
+/// cut short, a filez.stream file gone or damaged. Retry gets no further there.
+const GONE_FROM_HOST: &str = "Take another mirror";
+
+/// A mirror failure worth handing on: the host's copy is gone for good, or
+/// none of the file is here yet and another source may get past what
+/// stopped this one (its page could not be solved, `blame`, or it refused
+/// the download twice). With part of the file here, a timeout or a refusal
+/// stands, as before: Retry carries on from where it got. Not a full disk,
+/// a write that failed or a dropped line, which follow the player anywhere.
+fn worth_handing_on(why: &str, blame: bool, received: u64) -> bool {
+    why.contains(GONE_FROM_HOST) || (received == 0 && (blame || why.to_ascii_lowercase().contains("another mirror")))
+}
+
+/// Where a failed mirror row goes next by the player's download order: the
+/// first source after `failed` in it that the build has (`has`, and our own
+/// copy when `ours`) and that has not failed yet, else our own copy. None:
+/// no order set, or nothing left to try.
+fn next_source(order: &[String], failed: &str, has: &[&str], ours: bool, tried: &[String]) -> Option<String> {
+    if order.is_empty() {
+        return None;
+    }
+    let open = |name: &str| {
+        let on_build = if name.eq_ignore_ascii_case(OWN_SOURCE) { ours } else { has.iter().any(|h| h.eq_ignore_ascii_case(name)) };
+        on_build && !name.eq_ignore_ascii_case(failed) && !tried.iter().any(|t| t.eq_ignore_ascii_case(name))
+    };
+    let from = order.iter().position(|o| o.eq_ignore_ascii_case(failed)).map_or(0, |i| i + 1);
+    order[from..].iter().find(|o| open(o)).cloned().or_else(|| open(OWN_SOURCE).then(|| OWN_SOURCE.to_string()))
+}
+
+/// What `hand_on` did with a failed row.
+enum HandOn {
+    /// It is on its next source, to be fetched from there.
+    Moved,
+    /// The player paused or cancelled it meanwhile.
+    Stopped,
+    /// The failure stands, as it was.
+    Stands,
+}
+
+/// A mirror row failed (`why`), and the player set a download order: the row
+/// moves to the next source in it that the build has, else our own copy, and
+/// starts over there (another host's bytes are not stitched onto these). The
+/// sources it failed at are kept, so it never goes back to one. Nothing is
+/// thrown away until the next source is settled: our own link is asked for
+/// first, and a link that does not come leaves the row as it was.
+async fn hand_on<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8, settings: &crate::settings::Settings, why: &str, blame: bool) -> HandOn {
+    let stopped = || flag.load(Ordering::SeqCst) != RUN;
+    if settings.download_order.is_empty() || stopped() {
+        return HandOn::Stands;
+    }
+    let Some(d) = edit(app, id, |_| {}) else { return HandOn::Stands };
+    let (Some(failed), Some(slug)) = (d.mirror.clone(), d.slug.clone()) else { return HandOn::Stands };
+    if !worth_handing_on(why, blame, d.received) {
+        return HandOn::Stands;
+    }
+    let listing = match sources_listing(app, &slug, settings).await {
+        Ok(l) => l,
+        Err(e) => {
+            crate::logging::warn("download", &format!("{id}: {} failed ({why}); kryo.to's list of sources did not come ({e})", failed.host));
+            return HandOn::Stands;
+        }
+    };
+    if stopped() {
+        return HandOn::Stopped;
+    }
+    let pages: Vec<(String, String)> = mirror_pages(&listing, d.release.as_deref())
+        .into_iter()
+        .filter_map(|p| crate::resolvers::classify(&p).map(|(_, h)| (h.to_string(), p)))
+        .collect();
+    let has: Vec<&str> = pages.iter().map(|(h, _)| h.as_str()).collect();
+    let mut tried = d.tried_sources.clone();
+    tried.push(failed.host.clone());
+    // Our link is minted for an account: asked for as a guest, it would open
+    // Sign in and start the row again by itself later (`signed_out`).
+    let ours = has_own_copy(&listing, d.release.as_deref()) && crate::phone::session(app).is_ok();
+    let Some(next) = next_source(&settings.download_order, &failed.host, &has, ours, &tried) else {
+        crate::logging::warn("download", &format!("{id}: {} failed ({why}); no other source in the download order is left (tried {})", failed.host, tried.join(", ")));
+        return HandOn::Stands;
+    };
+    let to_ours = next.eq_ignore_ascii_case(OWN_SOURCE);
+    let to = if to_ours { "Kryoto's own copy".to_string() } else { next.clone() };
+    crate::logging::warn("download", &format!("{id}: {} failed ({why}); trying {to}, next in the download order", failed.host));
+    if to_ours {
+        set_status(app, id, Status::Resolving, None);
+        edit(app, id, |row| row.mirror = None);
+        let minted = mint_link(app, id).await;
+        if minted.is_err() || stopped() {
+            if let Err(e) = &minted {
+                crate::logging::error("download", &format!("{id}: Kryoto's own copy could not be asked for: {e}"));
+            }
+            edit(app, id, |row| {
+                row.mirror = Some(failed.clone());
+                row.url = d.url.clone();
+                row.family = d.family;
+            });
+            persist(app);
+            return if stopped() { HandOn::Stopped } else { HandOn::Stands };
+        }
+    }
+    discard(app, id);
+    if let Ok(mut map) = app.state::<Downloads>().resolved.lock() {
+        map.remove(id);
+    }
+    let page = pages.iter().find(|(h, _)| h.eq_ignore_ascii_case(&next)).map(|(h, p)| Mirror { page: p.clone(), host: h.clone() });
+    edit(app, id, |row| {
+        row.tried_sources = tried.clone();
+        // Another host's file: its size and name are its own, and it is saved
+        // under that name (`identify` matches the file by it).
+        row.total = None;
+        row.archive_path.clear();
+        row.file_name.clear();
+        row.resume_pass = None;
+        if !to_ours {
+            row.family = None;
+            row.mirror = page.clone();
+            if let Some(m) = &page {
+                row.url = m.page.clone();
+            }
+        }
+        row.notice = Some(format!("{} failed. Trying {to}.", failed.host));
+    });
+    persist(app);
+    emit(app, true);
+    HandOn::Moved
+}
+
+// Bytes of the download on disk now.
 fn received_now<R: Runtime>(app: &AppHandle<R>, id: &str) -> u64 {
     edit(app, id, |_| {}).map(|d| d.received).unwrap_or(0)
 }
@@ -3768,6 +3975,7 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
         d.status = Status::Queued;
         // Resumed without an answer: the default folder.
         d.ask_folder = false;
+        d.tried_sources.clear();
     })
     .ok_or("That download is gone.")?;
     emit(app, true);
@@ -6868,6 +7076,88 @@ mod tests {
         assert_eq!(mirror_pages(&listing, None), ["https://pixeldrain.com/u/abc"]);
         assert_eq!(mirror_pages(&listing, Some("1.0")), ["https://pixeldrain.com/u/old"]);
         assert!(mirror_pages(&serde_json::json!({}), None).is_empty());
+    }
+
+    /// Suggestion #110: our own copy is one of the sources a failed mirror can
+    /// hand on to, unless the build has none (archived: mirrors only).
+    #[test]
+    fn the_build_has_our_copy_unless_it_is_archived() {
+        let listing = serde_json::json!({ "releases": [
+            { "version": "1.1", "primary": true, "links": [{ "url": "/api/download/v/9" }, { "url": "https://gofile.io/d/x" }] },
+            { "version": "1.0", "archived": true, "links": [{ "url": "/api/download/v/8" }] },
+            { "version": "0.9", "links": [{ "url": "https://pixeldrain.com/u/old" }] },
+        ] });
+        assert!(has_own_copy(&listing, None));
+        assert!(!has_own_copy(&listing, Some("1.0")));
+        assert!(!has_own_copy(&listing, Some("0.9")));
+        assert!(!has_own_copy(&serde_json::json!({}), None));
+    }
+
+    /// Suggestion #110: a failed mirror goes on to the next source in the
+    /// player's order that the build has, then our own copy; never back to
+    /// one that failed, and nowhere when no order is set (as before).
+    #[test]
+    fn a_failed_mirror_hands_on_down_the_players_order() {
+        let order: Vec<String> = ["Gofile", "Pixeldrain", "kryoto", "VikingFile"].map(String::from).into();
+        let has = ["Pixeldrain", "Gofile", "VikingFile"];
+        let next = |failed: &str, has: &[&str], ours: bool, tried: &[&str]| {
+            let tried: Vec<String> = tried.iter().map(|t| t.to_string()).collect();
+            next_source(&order, failed, has, ours, &tried)
+        };
+        assert_eq!(next("Gofile", &has, true, &["Gofile"]).as_deref(), Some("Pixeldrain"));
+        assert_eq!(next("Pixeldrain", &has, true, &["Gofile", "Pixeldrain"]).as_deref(), Some("kryoto"));
+        // A host the build lacks is passed over; the name's case does not matter.
+        assert_eq!(next("gofile", &["Gofile", "VikingFile"], true, &[]).as_deref(), Some("kryoto"));
+        // No copy of ours (an archived build): the mirror after it.
+        assert_eq!(next("Pixeldrain", &has, false, &["Pixeldrain"]).as_deref(), Some("VikingFile"));
+        // The last one in the order failed: our copy, as the fallback.
+        assert_eq!(next("VikingFile", &has, true, &["Gofile", "VikingFile"]).as_deref(), Some("kryoto"));
+        // A host picked by hand that the order leaves out: from the top.
+        assert_eq!(next("Buzzheavier", &has, true, &[]).as_deref(), Some("Gofile"));
+        // Our copy cut the download and a mirror took over (it counts as
+        // failed then), and that mirror failed too: the next mirror, never
+        // our copy again, so a row cannot go round the two for ever.
+        assert_eq!(next("Gofile", &has, true, &["kryoto", "Gofile"]).as_deref(), Some("Pixeldrain"));
+        assert_eq!(next("VikingFile", &has, true, &["kryoto", "Gofile", "Pixeldrain", "VikingFile"]), None);
+        // Everything tried: the failure stands.
+        assert_eq!(next("VikingFile", &has, false, &["VikingFile"]), None);
+        assert_eq!(next_source(&[], "Gofile", &has, true, &[]), None);
+    }
+
+    /// Suggestion #110: when our own server keeps cutting a download, the
+    /// mirrors are asked in the player's order, and never one that failed.
+    #[test]
+    fn our_copy_is_carried_on_from_mirrors_in_the_players_order() {
+        let pages = || ["https://pixeldrain.com/u/a", "https://buzzheavier.com/b", "https://gofile.io/d/c"].map(String::from).to_vec();
+        let order: Vec<String> = ["kryoto", "Gofile", "Pixeldrain"].map(String::from).into();
+        assert_eq!(pages_in_order(pages(), &order, &[]), ["https://gofile.io/d/c", "https://pixeldrain.com/u/a", "https://buzzheavier.com/b"]);
+        assert_eq!(pages_in_order(pages(), &order, &["gofile".into()]), ["https://pixeldrain.com/u/a", "https://buzzheavier.com/b"]);
+        // No order: kryo.to's, as before.
+        assert_eq!(pages_in_order(pages(), &[], &["kryoto".into()]), pages());
+    }
+
+    /// Suggestion #110: a mirror's failure is handed on when its copy is gone
+    /// for good, or when none of the file is here yet. Part of a file is never
+    /// thrown away for a timeout or a refusal that a Retry may get past.
+    #[test]
+    fn only_a_failing_source_is_handed_on() {
+        let fatal = |code| match check_status(code) {
+            Err(Transfer::Fatal(e)) => e,
+            _ => String::new(),
+        };
+        let filez_refused = "filez.stream refused the download twice (it answered 403). Its check is tied to the network that passed it: press Retry, or take another mirror.";
+        for gone in [fatal(404), fatal(451), web_page_sent("VikingFile"), check_head("x.7z", &[0u8; 32], 10, "Gofile").unwrap_err(), "The file is gone from filez.stream. Take another mirror.".into()] {
+            assert!(worth_handing_on(&gone, false, 30 << 30), "{gone}");
+        }
+        assert!(worth_handing_on("could not solve the page", true, 0));
+        assert!(worth_handing_on(&refused_text(403, true), false, 0));
+        assert!(worth_handing_on(filez_refused, false, 0));
+        // 30 GB here: the error stands, and Retry carries on.
+        assert!(!worth_handing_on("the page timed out", true, 30 << 30));
+        assert!(!worth_handing_on(&refused_text(403, true), false, 30 << 30));
+        assert!(!worth_handing_on(filez_refused, false, 30 << 30));
+        assert!(!worth_handing_on("Writing the download failed: the disk is full", false, 0));
+        assert!(!worth_handing_on("The connection kept dropping (the server answered 503). Resume to try again.", false, 0));
     }
 
     /// What the log says when a link never passes, without an address in it.
