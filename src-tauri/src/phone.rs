@@ -11,8 +11,8 @@
 //! both ways in. It never sees install paths, launch options or custom art:
 //! only what `PhoneGame` and `PhoneDownload` hold.
 
-use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,7 +31,13 @@ use crate::{library, logging, settings};
 const FIRST_PORT: u16 = 47821;
 const LAST_PORT: u16 = 47830;
 const CODE_LIFETIME: Duration = Duration::from_secs(10 * 60);
+/// Wrong codes in a row from one address before it has to wait.
 const MAX_FAILURES: u8 = 5;
+/// How long an address that got the code wrong too often waits.
+const WAIT_AFTER_FAILURES: Duration = Duration::from_secs(60);
+/// Wrong codes from every address together that burn the code, so several
+/// devices guessing at once still get only a few tries at a million codes.
+const MAX_FAILURES_IN_ALL: u8 = 20;
 /// `lastSeen` is written at most this often per phone.
 const TOUCH_EVERY: u64 = 60;
 
@@ -259,7 +265,11 @@ struct Inner {
     port: Option<u16>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     code: Option<(String, Instant)>,
+    /// Wrong codes for the live code, from every address.
     failures: u8,
+    /// Wrong codes in a row from each address, and when the last one came:
+    /// one device on the network cannot use up the phone's tries.
+    misses: HashMap<IpAddr, (u8, Instant)>,
 }
 
 #[derive(Default)]
@@ -268,6 +278,8 @@ pub struct PhoneState(Mutex<Inner>);
 #[derive(Debug, PartialEq, Eq)]
 enum CodeError {
     Wrong,
+    /// This address got it wrong too often; others can still pair.
+    Wait,
     TooMany,
 }
 
@@ -297,8 +309,13 @@ impl Inner {
     fn issue_code(&mut self, now: Instant) -> Result<String, String> {
         let code = random_code()?;
         self.code = Some((code.clone(), now));
-        self.failures = 0;
+        self.forget_failures();
         Ok(code)
+    }
+
+    fn forget_failures(&mut self) {
+        self.failures = 0;
+        self.misses.clear();
     }
 
     /// The live code, if any; an expired one is dropped.
@@ -309,22 +326,37 @@ impl Inner {
         self.code.as_ref().map(|(c, at)| (c.as_str(), CODE_LIFETIME.saturating_sub(now.saturating_duration_since(*at)).as_secs()))
     }
 
-    /// A right code works once. The fifth wrong try in a row burns the code.
-    fn take_code(&mut self, given: &str, now: Instant) -> Result<(), CodeError> {
+    /// A right code works once. The fifth wrong try in a row from one address
+    /// makes that address wait a minute; the twentieth from anyone burns the code.
+    fn take_code(&mut self, given: &str, from: IpAddr, now: Instant) -> Result<(), CodeError> {
+        if let Some((count, at)) = self.misses.get(&from).copied() {
+            if count >= MAX_FAILURES {
+                if now.saturating_duration_since(at) < WAIT_AFTER_FAILURES {
+                    return Err(CodeError::Wait);
+                }
+                self.misses.remove(&from);
+            }
+        }
         let right = self.live_code(now).is_some_and(|(c, _)| same(c, given.trim()));
         if right {
             self.code = None;
-            self.failures = 0;
+            self.forget_failures();
             return Ok(());
         }
         if self.code.is_none() {
             return Err(CodeError::Wrong);
         }
         self.failures += 1;
-        if self.failures >= MAX_FAILURES {
+        if self.failures >= MAX_FAILURES_IN_ALL {
             self.code = None;
-            self.failures = 0;
+            self.forget_failures();
             return Err(CodeError::TooMany);
+        }
+        let (count, at) = self.misses.entry(from).or_insert((0, now));
+        *count += 1;
+        *at = now;
+        if *count >= MAX_FAILURES {
+            return Err(CodeError::Wait);
         }
         Err(CodeError::Wrong)
     }
@@ -432,15 +464,18 @@ struct GameBody {
     id: String,
 }
 
-async fn pair(AxumState(app): AxumState<AppHandle>, body: String) -> Reply {
+async fn pair(AxumState(app): AxumState<AppHandle>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>, body: String) -> Reply {
     let body: PairBody = match parse(&body) {
         Ok(b) => b,
         Err(r) => return r,
     };
     let state = app.state::<PhoneState>();
-    match lock(&state).take_code(&body.code, Instant::now()) {
+    match lock(&state).take_code(&body.code, peer.ip(), Instant::now()) {
         Ok(()) => {}
         Err(CodeError::Wrong) => return fail(StatusCode::UNAUTHORIZED, "Wrong code."),
+        // Same status as a burnt code. An app that shows its own words for 429
+        // says to make a new code, and a new code ends the wait too.
+        Err(CodeError::Wait) => return fail(StatusCode::TOO_MANY_REQUESTS, "Too many wrong codes. Wait a minute and try again."),
         Err(CodeError::TooMany) => return fail(StatusCode::TOO_MANY_REQUESTS, "Too many tries. Make a new code on the PC."),
     }
     let made = (|| -> Result<(String, String), String> {
@@ -1141,6 +1176,29 @@ fn router(app: AppHandle) -> Router {
         .route("/v1/library/remove", post(library_remove))
         .route("/v1/achievements", post(achievements))
         .with_state(app)
+        .layer(axum::middleware::from_fn(only_by_address))
+}
+
+/// What a request names as this PC: an IP address, as Settings > Phone shows,
+/// or `localhost`, with or without a port. A web page that reached
+/// this PC by pointing its own domain here (DNS rebinding) names that domain.
+fn names_an_address(host: &str) -> bool {
+    let (name, port) = match host.rsplit_once(':') {
+        Some((name, port)) if !name.contains(':') || name.ends_with(']') => (name, Some(port)),
+        _ => (host, None),
+    };
+    let name = name.strip_prefix('[').and_then(|n| n.strip_suffix(']')).unwrap_or(name);
+    port.is_none_or(|p| p.parse::<u16>().is_ok()) && (name.eq_ignore_ascii_case("localhost") || name.parse::<IpAddr>().is_ok())
+}
+
+/// Requests that call this PC by a name get nothing. Browsers always say the
+/// host; a request that names none is not from a web page and goes on.
+async fn only_by_address(request: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let host = request.headers().get(axum::http::header::HOST).map(|h| h.to_str().unwrap_or_default());
+    if host.is_some_and(|h| !names_an_address(h)) {
+        return axum::response::IntoResponse::into_response(fail(StatusCode::FORBIDDEN, "Use this PC's address, not a name."));
+    }
+    next.run(request).await
 }
 
 /// Listen on the first free port from 47821. Already running: the same port.
@@ -1170,7 +1228,8 @@ fn start(app: &AppHandle) -> Result<u16, String> {
             Ok(l) => l,
             Err(e) => return logging::error("phone", &e.to_string()),
         };
-        let served = axum::serve(listener, router(app)).with_graceful_shutdown(async move {
+        // Each request knows the address it came from: wrong codes count per device.
+        let served = axum::serve(listener, router(app).into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(async move {
             let _ = rx.await;
         });
         if let Err(e) = served.await {
@@ -1191,7 +1250,7 @@ fn stop_server(app: &AppHandle) {
     }
     inner.port = None;
     inner.code = None;
-    inner.failures = 0;
+    inner.forget_failures();
 }
 
 /// At launch: listen again if the player left it on.
@@ -1463,37 +1522,96 @@ mod tests {
         }
     }
 
+    const PHONE: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+    const OTHER: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 66));
+
+    fn wrong_for(code: &str) -> &'static str {
+        if code == "000000" { "000001" } else { "000000" }
+    }
+
     #[test]
     fn right_code_works_once() {
         let now = Instant::now();
         let (mut inner, code) = issued(now);
-        assert_eq!(inner.take_code(&code, now), Ok(()));
-        assert_eq!(inner.take_code(&code, now), Err(CodeError::Wrong));
+        assert_eq!(inner.take_code(&code, PHONE, now), Ok(()));
+        assert_eq!(inner.take_code(&code, PHONE, now), Err(CodeError::Wrong));
+    }
+
+    /// Another device on the network guessing makes only itself wait: the
+    /// phone being paired still gets in with the right code.
+    #[test]
+    fn five_wrong_tries_make_only_that_address_wait() {
+        let now = Instant::now();
+        let (mut inner, code) = issued(now);
+        let wrong = wrong_for(&code);
+        for _ in 0..4 {
+            assert_eq!(inner.take_code(wrong, OTHER, now), Err(CodeError::Wrong));
+        }
+        assert_eq!(inner.take_code(wrong, OTHER, now), Err(CodeError::Wait));
+        // Waiting, even the right code is not tried for it.
+        assert_eq!(inner.take_code(&code, OTHER, now + Duration::from_secs(30)), Err(CodeError::Wait));
+        assert_eq!(inner.take_code(&code, PHONE, now + Duration::from_secs(30)), Ok(()));
     }
 
     #[test]
-    fn five_wrong_tries_burn_the_code() {
+    fn the_wait_ends_after_a_minute() {
         let now = Instant::now();
         let (mut inner, code) = issued(now);
-        let wrong = if code == "000000" { "000001" } else { "000000" };
-        for _ in 0..4 {
-            assert_eq!(inner.take_code(wrong, now), Err(CodeError::Wrong));
+        let wrong = wrong_for(&code);
+        for _ in 0..5 {
+            let _ = inner.take_code(wrong, PHONE, now);
         }
-        assert_eq!(inner.take_code(wrong, now), Err(CodeError::TooMany));
+        let later = now + WAIT_AFTER_FAILURES;
+        // A fresh count: four more wrong tries before the next wait.
+        for _ in 0..4 {
+            assert_eq!(inner.take_code(wrong, PHONE, later), Err(CodeError::Wrong));
+        }
+        assert_eq!(inner.take_code(&code, PHONE, later), Ok(()));
+    }
+
+    /// However many addresses guess, the code takes twenty wrong tries in all.
+    #[test]
+    fn twenty_wrong_tries_from_anyone_burn_the_code() {
+        let now = Instant::now();
+        let (mut inner, code) = issued(now);
+        let wrong = wrong_for(&code);
+        for i in 1..20 {
+            assert_eq!(inner.take_code(wrong, IpAddr::V4(Ipv4Addr::new(10, 0, 0, i)), now), Err(CodeError::Wrong));
+        }
+        assert_eq!(inner.take_code(wrong, OTHER, now), Err(CodeError::TooMany));
         // The right code no longer works either.
-        assert_eq!(inner.take_code(&code, now), Err(CodeError::Wrong));
+        assert_eq!(inner.take_code(&code, PHONE, now), Err(CodeError::Wrong));
+        // One address, waiting a minute between rounds, gets there too.
+        let (mut inner, code) = issued(now);
+        let wrong = wrong_for(&code);
+        let results: Vec<_> = (0..20u64).map(|i| inner.take_code(wrong, OTHER, now + WAIT_AFTER_FAILURES * (i / 5) as u32)).collect();
+        assert_eq!(results.iter().filter(|r| **r == Err(CodeError::Wait)).count(), 3);
+        assert_eq!(results.last(), Some(&Err(CodeError::TooMany)));
     }
 
     #[test]
     fn a_right_code_resets_the_count() {
         let now = Instant::now();
         let (mut inner, code) = issued(now);
-        let wrong = if code == "000000" { "000001" } else { "000000" };
+        let wrong = wrong_for(&code);
         for _ in 0..4 {
-            let _ = inner.take_code(wrong, now);
+            let _ = inner.take_code(wrong, PHONE, now);
         }
-        assert_eq!(inner.take_code(&code, now), Ok(()));
+        let _ = inner.take_code(wrong, OTHER, now);
+        assert_eq!(inner.take_code(&code, PHONE, now), Ok(()));
         assert_eq!(inner.failures, 0);
+        assert!(inner.misses.is_empty());
+    }
+
+    #[test]
+    fn a_new_code_forgets_who_got_the_last_one_wrong() {
+        let now = Instant::now();
+        let (mut inner, code) = issued(now);
+        for _ in 0..5 {
+            let _ = inner.take_code(wrong_for(&code), PHONE, now);
+        }
+        let code = inner.issue_code(now).unwrap();
+        assert_eq!(inner.take_code(&code, PHONE, now), Ok(()));
     }
 
     #[test]
@@ -1501,8 +1619,20 @@ mod tests {
         let now = Instant::now();
         let (mut inner, code) = issued(now);
         let later = now + CODE_LIFETIME;
-        assert_eq!(inner.take_code(&code, later), Err(CodeError::Wrong));
+        assert_eq!(inner.take_code(&code, PHONE, later), Err(CodeError::Wrong));
         assert!(inner.live_code(later).is_none());
+    }
+
+    /// A page that pointed its own domain at this PC names that domain as the
+    /// host; the phone names one of the addresses it was given.
+    #[test]
+    fn only_requests_naming_an_address_are_answered() {
+        for ok in ["192.168.1.5:47821", "192.168.1.5", "127.0.0.1:47821", "localhost:47821", "LOCALHOST", "[::1]:47821", "[::1]"] {
+            assert!(names_an_address(ok), "{ok}");
+        }
+        for no in ["evil.example:47821", "evil.example", "192.168.1.5.nip.io:47821", "localhost.evil.example", "my-pc.local:47821", "", "192.168.1.5:", "192.168.1.5:99999", "[::1]:x", "1.2.3.4:80:80"] {
+            assert!(!names_an_address(no), "{no}");
+        }
     }
 
     #[test]
