@@ -175,18 +175,27 @@ async fn page(client: &reqwest::Client, url: &str, referer: Option<&str>) -> Res
     Ok((status, body))
 }
 
+/// The game's title as online-fix.me writes it. The site is Latin only:
+/// "Call of Duty®: Black Ops III" finds nothing with its ®, and "Rise of the
+/// Rōnin" is found as "Rise of the Ronin", never as "Rise of the Rnin". A
+/// letter with no plain spelling splits the word instead of joining its two
+/// halves: the search finds "Rise of the R nin" but not "Rise of the Rnin".
+fn site_title(title: &str) -> String {
+    let plain = crate::downloads::latin_with(title, |c| if c.is_alphabetic() { " " } else { "" });
+    plain.chars().filter(|c| !c.is_ascii_control()).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Ask online-fix.me what it has for this game.
 async fn look_up(title: &str, slug: Option<&str>, installed: Option<&str>) -> Lookup {
     let Ok(client) = client() else { return unreachable("no network client".into()) };
-    // The site's search is Latin: "Call of Duty®: Black Ops III" finds nothing with its ®.
-    let query: String = title.chars().filter(|c| c.is_ascii() && !c.is_ascii_control()).collect();
-    let search = format!("{}/index.php?do=search&subaction=search&story={}", fixsite::SITE, url::form_urlencoded::byte_serialize(query.trim().as_bytes()).collect::<String>());
+    let title = site_title(title);
+    let search = format!("{}/index.php?do=search&subaction=search&story={}", fixsite::SITE, url::form_urlencoded::byte_serialize(title.as_bytes()).collect::<String>());
     let html = match page(&client, &search, None).await {
         Ok((_, h)) => h,
         Err(e) => return unreachable(e),
     };
     let pages = fixsite::parse_search(&html);
-    let Some(found) = fixsite::pick_page(title, slug, &pages) else { return Lookup { status: "none", ..Default::default() } };
+    let Some(found) = fixsite::pick_page(&title, slug, &pages) else { return Lookup { status: "none", ..Default::default() } };
     let page_url = found.url.clone();
     let html = match page(&client, &page_url, None).await {
         Ok((_, h)) => h,
@@ -504,6 +513,22 @@ mod tests {
         assert!(!carried_by(&["Steam + Kryoto Online"], &[], false));
         assert!(!carried_by(&["Steam + gbe_fork"], &["Game/Steamless.exe".into()], false));
         assert!(!carried_by(&["Software"], &[], false), "ofme only as a word");
+    }
+
+    #[test]
+    fn an_accented_title_is_looked_up_in_plain_letters() {
+        assert_eq!(site_title("Rise of the Rōnin"), "Rise of the Ronin");
+        assert_eq!(site_title("Brütal Legend"), "Brutal Legend");
+        assert_eq!(site_title("Call of Duty®: Black Ops III "), "Call of Duty: Black Ops III");
+        assert_eq!(site_title("Ștefan și Țara"), "Stefan si Tara");
+        // A decomposed accent is left out; its letter stays.
+        assert_eq!(site_title("Rise of the Ro\u{304}nin"), "Rise of the Ronin");
+        // A letter with no plain spelling splits the word; other scripts go.
+        assert_eq!(site_title("Ti\u{1EBF}ng Vi\u{1EC7}t"), "Ti ng Vi t");
+        assert_eq!(site_title("Ōkami 大神"), "Okami");
+        // Its page is found by title, though its slug ends in -po-seti, not -online.
+        let pages = vec![fixsite::Page { title: "Rise of the Ronin   ".into(), url: "https://online-fix.me/games/rpg/17719-rise-of-the-ronin-po-seti.html".into() }];
+        assert!(fixsite::pick_page(&site_title("Rise of the Rōnin"), None, &pages).is_some());
     }
 
     #[test]
