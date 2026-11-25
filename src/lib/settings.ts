@@ -69,6 +69,11 @@ export type Settings = {
   linuxGamemode: boolean
   /** Linux: Proton-GE's FSR upscaling at lower fullscreen resolutions. */
   linuxFsr: boolean
+  /**
+   * Linux: the welcome screen's wall and the Store's animations hold still.
+   * Null until the player picks: then on while drawing on the CPU (`stillBackgrounds`).
+   */
+  stillBackgrounds?: boolean | null
   /** The name in games: your K// username, `playerName`, or each build's own. */
   playerNameMode: PlayerNameMode
   playerName: string
@@ -313,6 +318,16 @@ export const displayApi = {
   setMode: (mode: DisplayMode) => call<void>('display_set_mode', { mode }),
 }
 
+/**
+ * Still backgrounds (Linux): the player's choice, else on while every frame is
+ * drawn on the CPU, where a moving wall costs the processor (display_env.rs
+ * `still_backgrounds`). Always off outside Linux, where there is no display state.
+ */
+export function stillBackgrounds(s: Pick<Settings, 'stillBackgrounds'> | null, state: DisplayState | null): boolean {
+  if (!state) return false
+  return s?.stillBackgrounds ?? state.onCpu ?? false
+}
+
 /** The Linux build's display state, read again once the shell says what drew it (`display-state`). Null elsewhere. */
 export function useDisplayState(): DisplayState | null {
   const [state, setState] = useState<DisplayState | null>(null)
@@ -331,6 +346,11 @@ export function useDisplayState(): DisplayState | null {
     }
   }, [])
   return state
+}
+
+/** Whether moving backgrounds hold still here (`stillBackgrounds`). */
+export function useStillBackgrounds(): boolean {
+  return stillBackgrounds(useSettings(), useDisplayState())
 }
 
 /** Where saves or achievements are kept: kryo.to, this PC, or your own server. */

@@ -221,7 +221,9 @@
   .kryo-wall, .kryo-wall-track { animation: none !important; }
 }
 html[data-motion='reduced'] .kryo-wall,
-html[data-motion='reduced'] .kryo-wall-track { animation: none !important; }
+html[data-motion='reduced'] .kryo-wall-track,
+[data-still] .kryo-wall,
+[data-still] .kryo-wall-track { animation: none !important; }
 
 /* Motion, from the site's vocabulary. */
 @keyframes kryo-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }

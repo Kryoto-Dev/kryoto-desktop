@@ -178,6 +178,7 @@ const settings: Record<string, unknown> = {
   linuxMangohud: false,
   linuxGamemode: false,
   linuxFsr: false,
+  stillBackgrounds: null,
   gameLanguage: '',
   cloudSaves: true,
   cloudSavesOnExit: true,
