@@ -22,7 +22,7 @@
 //!   its own channel only ever offers more previews.
 
 use std::cmp::Ordering;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -191,7 +191,11 @@ fn path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
 }
 
 fn load<R: Runtime>(app: &AppHandle<R>) -> Option<Kept> {
-    serde_json::from_slice(&std::fs::read(path(app)?).ok()?).ok()
+    read(&path(app)?)
+}
+
+fn read(file: &Path) -> Option<Kept> {
+    serde_json::from_slice(&std::fs::read(file).ok()?).ok()
 }
 
 fn save<R: Runtime>(app: &AppHandle<R>, kept: &Kept) {
@@ -228,6 +232,31 @@ async fn fetch<R: Runtime>(app: &AppHandle<R>) -> Result<Answer, String> {
     // Only what could be a version and one short sentence is kept.
     let clip = |v: Option<String>, n: usize| v.map(|s| s.trim().chars().take(n).collect::<String>()).filter(|s| !s.is_empty());
     Ok(Answer { min: clip(answer.min, 32), reason: clip(answer.reason, 300), latest: clip(answer.latest, 32) })
+}
+
+/// At start, before the phone, Remote or the window can ask for anything: the
+/// answer kept from last time holds (for at most its week) until kryo.to
+/// answers. Without it a blocked copy did whatever came in while the first
+/// check was still waiting on kryo.to (up to its 15 seconds).
+pub fn init<R: Runtime>(app: &AppHandle<R>) {
+    let current = app.package_info().version.to_string();
+    hold(at_start(&current, path(app).as_deref(), now_secs()));
+}
+
+/// What holds at start: the answer kept in `file`, by the same rules as when
+/// kryo.to cannot be reached. A blocked copy says so in the log here: the
+/// first check only logs a change, so the line that explains every refusal
+/// would otherwise be missing from that session's log.
+fn at_start(current: &str, file: Option<&Path>, now: u64) -> Required {
+    let required = decide(current, file.and_then(read).as_ref(), now, false);
+    if required.blocked {
+        crate::logging::warn("required", &format!("this version ({current}) is older than the oldest allowed ({}), as kryo.to last said: only updating and playing", required.min.as_deref().unwrap_or("?")));
+    }
+    required
+}
+
+fn hold(required: Required) {
+    *NOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(required);
 }
 
 /// Ask kryo.to now, keep the answer, and tell the shell when it changes.
@@ -268,6 +297,17 @@ pub async fn required_check(webview: Webview) -> Result<Required, String> {
         return Err("Only the app itself asks.".into());
     }
     Ok(check(webview.app_handle()).await)
+}
+
+/// What holds now, without asking kryo.to: at start, the answer kept from
+/// last time, so the shell shows the update screen at once rather than after
+/// the first check. Its own view only.
+#[tauri::command]
+pub fn required_held(webview: Webview) -> Result<Option<Required>, String> {
+    if webview.label() != "main" {
+        return Err("Only the app itself asks.".into());
+    }
+    Ok(NOW.lock().unwrap_or_else(|e| e.into_inner()).clone())
 }
 
 static STORE_ASKED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
@@ -367,8 +407,35 @@ mod tests {
     fn only_harmful_actions_are_refused_while_blocked() {
         assert!(refusal(Some(&Required { blocked: true, ..Default::default() })).is_err());
         assert!(refusal(Some(&Required { blocked: false, ..Default::default() })).is_ok());
-        // Never asked yet (the first check still running): nothing is held up.
+        // Nothing read yet (before `init`): nothing is held up.
         assert!(refusal(None).is_ok());
+    }
+
+    #[test]
+    fn the_answer_kept_from_last_time_refuses_from_the_start() {
+        let dir = std::env::temp_dir().join(format!("kry-required-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(FILE);
+        let day = 86_400;
+        let now = 1_000_000_000;
+        // kryo.to blocked this version yesterday: blocked from the start.
+        std::fs::write(&file, serde_json::to_vec(&kept(Some("0.4.0"), Some("0.4.0"), now - day)).unwrap()).unwrap();
+        let start = at_start("0.3.11", Some(&file), now);
+        assert!(start.blocked && start.offline);
+        hold(start);
+        let refused = refuse();
+        *NOW.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        assert!(refused.is_err());
+        // The same rules as offline: a week at most, and not from a clock gone back.
+        assert!(!at_start("0.3.11", Some(&file), now + 7 * day).blocked);
+        assert!(!at_start("0.3.11", Some(&file), now - 3 * day).blocked);
+        // An updated copy, nothing kept, or a damaged file: nothing is held up.
+        assert!(!at_start("0.4.0", Some(&file), now).blocked);
+        std::fs::write(&file, "damaged").unwrap();
+        assert!(!at_start("0.3.11", Some(&file), now).blocked);
+        assert!(!at_start("0.3.11", Some(&dir.join("missing.json")), now).blocked);
+        assert!(!at_start("0.3.11", None, now).blocked);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
