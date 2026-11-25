@@ -291,6 +291,8 @@ export type DisplayState = {
   drawing?: Drawing | null
   /** Every frame is drawn on the CPU: Compatible, or a software renderer. */
   onCpu?: boolean
+  /** Automatic on NVIDIA, and WebGL did not get the driver (KB-0377): the window may stay black. */
+  mayStayBlack?: boolean
 }
 
 /**

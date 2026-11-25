@@ -646,8 +646,10 @@ function GraphicsSection({ s, set }: { s: Settings; set: <K extends keyof Settin
           Drawing on the CPU: the graphics driver is not in use.{state.renderer ? ` WebGL's renderer is ${state.renderer}.` : ''}
         </p>
       ) : null}
-      {/* KB-0377: a window that turns black cannot reach this page. */}
-      <p className="text-[11px] text-muted-foreground">
+      {/* KB-0377: a window that turns black cannot reach this page. Said
+          plainly when WebGL did not get the driver on Automatic and NVIDIA. */}
+      <p className={state.mayStayBlack ? 'text-[11px] text-foreground' : 'text-[11px] text-muted-foreground'}>
+        {state.mayStayBlack ? 'WebGL could not use the NVIDIA driver, so the window may stay black until something moves. ' : ''}
         Window black or flickering? The tray icon&apos;s menu has Start in compatible graphics, or start Kryoto with{' '}
         <code className="select-text">--safe-graphics</code>.
       </p>
