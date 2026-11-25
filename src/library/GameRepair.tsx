@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { call, on } from '@/lib/bridge'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { call, errorText, on } from '@/lib/bridge'
 import { fetchCatalogGame, library } from '@/lib/library'
 import { openExternal, openStorePage } from '@/lib/window'
-import { ExternalLink, TriangleAlert } from '@/ui/pixel-icons'
+import { ExternalLink, RotateCcw, TriangleAlert } from '@/ui/pixel-icons'
 import { Busy, Button } from '@/ui'
 import { RepairPanel, type RepairBackend, type RepairProgress } from './RepairPanel'
 import { EmulatorRow } from './EmulatorRow'
@@ -12,7 +12,8 @@ import { KryoFix } from './KryoFix'
 /**
  * The auto-fixer for one installed game. With `slug`, kryo.to is asked first
  * whether its release is one the auto-fixer cannot fix (lib/autofix.ts): then
- * the release's notice shows instead, and nothing offers to repair it.
+ * the release's notice shows instead, and nothing offers to repair it; only
+ * Back to the release's own files stays, for what Kryoto changed before.
  * `onLeave` closes whatever holds this before its kryo.to page opens.
  * `view="row"`: Properties' Emulator row (EmulatorRow.tsx) and Online fix row
  * (OnlineFixRow.tsx) instead of the panel.
@@ -60,6 +61,7 @@ export function GameRepair({ gameId, slug = null, initialOnline = false, purpose
         <p className="max-w-sm text-xs leading-relaxed text-foreground">{blocked.notice}</p>
         {blocked.reason ? <p className="max-w-sm text-[11px] leading-relaxed text-foreground">Why: {blocked.reason}</p> : null}
         <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">Kryoto&apos;s repair is off for this release. Still stuck? Ask on its kryo.to page or in support.</p>
+        <BackToOwnFiles gameId={gameId} backend={backend} />
         {slug ? (
           <Button size="sm" variant="outline" onClick={() => { onLeave?.(); openStorePage(`/game/${slug}`) }}>
             <ExternalLink className="size-3.5" aria-hidden /> Its kryo.to page
@@ -88,4 +90,62 @@ export function GameRepair({ gameId, slug = null, initialOnline = false, purpose
     )
   }
   return <RepairPanel backend={backend} initialOnline={initialOnline} purpose={purpose} />
+}
+
+/**
+ * On a release the auto-fixer is off for, the one way out that stays: files
+ * Kryoto changed before kryo.to marked it (a repair, a switch, kryo.to's own
+ * fix) go back to the release's own. A Phantom Blade Zero player repaired
+ * before the mark could otherwise only reinstall. Nothing new goes in here.
+ */
+function BackToOwnFiles({ gameId, backend }: { gameId: string; backend: RepairBackend }) {
+  const [undo, setUndo] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [done, setDone] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const load = useCallback(() => {
+    void library
+      .emulators(gameId)
+      .then((s) => setUndo(s.undo))
+      .catch(() => setUndo(false))
+  }, [gameId])
+  useEffect(() => {
+    load()
+    let stop: (() => void) | undefined
+    let cancelled = false
+    // kryo.to's fix applied below, or Undo from elsewhere: read again.
+    void on('library-changed', load).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [load])
+  const restore = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await backend.undo()
+      setDone(true)
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setBusy(false)
+      load()
+    }
+  }
+  if (!undo && !done && !error) return null
+  return (
+    <div className="grid justify-items-center gap-2">
+      {undo ? (
+        <>
+          <p className="max-w-sm text-[11px] leading-relaxed text-muted-foreground">Kryoto changed this game&apos;s files before. You can still put the release&apos;s own back.</p>
+          <Button size="sm" variant="outline" disabled={busy} busy={busy} onClick={() => void restore()}>
+            <RotateCcw className="size-3.5" aria-hidden /> Back to the release&apos;s own files
+          </Button>
+        </>
+      ) : null}
+      {done && !undo ? <p role="status" className="text-xs text-foreground">The release&apos;s own files are back.</p> : null}
+      {error ? <p role="alert" className="max-w-sm break-words text-xs text-destructive">{error}</p> : null}
+    </div>
+  )
 }

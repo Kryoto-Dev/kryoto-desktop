@@ -698,6 +698,44 @@ try {
       assert.equal(await linux.getByText('On Linux', { exact: true }).count(), 0)
     } finally { await context.close() }
   })
+  await check("a release the auto-fixer is off for still takes what Kryoto put in back out", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 860 } })
+    await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+    page.on('pageerror', e => failures.push(e.message))
+    // kryo.to marks the release only after the player switched its emulator.
+    let marked = false
+    await page.route('**/api/games/celeste', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: { 'access-control-allow-origin': '*' },
+      body: JSON.stringify({ game: { title: 'Celeste', source: 'Steam + gbe_fork' }, ...(marked ? { hypervisor: true } : {}) }),
+    }))
+    try {
+      await page.goto(base)
+      await page.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Celeste', exact: true }).click()
+      const region = page.getByRole('region', { name: 'Celeste', exact: true })
+      const dialog = page.getByRole('dialog', { name: 'Celeste', exact: true })
+      const open = async () => {
+        await region.getByLabel('Manage', { exact: true }).click()
+        await page.getByRole('menuitem', { name: 'Properties', exact: true }).click()
+        await dialog.getByRole('button', { name: 'Emulator & fixes', exact: true }).click()
+      }
+      const back = dialog.getByRole('button', { name: "Back to the release's own files", exact: true })
+      await open()
+      await dialog.getByRole('list', { name: 'Switch to', exact: true }).getByRole('button', { name: 'Switch', exact: true }).first().click()
+      await back.waitFor()
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+      await dialog.waitFor({ state: 'hidden' })
+      marked = true
+      await open()
+      await dialog.getByText("Kryoto's repair is off for this release", { exact: false }).waitFor()
+      await back.waitFor()
+      assert.equal(await dialog.getByRole('list', { name: 'Switch to', exact: true }).count(), 0)
+      await back.click()
+      await dialog.getByText("The release's own files are back.", { exact: true }).waitFor()
+      assert.equal(await back.count(), 0)
+    } finally { await page.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
