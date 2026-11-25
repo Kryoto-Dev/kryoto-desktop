@@ -543,6 +543,43 @@ try {
       await saver.evaluate(() => window.stopSaver())
     } finally { await saver.close() }
   })
+  await check('the screensaver redraws for a new palette, not for every write to the page class', async () => {
+    const saver = await saverPage()
+    try {
+      const drawn = await saver.evaluate(async () => {
+        // Sprites are drawn into a sheet that is never on the page: count those draws.
+        let sprites = 0
+        const ctx = CanvasRenderingContext2D.prototype
+        for (const name of ['fill', 'fillText']) {
+          const draw = ctx[name]
+          ctx[name] = function (...args) {
+            if (!this.canvas.isConnected) sprites++
+            return draw.apply(this, args)
+          }
+        }
+        const wait = ms => new Promise(r => setTimeout(r, ms))
+        const during = async (fn) => {
+          sprites = 0
+          const churn = fn && setInterval(fn, 16)
+          await wait(1000)
+          clearInterval(churn)
+          return sprites
+        }
+        const stop = window.saverFixture.mount('mark')
+        await wait(800)
+        const still = await during()
+        // What pad-nav does on every mouse move.
+        const moves = await during(() => document.documentElement.classList.remove('kryo-pad'))
+        document.documentElement.style.setProperty('--primary', 'rgb(200, 40, 40)')
+        const palette = await during()
+        stop()
+        return { still, moves, palette, frames: window.saverFixture.frames }
+      })
+      assert(drawn.frames > 20, `${drawn.frames} frames`)
+      assert(drawn.moves <= drawn.still + 10, `sprites drawn again on mouse moves: ${JSON.stringify(drawn)}`)
+      assert(drawn.palette > 0, `a new palette redraws: ${JSON.stringify(drawn)}`)
+    } finally { await saver.close() }
+  })
   await check('a Settings switch does not undo where saves are kept, chosen on the same page', async () => {
     const cloud = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     cloud.on('pageerror', e => failures.push(e.message))
