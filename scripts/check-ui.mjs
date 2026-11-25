@@ -714,6 +714,34 @@ try {
       await shell.waitForFunction(() => [...document.querySelectorAll('button[aria-current="page"]')].some(b => b.textContent === 'Community'))
     } finally { await shell.close() }
   })
+  await check('a Preview report keeps its text when closed, for that account only, and starts empty once sent', async () => {
+    const ui = await browser.newPage()
+    ui.on('pageerror', e => failures.push(e.message))
+    try {
+      await ui.goto(`${base}/test/ui.html`)
+      await ui.locator('#report').click()
+      const dialog = ui.getByRole('dialog', { name: 'Report a bug', exact: true })
+      await dialog.getByRole('textbox', { name: 'What happened', exact: true }).fill('The Store went white')
+      await dialog.getByRole('textbox', { name: 'Steps to see it', exact: true }).fill('Open Downloads')
+      // Closed at once, before the pause that saves it.
+      await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+      await dialog.waitFor({ state: 'detached' })
+      // Another account signed in on this PC starts empty: the report would go out under its name.
+      await ui.locator('#report-other').click()
+      assert.equal(await dialog.getByRole('textbox', { name: 'What happened', exact: true }).inputValue(), '')
+      await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+      await dialog.waitFor({ state: 'detached' })
+      await ui.locator('#report').click()
+      assert.equal(await dialog.getByRole('textbox', { name: 'What happened', exact: true }).inputValue(), 'The Store went white')
+      assert.equal(await dialog.getByRole('textbox', { name: 'Steps to see it', exact: true }).inputValue(), 'Open Downloads')
+      await dialog.getByRole('button', { name: 'Send the report' }).click()
+      await dialog.getByText('Sent. Thank you.').waitFor()
+      await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+      await dialog.waitFor({ state: 'detached' })
+      await ui.locator('#report').click()
+      assert.equal(await dialog.getByRole('textbox', { name: 'What happened', exact: true }).inputValue(), '')
+    } finally { await ui.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
