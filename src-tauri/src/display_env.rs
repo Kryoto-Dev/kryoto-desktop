@@ -314,6 +314,49 @@ pub fn modules_have_nvidia(modules: &str) -> bool {
     modules.lines().any(|l| l.split_whitespace().next() == Some("nvidia"))
 }
 
+// ---- What actually draws (report-A, KB-0377) ----------------------------
+//
+// The mode says what WebKit was asked for, not what it got. The AppImage's
+// WebKit can fail to load the system's GL (a rolling distribution, NVIDIA's
+// driver) and fall back to Mesa's software rasterizer without a word, so every
+// mode draws on the CPU and none of them helps. The shell asks WebGL, once at
+// start, which renderer it got (`display_rendered`).
+
+/// What drew the shell's first frame, by WebGL's word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Drawing {
+    /// A graphics driver.
+    Gpu,
+    /// Mesa's software rasterizer: the graphics driver is not in use.
+    Cpu,
+    /// WebGL did not start at all. Expected with compositing off (Compatible).
+    NoWebgl,
+    /// WebGL started but did not name its renderer.
+    Unknown,
+}
+
+/// From WebGL's `UNMASKED_RENDERER_WEBGL`: llvmpipe, softpipe and swrast are
+/// Mesa drawing on the CPU, and some drivers just say "Software Rasterizer".
+pub fn drawing_of(webgl: bool, renderer: Option<&str>) -> Drawing {
+    if !webgl {
+        return Drawing::NoWebgl;
+    }
+    let Some(name) = renderer.map(str::trim).filter(|r| !r.is_empty()) else { return Drawing::Unknown };
+    let name = name.to_ascii_lowercase();
+    if ["llvmpipe", "softpipe", "swrast", "software"].iter().any(|s| name.contains(s)) {
+        Drawing::Cpu
+    } else {
+        Drawing::Gpu
+    }
+}
+
+/// Every frame is drawn on the CPU: compositing is off (Compatible), or WebGL
+/// says its renderer is a software one.
+pub fn on_cpu(compositing_off: bool, drawing: Option<Drawing>) -> bool {
+    compositing_off || drawing == Some(Drawing::Cpu)
+}
+
 // ---- The machine (Linux) ------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
@@ -326,12 +369,18 @@ pub struct DisplayState {
     pub healed: bool,
     /// The AppImage, with its own WebKit: it plays no video (ReleaseIntro.tsx, KB-0259).
     pub appimage: bool,
+    /// WebGL's renderer, once the shell has drawn and said (`display_rendered`).
+    pub renderer: Option<String>,
+    pub drawing: Option<Drawing>,
+    /// Every frame is drawn on the CPU (`on_cpu`): Still backgrounds is on by default.
+    pub on_cpu: bool,
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
 
     pub static STATE: OnceLock<DisplayState> = OnceLock::new();
@@ -652,7 +701,61 @@ mod linux {
             let _ = std::fs::write(f, "starting");
         }
         let mode = if p.healed { Mode::Compatible } else { saved };
-        let _ = STATE.set(DisplayState { mode, reason: p.reason, healed: p.healed, appimage: facts.appimage });
+        let _ = STATE.set(DisplayState {
+            mode,
+            reason: p.reason,
+            healed: p.healed,
+            appimage: facts.appimage,
+            renderer: None,
+            drawing: None,
+            on_cpu: false,
+        });
+    }
+
+    /// What WebGL said drew the first frame (`display_rendered`), once.
+    pub static RENDERER: OnceLock<(Drawing, Option<String>)> = OnceLock::new();
+
+    /// The shell was told to ask WebGL (`display_webgl_ask`).
+    pub static ASKED: AtomicBool = AtomicBool::new(false);
+
+    /// The shell was told to ask WebGL and never said what it got: its page
+    /// loaded again first, so its process ended, most likely as WebGL started.
+    pub fn unanswered() -> bool {
+        ASKED.load(Ordering::SeqCst) && RENDERER.get().is_none()
+    }
+
+    /// WebKit was told to draw every frame on the CPU (Compatible, or the
+    /// person's own variable).
+    pub fn compositing_off() -> bool {
+        std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some_and(|v| !v.is_empty() && v != "0")
+    }
+
+    /// This run's state, with what WebGL said once it has.
+    pub fn current() -> Option<DisplayState> {
+        let mut s = STATE.get().cloned()?;
+        if let Some((drawing, renderer)) = RENDERER.get() {
+            s.drawing = Some(*drawing);
+            s.renderer = renderer.clone();
+        }
+        s.on_cpu = on_cpu(compositing_off(), s.drawing);
+        Some(s)
+    }
+
+    /// The shell drew and asked WebGL what drew it. Logged beside the mode
+    /// line, so a report shows at once whether the driver was in use.
+    pub fn note_renderer(webgl: bool, renderer: Option<String>) {
+        let renderer = renderer.map(|r| r.trim().chars().take(200).collect::<String>()).filter(|r| !r.is_empty());
+        let drawing = drawing_of(webgl, renderer.as_deref());
+        if RENDERER.set((drawing, renderer.clone())).is_err() {
+            return;
+        }
+        let how = super::describe().unwrap_or_default();
+        let name = renderer.as_deref().unwrap_or("not named");
+        match drawing {
+            Drawing::Cpu => crate::logging::warn("display", &format!("drawing on the CPU: WebGL's renderer is {name}, so the graphics driver is not in use ({how})")),
+            Drawing::NoWebgl => crate::logging::info("display", &format!("WebGL did not start ({how})")),
+            Drawing::Gpu | Drawing::Unknown => crate::logging::info("display", &format!("WebGL's renderer: {name} ({how})")),
+        }
     }
 }
 
@@ -744,7 +847,7 @@ pub fn watch_crashes(view: &tauri::Webview) {
                 v.0 += 1;
                 *v
             });
-            let on_cpu = std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some_and(|v| !v.is_empty() && v != "0");
+            let on_cpu = linux::compositing_off();
             let relaunched = std::env::var_os(RELAUNCHED).is_some();
             let step = crash_step(in_a_row, now.saturating_sub(last_reload), on_cpu, relaunched);
             crate::logging::error(
@@ -816,20 +919,50 @@ fn tell_it_cannot_draw(app: &tauri::AppHandle, wv: &webkit2gtk::WebView, quit: b
 #[cfg(not(target_os = "linux"))]
 pub fn watch_crashes(_view: &tauri::Webview) {}
 
-/// The shell drew its first frame: this start worked.
+/// Whether the shell asks WebGL what draws it: on Linux, once per run.
+/// Asking makes a WebGL context, which on a broken driver can end the page's
+/// process. The page loaded again after that is not asked a second time, or
+/// it would crash again soon after its reload and stay dead (`crash_step`).
 #[tauri::command]
-pub fn display_rendered() {
+pub fn display_webgl_ask() -> bool {
     #[cfg(target_os = "linux")]
-    if let Some(f) = linux::probe_file() {
-        let _ = std::fs::remove_file(f);
+    let ask = !linux::ASKED.swap(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(target_os = "linux"))]
+    let ask = false;
+    ask
+}
+
+/// The shell drew its first frame: this start worked. When it was told to
+/// ask (`display_webgl_ask`), it says what WebGL got (`webgl`, `renderer`).
+#[tauri::command]
+pub fn display_rendered(app: tauri::AppHandle, webgl: Option<bool>, renderer: Option<String>) {
+    #[cfg(target_os = "linux")]
+    {
+        use tauri::Emitter;
+        let webgl = match webgl {
+            None if linux::unanswered() => {
+                crate::logging::warn("display", "the shell's page loaded again before WebGL said what draws it: its process likely ended as WebGL started");
+                Some(false)
+            }
+            webgl => webgl,
+        };
+        if let Some(webgl) = webgl {
+            linux::note_renderer(webgl, renderer);
+            let _ = app.emit_to("main", "display-state", ());
+        }
+        if let Some(f) = linux::probe_file() {
+            let _ = std::fs::remove_file(f);
+        }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (app, webgl, renderer);
 }
 
 /// What Settings shows: the saved mode and what this run uses. None off Linux.
 #[cfg(target_os = "linux")]
 #[tauri::command]
 pub fn display_state() -> Option<DisplayState> {
-    linux::STATE.get().cloned().map(|mut s| {
+    linux::current().map(|mut s| {
         s.mode = linux::saved_mode();
         s
     })
@@ -1057,6 +1190,31 @@ mod tests {
         assert!(c.contains("<include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>"));
         assert!(c.contains("<dir>/tmp/.mount_x/usr/share/kryoto/fonts</dir>"));
         assert!(c.contains("<glob>/usr/share/fonts/a&amp;b/Noto-COLRv1.ttf</glob>"));
+    }
+
+    /// report-A: the AppImage's WebKit on Mesa's software rasterizer looked
+    /// like a slow GPU, and no mode in Settings changed it.
+    #[test]
+    fn webgl_names_a_software_renderer() {
+        assert_eq!(drawing_of(true, Some("llvmpipe (LLVM 19.1.7, 256 bits)")), Drawing::Cpu);
+        assert_eq!(drawing_of(true, Some("softpipe")), Drawing::Cpu);
+        assert_eq!(drawing_of(true, Some("Mesa DRI swrast")), Drawing::Cpu);
+        assert_eq!(drawing_of(true, Some("Software Rasterizer")), Drawing::Cpu);
+        assert_eq!(drawing_of(true, Some("NVIDIA GeForce RTX 3070/PCIe/SSE2")), Drawing::Gpu);
+        assert_eq!(drawing_of(true, Some("AMD Radeon RX 7800 XT (radeonsi, navi32, LLVM 19.1.7, DRM 3.59)")), Drawing::Gpu);
+        // Not named, or no WebGL at all: nothing is claimed about the driver.
+        assert_eq!(drawing_of(true, Some("  ")), Drawing::Unknown);
+        assert_eq!(drawing_of(true, None), Drawing::Unknown);
+        assert_eq!(drawing_of(false, Some("llvmpipe")), Drawing::NoWebgl);
+    }
+
+    #[test]
+    fn compatible_or_a_software_renderer_is_the_cpu() {
+        assert!(on_cpu(true, None));
+        assert!(on_cpu(false, Some(Drawing::Cpu)));
+        assert!(!on_cpu(false, Some(Drawing::Gpu)));
+        assert!(!on_cpu(false, Some(Drawing::NoWebgl)));
+        assert!(!on_cpu(false, None));
     }
 
     #[test]

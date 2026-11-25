@@ -2391,6 +2391,7 @@ pub fn run() {
             required::store_required_check,
             store_mint_release,
             display_env::display_rendered,
+            display_env::display_webgl_ask,
             game_logs::game_logs,
             remote::remote_snapshot,
             remote::remote_phone_seen,
