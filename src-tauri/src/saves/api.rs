@@ -297,11 +297,42 @@ impl Api {
         let rules: Vec<_> = rules.iter().take(20).map(|r| json!({ "kind": r.kind, "root": r.root, "path": r.path, "excludes": r.excludes, "source": "detected" })).collect();
         self.send(self.http.post(self.url("/api/saves/rules/report")).json(&json!({ "gameKey": game_key, "rules": rules, "traced": traced }))).await.map(|_| ())
     }
+
+    /// Put a backup where `prepare` said: copied into the folder kept on this
+    /// PC, else sent to the web address (`upload_to_web`).
+    pub async fn upload(&self, url: &str, headers: &HashMap<String, String>, file: &Path, size: u64, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<(), String> {
+        match self.file_in_store(url)? {
+            Some(dest) => super::local::copy(file, &dest, size, sent).await.map(|_| ()),
+            None => upload_to_web(url, headers, file, size, sent).await,
+        }
+    }
+
+    /// Fetch a backup from where `link` said to `out`, refusing anything
+    /// bigger than `max`. `on_got(bytes so far, bytes in all)` follows it.
+    pub async fn download(&self, url: &str, out: &Path, max: u64, on_got: impl Fn(u64, u64)) -> Result<(), String> {
+        match self.file_in_store(url)? {
+            Some(src) => {
+                let total = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+                super::local::copy(&src, out, max, |done| on_got(done, total.max(done))).await.map(|_| ())
+            }
+            None => download_from_web(url, out, max, on_got).await,
+        }
+    }
+
+    /// The file a backup's `file:` address names, for the folder kept on this
+    /// PC only. Anywhere else the address must be a web one, so nothing a
+    /// server says can make this PC read or write one of its own files.
+    fn file_in_store(&self, url: &str) -> Result<Option<std::path::PathBuf>, String> {
+        if let (Auth::Local(_), Some(path)) = (&self.auth, super::local::path_of(url)) {
+            return Ok(Some(path));
+        }
+        web_address(url, &self.place).map(|()| None).map_err(|e| e.to_string())
+    }
 }
 
 /// Where a server says to put or fetch a backup. Only a web address is taken
-/// from a server: `upload` and `download` follow a `file:` address to a file
-/// on this PC, and only the folder kept on this PC (local.rs) hands those out.
+/// from a server: a `file:` address names a file on this PC, and only the
+/// folder kept on this PC (local.rs) hands those out.
 fn web_address(url: &str, place: &str) -> Result<(), ApiError> {
     match url::Url::parse(url) {
         Ok(u) if matches!(u.scheme(), "https" | "http") => Ok(()),
@@ -311,11 +342,7 @@ fn web_address(url: &str, place: &str) -> Result<(), ApiError> {
 
 /// PUT a backup to the address kryo.to gave, with exactly the headers it
 /// signed (the MD5 and length), so storage takes these bytes and no others.
-pub async fn upload(url: &str, headers: &HashMap<String, String>, file: &Path, size: u64, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<(), String> {
-    // A folder on this PC: the backup is copied in.
-    if let Some(dest) = super::local::path_of(url) {
-        return super::local::copy(file, &dest, size, sent).await.map(|_| ());
-    }
+async fn upload_to_web(url: &str, headers: &HashMap<String, String>, file: &Path, size: u64, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<(), String> {
     let client = storage_client();
     let sent = std::sync::Arc::new(sent);
     let mut last = String::new();
@@ -373,13 +400,9 @@ fn counted(file: tokio::fs::File, sent: std::sync::Arc<impl Fn(u64) + Send + Syn
 
 /// Download a backup to `out`, refusing anything bigger than `max`.
 /// `on_got(bytes so far, bytes in all)` follows it.
-pub async fn download(url: &str, out: &Path, max: u64, on_got: impl Fn(u64, u64)) -> Result<(), String> {
+async fn download_from_web(url: &str, out: &Path, max: u64, on_got: impl Fn(u64, u64)) -> Result<(), String> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
-    if let Some(src) = super::local::path_of(url) {
-        let total = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
-        return super::local::copy(&src, out, max, |done| on_got(done, total.max(done))).await.map(|_| ());
-    }
     let res = storage_client().get(url).send().await.map_err(|e| format!("Could not download the backup: {}", crate::logging::why(&e)))?;
     if !res.status().is_success() {
         return Err(format!("Could not download the backup ({}).", res.status()));
@@ -450,6 +473,32 @@ mod tests {
         let web = "http://192.168.1.20:8787/upload/x?key=abc";
         assert_eq!(own_server(json!({ "uploadId": "x", "url": web })).await.prepare(json!({})).await.unwrap().url, web);
         assert_eq!(own_server(json!({ "url": web, "size": 4 })).await.link("x").await.unwrap().url, web);
+    }
+
+    /// Only the folder kept on this PC moves backups by `file:` address. For
+    /// a server, one is refused before any file is read or written, even if
+    /// it got past `prepare` and `link`.
+    #[tokio::test]
+    async fn only_the_folder_on_this_pc_moves_backups_by_file_address() {
+        let dir = std::env::temp_dir().join(format!("kryoto-api-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = dir.join("thesis.docx");
+        std::fs::write(&mine, b"mine").unwrap();
+        let address = |p: &Path| url::Url::from_file_path(p).unwrap().to_string();
+        let own = crate::patchbay::Own { base: "http://127.0.0.1:9".into(), host: "the save server".into(), token: None };
+        let server = Api { http: reqwest::Client::new(), base: own.base.clone(), place: own.host.clone(), auth: Auth::Own(own) };
+        let refused = Err("the save server answered with a storage address that is not a web address.".to_string());
+        assert_eq!(server.download(&address(&mine), &dir.join("got"), 1 << 20, |_, _| {}).await, refused);
+        assert_eq!(server.upload(&address(&dir.join("put")), &HashMap::new(), &mine, 4, |_| {}).await, refused);
+        assert!(!dir.join("got").exists() && !dir.join("put").exists());
+        // The folder on this PC copies them in and out as before.
+        let here = Api { http: reqwest::Client::new(), base: String::new(), place: dir.to_string_lossy().into_owned(), auth: Auth::Local(crate::saves::local::LocalStore::new(dir.clone(), 10)) };
+        here.download(&address(&mine), &dir.join("got"), 1 << 20, |_, _| {}).await.unwrap();
+        here.upload(&address(&dir.join("put")), &HashMap::new(), &mine, 4, |_| {}).await.unwrap();
+        assert_eq!(std::fs::read(dir.join("got")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(dir.join("put")).unwrap(), b"mine");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
