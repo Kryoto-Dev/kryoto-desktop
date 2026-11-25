@@ -7,7 +7,7 @@ use kryoto_repair::{
     crack::EmuIdentity, detection::GameIdentity, journal, release, repair, settings::Emulator,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::Mutex};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -441,11 +441,8 @@ pub fn repair_undo(app: AppHandle, game_id: String) -> Result<(), String> {
     // A switch also set the release's own emulator aside (release_files.rs):
     // Repair's files come out first, then those go back where they were.
     let swapped = crate::release_files::has_swap(&dir);
-    match journal::undo(&dir) {
-        Ok(()) => {}
-        Err(_) if swapped && journal::load(&dir)?.is_none() => {}
-        Err(error) => return Err(error),
-    }
+    let legacy = legacy_online(&before);
+    undo_journal(&dir, swapped || legacy)?;
     if swapped {
         crate::release_files::unclean(&dir)?;
     }
@@ -461,9 +458,29 @@ pub fn repair_undo(app: AppHandle, game_id: String) -> Result<(), String> {
             game.repair = None;
             Ok(())
         })?;
+    } else if legacy {
+        // Last, so Repair's files and the release's own emulator are back first.
+        crate::online::online_undo(app.clone(), game_id)?;
     }
     let _ = app.emit("library-changed", ());
     Ok(())
+}
+
+/// Kryoto Online set up before it went through Repair: it has no journal, so
+/// online.rs takes it out. Undo of a repair made over it brings it back too.
+fn legacy_online(game: &LibraryGame) -> bool {
+    game.online.is_some() && game.repair.is_none()
+}
+
+/// Repair's own files come out. No journal is fine when Undo still has
+/// something else to put back: the release's emulator a switch set aside,
+/// or Kryoto Online set up before it went through Repair.
+fn undo_journal(dir: &Path, more: bool) -> Result<(), String> {
+    match journal::undo(dir) {
+        Ok(()) => Ok(()),
+        Err(_) if more && journal::load(dir)?.is_none() => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
@@ -505,6 +522,22 @@ pub fn repair_support_url(app: AppHandle, game_id: String) -> Result<String, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kryoto_online_from_before_repair_is_taken_out_by_its_own_undo() {
+        let online = LibraryGame { online: Some(LocalOnline::default()), ..Default::default() };
+        assert!(legacy_online(&online));
+        let repaired = LibraryGame { repair: Some(LocalRepair::default()), ..online.clone() };
+        assert!(!legacy_online(&repaired), "Repair's own undo takes it out");
+        assert!(!legacy_online(&LibraryGame::default()));
+        // It has no journal: Undo goes on to take it out instead of failing.
+        let dir = std::env::temp_dir().join(format!("kryoto-undo-online-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(undo_journal(&dir, false).is_err(), "nothing to undo");
+        assert!(undo_journal(&dir, legacy_online(&online)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_emulator_in_use_is_not_offered_again_and_each_says_what_it_is_for() {
