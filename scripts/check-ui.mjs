@@ -742,6 +742,27 @@ try {
       assert.equal(await dialog.getByRole('textbox', { name: 'What happened', exact: true }).inputValue(), '')
     } finally { await ui.close() }
   })
+  await check("a game kryo.to will not put in a collection says why, in kryo.to's words", async () => {
+    const shelf = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+    shelf.on('pageerror', e => failures.push(e.message))
+    await shelf.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await shelf.goto(base)
+      const rail = shelf.getByRole('complementary', { name: 'Your games' })
+      const collect = async (title, list) => {
+        await rail.getByRole('button', { name: title, exact: true }).click({ button: 'right' })
+        await shelf.getByRole('menuitem', { name: 'Add to collection' }).click()
+        await shelf.getByRole('menuitem', { name: list }).click()
+      }
+      // The preview's kryo.to refuses Hollow Knight, as it once did a game (plan 01).
+      await collect('Hollow Knight', 'Cozy nights')
+      await shelf.locator('.kryo-toast').filter({ hasText: 'A game slug is required.' }).waitFor()
+      // Another game goes in, and the menu shows it there.
+      await collect('Hades', 'Finished in a weekend')
+      await rail.getByRole('button', { name: 'Hades', exact: true }).click({ button: 'right' })
+      await shelf.getByRole('menuitem', { name: /^Add to collection\s*1$/ }).waitFor()
+    } finally { await shelf.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }

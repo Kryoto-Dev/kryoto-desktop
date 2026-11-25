@@ -103,8 +103,14 @@ fn plain_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn plain_slug(slug: &str) -> bool {
-    !slug.is_empty() && slug.len() <= 160 && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+/// A kryo.to game's slug as this app takes it everywhere: a collection's
+/// games, the Store's pages, downloads, statuses and play reports, and the
+/// routes sent with the player's session (lib.rs). Lowercase, as kryo.to
+/// writes them; the 160 the Library, release files and Remote also hold to.
+/// One rule, so a game shown in one place is never refused in another, and
+/// kryo.to says why if it refuses.
+pub(crate) fn plain_slug(slug: &str) -> bool {
+    !slug.is_empty() && slug.len() <= 160 && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn plain_text(text: &str, max: usize) -> String {
@@ -123,6 +129,9 @@ fn clean(mut c: Collection) -> Option<Collection> {
     }
     if !matches!(c.role.as_str(), "owner" | "collaborator" | "following" | "visitor") {
         c.role = "visitor".into();
+    }
+    for g in &mut c.games {
+        g.slug.make_ascii_lowercase();
     }
     c.games.retain(|g| plain_slug(&g.slug));
     c.games.truncate(MAX_GAMES);
@@ -320,6 +329,17 @@ mod tests {
         assert_eq!(c.role, "visitor");
         assert_eq!(c.games.len(), 1);
         assert_eq!(c.games[0].cover, None);
+    }
+
+    /// A long slug is kept, and is one the Library may add to a collection.
+    #[test]
+    fn one_slug_rule() {
+        let long = "a".repeat(160);
+        let c = clean(collection("12", &[&long, "Hades-II", &"b".repeat(161), ""])).unwrap();
+        let kept: Vec<&str> = c.games.iter().map(|g| g.slug.as_str()).collect();
+        assert_eq!(kept, [long.as_str(), "hades-ii"]);
+        assert!(plain_slug("celeste-2"));
+        assert!(!plain_slug("Celeste") && !plain_slug("../auth") && !plain_slug("a b") && !plain_slug("a_b"));
     }
 
     #[test]
