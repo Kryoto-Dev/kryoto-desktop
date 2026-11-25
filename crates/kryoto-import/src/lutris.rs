@@ -268,6 +268,10 @@ pub struct Added {
 pub struct Written {
     /// Every game of this send, new or updated, for the ledger.
     pub games: Vec<Added>,
+    /// The ones this send put in as new rows: what to take back if the
+    /// ledger cannot be written. A game sent before whose row the player
+    /// removed is one of them, under the key the ledger already has.
+    pub inserted: Vec<Added>,
     pub added: usize,
     pub updated: usize,
     pub pictures: usize,
@@ -531,7 +535,11 @@ fn write_all(conn: &mut Connection, cols: &[String], data: &Path, config: &Path,
                 tx.last_insert_rowid()
             }
         };
-        out.games.push(Added { key: g.key.clone(), id, slug, configpath, files });
+        let entry = Added { key: g.key.clone(), id, slug, configpath, files };
+        if before.is_none() {
+            out.inserted.push(entry.clone());
+        }
+        out.games.push(entry);
     }
     tx.commit().map_err(busy)?;
     Ok(out)
@@ -724,6 +732,27 @@ mod tests {
         assert_eq!(rows(&data), others);
         assert!(ledger.iter().flat_map(|a| &a.files).all(|f| !Path::new(f).exists()));
         assert!(data.join("coverart/the-witcher.jpg").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_send_says_which_rows_it_put_in() {
+        let root = temp("inserted");
+        let (data, config) = library(&root);
+        let backups = root.join("backups");
+        let w = send(&data, &config, &[outgoing("lantern", "Lantern Rite"), outgoing("moss", "Moss")], &[], &backups, 1_800_000_000).unwrap();
+        assert_eq!(w.inserted, w.games);
+        // The player removed Lantern in Lutris: sending it again puts in a new row.
+        Connection::open(data.join("pga.db")).unwrap().execute("DELETE FROM games WHERE slug = 'lantern'", []).unwrap();
+        let before = rows(&data);
+        let again = send(&data, &config, &[outgoing("lantern", "Lantern Rite"), outgoing("moss", "Moss")], &w.games, &backups, 1_800_000_100).unwrap();
+        assert_eq!((again.added, again.updated), (1, 1));
+        assert_eq!(again.inserted.len(), 1);
+        assert_eq!(again.inserted[0].key, "lantern");
+        assert_ne!(again.inserted[0].configpath, w.games[0].configpath);
+        // Taking back just those leaves Lutris as it was before this send.
+        assert_eq!(take_back(&data, &again.inserted, &backups, 1_800_000_200).unwrap(), 1);
+        assert_eq!(rows(&data), before);
         let _ = std::fs::remove_dir_all(root);
     }
 

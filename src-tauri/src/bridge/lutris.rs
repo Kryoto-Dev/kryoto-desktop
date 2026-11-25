@@ -173,6 +173,17 @@ fn eligible(g: &LibraryGame) -> bool {
     super::sendable(g) && !g.origin.as_deref().is_some_and(|o| o.starts_with("lutris:"))
 }
 
+/// What to tell the player when a send could not be noted: `took_back` is
+/// how taking its new games back out went, None when it put in none (only
+/// games already there were updated). Pure, for the tests.
+fn not_noted(e: &str, took_back: Option<Result<usize, String>>) -> String {
+    match took_back {
+        None => format!("Kryoto could not note what it sent: {e}"),
+        Some(Ok(_)) => format!("Kryoto could not note what it sent, so it took the new games back out: {e}"),
+        Some(Err(back)) => format!("Kryoto could not note what it sent, and could not take the new games back out of Lutris ({back}): {e}"),
+    }
+}
+
 fn dev_guard() -> Result<(), String> {
     #[cfg(debug_assertions)]
     if dev_dir().is_none() {
@@ -218,11 +229,12 @@ impl Export for Lutris {
         ledger.sent.retain(|a| !written.games.iter().any(|w| w.key == a.key));
         ledger.sent.extend(written.games.iter().cloned());
         // A game nothing remembers could not be undone: if the ledger cannot
-        // be written, the new games go back out.
+        // be written, the rows this send put in go back out, even one whose
+        // key the old ledger has (the player had removed its row). The ones
+        // updated in place stay, as the old ledger still knows them.
         if let Err(e) = ledger_file(app).and_then(|f| crate::saves::write_json(&f, &ledger)) {
-            let new: Vec<Added> = written.games.iter().filter(|w| !load_ledger(app).sent.iter().any(|a| a.key == w.key)).cloned().collect();
-            let _ = lu::take_back(dir, &new, &backups(app)?, super::now());
-            return Err(format!("Kryoto could not note what it sent, so it took the games back out: {e}"));
+            let took_back = (!written.inserted.is_empty()).then(|| backups(app).and_then(|b| lu::take_back(dir, &written.inserted, &b, super::now())));
+            return Err(not_noted(&e, took_back));
         }
         crate::logging::info("bridge", &format!("lutris: {} games added, {} updated", written.added, written.updated));
         Ok(Sent { added: written.added, updated: written.updated, pictures: written.pictures, backup: written.backup.map(|b| b.to_string_lossy().into_owned()) })
@@ -305,5 +317,13 @@ mod tests {
         assert!(eligible(&g));
         assert!(!eligible(&LibraryGame { origin: Some("lutris:7".into()), ..g.clone() }));
         assert!(!eligible(&LibraryGame { launcher: Some("steam".into()), ..g }));
+    }
+
+    #[test]
+    fn a_send_that_could_not_be_noted_says_only_what_happened() {
+        // Only games already in Lutris were updated: nothing was taken out.
+        assert_eq!(not_noted("disk full", None), "Kryoto could not note what it sent: disk full");
+        assert!(not_noted("disk full", Some(Ok(2))).contains("so it took the new games back out"));
+        assert!(not_noted("disk full", Some(Err("locked".into()))).contains("could not take the new games back out of Lutris (locked)"));
     }
 }
