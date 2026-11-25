@@ -86,7 +86,10 @@ pub(super) fn incoming(g: LutrisGame, data: &Path) -> Incoming {
     let wine = runner == "wine";
     let launch_options = options_line(&g.env, g.prefix.as_deref().filter(|_| wine), g.args.as_deref());
     Incoming {
-        key: g.id.to_string(),
+        // Lutris gives a removed game's id to the next one it adds, so the
+        // slug goes with it: a new game is never taken for an old one.
+        key: format!("{}:{}", g.id, g.slug),
+        old_key: Some(g.id.to_string()),
         title: g.name,
         executable: g.exe.filter(|_| g.installed),
         playtime_seconds: g.playtime_seconds,
@@ -255,7 +258,7 @@ mod tests {
     use super::*;
 
     fn lutris(runner: &str, exe: Option<&str>) -> LutrisGame {
-        LutrisGame { id: 7, name: "The Witcher".into(), runner: runner.into(), installed: true, exe: exe.map(String::from), playtime_seconds: 45_000, ..Default::default() }
+        LutrisGame { id: 7, slug: "the-witcher".into(), name: "The Witcher".into(), runner: runner.into(), installed: true, exe: exe.map(String::from), playtime_seconds: 45_000, ..Default::default() }
     }
 
     #[test]
@@ -270,7 +273,7 @@ mod tests {
         g.wine_version = Some("lutris-GE-8".into());
         g.env = vec![("DXVK_HUD".into(), "fps".into())];
         let h = incoming(g, &root);
-        assert_eq!((h.key.as_str(), h.executable.as_deref(), h.cannot), ("7", Some("/games/witcher/drive_c/witcher.exe"), None));
+        assert_eq!((h.key.as_str(), h.executable.as_deref(), h.cannot), ("7:the-witcher", Some("/games/witcher/drive_c/witcher.exe"), None));
         assert_eq!(h.launch_options.as_deref(), Some("DXVK_HUD=fps WINEPREFIX='/games/witcher pfx' %command% -skipintro"));
         assert_eq!(h.proton_path.as_deref().map(Path::new), Some(wine.join("wine").as_path()));
         // What Kryoto's launch reads back from that line.

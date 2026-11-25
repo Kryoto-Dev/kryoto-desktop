@@ -57,6 +57,8 @@ static PROVIDERS: &[&dyn Provider] = &[&hydra::Hydra, &steam::Steam, &playnite::
 pub(crate) struct Incoming {
     /// The launcher's own key for it: what a remembered link is kept by.
     pub key: String,
+    /// The key an older Kryoto kept it by, when that has changed.
+    pub old_key: Option<String>,
     pub title: String,
     pub steam_appid: Option<String>,
     /// Absolute path of its exe, when the launcher has one.
@@ -436,22 +438,54 @@ fn installed(h: &Incoming) -> bool {
     h.executable.as_deref().is_some_and(|e| Path::new(e).is_file()) || h.folder.as_deref().is_some_and(|d| Path::new(d).is_dir())
 }
 
-/// The library entry installed in the same place as the launcher's copy.
-fn same_install<'a>(games: &'a [LibraryGame], h: &Incoming) -> Option<&'a LibraryGame> {
-    let at = h.executable.as_deref().or(h.folder.as_deref())?;
-    let norm = |p: &str| {
-        let s = p.replace('\\', "/").trim_end_matches('/').to_string();
-        if cfg!(windows) { s.to_lowercase() } else { s }
-    };
-    let at = norm(at);
-    games.iter().filter(|g| g.install_dir.len() > 3).find(|g| {
-        let dir = norm(&g.install_dir);
-        at == dir || at.starts_with(&format!("{dir}/"))
-    })
+/// A path as compared: forward slashes, no trailing one, and on Windows any case.
+fn path_key(p: &str) -> String {
+    let s = p.replace('\\', "/").trim_end_matches('/').to_string();
+    if cfg!(windows) { s.to_lowercase() } else { s }
+}
+
+/// The launcher's copy is installed in this library entry's folder.
+fn installed_in(g: &LibraryGame, h: &Incoming) -> bool {
+    let Some(at) = h.executable.as_deref().or(h.folder.as_deref()) else { return false };
+    let (at, dir) = (path_key(at), path_key(&g.install_dir));
+    g.install_dir.len() > 3 && (at == dir || at.starts_with(&format!("{dir}/")))
+}
+
+/// A title as compared: "The Witcher: GOTY" and "Witcher" are one name.
+fn name_key(title: &str) -> String {
+    kryoto_import::matcher::squash(&kryoto_import::matcher::normalize(title))
+}
+
+/// This library entry is the launcher's game itself: the same program, or the
+/// same name. Being in its folder is not enough, as that may be one many
+/// games share, such as /usr/games.
+fn is_same_game(g: &LibraryGame, h: &Incoming) -> bool {
+    let program = (!g.executable.is_empty()).then(|| path_key(&format!("{}/{}", g.install_dir, g.executable)));
+    let same_program = h.executable.as_deref().is_some_and(|e| program.as_deref() == Some(path_key(e).as_str()));
+    same_program || (!name_key(&h.title).is_empty() && name_key(&g.title) == name_key(&h.title))
+}
+
+/// The library entry installed in the same place as the launcher's copy, for
+/// a game not brought over before. Never one under its old key: that is the
+/// game that had the key before, perhaps in a folder many games share.
+fn same_install<'a>(provider: &str, games: &'a [LibraryGame], h: &Incoming) -> Option<&'a LibraryGame> {
+    let old = h.old_key.as_deref().map(|k| origin(provider, k));
+    games.iter().find(|g| installed_in(g, h) && (old.is_none() || g.origin != old))
 }
 
 fn origin(provider: &str, key: &str) -> String {
     format!("{provider}:{key}")
+}
+
+/// Where the entry this game came over as before is in the library. One under
+/// its old key counts only when it has the game's program or name: the old key
+/// may be another game's now. Pure, for the tests.
+fn brought_before(provider: &str, h: &Incoming, games: &[LibraryGame]) -> Option<usize> {
+    let from = origin(provider, &h.key);
+    games.iter().position(|g| g.origin.as_deref() == Some(from.as_str())).or_else(|| {
+        let old = origin(provider, h.old_key.as_deref()?);
+        games.iter().position(|g| g.origin.as_deref() == Some(old.as_str()) && is_same_game(g, h))
+    })
 }
 
 /// A launcher's arguments for a game, as a launch options line. They go after
@@ -465,8 +499,7 @@ pub(crate) fn arguments_line(args: Option<&str>) -> Option<String> {
 /// nothing of it is compared with kryo.to. Pure, for the tests.
 pub(crate) fn judge_kept(provider: &str, h: &Incoming, games: &[LibraryGame]) -> Row {
     let mut row = blank_row(h);
-    let from = origin(provider, &h.key);
-    if let Some(g) = games.iter().find(|g| g.origin.as_deref() == Some(from.as_str())) {
+    if let Some(g) = brought_before(provider, h, games).map(|i| &games[i]) {
         row.kind = "imported";
         row.joins = Some(g.title.clone());
         return row;
@@ -477,8 +510,7 @@ pub(crate) fn judge_kept(provider: &str, h: &Incoming, games: &[LibraryGame]) ->
         return row;
     }
     row.kind = "stays";
-    let name = |t: &str| kryoto_import::matcher::squash(&kryoto_import::matcher::normalize(t));
-    row.joins = games.iter().find(|g| name(&g.title) == name(&h.title)).map(|g| g.title.clone());
+    row.joins = games.iter().find(|g| name_key(&g.title) == name_key(&h.title)).map(|g| g.title.clone());
     row
 }
 
@@ -513,8 +545,7 @@ fn cannot_come(h: &Incoming) -> Option<(&'static str, String)> {
 /// review shows it. Pure, for the tests.
 pub(crate) fn judge(provider: &str, h: &Incoming, index: Option<&Index>, links: &Links, games: &[LibraryGame]) -> Row {
     let mut row = blank_row(h);
-    let from = origin(provider, &h.key);
-    if let Some(g) = games.iter().find(|g| g.origin.as_deref() == Some(from.as_str())) {
+    if let Some(g) = brought_before(provider, h, games).map(|i| &games[i]) {
         row.kind = "imported";
         row.joins = Some(g.title.clone());
         return row;
@@ -524,7 +555,7 @@ pub(crate) fn judge(provider: &str, h: &Incoming, index: Option<&Index>, links: 
         row.why = Some(why);
         return row;
     }
-    let here = same_install(games, h);
+    let here = same_install(provider, games, h);
     let remembered = links.get(&h.key).cloned();
     let verdict = match (&remembered, index) {
         (Some(v), _) if v == OWN => Verdict::Own,
@@ -729,7 +760,12 @@ fn join(provider: &str, into: &mut LibraryGame, h: &Incoming) {
     if into.steam_appid.is_none() && into.slug.is_none() {
         into.steam_appid = h.steam_appid.clone();
     }
-    into.origin = into.origin.take().or_else(|| Some(origin(provider, &h.key)));
+    // One still under the game's old key takes its new one: from now on it is
+    // known as brought over, not joined again on every import.
+    let old = h.old_key.as_deref().map(|k| origin(provider, k));
+    if into.origin.is_none() || into.origin == old {
+        into.origin = Some(origin(provider, &h.key));
+    }
 }
 
 fn unique_id(games: &[LibraryGame], base: &str) -> String {
@@ -806,11 +842,10 @@ pub async fn bridge_import(app: AppHandle, launcher_id: String, dir: Option<Stri
         let mut changed: Vec<String> = Vec::new();
         for d in &decisions {
             let Some(h) = incoming.iter().find(|h| h.key == d.key) else { continue };
-            let from = origin(p.id(), &h.key);
-            if !installed(h) || games.iter().any(|g| g.origin.as_deref() == Some(from.as_str())) {
+            if !installed(h) || brought_before(p.id(), h, games).is_some() {
                 continue;
             }
-            let here = same_install(games, h).map(|g| g.id.clone());
+            let here = same_install(p.id(), games, h).map(|g| g.id.clone());
             let id = match &d.slug {
                 Some(slug) => {
                     let meta = &metas[slug];
@@ -879,8 +914,17 @@ pub async fn bridge_import(app: AppHandle, launcher_id: String, dir: Option<Stri
             if came.iter().any(|(_, k)| k == &h.key) {
                 continue;
             }
-            let from = origin(p.id(), &h.key);
-            let Some(g) = games.iter_mut().find(|g| g.origin.as_deref() == Some(from.as_str())) else { continue };
+            let Some(i) = brought_before(p.id(), h, games) else { continue };
+            let g = &mut games[i];
+            // One still under its old key moves to the new one, with the
+            // answer remembered for it.
+            if let Some(old) = h.old_key.as_ref().filter(|k| g.origin.as_deref() == Some(origin(p.id(), k).as_str())) {
+                g.origin = Some(origin(p.id(), &h.key));
+                if let Some(answer) = links.remove(old) {
+                    links.insert(h.key.clone(), answer);
+                }
+                changed.push(g.id.clone());
+            }
             before.insert(h.key.clone());
             if let Some(more) = refresh(g, h, true) {
                 out.updated += 1;
@@ -1262,6 +1306,52 @@ mod tests {
         assert!(!cfg!(target_os = "linux") || shown.contains(&"lutris"));
         assert!(provider("lutris").unwrap().reads_while_open() && !provider("playnite").unwrap().reads_while_open() && !provider("hydra").unwrap().reads_while_open());
         assert!(provider("lutris").unwrap().export().is_some() && provider("playnite").unwrap().export().is_none());
+    }
+
+    #[test]
+    fn a_reused_lutris_id_is_a_new_game_and_an_old_import_is_still_known() {
+        let (dir, old_exe) = temp_exe("reused-a", "Lantern");
+        let (other, new_exe) = temp_exe("reused-b", "Moss");
+        // A folder many games share, such as /usr/games.
+        let (_, shared_exe) = temp_exe("reused-a", "Neverball");
+        // Brought over by an older Kryoto, under Lutris's id alone.
+        let mut a = from_incoming("lutris", &hydra("42", "Lantern Rite Test", Some(&old_exe), None, 3_600), None, None).unwrap();
+        assert_eq!(a.origin.as_deref(), Some("lutris:42"));
+        let lutris = |slug: &str, title: &str, exe: &str| Incoming { key: format!("42:{slug}"), old_key: Some("42".into()), ..hydra("", title, Some(exe), None, 9_000) };
+        // Lutris gave id 42 to another game: it is new, and Lantern's entry is
+        // left alone, even when the new one is in the same folder.
+        let moss = lutris("moss", "Moss Test", &new_exe);
+        let r = judge("lutris", &moss, None, &Links::new(), std::slice::from_ref(&a));
+        assert_ne!(r.kind, "imported");
+        assert_eq!(brought_before("lutris", &moss, std::slice::from_ref(&a)), None);
+        let neverball = lutris("neverball", "Neverball Test", &shared_exe);
+        assert_eq!(brought_before("lutris", &neverball, std::slice::from_ref(&a)), None);
+        // Nor is it joined to Lantern for sharing its folder.
+        let r = judge("lutris", &neverball, None, &Links::new(), std::slice::from_ref(&a));
+        assert_eq!((r.kind, r.joins), ("own", None));
+        assert!(same_install("lutris", std::slice::from_ref(&a), &neverball).is_none());
+        // The same game under its old key is still the one brought over, by its
+        // program when the player renamed it in Kryoto.
+        let lantern = lutris("lantern", "Lantern Rite Test", &old_exe);
+        assert_eq!(judge("lutris", &lantern, None, &Links::new(), std::slice::from_ref(&a)).kind, "imported");
+        a.title = "Lantern".into();
+        assert_eq!(brought_before("lutris", &lantern, std::slice::from_ref(&a)), Some(0));
+        a.origin = Some("lutris:42:lantern".into());
+        assert_eq!(brought_before("lutris", &lantern, std::slice::from_ref(&a)), Some(0));
+        assert_eq!(brought_before("lutris", &moss, std::slice::from_ref(&a)), None);
+        // One joined to Kryoto's own copy in another folder is found by its name.
+        let mut kryoto = LibraryGame { title: "Moss Test".into(), install_dir: "/kryoto/Moss".into(), executable: "Moss.exe".into(), origin: Some("lutris:42".into()), ..Default::default() };
+        assert_eq!(brought_before("lutris", &moss, std::slice::from_ref(&kryoto)), Some(0));
+        // Joining a game again moves an entry under its old key to the new one,
+        // and leaves one from elsewhere as it is.
+        kryoto.title = "Moss".into();
+        let mut steam = LibraryGame { origin: Some("steam:7".into()), ..kryoto.clone() };
+        join("lutris", &mut kryoto, &moss);
+        join("lutris", &mut steam, &moss);
+        assert_eq!((kryoto.origin.as_deref(), steam.origin.as_deref()), (Some("lutris:42:moss"), Some("steam:7")));
+        assert_eq!(brought_before("lutris", &moss, std::slice::from_ref(&kryoto)), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(other);
     }
 
     #[test]

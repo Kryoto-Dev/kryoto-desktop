@@ -29,6 +29,7 @@ impl From<HydraGame> for Incoming {
     fn from(h: HydraGame) -> Incoming {
         Incoming {
             key: h.key,
+            old_key: None,
             title: h.title,
             steam_appid: h.steam_appid,
             executable: h.executable,
