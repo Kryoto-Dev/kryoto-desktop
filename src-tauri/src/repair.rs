@@ -344,9 +344,9 @@ pub fn game_emulators(app: AppHandle, game_id: String) -> Result<Emulators, Stri
         undo: record.as_ref().is_some_and(|j| j.state != "undone") || game.online.is_some() || swapped,
         interrupted: record.as_ref().is_some_and(|j| j.state == "pending"),
         blocked,
-        release: list.as_ref().and_then(crate::release_files::FileList::emulator_words),
+        release: list.as_deref().and_then(crate::release_files::FileList::emulator_words),
         release_off: list.as_ref().is_some_and(|l| l.emulator_off),
-        kept_own: list.map(|l| l.excluded).unwrap_or_default(),
+        kept_own: list.map(|l| l.excluded.clone()).unwrap_or_default(),
     })
 }
 

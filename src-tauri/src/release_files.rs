@@ -340,10 +340,53 @@ fn entry<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> GameEntry {
         .unwrap_or_default()
 }
 
+/// Lists already read, by file, the last used last. A list never changes
+/// once kept, and a big release's (up to ~60 MB of JSON) was read again on
+/// every game page refresh and Properties question.
+static HELD: Mutex<Vec<(PathBuf, Arc<FileList>)>> = Mutex::new(Vec::new());
+/// Listed files held at most: about one of the biggest lists kryo.to allows.
+const HELD_FILES: usize = 300_000;
+
+/// `list` held as the newest, the oldest let go past `most` files (the
+/// newest always stays). Pure, for tests.
+fn hold_in(held: &mut Vec<(PathBuf, Arc<FileList>)>, path: PathBuf, list: Arc<FileList>, most: usize) {
+    held.retain(|(p, _)| p != &path);
+    held.push((path, list));
+    while held.len() > 1 && held.iter().map(|(_, l)| l.listed().len()).sum::<usize>() > most {
+        held.remove(0);
+    }
+}
+
+fn hold(path: PathBuf, list: Arc<FileList>) {
+    hold_in(&mut HELD.lock().unwrap_or_else(|e| e.into_inner()), path, list, HELD_FILES);
+}
+
+/// The held list for `path`, moved to newest: a list in use is the last
+/// one let go, not the first one read. Pure, for tests.
+fn held_in(held: &mut Vec<(PathBuf, Arc<FileList>)>, path: &Path) -> Option<Arc<FileList>> {
+    let at = held.iter().position(|(p, _)| p == path)?;
+    let entry = held.remove(at);
+    let list = entry.1.clone();
+    held.push(entry);
+    Some(list)
+}
+
+/// A release's kept list, read from disk once and then shared.
+fn list_of(dir: &Path, release_id: &str) -> Option<Arc<FileList>> {
+    let path = dir.join(format!("{release_id}.json"));
+    let known = held_in(&mut HELD.lock().unwrap_or_else(|e| e.into_inner()), &path);
+    if let Some(list) = known {
+        return Some(list);
+    }
+    let list = Arc::new(read_kept(dir, release_id).list?);
+    hold(path, list.clone());
+    Some(list)
+}
+
 /// The list kept for this game's release, without asking kryo.to.
-pub fn cached_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<FileList> {
+pub fn cached_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<Arc<FileList>> {
     let id = entry(app, game).release_id?;
-    read_kept(&dir(app)?, &id).list
+    list_of(&dir(app)?, &id)
 }
 
 /// What kryo.to answered for a list.
@@ -432,16 +475,19 @@ async fn resolve<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<S
 
 /// This game's list: kept, or fetched once when `network` and due. Never
 /// fails: no list is the answer for every older release and when offline.
-pub async fn ensure_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, network: bool) -> Option<FileList> {
+pub async fn ensure_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, network: bool) -> Option<Arc<FileList>> {
     if game.slug.is_none() || game.launcher.is_some() {
         return None;
     }
     let id = if network { resolve(app, game).await? } else { entry(app, game).release_id? };
     let d = dir(app)?;
-    let mut kept = read_kept(&d, &id);
-    if kept.list.is_some() || !network {
-        return kept.list;
+    if let Some(list) = list_of(&d, &id) {
+        return Some(list);
     }
+    if !network {
+        return None;
+    }
+    let mut kept = read_kept(&d, &id);
     let at = now();
     if !due(kept.none_at, NO_LIST_RETRY_SECS, at) || !due(kept.failed_at, FAILED_RETRY_SECS, at) {
         return None;
@@ -476,12 +522,12 @@ pub async fn ensure_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, net
         Answer::Failed => kept.failed_at = Some(at),
     }
     let _ = write_kept(&d, &id, &kept);
-    if kept.list.is_some() {
-        crate::logging::info("files", &format!("{}: release {id} lists {} files", game.title, kept.list.as_ref().map(|l| l.listed().len()).unwrap_or(0)));
-        // Properties' Emulator row says what the release came with now.
-        let _ = app.emit("files-checked", &game.id);
-    }
-    kept.list
+    let list = Arc::new(kept.list?);
+    hold(d.join(format!("{id}.json")), list.clone());
+    crate::logging::info("files", &format!("{}: release {id} lists {} files", game.title, list.listed().len()));
+    // Properties' Emulator row says what the release came with now.
+    let _ = app.emit("files-checked", &game.id);
+    Some(list)
 }
 
 /* ── Checking an install ────────────────────────────────────────────────── */
@@ -901,13 +947,16 @@ pub struct FilesState {
 
 fn state_of<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> FilesState {
     let e = entry(app, game);
-    let kept = e.release_id.as_deref().and_then(|id| dir(app).map(|d| read_kept(&d, id))).unwrap_or_default();
+    let (id, d) = (e.release_id.as_deref(), dir(app));
+    let held = id.zip(d.as_deref()).and_then(|(id, d)| list_of(d, id));
+    let list = held.as_deref();
+    // Without a list, its small file says whether kryo.to has none.
+    let none_at = list.is_none() && id.zip(d.as_deref()).is_some_and(|(id, d)| read_kept(d, id).none_at.is_some());
     let root = PathBuf::from(&game.install_dir);
-    let list = kept.list.as_ref();
     FilesState {
         list: if list.is_some() {
             "yes"
-        } else if kept.none_at.is_some() || (e.resolved_at.is_some() && e.release_id.is_none()) {
+        } else if none_at || (e.resolved_at.is_some() && e.release_id.is_none()) {
             "none"
         } else {
             "unknown"
@@ -965,8 +1014,11 @@ pub fn game_files_check_cancel(game_id: String) {
 /// For the game page's antivirus card: the files the last check found
 /// missing or broken, with what each is, when the release has a list.
 pub fn alarms<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<Vec<Finding>> {
-    cached_list(app, game)?;
-    let report = current(entry(app, game).report, game, Path::new(&game.install_dir))?;
+    // Most games have no report: then nothing else is read.
+    let e = entry(app, game);
+    let report = e.report?;
+    list_of(&dir(app)?, e.release_id.as_deref()?)?;
+    let report = current(Some(report), game, Path::new(&game.install_dir))?;
     Some(report.missing.into_iter().chain(report.broken).collect())
 }
 
@@ -1612,7 +1664,32 @@ mod tests {
         assert_eq!(back.etag.as_deref(), Some("\"t\""));
         assert!(read_kept(&dir, "43").list.is_none());
         assert!(write_kept(&dir, "../x", &kept).is_err() && read_kept(&dir, "../x").list.is_none());
+        // Read once, then the same list is shared.
+        let first = list_of(&dir, "42").unwrap();
+        assert!(Arc::ptr_eq(&first, &list_of(&dir, "42").unwrap()));
+        assert_eq!(first.release_id, "42");
+        assert!(list_of(&dir, "43").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_latest_lists_are_held() {
+        let sized = |n: usize| Arc::new(FileList { files: Some(vec![ListedFile::default(); n]), ..Default::default() });
+        let mut held = Vec::new();
+        hold_in(&mut held, "a".into(), sized(4), 10);
+        hold_in(&mut held, "b".into(), sized(4), 10);
+        hold_in(&mut held, "a".into(), sized(4), 10);
+        let names = |h: &Vec<(PathBuf, Arc<FileList>)>| h.iter().map(|(p, _)| p.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(names(&held), ["b", "a"], "read again: newest");
+        hold_in(&mut held, "c".into(), sized(4), 10);
+        assert_eq!(names(&held), ["a", "c"], "the oldest goes past the limit");
+        assert!(held_in(&mut held, Path::new("a")).is_some());
+        assert_eq!(names(&held), ["c", "a"], "used again: newest");
+        hold_in(&mut held, "d".into(), sized(4), 10);
+        assert_eq!(names(&held), ["a", "d"], "the list in use outlives one only read");
+        assert!(held_in(&mut held, Path::new("gone")).is_none());
+        hold_in(&mut held, "huge".into(), sized(50), 10);
+        assert_eq!(names(&held), ["huge"], "the newest always stays");
     }
 
     #[test]
