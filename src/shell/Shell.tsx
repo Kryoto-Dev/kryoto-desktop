@@ -11,6 +11,7 @@ import {
   FolderHeart,
   FolderInput,
   FolderPlus,
+  HeartHandshake,
   Eye,
   EyeOff,
   FolderOpen,
@@ -21,6 +22,7 @@ import {
   MessageCircle,
   MessageSquarePlus,
   Newspaper,
+  Palette,
   PenLine,
   Play,
   Plus,
@@ -165,7 +167,7 @@ function tabForUrl(url: string, catalogEndpoint?: string): TopTab {
     return 'store'
   }
   if (/^\/(user|settings|account|notifications|library|login|signup|register)(\/|$)/.test(path)) return 'profile'
-  if (/^\/(blog|collections|testers|stats|community|rolls)(\/|$)/.test(path)) return 'community'
+  if (/^\/(blog|collections|testers|stats|community|rolls|art|contribute)(\/|$)/.test(path)) return 'community'
   return 'store'
 }
 
@@ -1104,6 +1106,8 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
         { label: 'Blog', icon: <Newspaper />, onSelect: () => openWeb('/blog') },
         { label: 'Collections', icon: <Layers />, onSelect: () => openWeb('/collections/discover') },
         { label: 'Playtest', icon: <FlaskConical />, onSelect: () => openWeb('/testers') },
+        { label: 'Art', icon: <Palette />, onSelect: () => openWeb('/art') },
+        { label: 'Contribute', icon: <HeartHandshake />, onSelect: () => openWeb('/contribute') },
         { separator: true },
         { label: 'Discord', icon: <ArrowUpRight />, onSelect: () => void openExternal(DISCORD_URL) },
         { label: 'Reddit', icon: <ArrowUpRight />, onSelect: () => void openExternal(REDDIT_URL) },
