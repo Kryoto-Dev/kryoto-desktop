@@ -2388,7 +2388,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
     };
     if !already_complete {
         if is_mirror {
-            match mirror_client(app, id, flag, false, settings.connections).await {
+            match mirror_client(app, id, flag, false, false, settings.connections).await {
                 Ok(v) => (client, connections) = v,
                 Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
                 Err(e) => return Err(e),
@@ -2514,7 +2514,7 @@ async fn fetch_filez<R: Runtime>(
             // the other address family: pass its check again, once.
             Err(Transfer::Refused(_)) if !asked_again => {
                 asked_again = true;
-                match mirror_client(app, id, flag, true, FILEZ_CONNECTIONS as u32).await {
+                match mirror_client(app, id, flag, true, false, FILEZ_CONNECTIONS as u32).await {
                     Ok((c, _)) => *client = c,
                     Err(_) if flag.load(Ordering::SeqCst) != RUN => return Ok(false),
                     Err(e) => return Err(e),
@@ -2810,10 +2810,11 @@ async fn fetch_all<R: Runtime>(
             }
             Err(Transfer::Fatal(e)) => return Err(e),
             // A mirror's address ran out (they are signed, or tied to a
-            // session): ask the mirror again, once per run.
+            // session): ask the mirror again, once per run. A mirror here
+            // with `tried_mirrors` set is one that took over this run.
             Err(Transfer::Refused(_)) if is_mirror && !asked_again => {
                 asked_again = true;
-                match mirror_client(app, id, flag, true, settings.connections).await {
+                match mirror_client(app, id, flag, true, tried_mirrors, settings.connections).await {
                     Ok(v) => (*client, *connections) = v,
                     Err(_) if flag.load(Ordering::SeqCst) != RUN => return Ok(false),
                     Err(e) => return Err(e),
@@ -2860,7 +2861,7 @@ async fn fetch_all<R: Runtime>(
                 edit(app, id, |d| d.notice = Some("The connection slowed down. Reconnecting.".into()));
                 emit(app, true);
                 if is_mirror {
-                    match mirror_client(app, id, flag, true, settings.connections).await {
+                    match mirror_client(app, id, flag, true, tried_mirrors, settings.connections).await {
                         Ok(v) => (*client, *connections) = v,
                         Err(_) if flag.load(Ordering::SeqCst) != RUN => return Ok(false),
                         // The page cannot be asked again right now: the old link still works.
@@ -2895,6 +2896,11 @@ async fn fetch_all<R: Runtime>(
                             edit(app, id, |d| d.notice = Some(format!("Our file host is having trouble; continuing from {host}.")));
                             emit(app, true);
                             continue;
+                        }
+                        // Paused while a mirror was asked: not a failure.
+                        Err(_) if flag.load(Ordering::SeqCst) != RUN => {
+                            edit(app, id, |d| d.notice = None);
+                            return Ok(false);
                         }
                         Err(why) => {
                             crate::logging::error("download", &format!("{id}: Kryoto's own server cut the download {cuts} times ({e}); no mirror could take over: {why}"));
@@ -3007,7 +3013,17 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
             why.push(format!("{host}: sealed, cannot carry on a plain download"));
             continue;
         }
-        let resolved = match crate::resolvers::resolve(app, &page).await {
+        // Nobody asked for this mirror, and the player may be in a game: a
+        // host that wants its page for a check is left out, as its window
+        // would pop up and take the focus. Pause is heard while one is asked.
+        if !crate::resolvers::opens_no_page(&page) {
+            why.push(format!("{host}: opens its page for a check"));
+            continue;
+        }
+        let Some(asked) = unless_stopped(flag, crate::resolvers::resolve_without_page(app, &page)).await else {
+            return Err("stopped".into());
+        };
+        let resolved = match asked {
             Ok(r) => r,
             Err(e) => {
                 why.push(format!("{host}: {e}"));
@@ -3030,7 +3046,7 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
             row.etag = None;
         });
         let taken = async {
-            let (client, n) = mirror_client(app, id, flag, false, settings.connections).await?;
+            let (client, n) = mirror_client(app, id, flag, false, true, settings.connections).await?;
             let url = edit(app, id, |_| {}).map(|r| r.url).unwrap_or_default();
             let res = send(client.get(&url).header(reqwest::header::RANGE, "bytes=0-31")).await.map_err(|_| "no answer".to_string())?;
             let size = content_range_of(&res).and_then(|r| r.total);
@@ -4140,12 +4156,15 @@ fn refused_text(code: u16, mirror: bool) -> String {
 
 /// Resolve a mirror download (again, with `fresh`) and build the client its
 /// file wants: the mirror's cookies, user agent and referer on every request,
-/// and no more connections than the host puts up with.
+/// and no more connections than the host puts up with. A mirror that took
+/// over from our own server (`taken_over`) is asked without its page, as
+/// when it took over: nobody asked for it, and a game may be in front.
 async fn mirror_client<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,
     flag: &AtomicU8,
     fresh: bool,
+    taken_over: bool,
     connections: u32,
 ) -> Result<(reqwest::Client, u32), String> {
     let state = app.state::<Downloads>();
@@ -4156,7 +4175,11 @@ async fn mirror_client<R: Runtime>(
         Some(r) => r,
         None => {
             set_status(app, id, Status::Resolving, None);
-            let r = crate::resolvers::resolve(app, &mirror.page).await?;
+            let r = if taken_over {
+                crate::resolvers::resolve_without_page(app, &mirror.page).await?
+            } else {
+                crate::resolvers::resolve(app, &mirror.page).await?
+            };
             if flag.load(Ordering::SeqCst) != RUN {
                 return Err("Stopped while the mirror was being asked.".into());
             }

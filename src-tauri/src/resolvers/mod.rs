@@ -212,7 +212,29 @@ pub fn classify_any(url: &str) -> Option<(Kind, String)> {
 /// person would get past whatever the API would not do (a Cloudflare check
 /// in front of Buzzheavier, say).
 pub async fn resolve<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolved, String> {
+    resolve_with(app, url, true).await
+}
+
+/// A mirror that hands its file over without a page: an API host or a direct
+/// link. Any other opens its page for a check, which is shown and takes the
+/// focus when it wants a person.
+pub fn opens_no_page(url: &str) -> bool {
+    matches!(classify(url), Some((Kind::Api | Kind::Direct, name)) if name != "filez.stream")
+}
+
+/// `resolve`, never opening a page: only a mirror that `opens_no_page`, and an
+/// API that fails is a failure. For a mirror taking over a download already
+/// going (downloads.rs `take_over_from_mirror`), which nobody asked for: a
+/// page shown then took the focus from whatever was in front, a game too.
+pub async fn resolve_without_page<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolved, String> {
+    resolve_with(app, url, false).await
+}
+
+async fn resolve_with<R: Runtime>(app: &AppHandle<R>, url: &str, pages: bool) -> Result<Resolved, String> {
     let (kind, name) = classify_any(url).ok_or_else(|| format!("Kryoto can't download from {}. Open it in your browser instead.", hostname(url)))?;
+    if !pages && !opens_no_page(url) {
+        return Err(format!("{name}: opens its page for a check"));
+    }
     let started = std::time::Instant::now();
     // filez.stream has a way of its own end to end (its key, its check, its
     // grants), and no page button to fall back to.
@@ -260,6 +282,7 @@ pub async fn resolve<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolv
             };
             match api {
                 Ok(r) => Ok(r),
+                Err(e) if !pages => Err(e),
                 Err(e) => {
                     crate::logging::info("resolver", &format!("{name}: {e}; trying its page"));
                     browser::solve(app, url, &name, browser::Mode::Host).await.map_err(|b| format!("{e}; {b}"))
@@ -339,6 +362,25 @@ mod tests {
         assert_eq!(classify_any("https://0807.st/Ab3dEfG.7z"), None);
         assert_eq!(classify_any("magnet:?xt=urn:btih:abc"), None);
         assert_eq!(classify_any("file:///C:/Windows"), None);
+    }
+
+    /// A mirror taking over a download asks only these: a page host's check
+    /// window used to pop up over a fullscreen game mid-download.
+    #[test]
+    fn only_a_mirror_with_no_page_takes_over_quietly() {
+        for url in ["https://pixeldrain.com/u/abcd1234", "https://gofile.io/d/dc1V9W", "https://mocha.my/share/pvpgaoYk-6So_SEvo", "https://files.catbox.moe/x.7z"] {
+            assert!(opens_no_page(url), "{url}");
+        }
+        for url in [
+            "https://1fichier.com/?abc",
+            "https://mocha.my/share/tok",
+            "https://dropdrive.org/d/YIJaPhMI",
+            "https://filez.stream/Ab12Cd34#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "https://www.example.org/get",
+            "https://mega.nz/file/abc",
+        ] {
+            assert!(!opens_no_page(url), "{url}");
+        }
     }
 
     #[test]
