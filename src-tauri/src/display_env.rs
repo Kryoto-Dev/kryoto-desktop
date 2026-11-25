@@ -384,6 +384,18 @@ pub fn on_cpu(compositing_off: bool, drawing: Option<Drawing>) -> bool {
     compositing_off || drawing == Some(Drawing::Cpu)
 }
 
+/// KB-0377: Automatic on NVIDIA keeps GPU compositing on, so WebKit needs the
+/// driver's GL. When WebGL could not get it (no WebGL, or Mesa's software
+/// renderer), that is the machine whose window stays black until something
+/// moves. Said in the log and in Settings; the mode itself is not changed,
+/// since two requestAnimationFrames fire even while the window shows black,
+/// and nothing here can tell a black window from one that drew. Not with
+/// compositing off (`compositing_off`, the person's own variable): then
+/// WebGL is not meant to start, and the window draws on the CPU as asked.
+pub fn may_stay_black(running: Mode, nvidia: bool, compositing_off: bool, drawing: Drawing) -> bool {
+    running == Mode::Auto && nvidia && !compositing_off && matches!(drawing, Drawing::Cpu | Drawing::NoWebgl)
+}
+
 /// Settings > Graphics > Still backgrounds: the player's choice, else on
 /// while drawing on the CPU, where every moving frame costs the processor.
 pub fn still_backgrounds(choice: Option<bool>, on_cpu: bool) -> bool {
@@ -417,6 +429,14 @@ pub struct DisplayState {
     pub drawing: Option<Drawing>,
     /// Every frame is drawn on the CPU (`on_cpu`): Still backgrounds is on by default.
     pub on_cpu: bool,
+    /// Automatic on NVIDIA without the driver's GL (`may_stay_black`):
+    /// Settings points to Start in compatible graphics.
+    pub may_stay_black: bool,
+    /// The mode this run uses, and whether NVIDIA's driver is loaded.
+    #[serde(skip)]
+    pub running: Mode,
+    #[serde(skip)]
+    pub nvidia: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -752,6 +772,9 @@ mod linux {
             renderer: None,
             drawing: None,
             on_cpu: false,
+            may_stay_black: false,
+            running: p.mode,
+            nvidia: facts.nvidia,
         });
     }
 
@@ -781,6 +804,7 @@ mod linux {
             s.renderer = renderer.clone();
         }
         s.on_cpu = on_cpu(compositing_off(), s.drawing);
+        s.may_stay_black = s.drawing.is_some_and(|d| may_stay_black(s.running, s.nvidia, compositing_off(), d));
         Some(s)
     }
 
@@ -798,6 +822,12 @@ mod linux {
             Drawing::Cpu => crate::logging::warn("display", &format!("drawing on the CPU: WebGL's renderer is {name}, so the graphics driver is not in use ({how})")),
             Drawing::NoWebgl => crate::logging::info("display", &format!("WebGL did not start ({how})")),
             Drawing::Gpu | Drawing::Unknown => crate::logging::info("display", &format!("WebGL's renderer: {name} ({how})")),
+        }
+        if current().is_some_and(|s| s.may_stay_black) {
+            crate::logging::warn(
+                "display",
+                "Automatic on NVIDIA without the driver's GL: if the window stays black until something moves (KB-0377), use the tray's Start in compatible graphics",
+            );
         }
     }
 }
@@ -976,7 +1006,10 @@ pub fn display_webgl_ask() -> bool {
 }
 
 /// The shell drew its first frame: this start worked. When it was told to
-/// ask (`display_webgl_ask`), it says what WebGL got (`webgl`, `renderer`).
+/// ask (`display_webgl_ask`), it asked WebGL first and says what it got
+/// (`webgl`, `renderer`), so the marker stays until that answer is in
+/// (KB-0377) and what drew a start that worked is in the log. A shell that
+/// was not told to ask drew all the same, so the marker goes either way.
 #[tauri::command]
 pub fn display_rendered(app: tauri::AppHandle, webgl: Option<bool>, renderer: Option<String>) {
     #[cfg(target_os = "linux")]
@@ -1303,6 +1336,22 @@ mod tests {
         assert!(!on_cpu(false, Some(Drawing::Gpu)));
         assert!(!on_cpu(false, Some(Drawing::NoWebgl)));
         assert!(!on_cpu(false, None));
+    }
+
+    /// KB-0377: only Automatic on NVIDIA leans on the driver's GL with no
+    /// way out of its own; Compatible and Full were picked, or healed to.
+    #[test]
+    fn automatic_on_nvidia_without_the_drivers_gl_may_stay_black() {
+        assert!(may_stay_black(Mode::Auto, true, false, Drawing::NoWebgl));
+        assert!(may_stay_black(Mode::Auto, true, false, Drawing::Cpu));
+        assert!(!may_stay_black(Mode::Auto, true, false, Drawing::Gpu));
+        assert!(!may_stay_black(Mode::Auto, true, false, Drawing::Unknown));
+        assert!(!may_stay_black(Mode::Auto, false, false, Drawing::NoWebgl));
+        assert!(!may_stay_black(Mode::Compatible, true, true, Drawing::NoWebgl));
+        assert!(!may_stay_black(Mode::Full, true, false, Drawing::Cpu));
+        // The person's own WEBKIT_DISABLE_COMPOSITING_MODE on Automatic: no
+        // WebGL is what they asked for, not a driver that failed.
+        assert!(!may_stay_black(Mode::Auto, true, true, Drawing::NoWebgl));
     }
 
     /// report-A: on by itself where the CPU draws every frame; the player's

@@ -789,6 +789,33 @@ try {
       assert.equal(await drift(gpu), 'kryo-wall-drift')
     } finally { await context.close() }
   })
+  await check('Settings > Graphics points to compatible graphics when Automatic on NVIDIA gets no driver for WebGL', async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15' })
+    await context.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    const hint = async (query) => {
+      const page = await context.newPage()
+      page.on('pageerror', e => failures.push(e.message))
+      await page.goto(`${base}${query}`)
+      await page.getByRole('complementary', { name: 'Your games' }).waitFor()
+      await page.getByRole('button', { name: 'Account menu' }).click()
+      await page.getByRole('menuitem', { name: /Settings/ }).click()
+      await page.getByRole('button', { name: 'General', exact: true }).click()
+      await page.getByText(/^Now: Automatic/).waitFor()
+      return page.locator('p', { hasText: 'Window black or flickering?' })
+    }
+    try {
+      for (const query of ['?nowebgl', '?software']) {
+        const said = await hint(query)
+        assert.match(await said.textContent(), /^WebGL could not use the NVIDIA driver, so the window may stay black until something moves\. Window black/)
+        assert.match(await said.getAttribute('class'), /text-foreground/)
+      }
+      // The driver drew: the way out stays, quietly.
+      const quiet = await hint('')
+      assert.equal(await quiet.count(), 1)
+      assert.doesNotMatch(await quiet.textContent(), /WebGL could not/)
+      assert.match(await quiet.getAttribute('class'), /text-muted-foreground/)
+    } finally { await context.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
