@@ -1432,7 +1432,9 @@ pub fn unclean(root: &Path) -> Result<bool, String> {
     for e in record.entries.iter().rev() {
         let live = journal::safe_path(root, &e.path)?;
         let stashed = e.stash.as_deref().map(|s| journal::safe_path(root, s)).transpose()?.filter(|p| p.is_file());
-        if (e.restored_from.is_some() || stashed.is_some()) && live.is_file() {
+        // A stash that was named but never made means the release's file
+        // never moved: it is still the one at `live`, so it stays.
+        if (stashed.is_some() || (e.restored_from.is_some() && e.stash.is_none())) && live.is_file() {
             journal::make_writable(&live)?;
             std::fs::remove_file(&live).map_err(|err| format!("{}: {err}", e.path))?;
         }
@@ -1705,6 +1707,34 @@ mod tests {
         std::fs::write(dir.join(SWAP_DIR).join("0"), b"evil").unwrap();
         assert!(unclean(&dir).is_err());
         assert_eq!(std::fs::read(dir.join("bin/steam_api64.dll")).unwrap(), b"valve", "nothing touched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_noted_but_never_set_aside_is_left_in_place() {
+        let dir = scratch("swap-never-moved");
+        write(&dir, "bin/steam_api64.dll", b"gbe");
+        write(&dir, "bin/steam_api64.dll.kryoto", b"valve");
+        // A crash right after the note, or a move that failed: no stash file.
+        let record = SwapRecord {
+            release_id: "9".into(),
+            at: 1,
+            entries: vec![SwapEntry {
+                path: "bin/steam_api64.dll".into(),
+                stash: Some(format!("{SWAP_DIR}/0")),
+                sha256: Some(sha(b"gbe")),
+                restored_from: Some("bin/steam_api64.dll.kryoto".into()),
+            }],
+        };
+        save_swap(&dir, &record).unwrap();
+        assert!(unclean(&dir).unwrap());
+        assert_eq!(std::fs::read(dir.join("bin/steam_api64.dll")).unwrap(), b"gbe", "the release's own file stays");
+        assert!(!has_swap(&dir));
+        // A swap that failed halfway puts back what it did and nothing more.
+        std::fs::create_dir_all(dir.join(".kryoto-repair")).unwrap();
+        std::fs::write(dir.join(SWAP_DIR), b"a file where the folder goes").unwrap();
+        assert!(clean_for_switch(&dir, &swap_list()).is_err());
+        assert_eq!(std::fs::read(dir.join("bin/steam_api64.dll")).unwrap(), b"gbe");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
