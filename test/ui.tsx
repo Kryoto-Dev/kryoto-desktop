@@ -9,6 +9,7 @@ import { DownloadsPage } from '@/downloads/DownloadsPage'
 import { LibraryHome } from '@/library/LibraryHome'
 import { AddGameDialog } from '@/library/AddGameDialog'
 import { ReportDialog } from '@/shell/PreviewReport'
+import { NetworkBlocked } from '@/shell/NetworkBlocked'
 import { holdPrompts, usePromptTurn } from '@/lib/prompts'
 import type { LibraryGame } from '@/lib/library'
 import '../src/styles.css'
@@ -62,6 +63,7 @@ function Harness() {
   const [nested, setNested] = useState(false)
   const [search, setSearch] = useState(false)
   const [report, setReport] = useState<string | null>(null)
+  const [blocked, setBlocked] = useState(false)
   const [value, setValue] = useState('a')
   const dl = useDownloads()
   const lib = useLibrary()
@@ -71,6 +73,7 @@ function Harness() {
     <button id="search" onClick={() => setSearch(true)}>Add fixture game</button>
     <button id="report" onClick={() => setReport('tess')}>Report</button>
     <button id="report-other" onClick={() => setReport('sam')}>Report as another account</button>
+    <button id="blocked" onClick={() => setBlocked(true)}>Blocked network</button>
     <Prompt id="update" /><Prompt id="intro" /><Prompt id="found" /><Prompt id="notice" />
     <output id="library-error">{lib.error}</output>
     <output id="library-games">{lib.games.map(g => g.title).join(',')}</output>
@@ -78,6 +81,7 @@ function Harness() {
     <section id="downloads"><DownloadsPage list={dl.list} loading={dl.loading} error={dl.error} onRetry={dl.retry} onOpenGame={() => {}} onStore={() => {}} onDonate={null} /></section>
     <section id="library"><LibraryHome games={[game]} running={new Set()} onOpen={() => {}} onPlay={() => {}} onContext={() => {}} /></section>
     {search ? <AddGameDialog onClose={() => setSearch(false)} onAdded={() => {}} /> : null}
+    {blocked ? <NetworkBlocked health={{ state: 'unreachable', parts: [], answering: false, statusUp: true, statusUrl: '', blocked: true }} /> : null}
     {report ? <ReportDialog key={report} page="fixture" username={report} shot={null} dropShot={() => {}} onClose={() => setReport(null)} /> : null}
     {dialog ? <Modal title="Fixture controls" onClose={() => setDialog(false)} footer={<button id="last">Last control</button>}>
       <Segmented label="Fixture choice" value={value} options={[{ value: 'a', label: 'Alpha' }, { value: 'b', label: 'Beta' }]} onChange={setValue} />
