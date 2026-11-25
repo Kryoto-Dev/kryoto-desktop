@@ -776,12 +776,25 @@ fn stamps_of(root: &Path) -> HashMap<String, Stamp> {
 /// The stored report, with what has come back since left out (a player who
 /// put a file back by hand): cheap, a look at the few files it names.
 /// A broken file stays named until the next check or Get the files back:
-/// being there again proves nothing about its bytes.
-fn current(report: Option<CheckReport>, root: &Path) -> Option<CheckReport> {
+/// being there again proves nothing about its bytes. What Kryoto changed
+/// itself since the check (a switch, an add-on, Kryoto Online) is left out
+/// too: Get the files back must never put the release's old emulator over
+/// the one the player switched to.
+fn current(report: Option<CheckReport>, game: &LibraryGame, root: &Path) -> Option<CheckReport> {
     let mut r = report?;
+    let (skip, switched) = kryoto_changes(game, root);
+    without_kryotos(&mut r, &skip, switched);
     let mut finder = Finder::new(root);
     r.missing.retain(|f| finder.find(&f.path).is_none());
     Some(r)
+}
+
+/// Findings on files Kryoto changed itself, left out the way `check_tree`
+/// skips them. Pure.
+fn without_kryotos(r: &mut CheckReport, skip: &BTreeSet<String>, switched: bool) {
+    let ours = |f: &Finding| skip.contains(&key(&f.path)) || (switched && f.role.emulator());
+    r.missing.retain(|f| !ours(f));
+    r.broken.retain(|f| !ours(f));
 }
 
 static CHECKING: Mutex<Vec<(String, Arc<AtomicBool>)>> = Mutex::new(Vec::new());
@@ -903,7 +916,7 @@ fn state_of<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> FilesState {
         emulator: list.and_then(FileList::emulator_words),
         emulator_off: list.is_some_and(|l| l.emulator_off),
         kept_own: list.map(|l| l.excluded.clone()).unwrap_or_default(),
-        report: current(e.report.filter(|_| list.is_some()), &root),
+        report: current(e.report.filter(|_| list.is_some()), game, &root),
         checking: CHECKING.lock().map(|c| c.iter().any(|(id, _)| id == &game.id)).unwrap_or(false),
         archive: kept_archive(app, game).is_some(),
         download_size: e.download_size,
@@ -953,7 +966,7 @@ pub fn game_files_check_cancel(game_id: String) {
 /// missing or broken, with what each is, when the release has a list.
 pub fn alarms<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<Vec<Finding>> {
     cached_list(app, game)?;
-    let report = current(entry(app, game).report, Path::new(&game.install_dir))?;
+    let report = current(entry(app, game).report, game, Path::new(&game.install_dir))?;
     Some(report.missing.into_iter().chain(report.broken).collect())
 }
 
@@ -1137,7 +1150,7 @@ pub async fn game_files_restore(app: AppHandle, game_id: String) -> Result<Resto
     let root = PathBuf::from(&game.install_dir);
     let e = entry(&app, &game);
     let wanted: Vec<ListedFile> = {
-        let report = current(e.report.clone(), &root).unwrap_or_default();
+        let report = current(e.report.clone(), &game, &root).unwrap_or_default();
         let names: BTreeSet<String> = report.missing.iter().chain(report.broken.iter()).map(|f| key(&f.path)).collect();
         list.listed().iter().filter(|f| names.contains(&key(&f.path))).cloned().collect()
     };
@@ -1707,6 +1720,27 @@ mod tests {
         std::fs::write(dir.join(SWAP_DIR).join("0"), b"evil").unwrap();
         assert!(unclean(&dir).is_err());
         assert_eq!(std::fs::read(dir.join("bin/steam_api64.dll")).unwrap(), b"valve", "nothing touched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_report_from_before_a_switch_no_longer_names_the_old_emulator() {
+        let dir = scratch("switch-report");
+        write(&dir, "bin/steam_api64.dll", b"gbe");
+        write(&dir, "bin/steam_api64.dll.kryoto", b"valve");
+        write(&dir, "bin/steam_settings/steam_appid.txt", b"480");
+        let finding = |path: &str, role, problem| Finding { path: path.into(), role, problem };
+        let report = CheckReport {
+            missing: vec![finding("bin/steam_settings/steam_appid.txt", Role::EmulatorAdded, Problem::Missing), finding("PlayGTAV.exe", Role::Game, Problem::Missing)],
+            broken: vec![finding("bin/steam_api64.dll", Role::EmulatorReplaced, Problem::Broken)],
+            ..Default::default()
+        };
+        let game = LibraryGame::default();
+        assert_eq!(current(Some(report.clone()), &game, &dir).unwrap().broken.len(), 1, "before the switch it is damage");
+        clean_for_switch(&dir, &swap_list()).unwrap().unwrap();
+        let after = current(Some(report), &game, &dir).unwrap();
+        assert!(after.broken.is_empty(), "the switch changed it, not an antivirus");
+        assert_eq!(after.missing.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["PlayGTAV.exe"], "the game's own file is still missing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
