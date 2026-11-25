@@ -7,6 +7,7 @@ import { isOnline, onOnlineChange } from '@/lib/online'
 import type { MascotId, ThemeId } from '@/pet/engine'
 import { Stage, petDetector } from '@/pet/stage'
 import { workingPose } from '@/pet/working-pose'
+import { pointerWatch } from '@/pet/pointer-watch'
 import { PET_SIZES, type PetSize } from '@/lib/settings'
 
 type Look = { palette: string; dark: boolean; reducedMotion: boolean }
@@ -255,8 +256,8 @@ export function PetApp() {
     // On Windows the window lets every click and tap through (pet.rs) until
     // the pointer is on the drawn pet: then it takes them, so nothing else on
     // the screen is ever in its way (KB-0369). Elsewhere (the pointer cannot
-    // be asked for on Wayland), or should asking fail, the small window takes
-    // them as it always did.
+    // be asked for on Wayland), or while asking keeps failing, the small window
+    // takes them as it always did (pointer-watch.ts).
     const passThrough = /Windows/i.test(navigator.userAgent)
     let hit = !passThrough
     const setHit = (over: boolean) => {
@@ -264,21 +265,20 @@ export function PetApp() {
       hit = over
       void quiet(call('pet_hit', { over }))
     }
-    let blind = false
+    const pointer = pointerWatch()
     const follow = window.setInterval(() => {
-      if (blind || document.hidden) return
+      if (document.hidden) return
       if (held || press) return setHit(true)
       void Promise.all([cursorPosition(), win.innerPosition()])
         .then(([c, at]) => {
+          pointer.answered()
           const x = (c.x - at.x) / scale
           const y = (c.y - at.y) / scale
           stage.lookAt(x, y)
           setHit(stage.opaqueAt(x, y))
         })
         .catch(() => {
-          if (!passThrough) return
-          blind = true
-          setHit(true)
+          if (pointer.missed()) setHit(true)
         })
     }, 150)
     canvas.addEventListener('pointerdown', down)
