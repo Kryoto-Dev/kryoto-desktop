@@ -235,11 +235,14 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
   let ink = '#ededed'
   let accent = ink
   let font = 'ui-monospace, monospace'
+  /** Read the colours and the font again; whether any of them changed. */
   const readPalette = () => {
+    const was = [ink, accent, font]
     const css = getComputedStyle(canvas)
     ink = css.color || ink
     accent = css.getPropertyValue('--primary').trim() || ink
     font = css.getPropertyValue('--font-ascii').trim() || font
+    return ink !== was[0] || accent !== was[1] || font !== was[2]
   }
 
   // The sprite sheet: every look a cell can have, drawn once.
@@ -412,14 +415,20 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
   watch.observe(host)
   window.addEventListener('resize', resized)
 
-  // The palette or the font changed (Settings, a font arriving): redraw every cell.
+  // The palette or the font changed (Settings): redraw every cell. The page's
+  // class changes for other things too (the pad's focus ring, on every mouse
+  // move), so only a new ink, accent or font redraws.
   const repaint = () => {
+    if (readPalette()) clearSprites()
+  }
+  // A font arriving draws the same font name differently: always redraw.
+  const fontsLoaded = () => {
     readPalette()
     clearSprites()
   }
   const themes = new MutationObserver(repaint)
   themes.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-palette', 'style'] })
-  document.fonts?.addEventListener?.('loadingdone', repaint)
+  document.fonts?.addEventListener?.('loadingdone', fontsLoaded)
 
   return () => {
     stopped = true
@@ -429,7 +438,7 @@ export function mountSaver(canvas: HTMLCanvasElement, spec: VariantSpec, opts: M
     watch.disconnect()
     window.removeEventListener('resize', resized)
     themes.disconnect()
-    document.fonts?.removeEventListener?.('loadingdone', repaint)
+    document.fonts?.removeEventListener?.('loadingdone', fontsLoaded)
     opts.onUnderlay?.(null)
   }
 }
