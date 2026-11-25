@@ -184,6 +184,11 @@ pub struct Download {
     /// That file's SHA-256 once read, so another game picked for it is
     /// matched without reading it a second time.
     pub file_sha: Option<String>,
+    /// That file's length and when it was written, as it was read
+    /// (`file_stamp`). A file that differs is read anew; None, an older
+    /// row, is read anew too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_stamp: Option<(u64, u64)>,
     /// That file passed 7-Zip's own test of the archive.
     pub tested: bool,
     /// The player chose to install it although it matches no file kryo.to
@@ -3366,6 +3371,29 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
     Ok(())
 }
 
+/// A file's length and when it was last written (ms since 1970): what says
+/// the file at a path is still the one that was read.
+fn file_stamp(meta: &std::fs::Metadata) -> (u64, u64) {
+    let written = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
+    (meta.len(), written)
+}
+
+/// Another file under the same name since it was read (a fresh download over
+/// it): everything read or matched of the old one goes. Going by the size
+/// alone, a good copy of the same size as a damaged one kept the damaged
+/// one's hash, and every Retry said it was not kryo.to's copy.
+fn read_anew(d: &mut Download, stamp: (u64, u64)) {
+    d.file_sha = None;
+    d.tested = false;
+    d.verified = false;
+    d.sha256 = None;
+    d.addon = None;
+    d.repair = false;
+    d.total = Some(stamp.0);
+    d.received = stamp.0;
+    d.file_stamp = Some(stamp);
+}
+
 /// The player's own archive (from_file.rs), at its turn: still there, read
 /// once for its SHA-256 (the same check a download gets), and that matched
 /// against every file kryo.to lists for the game. A match is Kryoto's copy,
@@ -3374,19 +3402,13 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) 
 async fn check_own_file<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>, client: &reqwest::Client) -> Result<(), String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let path = PathBuf::from(&d.archive_path);
-    let Some(size) = std::fs::metadata(&path).ok().filter(|m| m.is_file()).map(|m| m.len()) else {
+    let Some(meta) = std::fs::metadata(&path).ok().filter(|m| m.is_file()) else {
         return Err(format!("Your file is not at {} any more. Put it back and press Retry, or install it from where it is now.", path.display()));
     };
-    // Another file under the same name since (a fresh download over it): read anew.
-    if Some(size) != d.total {
-        edit(app, id, |d| {
-            d.file_sha = None;
-            d.tested = false;
-            d.verified = false;
-            d.sha256 = None;
-            d.total = Some(size);
-            d.received = size;
-        });
+    let size = meta.len();
+    let stamp = file_stamp(&meta);
+    if d.file_stamp != Some(stamp) {
+        edit(app, id, |d| read_anew(d, stamp));
     }
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     if d.verified {
@@ -3515,7 +3537,8 @@ pub fn enqueue_file<R: Runtime>(app: &AppHandle<R>, path: &Path, size: u64, slug
     }
     if let Some((id, false)) = found {
         // Another game picked for it, or the same one again: what was read of
-        // the file stays (its hash, its test), what was said of a game goes.
+        // the file stays (its hash, its test) while the file is the same one
+        // (`check_own_file`), what was said of a game goes.
         let keep_title = title.filter(|t| !is_placeholder(t, Some(&slug)));
         edit(app, &id, |d| {
             if d.slug.as_deref() != Some(slug.as_str()) {
@@ -7200,6 +7223,30 @@ mod tests {
         assert!(root.join(&exe).is_file());
         assert_eq!(std::fs::read(root.join("Data/level.bin")).unwrap().len(), 300_000);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A mirror served a damaged copy of the right size; the player put
+    /// kryo.to's good copy under the same name. Same size, so it used to keep
+    /// the damaged one's hash, and every Retry said "not a copy of any file
+    /// kryo.to lists".
+    #[test]
+    fn a_file_replaced_under_the_same_name_and_size_is_read_anew() {
+        let dir = scratch("own-file-stamp");
+        let file = dir.join("Captain Hardcore - kryoto.7z");
+        std::fs::write(&file, b"damaged!").unwrap();
+        let first = file_stamp(&std::fs::metadata(&file).unwrap());
+        let mut row = Download { from_file: true, file_stamp: Some(first), file_sha: Some("d".repeat(64)), tested: true, verified: true, sha256: Some("d".repeat(64)), addon: Some("DLC: Firebird".into()), total: Some(8), received: 8, ..Default::default() };
+        assert_eq!(file_stamp(&std::fs::metadata(&file).unwrap()), first, "read again, it is the same file");
+
+        std::fs::write(&file, b"good one").unwrap();
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)).unwrap();
+        let now = file_stamp(&std::fs::metadata(&file).unwrap());
+        assert_eq!(now.0, first.0, "the same size");
+        assert_ne!(now, first, "but another file");
+        read_anew(&mut row, now);
+        assert!(row.file_sha.is_none() && !row.tested && !row.verified && row.sha256.is_none() && row.addon.is_none(), "{row:?}");
+        assert_eq!((row.file_stamp, row.total, row.received), (Some(now), Some(8), 8));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A row that only waits for a sign-in carries on by itself: it stays in
