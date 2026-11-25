@@ -1163,6 +1163,8 @@ fn enqueue_item<R: Runtime>(
 /// default folder). Each takes its place like any download and gets its link
 /// at its turn. One already on its way is left as it is. How many were queued.
 pub fn enqueue_collection<R: Runtime>(app: &AppHandle<R>, games: &[crate::collections::Game], library_dir: Option<String>) -> Result<usize, String> {
+    // A version kryo.to no longer allows (required.rs) starts nothing new.
+    crate::required::refuse()?;
     let state = app.state::<Downloads>();
     let mut added: Vec<String> = Vec::new();
     {
@@ -6317,6 +6319,14 @@ mod tests {
         s.library_folders = vec!["D:/Games".into()];
         s.ask_install_folder = false;
         assert!(!asks_for_folder(&s, false), "always the default");
+    }
+
+    /// A version kryo.to no longer allows (required.rs) starts no download,
+    /// whoever asks: the phone and Remote too.
+    #[test]
+    fn a_blocked_version_starts_no_download() {
+        let src = include_str!("downloads.rs");
+        assert!(crate::required::refuses_before(src, "pub fn enqueue_collection<", "list.insert("));
     }
 
     /// A failed row from last week still says the build kryo.to served then.
