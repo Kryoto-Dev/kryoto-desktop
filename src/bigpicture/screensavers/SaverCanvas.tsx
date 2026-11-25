@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { SplashScene } from '@/boot/SplashScene'
+import { reducedMotion } from '@/lib/motion'
 import { cn } from '@/lib/utils'
-import { mountSaver } from './engine'
+import { mountSaver, STILL_MS } from './engine'
 import { saverSpec, type SaverId } from './index'
 
 /** In the page server only: frames drawn and their cost, read from the console as `__kryoSaverFrames`. */
@@ -13,7 +14,10 @@ function countFrame(ms: number) {
   s.longest = Math.max(s.longest, ms)
 }
 
-/** Field's start-screen scene starts over somewhere else this often, in whole pixels. */
+/**
+ * Field's start-screen scene starts over somewhere else this often, in whole
+ * pixels. With motion reduced, only as often as the cells' still changes.
+ */
 const SPLASH_MOVE_MS = 90_000
 /**
  * Where it starts over: the middle, then four places a modest step from it,
@@ -87,7 +91,7 @@ function Splash({ fps, moves }: { fps: number; moves: boolean }) {
   const [turn, setTurn] = useState(0)
   useEffect(() => {
     if (!moves) return
-    const t = window.setInterval(() => setTurn((n) => n + 1), SPLASH_MOVE_MS)
+    const t = window.setInterval(() => setTurn((n) => n + 1), reducedMotion() ? STILL_MS : SPLASH_MOVE_MS)
     return () => window.clearInterval(t)
   }, [moves])
   const [x, y] = SPLASH_PLACES[turn % SPLASH_PLACES.length]!
