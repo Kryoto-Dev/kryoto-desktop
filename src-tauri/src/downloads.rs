@@ -2772,9 +2772,11 @@ async fn fetch_all<R: Runtime>(
     let mut asked_again = false;
     // What had arrived when our own link was last asked for again.
     let mut own_asked_at: Option<u64> = None;
-    // Every dropped or stalled connection this run, progress or not, and
-    // whether a mirror was asked to take over.
+    // Every dropped or stalled connection this run, progress or not, the
+    // latest of them in a row (`cuts_lately`), and whether a mirror was asked
+    // to take over.
     let mut cuts = 0u32;
+    let mut cut_run = (0u32, None);
     let mut tried_mirrors = false;
     let mut is_mirror = is_mirror;
     let mut refreshed = 0u32;
@@ -2880,11 +2882,12 @@ async fn fetch_all<R: Runtime>(
                 }
                 failures += 1;
                 cuts += 1;
+                let lately = cuts_lately(&mut cut_run, Instant::now());
                 // Our own server keeps cutting the download: the same archive
                 // from one of the game's mirrors, for the bytes still missing
                 // (KB-0117, 2026-11-22: 20 of 30 ranges cut in 50 s, players
                 // on "Reconnecting." for half an hour).
-                if !is_mirror && !tried_mirrors && cuts >= OWN_CUTS_BEFORE_MIRROR {
+                if !is_mirror && !tried_mirrors && lately >= OWN_CUTS_BEFORE_MIRROR {
                     tried_mirrors = true;
                     match take_over_from_mirror(app, id, flag, settings).await {
                         Ok((mirror_client, n, host)) => {
@@ -2934,10 +2937,30 @@ async fn fetch_all<R: Runtime>(
     }
 }
 
-/// Dropped or stalled connections to our own server in one run before a
-/// mirror is asked to carry on. With the back-off between them, about a
-/// minute of trying; it used to retry for as long as each try moved a byte.
+/// Dropped or stalled connections to our own server in a row (`CUT_GAP`)
+/// before a mirror is asked to carry on. With the back-off between them,
+/// about a minute of trying; it used to retry for as long as each try moved
+/// a byte.
 const OWN_CUTS_BEFORE_MIRROR: u32 = 6;
+
+/// A cut this long after the one before starts the count again. Cuts back to
+/// back are one range stalling through all four tries (up to a minute each)
+/// and the wait after: about five minutes apart on a server that answers late
+/// and then sends nothing. A fixed window missed those once a try ran past
+/// 40 s. Cuts spread over a long, healthy download on a mobile line (one an
+/// hour) never add up, and used to move it to a mirror for good.
+const CUT_GAP: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// A cut at `now`: how many came in a row, each within `CUT_GAP` of the last.
+fn cuts_lately(run: &mut (u32, Option<Instant>), now: Instant) -> u32 {
+    let (count, last) = run;
+    match last {
+        Some(t) if now.duration_since(*t) <= CUT_GAP => *count += 1,
+        _ => *count = 1,
+    }
+    *last = Some(now);
+    *count
+}
 
 /// The mirror pages kryo.to lists for the build a row downloads, in its order.
 fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<String> {
@@ -7255,6 +7278,28 @@ mod tests {
         assert!(root.join(&exe).is_file());
         assert_eq!(std::fs::read(root.join("Data/level.bin")).unwrap().len(), 300_000);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// KB-0117: our own server cutting the download again and again hands it
+    /// to a mirror. Cuts spread over hours of a healthy download never do.
+    #[test]
+    fn only_cuts_close_together_hand_a_download_to_a_mirror() {
+        let start = Instant::now();
+        let mut run = (0, None);
+        let spread: Vec<u32> = (0..6).map(|h| cuts_lately(&mut run, start + std::time::Duration::from_secs(3600 * h))).collect();
+        assert_eq!(spread, vec![1; 6], "one an hour over five hours");
+        let later = start + std::time::Duration::from_secs(6 * 3600);
+        let close: Vec<u32> = (0..6).map(|i| cuts_lately(&mut run, later + std::time::Duration::from_secs(20 * i))).collect();
+        assert_eq!(close.last(), Some(&OWN_CUTS_BEFORE_MIRROR), "six in two minutes: {close:?}");
+        // Six back to back, each a range stalling through all four tries of a
+        // minute (an answer after 30 s, then 30 s of nothing) and the waits:
+        // 25 minutes from the first to the sixth.
+        let mut run = (0, None);
+        let slow: Vec<u32> = (0..6).map(|i| cuts_lately(&mut run, later + std::time::Duration::from_secs(300 * i))).collect();
+        assert_eq!(slow.last(), Some(&OWN_CUTS_BEFORE_MIRROR), "{slow:?}");
+        // A quiet stretch after a few starts the count again.
+        let after = later + std::time::Duration::from_secs(1500 + 11 * 60);
+        assert_eq!(cuts_lately(&mut run, after), 1);
     }
 
     /// A mirror served a damaged copy of the right size; the player put
