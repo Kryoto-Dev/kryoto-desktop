@@ -1136,6 +1136,10 @@ fn tool_files<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, u64, PathBuf)> {
     out
 }
 
+/// Said when an install or update of the game is unpacking: the old
+/// release's files must not land in the new build.
+const INSTALLING: &str = "The game is being installed. Get its files back once that is done.";
+
 /// Get the files back: every missing or broken file the last check named,
 /// from this PC when its bytes are here, else said plainly (with the
 /// download's size) so the game's page offers downloading it again.
@@ -1145,6 +1149,13 @@ pub async fn game_files_restore(app: AppHandle, game_id: String) -> Result<Resto
     let game = game(&app, &game_id)?;
     if crate::library::is_running(&app, &game.id) {
         return Err("Close the game before getting its files back.".into());
+    }
+    let installing = {
+        let (app, slug) = (app.clone(), game.slug.clone());
+        move || slug.as_deref().is_some_and(|s| crate::downloads::unpacking(&app, s))
+    };
+    if installing() {
+        return Err(INSTALLING.into());
     }
     let list = cached_list(&app, &game).ok_or("Kryoto has no list of this release's files.")?;
     let root = PathBuf::from(&game.install_dir);
@@ -1164,72 +1175,9 @@ pub async fn game_files_restore(app: AppHandle, game_id: String) -> Result<Resto
     let say = move |text: &str, percent: Option<u8>| {
         let _ = app2.emit("files-restore-progress", RestoreProgress { game_id: id.clone(), text: text.into(), percent });
     };
-    let mut out = tauri::async_runtime::spawn_blocking(move || -> Result<Restored, String> {
-        let _guard = journal::lock(&root)?;
-        let mut out = Restored::default();
-        let mut finder = Finder::new(&root);
-        let mut left: Vec<ListedFile> = Vec::new();
-        say("Looking for the files on this PC", None);
-        for f in &wanted {
-            match local_twin(&mut finder, &list, f, &tools) {
-                Some(from) => match place(&root, &from, &f.path, &f.sha256) {
-                    Ok(()) => out.restored.push(f.path.clone()),
-                    Err(e) => {
-                        crate::logging::warn("files", &e);
-                        left.push(f.clone());
-                    }
-                },
-                None => left.push(f.clone()),
-            }
-        }
-        if let (false, Some(archive)) = (left.is_empty(), archive) {
-            let entries = archive_entries(&archive).unwrap_or_default();
-            let paths: Vec<String> = left.iter().map(|f| f.path.clone()).collect();
-            let prefix = archive_prefix(&entries, &paths).unwrap_or_default();
-            let names = archive_names(&entries, &prefix, &paths);
-            if !names.is_empty() {
-                let staging = root.with_file_name(format!(".{}.kryoto-restore", root.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
-                let _ = std::fs::remove_dir_all(&staging);
-                let count = names.len();
-                let label = format!("Taking {count} file{} from the download Kryoto kept", if count == 1 { "" } else { "s" });
-                say(&label, Some(0));
-                let progress = |done: u64, total: Option<u64>| {
-                    let pct = total.filter(|t| *t > 0).map(|t| (done.min(t) * 100 / t) as u8);
-                    say(&label, pct);
-                };
-                let stop = AtomicU8::new(0);
-                let list_names: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
-                let unpacked = match crate::downloads::extract_named(&archive, &staging, &list_names, &progress, &stop) {
-                    Ok(true) => Ok(()),
-                    Ok(false) if archive.extension().is_some_and(|x| x.eq_ignore_ascii_case("7z")) => {
-                        extract_7z_named(&archive, &staging, &list_names.iter().cloned().collect(), &stop, &progress)
-                    }
-                    Ok(false) => Err("no 7-Zip to read it".to_string()),
-                    Err(e) => Err(e),
-                };
-                if let Err(e) = &unpacked {
-                    crate::logging::warn("files", &format!("could not take files from {}: {e}", archive.display()));
-                }
-                if unpacked.is_ok() {
-                    for (rel, name) in &names {
-                        let Some(f) = left.iter().find(|f| &f.path == rel) else { continue };
-                        let from = staging.join(name);
-                        if from.is_file() && place(&root, &from, &f.path, &f.sha256).is_ok() {
-                            out.restored.push(f.path.clone());
-                            out.from_archive += 1;
-                        }
-                    }
-                }
-                let _ = std::fs::remove_dir_all(&staging);
-                let _ = std::fs::remove_file(staging.with_extension("names"));
-                left.retain(|f| !out.restored.contains(&f.path));
-            }
-        }
-        out.left = left.into_iter().map(|f| f.path).collect();
-        Ok(out)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let mut out = tauri::async_runtime::spawn_blocking(move || restore_into(&root, &list, &wanted, &tools, archive.as_deref(), &installing, &say))
+        .await
+        .map_err(|e| e.to_string())??;
     out.download_size = e.download_size;
     // What came back is no longer a finding.
     let back: BTreeSet<String> = out.restored.iter().map(|p| key(p)).collect();
@@ -1242,6 +1190,96 @@ pub async fn game_files_restore(app: AppHandle, game_id: String) -> Result<Resto
     crate::logging::info("files", &format!("{}: {} file(s) back ({} from the kept download), {} not on this PC", game.title, out.restored.len(), out.from_archive, out.left.len()));
     let _ = app.emit("files-checked", &game.id);
     let _ = app.emit("library-changed", ());
+    Ok(out)
+}
+
+/// `game_files_restore`'s work, off the UI thread. `installing` is asked
+/// once the folder is locked, and again before each file goes in: an update
+/// that started meanwhile wins. Asked after the lock, an install that began
+/// before it (one that takes no lock in a fresh folder) is still caught,
+/// and one that begins after it finds the lock and refuses.
+fn restore_into(
+    root: &Path,
+    list: &FileList,
+    wanted: &[ListedFile],
+    tools: &[(String, u64, PathBuf)],
+    archive: Option<&Path>,
+    installing: &dyn Fn() -> bool,
+    say: &dyn Fn(&str, Option<u8>),
+) -> Result<Restored, String> {
+    let _guard = journal::lock(root)?;
+    if installing() {
+        return Err(INSTALLING.into());
+    }
+    let mut out = Restored::default();
+    let mut finder = Finder::new(root);
+    let mut left: Vec<ListedFile> = Vec::new();
+    say("Looking for the files on this PC", None);
+    for f in wanted {
+        match local_twin(&mut finder, list, f, tools) {
+            Some(from) => {
+                if installing() {
+                    return Err(INSTALLING.into());
+                }
+                match place(root, &from, &f.path, &f.sha256) {
+                    Ok(()) => out.restored.push(f.path.clone()),
+                    Err(e) => {
+                        crate::logging::warn("files", &e);
+                        left.push(f.clone());
+                    }
+                }
+            }
+            None => left.push(f.clone()),
+        }
+    }
+    if let (false, Some(archive)) = (left.is_empty(), archive) {
+        let entries = archive_entries(archive).unwrap_or_default();
+        let paths: Vec<String> = left.iter().map(|f| f.path.clone()).collect();
+        let prefix = archive_prefix(&entries, &paths).unwrap_or_default();
+        let names = archive_names(&entries, &prefix, &paths);
+        if !names.is_empty() {
+            let staging = root.with_file_name(format!(".{}.kryoto-restore", root.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
+            let _ = std::fs::remove_dir_all(&staging);
+            let count = names.len();
+            let label = format!("Taking {count} file{} from the download Kryoto kept", if count == 1 { "" } else { "s" });
+            say(&label, Some(0));
+            let progress = |done: u64, total: Option<u64>| {
+                let pct = total.filter(|t| *t > 0).map(|t| (done.min(t) * 100 / t) as u8);
+                say(&label, pct);
+            };
+            let stop = AtomicU8::new(0);
+            let list_names: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
+            let unpacked = match crate::downloads::extract_named(archive, &staging, &list_names, &progress, &stop) {
+                Ok(true) => Ok(()),
+                Ok(false) if archive.extension().is_some_and(|x| x.eq_ignore_ascii_case("7z")) => {
+                    extract_7z_named(archive, &staging, &list_names.iter().cloned().collect(), &stop, &progress)
+                }
+                Ok(false) => Err("no 7-Zip to read it".to_string()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = &unpacked {
+                crate::logging::warn("files", &format!("could not take files from {}: {e}", archive.display()));
+            }
+            if unpacked.is_ok() {
+                for (rel, name) in &names {
+                    let Some(f) = left.iter().find(|f| &f.path == rel) else { continue };
+                    let from = staging.join(name);
+                    if installing() {
+                        let _ = std::fs::remove_dir_all(&staging);
+                        return Err(INSTALLING.into());
+                    }
+                    if from.is_file() && place(root, &from, &f.path, &f.sha256).is_ok() {
+                        out.restored.push(f.path.clone());
+                        out.from_archive += 1;
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            let _ = std::fs::remove_file(staging.with_extension("names"));
+            left.retain(|f| !out.restored.contains(&f.path));
+        }
+    }
+    out.left = left.into_iter().map(|f| f.path).collect();
     Ok(out)
 }
 
@@ -1792,6 +1830,28 @@ mod tests {
         write(&tools_dir, "steam_api64.dll", b"gbe!");
         assert!(local_twin(&mut finder, &list, &want, &tools).is_some());
         assert!(place(&dir, &tools_dir.join("steam_api64.dll"), "../escape.dll", &want.sha256).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_is_put_back_while_the_game_is_being_installed() {
+        let dir = scratch("restore-installing");
+        write(&dir, "bin/steam_api64.dll.kryoto", b"valve");
+        let list = swap_list();
+        let want = ListedFile { path: "bin/original.dll".into(), size: 5, sha256: sha(b"valve"), ..Default::default() };
+        let wanted = [want];
+        let said = |_: &str, _: Option<u8>| {};
+        let err = restore_into(&dir, &list, &wanted, &[], None, &|| true, &said).unwrap_err();
+        assert_eq!(err, INSTALLING);
+        assert!(!dir.join("bin/original.dll").exists(), "the update's files are left alone");
+        // Asked once the folder is locked, not only before a file goes in:
+        // a file found nowhere on this PC would go straight to the kept
+        // download, which can take minutes while the update runs on.
+        let nowhere = [ListedFile { path: "bin/gone.dll".into(), size: 4, sha256: sha(b"gone"), ..Default::default() }];
+        assert_eq!(restore_into(&dir, &list, &nowhere, &[], None, &|| true, &said).unwrap_err(), INSTALLING);
+        let out = restore_into(&dir, &list, &wanted, &[], None, &|| false, &said).unwrap();
+        assert_eq!(out.restored, ["bin/original.dll"]);
+        assert_eq!(std::fs::read(dir.join("bin/original.dll")).unwrap(), b"valve");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
