@@ -57,12 +57,11 @@ pub(super) fn options_line(env: &[(String, String)], prefix: Option<&str>, args:
     if let Some(p) = prefix {
         words.push(format!("WINEPREFIX={}", quote(p)));
     }
-    let args = args.map(str::trim).filter(|a| !a.is_empty());
-    match (words.is_empty(), args) {
-        (true, None) => None,
-        (true, Some(a)) => Some(a.to_string()),
-        (false, a) => Some(format!("{} %command%{}", words.join(" "), a.map(|a| format!(" {a}")).unwrap_or_default())),
+    if words.is_empty() {
+        return super::arguments_line(args);
     }
+    let args = args.map(str::trim).filter(|a| !a.is_empty());
+    Some(format!("{} %command%{}", words.join(" "), args.map(|a| format!(" {a}")).unwrap_or_default()))
 }
 
 /// One of Lutris's games as Bridge takes it. Pure, for the tests.
@@ -290,7 +289,11 @@ mod tests {
     #[test]
     fn the_options_line_only_when_there_is_something_to_say() {
         assert_eq!(options_line(&[], None, None), None);
-        assert_eq!(options_line(&[], None, Some(" -w ")).as_deref(), Some("-w"));
+        assert_eq!(options_line(&[], None, Some(" -w ")).as_deref(), Some("%command% -w"));
+        // Arguments that look like settings are still arguments.
+        let line = options_line(&[], None, Some("ResX=1920 ResY=1080 -windowed")).unwrap();
+        let read = crate::launch::parse_line(&line);
+        assert_eq!((read.env.len(), read.extra_args.as_str()), (0, "ResX=1920 ResY=1080 -windowed"));
         assert_eq!(options_line(&[("A".into(), "it's".into())], None, None).as_deref(), Some("A=\"it's\" %command%"));
         // The prefix Lutris set wins over one in the game's own environment.
         assert_eq!(options_line(&[("WINEPREFIX".into(), "/old".into())], Some("/new"), None).as_deref(), Some("WINEPREFIX=/new %command%"));

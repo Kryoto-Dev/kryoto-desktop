@@ -454,6 +454,13 @@ fn origin(provider: &str, key: &str) -> String {
     format!("{provider}:{key}")
 }
 
+/// A launcher's arguments for a game, as a launch options line. They go after
+/// `%command%`: without it a leading `ResX=1920` would be read as an
+/// environment variable and never reach the game.
+pub(crate) fn arguments_line(args: Option<&str>) -> Option<String> {
+    args.map(str::trim).filter(|a| !a.is_empty()).map(|a| format!("%command% {a}"))
+}
+
 /// A row for a game that stays in its own launcher: no catalog involved, so
 /// nothing of it is compared with kryo.to. Pure, for the tests.
 pub(crate) fn judge_kept(provider: &str, h: &Incoming, games: &[LibraryGame]) -> Row {
