@@ -22,16 +22,22 @@ export function packLanguage(a: { label: string | null; language?: string | null
   return GAME_LANGUAGES.find((l) => l.label.toLowerCase() === name)?.value ?? null
 }
 
+/** An applied pack as the library keeps it (addons.rs `InstalledAddon`). */
+type AppliedPack = { label: string | null; language?: string | null; setLanguage?: boolean | null }
+
 /**
- * The game's Language once the pack labelled `removed` is taken out: back to
- * following Settings (null) when it was that pack's language and no pack of
- * it is left (`remaining`, the labels still applied); otherwise as it was.
- * The game no longer has that language's files, so it cannot start in it.
+ * The game's Language once the pack `removed` is taken out: back to following
+ * Settings (null) when the pack had set it (`setLanguage`) and no pack of that
+ * language is left (`remaining`, the add-ons still applied); otherwise as it
+ * was. The game no longer has that language's files, so it cannot start in
+ * it; a Language the player picked stays theirs. Each pack's language is the
+ * one Add said, else read from its label. A pack applied before Kryoto kept
+ * `setLanguage` counts as having set its own.
  */
-export function languageAfterRemoving(gameLanguage: string | null | undefined, removed: string, remaining: string[]): string | null {
-  const gone = isLanguagePack({ label: removed }) ? packLanguage({ label: removed }) : null
+export function languageAfterRemoving(gameLanguage: string | null | undefined, removed: AppliedPack, remaining: AppliedPack[]): string | null {
+  const gone = isLanguagePack(removed) && removed.setLanguage !== false ? packLanguage(removed) : null
   if (!gone || gameLanguage !== gone) return gameLanguage ?? null
-  return remaining.some((l) => isLanguagePack({ label: l }) && packLanguage({ label: l }) === gone) ? gameLanguage : null
+  return remaining.some((a) => isLanguagePack(a) && packLanguage(a) === gone) ? gameLanguage : null
 }
 
 /** A locale (`pl-PL`, `pt-BR`, `zh-TW`) as Steam's code, or null (kryo.to `steamCodeForLocale`). */

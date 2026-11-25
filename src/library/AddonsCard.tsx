@@ -397,9 +397,9 @@ export function AddonsCard({
                     void run(c.file, async () => {
                       const g = await library.addonUndo(game.id, c.file)
                       setRemovedAt(Date.now() / 1000)
-                      // The language it set goes with it (`add` above set it).
-                      const removed = applied.find((a) => a.file === c.file)?.label ?? ''
-                      const lang = languageAfterRemoving(g.gameLanguage, removed, (g.addons ?? []).map((a) => a.label))
+                      // The language it set when it landed goes with it.
+                      const removed = applied.find((a) => a.file === c.file) ?? { label: '' }
+                      const lang = languageAfterRemoving(g.gameLanguage, removed, g.addons ?? [])
                       return lang === (g.gameLanguage ?? null) ? g : library.save({ ...g, gameLanguage: lang })
                     })
                 }}

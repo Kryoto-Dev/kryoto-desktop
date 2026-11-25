@@ -4,13 +4,23 @@ import assert from 'node:assert/strict'
 import { isLanguagePack, languageAfterRemoving, orderPacks, packLanguage, packName, preferredLanguage, steamCodeForLocale } from './language-packs.ts'
 
 test('taking a language pack out puts the game back on Settings when it was in that language', () => {
-  assert.equal(languageAfterRemoving('polish', 'Language: Polish', []), null)
+  const polish = { label: 'Language: Polish' }
+  assert.equal(languageAfterRemoving('polish', polish, []), null)
   // Another pack of the same language is still there, or the game is in another language.
-  assert.equal(languageAfterRemoving('polish', 'Language: Polish', ['Language: Polish']), 'polish')
-  assert.equal(languageAfterRemoving('german', 'Language: Polish', []), 'german')
+  assert.equal(languageAfterRemoving('polish', polish, [polish]), 'polish')
+  assert.equal(languageAfterRemoving('german', polish, []), 'german')
   // A DLC is not a language; following Settings stays so.
-  assert.equal(languageAfterRemoving('polish', 'DLC: Soundtrack', []), 'polish')
-  assert.equal(languageAfterRemoving(null, 'Language: Polish', []), null)
+  assert.equal(languageAfterRemoving('polish', { label: 'DLC: Soundtrack' }, []), 'polish')
+  assert.equal(languageAfterRemoving(null, polish, []), null)
+})
+
+test('only a language the pack set goes with it, by the code Add said', () => {
+  // kryo.to files it as Brazilian under a label that reads Portuguese.
+  const brazilian = { label: 'Language: Portuguese', language: 'brazilian', setLanguage: true }
+  assert.equal(languageAfterRemoving('brazilian', brazilian, []), null)
+  assert.equal(languageAfterRemoving('brazilian', brazilian, [{ label: 'Language: Portuguese (Brazil)' }]), 'brazilian')
+  // The player picked Polish in Properties before adding the pack: it stays.
+  assert.equal(languageAfterRemoving('polish', { label: 'Language: Polish', language: 'polish', setLanguage: false }, []), 'polish')
 })
 
 test('a language pack is known by its label, like a DLC', () => {

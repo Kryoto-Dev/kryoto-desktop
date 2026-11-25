@@ -370,13 +370,13 @@ export function startPreview() {
         if (owner) {
           // An add-on goes into its game (addons.rs `install`).
           const list = ((owner.addons as Record<string, unknown>[] | undefined) ?? []).filter((a) => a.file !== d.fileName)
-          if (!d.repair) owner.addons = [...list, { label: d.addon, file: d.fileName, files: [`DLC/${String(d.fileName)}.pak`], replaced: [], installedAt: now() }]
           // The language pack Add asked for: the game takes its language now (addons.rs `language_on_landing`).
           const asked = owner.askedPack as { label: string; language: string } | null | undefined
-          if (asked && asked.label.toLowerCase() === String(d.addon).toLowerCase()) {
-            owner.askedPack = null
-            if (owner.gameLanguage == null && settings.gameLanguage !== asked.language) owner.gameLanguage = asked.language
-          }
+          const mine = !!asked && asked.label.toLowerCase() === String(d.addon).toLowerCase()
+          const setLanguage = mine && owner.gameLanguage == null && settings.gameLanguage !== asked.language
+          if (mine) owner.askedPack = null
+          if (setLanguage) owner.gameLanguage = asked.language
+          if (!d.repair) owner.addons = [...list, { label: d.addon, file: d.fileName, files: [`DLC/${String(d.fileName)}.pak`], replaced: [], installedAt: now(), language: mine ? asked.language : null, setLanguage }]
           previewBus.emit('library-changed', null)
           previewBus.emit('notify', { title: `${String(d.addon).replace(/^DLC: /, '')} applied`, body: `Added to ${String(owner.title)}.`, gameId: owner.id })
         } else {

@@ -30,6 +30,13 @@ pub struct InstalledAddon {
     /// The game's files it replaced, kept under `backup_dir` for Undo.
     pub replaced: Vec<String>,
     pub installed_at: u64,
+    /// A language pack's Steam code, as Add said it (kryo.to's own, which its
+    /// label may not spell). None when it landed without Add.
+    pub language: Option<String>,
+    /// Landing it set the game's Language: only then does Remove put the game
+    /// back on Settings, never over a language the player picked. None on
+    /// add-ons applied before Kryoto kept this.
+    pub set_language: Option<bool>,
 }
 
 /// A language pack Add was pressed on by itself, waiting for its download.
@@ -46,14 +53,25 @@ pub struct AskedPack {
 /// language, and its packs lead with it. Only while the game still follows
 /// Settings and Settings says another language; set at the Add press, a pack
 /// that failed or was canceled left the game in a language it had no files
-/// for. The language it set, if it did.
-fn language_on_landing(game: &mut LibraryGame, label: &str, settings_language: &str) -> Option<String> {
+/// for. The pack's language and whether the game took it; None when this is
+/// not the pack Add asked for.
+fn language_on_landing(game: &mut LibraryGame, label: &str, settings_language: &str) -> Option<(String, bool)> {
     let asked = game.asked_pack.take_if(|p| p.label.trim().eq_ignore_ascii_case(label.trim()))?;
-    if game.game_language.is_some() || asked.language.is_empty() || asked.language == settings_language {
-        return None;
+    let takes = game.game_language.is_none() && !asked.language.is_empty() && asked.language != settings_language;
+    if takes {
+        game.game_language = Some(asked.language.clone());
     }
-    game.game_language = Some(asked.language.clone());
-    Some(asked.language)
+    Some((asked.language, takes))
+}
+
+/// What a landing records as `set_language`. Applied again without setting
+/// it, a pack keeps what its first landing said, and one applied before Kryoto
+/// kept this stays None, which Remove counts as having set its language.
+fn set_language_on_landing(before: Option<&InstalledAddon>, set: bool) -> Option<bool> {
+    match before {
+        Some(b) if !set => b.set_language,
+        _ => Some(set),
+    }
 }
 
 fn now() -> u64 {
@@ -161,7 +179,8 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
     let pid = id.to_string();
     // Applied before (a DLC downloaded again): its files are its own, and the
     // originals they replaced are already kept.
-    let before = game.addons.iter().find(|a| a.file == item.file_name).cloned().unwrap_or_default();
+    let applied_before = game.addons.iter().find(|a| a.file == item.file_name).cloned();
+    let before = applied_before.clone().unwrap_or_default();
     let backup = backup_dir(&root, &item.file_name);
     let own = before.files.clone();
     let applied = tauri::async_runtime::spawn_blocking(move || -> Result<Applied, String> {
@@ -192,9 +211,14 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
     files.dedup();
     library::update(app, |games| {
         if let Some(g) = games.iter_mut().find(|g| g.id == game.id) {
-            language_on_landing(g, &label, &settings.game_language);
+            // Applied again, it keeps what the first landing said.
+            let (language, set) = match language_on_landing(g, &label, &settings.game_language) {
+                Some((language, set)) => (Some(language), set),
+                None => (before.language.clone(), false),
+            };
+            let set_language = set_language_on_landing(applied_before.as_ref(), set);
             g.addons.retain(|a| a.file != file);
-            g.addons.push(InstalledAddon { label: label.clone(), file: file.clone(), files, replaced, installed_at: now() });
+            g.addons.push(InstalledAddon { label: label.clone(), file: file.clone(), files, replaced, installed_at: now(), language, set_language });
         }
         Ok(())
     })?;
@@ -549,7 +573,7 @@ mod tests {
         move_recording(&addon, &game, &game, &backup, &done.files, &mut again).unwrap();
         assert!(again.replaced.is_empty());
 
-        let record = InstalledAddon { label: "DLC: Japan".into(), file: "Game - DLC Japan - kryoto.7z".into(), files: done.files, replaced: done.replaced, installed_at: 0 };
+        let record = InstalledAddon { label: "DLC: Japan".into(), file: "Game - DLC Japan - kryoto.7z".into(), files: done.files, replaced: done.replaced, ..Default::default() };
         remove(&game, &record).unwrap();
         assert_eq!(std::fs::read_to_string(game.join("bin/steam_api64.dll")).unwrap(), "original");
         assert!(!game.join("lang").exists());
@@ -569,22 +593,38 @@ mod tests {
         assert_eq!(game.asked_pack, Some(asked()));
 
         // The pack itself, from the card or the download window.
-        assert_eq!(language_on_landing(&mut game, "language: japanese ", "english"), Some("japanese".into()));
+        assert_eq!(language_on_landing(&mut game, "language: japanese ", "english"), Some(("japanese".into(), true)));
         assert_eq!(game.game_language.as_deref(), Some("japanese"));
         assert_eq!(game.asked_pack, None);
 
         // A language picked in Properties meanwhile, or Settings' own, stays.
         let mut chosen = LibraryGame { asked_pack: Some(asked()), game_language: Some("german".into()), ..Default::default() };
-        assert_eq!(language_on_landing(&mut chosen, "Language: Japanese", "english"), None);
+        assert_eq!(language_on_landing(&mut chosen, "Language: Japanese", "english"), Some(("japanese".into(), false)));
         assert_eq!(chosen.game_language.as_deref(), Some("german"));
         assert_eq!(chosen.asked_pack, None);
         let mut same = LibraryGame { asked_pack: Some(asked()), ..Default::default() };
-        assert_eq!(language_on_landing(&mut same, "Language: Japanese", "japanese"), None);
+        assert_eq!(language_on_landing(&mut same, "Language: Japanese", "japanese"), Some(("japanese".into(), false)));
         assert_eq!(same.game_language, None);
 
         // Not asked for (downloaded from the Store page alone): left as it was.
         let mut plain = LibraryGame::default();
         assert_eq!(language_on_landing(&mut plain, "Language: Japanese", "english"), None);
         assert_eq!(plain.game_language, None);
+    }
+
+    #[test]
+    fn landing_again_keeps_what_the_first_landing_said() {
+        let applied = |set_language| InstalledAddon { label: "Language: Japanese".into(), set_language, ..Default::default() };
+        // A first landing says what it did.
+        assert_eq!(set_language_on_landing(None, true), Some(true));
+        assert_eq!(set_language_on_landing(None, false), Some(false));
+        // Downloaded again, it still set the language it set the first time.
+        assert_eq!(set_language_on_landing(Some(&applied(Some(true))), false), Some(true));
+        assert_eq!(set_language_on_landing(Some(&applied(Some(false))), false), Some(false));
+        assert_eq!(set_language_on_landing(Some(&applied(Some(false))), true), Some(true));
+        // Applied before Kryoto kept this: still unknown, so Remove still
+        // resets the Language older Kryoto set at Add.
+        assert_eq!(set_language_on_landing(Some(&applied(None)), false), None);
+        assert_eq!(set_language_on_landing(Some(&applied(None)), true), Some(true));
     }
 }
