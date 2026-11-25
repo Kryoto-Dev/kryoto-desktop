@@ -2922,13 +2922,13 @@ async fn fetch_all<R: Runtime>(
                     }
                 }
                 if failures > MAX_FAILURES {
-                    return Err(format!("The connection kept dropping ({e}). Resume to try again."));
+                    return Err(kept_failing(&e));
                 }
                 let wait = backoff(failures);
                 crate::logging::warn("download", &format!("{id}: {e}; trying again in {wait} s"));
                 edit(app, id, |d| {
                     d.speed = 0;
-                    d.notice = Some(format!("Connection lost. Trying again in {wait} s."));
+                    d.notice = Some(retry_notice(&e, wait));
                 });
                 emit(app, true);
                 if !wait_unless_stopped(flag, wait).await {
@@ -2953,13 +2953,18 @@ async fn fetch_all<R: Runtime>(
 /// minute of trying; it used to retry for as long as each try moved a byte.
 const OWN_CUTS_BEFORE_MIRROR: u32 = 6;
 
+/// The build a row downloads, in kryo.to's listing: the version picked, else the current one.
+fn listed_build<'a>(listing: &'a serde_json::Value, release: Option<&str>) -> Option<&'a serde_json::Value> {
+    let releases: Vec<&serde_json::Value> = listing["releases"].as_array().into_iter().flatten().collect();
+    release
+        .and_then(|v| releases.iter().find(|r| r["version"].as_str() == Some(v)))
+        .or_else(|| releases.iter().find(|r| r["primary"].as_bool() == Some(true)))
+        .copied()
+}
+
 /// The mirror pages kryo.to lists for the build a row downloads, in its order.
 fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<String> {
-    let releases: Vec<&serde_json::Value> = listing["releases"].as_array().into_iter().flatten().collect();
-    let build = release
-        .and_then(|v| releases.iter().find(|r| r["version"].as_str() == Some(v)))
-        .or_else(|| releases.iter().find(|r| r["primary"].as_bool() == Some(true)));
-    build
+    listed_build(listing, release)
         .map(|r| {
             r["links"]
                 .as_array()
@@ -2973,19 +2978,48 @@ fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<Strin
         .unwrap_or_default()
 }
 
+/// The size kryo.to lists for the build's file (`listed_build`): the one of
+/// this name, else its only one.
+fn listed_size(listing: &serde_json::Value, release: Option<&str>, file: Option<&str>) -> Option<u64> {
+    let sizes: Vec<(Option<&str>, u64)> = listed_build(listing, release)?["hashes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| Some((h["name"].as_str(), h["bytes"].as_u64()?)))
+        .collect();
+    let same = |n: &str| file.is_some_and(|f| safe_name(n).eq_ignore_ascii_case(&safe_name(f)));
+    let named = sizes.iter().find(|(n, _)| n.is_some_and(same));
+    named.or((sizes.len() == 1).then(|| &sizes[0])).map(|(_, b)| *b)
+}
+
+/// The size a mirror's copy must have to carry this download on: the one our
+/// host said. When it failed on the very first request, nothing is on disk
+/// and the size kryo.to lists for the build (`listed`) is the one, so the
+/// mirror starts it from zero with this file and not another packaging of
+/// the build (a `.rar` part, an older upload). Bytes on disk of a file whose
+/// size is not known cannot be matched to anyone's copy.
+fn takeover_size(total: Option<u64>, received: u64, listed: Option<u64>) -> Result<u64, &'static str> {
+    match (total, listed) {
+        (Some(t), _) => Ok(t),
+        (None, _) if received > 0 => Err("the file's size is not known yet"),
+        (None, Some(l)) => Ok(l),
+        (None, None) => Err("kryo.to lists no size for the file to check a mirror's copy by"),
+    }
+}
+
 /// Our own server keeps cutting this download: the same archive from one of
 /// the game's mirrors carries it on, from where every range got to. A mirror
 /// is only taken when its file is this one: the same size, and the same first
 /// bytes as what is on disk (the 7z start header, which names the archive's
-/// end). The checksum at the end still checks every byte. The mirror's
-/// client, its connection count and its name.
+/// end). The checksum at the end still checks every byte. When nothing came
+/// from our host at all, a copy of the size kryo.to lists starts it (`takeover_size`).
+/// The mirror's client, its connection count and its name.
 async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8, settings: &crate::settings::Settings) -> Result<(reqwest::Client, u32, String), String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let slug = d.slug.clone().ok_or("no game to ask kryo.to about")?;
     if crate::catalog_gone::is_gone(app, &slug) {
         return Err("the game is no longer on kryo.to".into());
     }
-    let total = d.total.ok_or("the file's size is not known yet")?;
     let endpoint = crate::settings::catalog_endpoint(settings);
     let listing = match crate::phone::session(app) {
         Ok(session) => crate::phone::listing(&session, &slug).await?,
@@ -3004,6 +3038,8 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
     if pages.is_empty() {
         return Err("the game has no mirror Kryoto downloads from".into());
     }
+    let file = Some(d.file_name.clone()).filter(|n| !n.is_empty()).or_else(|| file_name_in_link(&d.url));
+    let total = takeover_size(d.total, d.received, listed_size(&listing, d.release.as_deref(), file.as_deref()))?;
     // What is on disk of the start, to compare (zeros until range 0 has it).
     let ours: Vec<u8> = std::fs::File::open(&d.archive_path)
         .and_then(|mut f| {
@@ -3034,8 +3070,8 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
                 continue;
             }
         };
-        if resolved.size.is_some_and(|s| s != total) {
-            why.push(format!("{host}: another size ({} bytes, ours {total})", resolved.size.unwrap_or(0)));
+        if let Some(size) = resolved.size.filter(|s| *s != total) {
+            why.push(format!("{host}: another size ({size} bytes, ours {total})"));
             continue;
         }
         let (before_url, before_mirror, before_etag) = (d.url.clone(), d.mirror.clone(), d.etag.clone());
@@ -3054,12 +3090,16 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
             let url = edit(app, id, |_| {}).map(|r| r.url).unwrap_or_default();
             let res = send(client.get(&url).header(reqwest::header::RANGE, "bytes=0-31")).await.map_err(|_| "no answer".to_string())?;
             let size = content_range_of(&res).and_then(|r| r.total);
-            if res.status().as_u16() != 206 || size != Some(total) || is_web_page(&res) {
+            let fits = size == Some(total);
+            if res.status().as_u16() != 206 || !fits || not_the_file(content_type(&res), &[]).is_some() {
                 return Err(format!("answered {} for {} bytes", res.status().as_u16(), size.map_or("?".into(), |s| s.to_string())));
             }
             let head = res.bytes().await.map_err(|e| e.to_string())?;
             if have_head && head.as_ref() != ours.as_slice() {
                 return Err("another file (its first bytes differ)".into());
+            }
+            if not_the_file(None, &head).is_some() {
+                return Err(format!("sent {} instead of the file", looks_like(&head)));
             }
             Ok((client, n))
         }
@@ -4222,6 +4262,29 @@ async fn size_by_asking(client: &reqwest::Client, url: &str) -> Option<u64> {
     client.head(url).timeout(wait).send().await.ok().filter(|r| r.status().is_success()).and_then(|r| r.content_length()).filter(|n| *n > 0)
 }
 
+/// The first chunk of an answer, waited on the way `transfer` waits on every
+/// one. `None` for an empty answer, or when the download was stopped (the
+/// caller looks at the flag).
+async fn first_chunk<S, B>(stream: &mut S, flag: &AtomicU8) -> Result<Option<B>, String>
+where
+    S: futures_util::Stream<Item = reqwest::Result<B>> + Unpin,
+{
+    let asked = Instant::now();
+    loop {
+        let next = tokio::time::timeout(STOP_POLL, stream.next()).await;
+        if flag.load(Ordering::SeqCst) != RUN {
+            return Ok(None);
+        }
+        match next {
+            Err(_) if asked.elapsed() >= STALL_TIMEOUT => return Err(format!("no data for {} s", STALL_TIMEOUT.as_secs())),
+            Err(_) => continue,
+            Ok(None) => return Ok(None),
+            Ok(Some(Ok(chunk))) => return Ok(Some(chunk)),
+            Ok(Some(Err(e))) => return Err(e.to_string()),
+        }
+    }
+}
+
 /// Move bytes on one stream. `Ok(true)` finished, `Ok(false)` paused or cancelled.
 async fn transfer<R: Runtime>(
     app: &AppHandle<R>,
@@ -4262,12 +4325,11 @@ async fn transfer<R: Runtime>(
         }
         return Err(Transfer::Restart(format!("the server has {total:?} bytes and {on_disk} are here")));
     }
-    check_status(status.as_u16())?;
-    // Never written as the archive: a page where the file should be. A host
-    // that answers ranges with a page falls back to this one stream first.
-    if is_web_page(&response) {
-        return Err(Transfer::Fatal(web_page_sent(&source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str())))));
-    }
+    let source = source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str()));
+    let response = check_answer(response, &source).await?;
+    // Never written as the archive: a page or a message where the file should
+    // be. A host that answers ranges with a page falls back to this one stream first.
+    let response = refuse_by_type(response, &source).await?;
     let resumed = status.as_u16() == 206;
     let range = content_range_of(&response);
     let etag = etag_of(&response);
@@ -4312,6 +4374,27 @@ async fn transfer<R: Runtime>(
         });
     }
 
+    let mut stream = response.bytes_stream();
+    // The start of a fresh answer is looked at before the file on disk is
+    // touched: a page or a JSON message sent with an archive's type (or none)
+    // is never written as the archive, and must not cost a resume its bytes.
+    let first = if resumed {
+        None
+    } else {
+        match first_chunk(&mut stream, flag).await {
+            Err(e) => return Err(Transfer::Retry(e)),
+            Ok(_) if flag.load(Ordering::SeqCst) != RUN => return Ok(false),
+            Ok(Some(chunk)) => {
+                if let Some(what) = not_the_file(None, &chunk) {
+                    crate::logging::error("download", &format!("{id}: {source} refused before writing: it starts as {}", looks_like(&chunk)));
+                    return Err(refuse_answer(what, &source));
+                }
+                Some(chunk)
+            }
+            Ok(None) => None,
+        }
+    };
+
     let file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -4342,7 +4425,13 @@ async fn transfer<R: Runtime>(
         }
     });
 
-    let mut stream = response.bytes_stream();
+    if let Some(chunk) = first {
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| Transfer::Fatal(format!("Writing the download failed: {e}")))?;
+        received += chunk.len() as u64;
+        limiter.take(chunk.len() as u64).await;
+    }
     // The disk catching up in the background, on a second handle to the file,
     // so the stream never waits on it: how far it had got once it is done.
     let mut syncing: Option<tokio::task::JoinHandle<Option<u64>>> = None;
@@ -4517,13 +4606,132 @@ fn another_source(source: &str) -> &'static str {
     }
 }
 
-/// An answer that is a web page (a host's "file removed" or wait page, a
-/// network's block page) where a file was asked for.
-fn is_web_page(res: &reqwest::Response) -> bool {
-    res.headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"))
+/// What came back where the file was asked for, when it cannot be the file.
+#[derive(Debug, PartialEq)]
+enum NotTheFile {
+    /// A web page: a host's "file removed" or wait page, a network's block page.
+    Page,
+    /// A JSON message, with its `error` when it was read (dl.kryo.to's
+    /// `{"error":"storage_timeout"}`).
+    Json(Option<String>),
+}
+
+/// An answer's Content-Type, as sent.
+fn content_type(res: &reqwest::Response) -> Option<&str> {
+    res.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok())
+}
+
+/// Is a 2xx answer something other than the file? Told by its Content-Type,
+/// and by its first bytes when they are the start of the file (`head`, empty
+/// when they are not): a page or a JSON message was once written as the
+/// archive, and only the checksum at the end caught it.
+fn not_the_file(content_type: Option<&str>, head: &[u8]) -> Option<NotTheFile> {
+    let kind = content_type.unwrap_or_default().trim_start().to_ascii_lowercase();
+    let kind = kind.split(';').next().unwrap_or_default().trim();
+    if kind == "text/html" {
+        return Some(NotTheFile::Page);
+    }
+    if kind == "application/json" || kind.ends_with("+json") {
+        return Some(NotTheFile::Json(json_error(head)));
+    }
+    match looks_like(head) {
+        "a web page" => Some(NotTheFile::Page),
+        "a JSON answer" => Some(NotTheFile::Json(json_error(head))),
+        _ => None,
+    }
+}
+
+/// The `error` of a JSON message (`{"error":"storage_timeout"}`).
+fn json_error(body: &[u8]) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_slice(body).ok()?;
+    body["error"].as_str().map(str::to_string)
+}
+
+/// The start of an answer that is not the file, read for its reason: a
+/// message is small, and an archive sent with the wrong type is not read whole.
+async fn small_body(mut res: reqwest::Response) -> Vec<u8> {
+    let mut body = Vec::new();
+    let read = async {
+        while body.len() < 64 * 1024 {
+            match res.chunk().await {
+                Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+                _ => break,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(ANSWER_TIMEOUT, read).await;
+    body
+}
+
+/// `not_the_file` by the Content-Type alone, with a JSON message's reason
+/// read from its body. `Ok` hands the answer back when it may be the file.
+async fn refuse_by_type(res: reqwest::Response, source: &str) -> Result<reqwest::Response, Transfer> {
+    match not_the_file(content_type(&res), &[]) {
+        None => Ok(res),
+        Some(NotTheFile::Json(None)) => Err(refuse_answer(NotTheFile::Json(json_error(&small_body(res).await)), source)),
+        Some(what) => Err(refuse_answer(what, source)),
+    }
+}
+
+/// What to do with an answer that is not the file. A message from our own
+/// host is the host failing for now (its storage timing out), so it is tried
+/// again like a 5xx, and its mirrors after that; a page, or a mirror's
+/// message, is not the file and will not turn into it.
+fn refuse_answer(what: NotTheFile, source: &str) -> Transfer {
+    match what {
+        NotTheFile::Page => Transfer::Fatal(web_page_sent(source)),
+        NotTheFile::Json(reason) if source == OWN_HOST => Transfer::Retry(own_host_trouble(reason.as_deref().unwrap_or("no reason given"))),
+        NotTheFile::Json(reason) => Transfer::Fatal(format!(
+            "{source} sent a message instead of the file{}. {}",
+            reason.map(|r| format!(" ({r})")).unwrap_or_default(),
+            another_source(source)
+        )),
+    }
+}
+
+/// How the player is told our own host failed, by the reason it gave. Every
+/// line starts the same (`OWN_TROUBLE`), so the retry notice can say so.
+fn own_host_trouble(reason: &str) -> String {
+    if reason.contains("timeout") {
+        format!("{OWN_TROUBLE}timed out ({reason})")
+    } else {
+        format!("{OWN_TROUBLE}had a problem ({reason})")
+    }
+}
+
+/// How `own_host_trouble` starts.
+const OWN_TROUBLE: &str = "Kryoto's file host ";
+
+/// `check_status`, and for a 5xx from our own host the reason its JSON body
+/// gives (`{"error":"storage_timeout"}`): the log said only "the server
+/// answered 503", and the player read "Connection lost".
+async fn check_answer(res: reqwest::Response, source: &str) -> Result<reqwest::Response, Transfer> {
+    let code = res.status().as_u16();
+    match check_status(code) {
+        Ok(()) => Ok(res),
+        Err(Transfer::Retry(e)) if code >= 500 && source == OWN_HOST => {
+            Err(Transfer::Retry(json_error(&small_body(res).await).map_or(e, |reason| own_host_trouble(&reason))))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The notice while a download waits to try again.
+fn retry_notice(e: &str, wait: u64) -> String {
+    if e.starts_with(OWN_TROUBLE) {
+        format!("{e}. Trying again in {wait} s.")
+    } else {
+        format!("Connection lost. Trying again in {wait} s.")
+    }
+}
+
+/// Why a download stopped after trying again and again.
+fn kept_failing(e: &str) -> String {
+    if e.starts_with(OWN_TROUBLE) {
+        format!("{e} on every try. {}", another_source(OWN_HOST))
+    } else {
+        format!("The connection kept dropping ({e}). Resume to try again.")
+    }
 }
 
 /// The 7z signature every 7z archive starts with.
@@ -4624,13 +4832,11 @@ async fn transfer_parallel<R: Runtime>(
         let probe = send(client.get(&item.url).header(reqwest::header::RANGE, "bytes=0-31"));
         let Some(probe) = unless_stopped(flag, probe).await else { return Ok(false) };
         let probe = probe?;
-        check_status(probe.status().as_u16())?;
         let source = source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str()));
+        let probe = check_answer(probe, &source).await?;
         // Before the one-stream fallback: a page answers a range with 200,
         // and was then downloaded as the archive (2026-11-22, a block page).
-        if is_web_page(&probe) {
-            return Err(Transfer::Fatal(web_page_sent(&source)));
-        }
+        let probe = refuse_by_type(probe, &source).await?;
         let total = (probe.status().as_u16() == 206).then(|| content_range_of(&probe).and_then(|r| r.total)).flatten();
         let Some(total) = total.filter(|t| *t > 0) else {
             drop(probe);
@@ -4648,6 +4854,11 @@ async fn transfer_parallel<R: Runtime>(
             .map(|n| safe_name(&n))
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
         let head = tokio::time::timeout(ANSWER_TIMEOUT, probe.bytes()).await.ok().and_then(Result::ok).unwrap_or_default();
+        // Any archive, not only a 7z: none starts as a page or a message.
+        if let Some(what) = not_the_file(None, &head) {
+            crate::logging::error("download", &format!("{id}: {source} refused before writing: it starts as {} ({total} bytes on offer)", looks_like(&head)));
+            return Err(refuse_answer(what, &source));
+        }
         if let Err(why) = check_head(&name, &head, total, &source) {
             crate::logging::error("download", &format!("{id}: {source} refused before writing: {} ({total} bytes on offer, starts as {})", why, looks_like(&head)));
             return Err(Transfer::Fatal(why));
@@ -5147,11 +5358,11 @@ async fn fetch_range(
             Unsatisfiable::Retry(why) => Err(Transfer::Retry(why)),
         };
     }
-    check_status(res.status().as_u16())?;
-    // Never written into the archive: a page where the bytes should be.
-    if is_web_page(&res) {
-        return Err(Transfer::Fatal(web_page_sent(&source_of(url))));
-    }
+    let source = source_of(url);
+    let res = check_answer(res, &source).await?;
+    // Never written into the archive: a page or a message where the bytes
+    // should be. By its type only: a range's first bytes can be anything.
+    let res = refuse_by_type(res, &source).await?;
     if res.status().as_u16() != 206 {
         return Err(Transfer::NoRanges);
     }
@@ -6959,6 +7170,84 @@ mod tests {
         assert!(web_page_sent(OWN_HOST).contains("one of the game's mirrors"));
         assert!(!web_page_sent(OWN_HOST).contains("Kryoto's own copy"));
         assert!(web_page_sent("VikingFile").ends_with("Take another mirror, or Kryoto's own copy."));
+    }
+
+    /// A page or a JSON message where the file should be is told by its type,
+    /// or by its first bytes when it came with an archive's type or none.
+    #[test]
+    fn a_page_or_a_message_is_not_the_file() {
+        let timeout = br#"{"error":"storage_timeout"}"#;
+        let mut seven_z = SEVEN_Z_MAGIC.to_vec();
+        seven_z.extend_from_slice(&[0; 26]);
+        assert_eq!(not_the_file(Some("text/html; charset=utf-8"), &[]), Some(NotTheFile::Page));
+        assert_eq!(not_the_file(Some(" Text/HTML"), &[]), Some(NotTheFile::Page));
+        assert_eq!(not_the_file(Some("application/json"), &[]), Some(NotTheFile::Json(None)));
+        assert_eq!(not_the_file(Some("application/problem+json; charset=utf-8"), timeout), Some(NotTheFile::Json(Some("storage_timeout".into()))));
+        // A 200 sent as an archive, or with no type, that starts as a message.
+        assert_eq!(not_the_file(Some("application/octet-stream"), timeout), Some(NotTheFile::Json(Some("storage_timeout".into()))));
+        assert_eq!(not_the_file(None, b"  {\"oops\": 1}"), Some(NotTheFile::Json(None)));
+        assert_eq!(not_the_file(None, b"<!DOCTYPE html><html>"), Some(NotTheFile::Page));
+        // The file itself, and a range from the middle of it (no head to read).
+        assert_eq!(not_the_file(Some("application/x-7z-compressed"), &seven_z), None);
+        assert_eq!(not_the_file(Some("application/octet-stream"), b"PK\x03\x04rest"), None);
+        assert_eq!(not_the_file(Some("application/octet-stream"), &[]), None);
+        assert_eq!(not_the_file(None, &[]), None);
+        assert_eq!(json_error(timeout).as_deref(), Some("storage_timeout"));
+        assert_eq!(json_error(b"{\"error\":"), None);
+    }
+
+    /// dl.kryo.to's `{"error":"storage_timeout"}` (report 4): our own host
+    /// failing is tried again, and then its mirrors, in words that say so;
+    /// a mirror's message is final, as its page is.
+    #[test]
+    fn our_host_timing_out_is_said_and_tried_again() {
+        let ours = refuse_answer(NotTheFile::Json(Some("storage_timeout".into())), OWN_HOST);
+        assert!(matches!(&ours, Transfer::Retry(e) if e == "Kryoto's file host timed out (storage_timeout)"));
+        assert!(matches!(refuse_answer(NotTheFile::Json(None), OWN_HOST), Transfer::Retry(e) if e == "Kryoto's file host had a problem (no reason given)"));
+        let mirror = refuse_answer(NotTheFile::Json(Some("not_found".into())), "Pixeldrain");
+        assert!(matches!(&mirror, Transfer::Fatal(e) if e == "Pixeldrain sent a message instead of the file (not_found). Take another mirror, or Kryoto's own copy."));
+        assert!(matches!(refuse_answer(NotTheFile::Json(None), "Pixeldrain"), Transfer::Fatal(e) if e.starts_with("Pixeldrain sent a message instead of the file. ")));
+        assert!(matches!(refuse_answer(NotTheFile::Page, OWN_HOST), Transfer::Fatal(e) if e == web_page_sent(OWN_HOST)));
+        assert_eq!(own_host_trouble("internal"), "Kryoto's file host had a problem (internal)");
+
+        let timed_out = own_host_trouble("storage_timeout");
+        assert_eq!(retry_notice(&timed_out, 8), "Kryoto's file host timed out (storage_timeout). Trying again in 8 s.");
+        assert_eq!(retry_notice("the server answered 503", 8), "Connection lost. Trying again in 8 s.");
+        assert_eq!(
+            kept_failing(&timed_out),
+            "Kryoto's file host timed out (storage_timeout) on every try. Retry in a few minutes, or download it from one of the game's mirrors on its page."
+        );
+        assert_eq!(kept_failing("timed out"), "The connection kept dropping (timed out). Resume to try again.");
+    }
+
+    /// Our host failing on its very first answer leaves no size and nothing
+    /// on disk: a mirror can still start the download from zero, at the size
+    /// kryo.to lists, never at whatever size the mirror has.
+    #[test]
+    fn a_mirror_takes_over_from_zero_when_nothing_came() {
+        assert_eq!(takeover_size(Some(5_000), 1_000, Some(9)), Ok(5_000));
+        assert_eq!(takeover_size(Some(5_000), 0, None), Ok(5_000));
+        assert_eq!(takeover_size(None, 0, Some(4_000)), Ok(4_000));
+        assert!(takeover_size(None, 0, None).is_err());
+        assert!(takeover_size(None, 1_000, Some(4_000)).is_err());
+    }
+
+    /// The size a mirror must match from zero: the build's file of this name,
+    /// else its only file. Two files and none of this name say nothing.
+    #[test]
+    fn the_listed_size_is_the_builds_file() {
+        let listing = serde_json::json!({ "releases": [
+            { "version": "1.1", "primary": true, "hashes": [
+                { "name": "Game - Kryoto.7z", "sha256": "a".repeat(64), "bytes": 300u64 },
+                { "name": "Game - Kryoto.part2.rar", "sha256": "b".repeat(64), "bytes": 100u64 },
+            ] },
+            { "version": "1.0", "hashes": [{ "name": "Old.7z", "sha256": "c".repeat(64), "bytes": 200u64 }] },
+        ] });
+        assert_eq!(listed_size(&listing, None, Some("Game - Kryoto.7z")), Some(300));
+        assert_eq!(listed_size(&listing, None, Some("other.7z")), None);
+        assert_eq!(listed_size(&listing, None, None), None);
+        assert_eq!(listed_size(&listing, Some("1.0"), Some("renamed.7z")), Some(200));
+        assert_eq!(listed_size(&serde_json::json!({}), None, Some("Game - Kryoto.7z")), None);
     }
 
     /// KB-0117: the mirrors that can carry on a download our server keeps
