@@ -305,11 +305,41 @@ fn columns(conn: &Connection) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// How many copies of Lutris's library Kryoto keeps. Each is the whole
+/// library, which holds Lutris's Steam, GOG and Epic lists too.
+const KEEP_BACKUPS: usize = 5;
+
 fn back_up(data: &Path, backups: &Path, now: u64) -> Result<PathBuf, String> {
     std::fs::create_dir_all(backups).map_err(|e| e.to_string())?;
-    let copy = backups.join(format!("lutris-pga-{now}.db"));
+    // Two changes in the same second each keep their own copy: the one from
+    // before a send is never replaced by the one its take-back makes.
+    let mut copy = backups.join(format!("lutris-pga-{now}.db"));
+    let mut n = 2;
+    while copy.exists() {
+        copy = backups.join(format!("lutris-pga-{now}-{n}.db"));
+        n += 1;
+    }
     std::fs::copy(data.join("pga.db"), &copy).map_err(|e| format!("Could not copy Lutris's library first, so nothing was changed: {e}"))?;
+    prune_backups(backups, &copy);
     Ok(copy)
+}
+
+/// `lutris-pga-<seconds>[-<n>].db`: when it was made, for keeping the newest.
+/// None for any other file (Steam's copies share the folder). Pure, for the tests.
+fn backup_order(name: &str) -> Option<(u64, u64)> {
+    let stem = name.strip_prefix("lutris-pga-")?.strip_suffix(".db")?;
+    let (secs, n) = stem.split_once('-').unwrap_or((stem, "1"));
+    Some((secs.parse().ok()?, n.parse().ok()?))
+}
+
+/// Only the newest copies stay, and always the one just made.
+fn prune_backups(backups: &Path, keep: &Path) {
+    let Ok(dir) = std::fs::read_dir(backups) else { return };
+    let mut copies: Vec<((u64, u64), PathBuf)> = dir.filter_map(Result::ok).filter_map(|e| Some((backup_order(&e.file_name().to_string_lossy())?, e.path()))).collect();
+    copies.sort_by_key(|c| std::cmp::Reverse(c.0));
+    for (_, old) in copies.into_iter().skip(KEEP_BACKUPS).filter(|(_, p)| p != keep) {
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 /// A slug no other game in Lutris has, so its cover and settings are its own.
@@ -420,6 +450,10 @@ impl Undo {
 /// Add these games to Lutris, or update the ones sent before (`earlier`,
 /// from the ledger) whose row is still there. All or nothing.
 pub fn send(data: &Path, config: &Path, games: &[NewGame], earlier: &[Added], backups: &Path, now: u64) -> Result<Written, String> {
+    // Nothing to write: no copy of the library either.
+    if games.is_empty() {
+        return Ok(Written::default());
+    }
     let mut conn = open_write(data)?;
     let cols = columns(&conn)?;
     let backup = back_up(data, backups, now)?;
@@ -732,6 +766,32 @@ mod tests {
         assert_eq!(rows(&data), others);
         assert!(ledger.iter().flat_map(|a| &a.files).all(|f| !Path::new(f).exists()));
         assert!(data.join("coverart/the-witcher.jpg").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_the_newest_library_copies_are_kept() {
+        let root = temp("backups");
+        let (data, config) = library(&root);
+        let backups = root.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::write(backups.join("shortcuts-1-100.vdf"), b"steam's").unwrap();
+        // Nothing to send: nothing copied.
+        assert_eq!(send(&data, &config, &[], &[], &backups, 1_800_000_000).unwrap().backup, None);
+        let mut sent = Vec::new();
+        for i in 0..7 {
+            let w = send(&data, &config, &[outgoing("lantern", "Lantern Rite")], &sent, &backups, 1_800_000_000 + i).unwrap();
+            sent = w.games;
+        }
+        // A take-back in the same second as the send keeps the send's copy.
+        let w = send(&data, &config, &[outgoing("moss", "Moss")], &[], &backups, 1_800_000_010).unwrap();
+        take_back(&data, &w.games, &backups, 1_800_000_010).unwrap();
+        assert!(w.backup.as_ref().unwrap().is_file());
+        let mut names: Vec<String> = std::fs::read_dir(&backups).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["lutris-pga-1800000004.db", "lutris-pga-1800000005.db", "lutris-pga-1800000006.db", "lutris-pga-1800000010-2.db", "lutris-pga-1800000010.db", "shortcuts-1-100.vdf"]);
+        assert_eq!(backup_order("lutris-pga-12-3.db"), Some((12, 3)));
+        assert_eq!(backup_order("lutris-pga-x.db"), None);
         let _ = std::fs::remove_dir_all(root);
     }
 
