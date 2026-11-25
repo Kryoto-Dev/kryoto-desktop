@@ -603,7 +603,8 @@ pub(crate) fn persist_checked<R: Runtime>(app: &AppHandle<R>) -> Result<(), Stri
     let list = app.state::<Downloads>().list.lock().map_err(|_| "download list lock poisoned")?.clone();
     let tmp = file.with_extension("json.tmp");
     let mut output = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    output.write_all(&serde_json::to_vec_pretty(&list).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    // Compact: only this file reads it back, and it is written on every change.
+    output.write_all(&serde_json::to_vec(&list).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     output.sync_all().map_err(|e| e.to_string())?;
     drop(output);
     std::fs::rename(tmp, file).map_err(|e| e.to_string())
@@ -778,9 +779,23 @@ fn set_status<R: Runtime>(app: &AppHandle<R>, id: &str, status: Status, error: O
         if matches!(status, Status::Installed | Status::Failed | Status::Canceled) {
             d.finished_at = Some(now());
         }
+        forget_ranges(d);
     });
     persist(app);
     emit(app, true);
+}
+
+/// A row that is done with its archive (installed, or cancelled and its
+/// archive deleted) has no use for its ranges. They were about 10 KB a row,
+/// saved with every change and sent to the window with every update, so the
+/// list grew heavier with the history. A failed row keeps them to resume.
+/// A cancel only counts once it has been tidied up (`settle_stopped`, nothing
+/// received): Cancel says so on the row at once, and a run that then fails
+/// instead leaves an archive that only its ranges can resume.
+fn forget_ranges(d: &mut Download) {
+    if d.status == Status::Installed || (d.status == Status::Canceled && d.received == 0) {
+        d.segments.clear();
+    }
 }
 
 /// Load what was left from last time. Anything that was moving is paused -
@@ -802,6 +817,8 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
             d.speed = 0;
         }
         d.notice = None;
+        // Rows finished before their ranges were dropped (`forget_ranges`).
+        forget_ranges(d);
         // The ranges are only ever saved once their bytes are on the disk;
         // `received` is the live count and can be ahead of them after a crash.
         if !d.segments.is_empty() {
@@ -1030,6 +1047,7 @@ fn enqueue_item<R: Runtime>(
     release: Option<String>,
     remote_id: Option<String>,
 ) -> Result<(), String> {
+    let started = Instant::now();
     // A version kryo.to no longer allows (required.rs) starts nothing new.
     crate::required::refuse()?;
     // A Download pressed for the game means kryo.to has it (again): its
@@ -1153,7 +1171,17 @@ fn enqueue_item<R: Runtime>(
     // Shown first, saved second: the row (and the folder question) must not
     // wait for a busy disk.
     emit(app, true);
-    if let Err(e) = persist_checked(app) {
+    // How long the row took to show, beside how many rows there are: the
+    // folder question was said to come slower as the history grew (plan 05).
+    let rows = state.list.lock().map(|l| l.len()).unwrap_or(0);
+    crate::logging::info("download", &format!("queued {id} in {} ms ({rows} rows, ask_folder {ask_folder})", started.elapsed().as_millis()));
+    // The whole list written and flushed to the disk: the likeliest slow step.
+    let saving = Instant::now();
+    let saved = persist_checked(app);
+    if saving.elapsed() > SLOW_SAVE {
+        crate::logging::warn("download", &format!("saving the queue for {id} took {} ms ({rows} rows)", saving.elapsed().as_millis()));
+    }
+    if let Err(e) = saved {
         if let Ok(mut list) = state.list.lock() { list.retain(|d| d.id != id); }
         emit(app, true);
         return Err(format!("Could not save the download queue: {e}"));
@@ -1164,6 +1192,9 @@ fn enqueue_item<R: Runtime>(
     }
     Ok(())
 }
+
+/// Saving the queue for longer than this is said in the log (plan 05).
+const SLOW_SAVE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Queue the games of a collection, in order, into `library_dir` (none is the
 /// default folder). Each takes its place like any download and gets its link
@@ -7218,6 +7249,25 @@ mod tests {
             "Kryoto's file host timed out (storage_timeout) on every try. Retry in a few minutes, or download it from one of the game's mirrors on its page."
         );
         assert_eq!(kept_failing("timed out"), "The connection kept dropping (timed out). Resume to try again.");
+    }
+
+    /// Plan 05: a finished or cancelled row drops its ranges; one that can
+    /// still resume keeps them. Cancel pressed on a running row is not tidied
+    /// up yet (bytes still counted): its ranges stay until it is.
+    #[test]
+    fn only_rows_that_can_resume_keep_their_ranges() {
+        for (status, received, kept) in [
+            (Status::Installed, 1 << 30, false),
+            (Status::Canceled, 0, false),
+            (Status::Canceled, 1 << 20, true),
+            (Status::Failed, 1 << 20, true),
+            (Status::Paused, 1 << 20, true),
+            (Status::Downloading, 1 << 20, true),
+        ] {
+            let mut d = Download { status, received, segments: split(1 << 30, 4), ..Default::default() };
+            forget_ranges(&mut d);
+            assert_eq!(!d.segments.is_empty(), kept, "{status:?} with {received} received");
+        }
     }
 
     /// Our host failing on its very first answer leaves no size and nothing
