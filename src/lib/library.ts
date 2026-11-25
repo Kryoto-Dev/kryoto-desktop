@@ -216,6 +216,9 @@ export type AddonsGot = {
   store: boolean
 }
 
+/** A language pack Add was pressed on by itself (addons.rs `AskedPack`): its label and Steam code. */
+export type AskedPack = { label: string; language: string }
+
 /** Where a release can be downloaded from, as Kryoto Desktop sees it. */
 export type ReleaseSource =
   /** Our own copy: through the Store's download sheet (it passes kryo.to's check). */
@@ -436,8 +439,12 @@ export const library = {
   onState: (fn: (e: GameStateEvent) => void) => on<GameStateEvent>('game-state', fn),
   onChanged: (fn: () => void) => on<unknown>('library-changed', fn),
   addonUndo: (gameId: string, file: string) => call<LibraryGame>('addon_undo', { gameId, file }),
-  /** Queue add-ons (by kryo.to id) for this installed game: they apply to its folder as they land. */
-  addonsGet: (gameId: string, ids: string[]) => call<AddonsGot>('addons_get', { gameId, ids }),
+  /**
+   * Queue add-ons (by kryo.to id) for this installed game: they apply to its
+   * folder as they land. `pack`: one language pack added by itself, whose
+   * language the game takes once it lands.
+   */
+  addonsGet: (gameId: string, ids: string[], pack: AskedPack | null = null) => call<AddonsGot>('addons_get', { gameId, ids, pack }),
   /** `null` when the game can use Kryoto Online, else why it cannot. */
   onlineCheck: (gameId: string) => call<string | null>('online_check', { gameId }),
   onlineApply: (gameId: string) => call<LibraryGame>('online_apply', { gameId }),

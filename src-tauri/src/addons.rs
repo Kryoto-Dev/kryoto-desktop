@@ -32,6 +32,30 @@ pub struct InstalledAddon {
     pub installed_at: u64,
 }
 
+/// A language pack Add was pressed on by itself, waiting for its download.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AskedPack {
+    /// Its label on kryo.to ("Language: Japanese"), which its download carries too.
+    pub label: String,
+    /// Its Steam code (`japanese`).
+    pub language: String,
+}
+
+/// The pack Add asked for has landed (`label`): the game now starts in its
+/// language, and its packs lead with it. Only while the game still follows
+/// Settings and Settings says another language; set at the Add press, a pack
+/// that failed or was canceled left the game in a language it had no files
+/// for. The language it set, if it did.
+fn language_on_landing(game: &mut LibraryGame, label: &str, settings_language: &str) -> Option<String> {
+    let asked = game.asked_pack.take_if(|p| p.label.trim().eq_ignore_ascii_case(label.trim()))?;
+    if game.game_language.is_some() || asked.language.is_empty() || asked.language == settings_language {
+        return None;
+    }
+    game.game_language = Some(asked.language.clone());
+    Some(asked.language)
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -168,6 +192,7 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
     files.dedup();
     library::update(app, |games| {
         if let Some(g) = games.iter_mut().find(|g| g.id == game.id) {
+            language_on_landing(g, &label, &settings.game_language);
             g.addons.retain(|a| a.file != file);
             g.addons.push(InstalledAddon { label: label.clone(), file: file.clone(), files, replaced, installed_at: now() });
         }
@@ -302,9 +327,11 @@ fn requests_for(addons: &[serde_json::Value], ids: &[String]) -> (Vec<downloads:
 /// Add-ons pressed on an installed game's card (one, or "Add all DLC"): each
 /// is queued for this game and applies to its folder when it lands. Nothing
 /// opens; the card follows the rows. Signed out there is no link to mint, so
-/// the answer says to use the game's download window instead.
+/// the answer says to use the game's download window instead. `pack`: one
+/// language pack pressed by itself, whose language the game takes once it
+/// lands, however it is downloaded.
 #[tauri::command]
-pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>) -> Result<AddonsGot, String> {
+pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>, pack: Option<AskedPack>) -> Result<AddonsGot, String> {
     crate::required::refuse()?;
     let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     let slug = game.slug.clone().ok_or("This game is not from kryo.to, so it has no add-ons there.")?;
@@ -313,6 +340,7 @@ pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>) -> Re
     }
     // Only a signed-in app can mint them (KB-0326): a guest gets the window.
     let Some(session) = crate::phone::session(&app).ok().filter(|s| s.signed_in()) else {
+        remember_pack(&app, &game.id, pack)?;
         return Ok(AddonsGot { queued: Vec::new(), store: true });
     };
     let listing = crate::phone::listing(&session, &slug).await?;
@@ -321,6 +349,7 @@ pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>) -> Re
     if requests.is_empty() && !store {
         return Err("kryo.to no longer has that add-on. Reopen the game's page to see what it has now.".into());
     }
+    remember_pack(&app, &game.id, pack)?;
     let mut queued = Vec::new();
     for req in requests {
         let label = req.label.clone();
@@ -328,6 +357,19 @@ pub async fn addons_get(app: AppHandle, game_id: String, ids: Vec<String>) -> Re
         crate::logging::info("addons", &format!("{label} queued for {} from its card", game.title));
     }
     Ok(AddonsGot { queued, store })
+}
+
+/// Note the language pack pressed on the game, for when it lands
+/// (`language_on_landing`). The last one pressed is the one that counts.
+fn remember_pack(app: &AppHandle, game_id: &str, pack: Option<AskedPack>) -> Result<(), String> {
+    let Some(pack) = pack else { return Ok(()) };
+    let Some(language) = crate::player_name::clean_language(&pack.language) else { return Ok(()) };
+    library::update(app, |games| {
+        if let Some(g) = games.iter_mut().find(|g| g.id == game_id) {
+            g.asked_pack = Some(AskedPack { label: pack.label, language });
+        }
+        Ok(())
+    })
 }
 
 /// A repair fix (kryo.to kind `repair`: Online-Fix's generic fix, packed by
@@ -514,5 +556,35 @@ mod tests {
         assert!(!backups_of(&game).exists());
         assert!(game.join("save.dat").exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_language_pack_sets_the_language_when_it_lands_not_when_it_is_asked_for() {
+        let asked = || AskedPack { label: "Language: Japanese".into(), language: "japanese".into() };
+        let mut game = LibraryGame { asked_pack: Some(asked()), ..Default::default() };
+
+        // Another add-on landing changes nothing: the pack may still fail or be canceled.
+        assert_eq!(language_on_landing(&mut game, "DLC: Soundtrack", "english"), None);
+        assert_eq!(game.game_language, None);
+        assert_eq!(game.asked_pack, Some(asked()));
+
+        // The pack itself, from the card or the download window.
+        assert_eq!(language_on_landing(&mut game, "language: japanese ", "english"), Some("japanese".into()));
+        assert_eq!(game.game_language.as_deref(), Some("japanese"));
+        assert_eq!(game.asked_pack, None);
+
+        // A language picked in Properties meanwhile, or Settings' own, stays.
+        let mut chosen = LibraryGame { asked_pack: Some(asked()), game_language: Some("german".into()), ..Default::default() };
+        assert_eq!(language_on_landing(&mut chosen, "Language: Japanese", "english"), None);
+        assert_eq!(chosen.game_language.as_deref(), Some("german"));
+        assert_eq!(chosen.asked_pack, None);
+        let mut same = LibraryGame { asked_pack: Some(asked()), ..Default::default() };
+        assert_eq!(language_on_landing(&mut same, "Language: Japanese", "japanese"), None);
+        assert_eq!(same.game_language, None);
+
+        // Not asked for (downloaded from the Store page alone): left as it was.
+        let mut plain = LibraryGame::default();
+        assert_eq!(language_on_landing(&mut plain, "Language: Japanese", "english"), None);
+        assert_eq!(plain.game_language, None);
     }
 }
