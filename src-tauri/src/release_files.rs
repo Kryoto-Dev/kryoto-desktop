@@ -32,7 +32,7 @@
 //! check runs off the UI thread and gives the disk room between reads (D: is a
 //! hard disk on many PCs, see `achievements_cloud.rs`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -990,20 +990,24 @@ fn kept_archive<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<Pa
 
 /// The folder inside the archive the game's files sit under ("" when at the
 /// top): the one most wanted files agree on, the shortest on a tie. Pure.
+/// Every tail of each entry after a '/' is looked up among the wanted
+/// files, so thousands of missing files against a big archive stay quick,
+/// and what is held grows with the files wanted, not with the archive.
 pub fn archive_prefix(entries: &[String], wanted: &[String]) -> Option<String> {
-    let lower: Vec<String> = entries.iter().map(|e| e.replace('\\', "/").to_lowercase()).collect();
-    let mut votes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut want: HashMap<String, usize> = HashMap::new();
     for w in wanted {
-        let w = key(w);
-        for e in &lower {
-            if *e == w {
-                *votes.entry(String::new()).or_default() += 1;
-            } else if e.len() > w.len() && e.ends_with(&w) && e.as_bytes()[e.len() - w.len() - 1] == b'/' {
-                *votes.entry(e[..e.len() - w.len()].to_string()).or_default() += 1;
+        *want.entry(key(w)).or_default() += 1;
+    }
+    let lower: Vec<String> = entries.iter().map(|e| key(e)).collect();
+    let mut votes: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in &lower {
+        for at in std::iter::once(0).chain(e.match_indices('/').map(|(at, _)| at + 1)) {
+            if let Some(n) = want.get(&e[at..]) {
+                *votes.entry(&e[..at]).or_default() += n;
             }
         }
     }
-    votes.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.len().cmp(&a.0.len()))).map(|(p, _)| p)
+    votes.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.len().cmp(&a.0.len()))).map(|(p, _)| p.to_string())
 }
 
 /// Each wanted path's name in the archive, under `prefix`. Pure.
@@ -1092,11 +1096,23 @@ fn place(root: &Path, from: &Path, rel: &str, sha: &str) -> Result<(), String> {
     })
 }
 
+/// The listed files by hash, for `local_twin`, without the wanted ones: they
+/// are missing or broken, so never a source. Built once per Get the files back.
+fn twins_of<'a>(list: &'a FileList, wanted: &[ListedFile]) -> HashMap<&'a str, Vec<&'a ListedFile>> {
+    let gone: HashSet<String> = wanted.iter().map(|f| key(&f.path)).collect();
+    let mut by_sha: HashMap<&str, Vec<&ListedFile>> = HashMap::new();
+    for f in list.listed().iter().filter(|f| !gone.contains(&key(&f.path))) {
+        by_sha.entry(f.sha256.as_str()).or_default().push(f);
+    }
+    by_sha
+}
+
 /// Files on this PC with the same bytes as a wanted one: another listed file
 /// (a shipped `.dll.kryoto` is the original's twin) or an emulator build
 /// Repair keeps. Matched by name and size first, then proven by hash.
-fn local_twin(finder: &mut Finder, list: &FileList, want: &ListedFile, tools: &[(String, u64, PathBuf)]) -> Option<PathBuf> {
-    for other in list.listed().iter().filter(|o| o.sha256 == want.sha256 && key(&o.path) != key(&want.path)) {
+fn local_twin(finder: &mut Finder, twins: &HashMap<&str, Vec<&ListedFile>>, want: &ListedFile, tools: &[(String, u64, PathBuf)]) -> Option<PathBuf> {
+    let own = key(&want.path);
+    for other in twins.get(want.sha256.as_str()).into_iter().flatten().filter(|o| key(&o.path) != own) {
         if let Some(p) = finder.find(&other.path).filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == want.size)) {
             if journal::digest(&p).ok().as_deref() == Some(want.sha256.as_str()) {
                 return Some(p);
@@ -1215,9 +1231,18 @@ fn restore_into(
     let mut finder = Finder::new(root);
     let mut left: Vec<ListedFile> = Vec::new();
     say("Looking for the files on this PC", None);
+    let twins = twins_of(list, wanted);
+    // Many copies of one file (the same asset shipped in every level) are
+    // looked for once: the first source found serves them all.
+    let mut found: HashMap<&str, PathBuf> = HashMap::new();
     for f in wanted {
-        match local_twin(&mut finder, list, f, tools) {
+        let from = match found.get(f.sha256.as_str()) {
+            Some(p) => Some(p.clone()),
+            None => local_twin(&mut finder, &twins, f, tools),
+        };
+        match from {
             Some(from) => {
+                found.insert(f.sha256.as_str(), from.clone());
                 if installing() {
                     return Err(INSTALLING.into());
                 }
@@ -1261,8 +1286,9 @@ fn restore_into(
                 crate::logging::warn("files", &format!("could not take files from {}: {e}", archive.display()));
             }
             if unpacked.is_ok() {
+                let by_path: HashMap<&str, &ListedFile> = left.iter().map(|f| (f.path.as_str(), f)).collect();
                 for (rel, name) in &names {
-                    let Some(f) = left.iter().find(|f| &f.path == rel) else { continue };
+                    let Some(f) = by_path.get(rel.as_str()) else { continue };
                     let from = staging.join(name);
                     if installing() {
                         let _ = std::fs::remove_dir_all(&staging);
@@ -1276,7 +1302,8 @@ fn restore_into(
             }
             let _ = std::fs::remove_dir_all(&staging);
             let _ = std::fs::remove_file(staging.with_extension("names"));
-            left.retain(|f| !out.restored.contains(&f.path));
+            let back: HashSet<&str> = out.restored.iter().map(String::as_str).collect();
+            left.retain(|f| !back.contains(f.path.as_str()));
         }
     }
     out.left = left.into_iter().map(|f| f.path).collect();
@@ -1817,7 +1844,8 @@ mod tests {
         write(&dir, "bin/steam_api64.dll.kryoto", b"valve");
         let want = ListedFile { path: "bin/original.dll".into(), size: 5, sha256: sha(b"valve"), ..Default::default() };
         let mut finder = Finder::new(&dir);
-        let twin = local_twin(&mut finder, &list, &want, &[]).unwrap();
+        let twins = twins_of(&list, &[]);
+        let twin = local_twin(&mut finder, &twins, &want, &[]).unwrap();
         place(&dir, &twin, &want.path, &want.sha256).unwrap();
         assert_eq!(std::fs::read(dir.join("bin/original.dll")).unwrap(), b"valve");
         assert!(dir.join("bin/steam_api64.dll.kryoto").is_file(), "the source stays");
@@ -1826,9 +1854,12 @@ mod tests {
         write(&tools_dir, "steam_api64.dll", b"nope");
         let want = ListedFile { path: "bin/steam_api64.dll".into(), size: 4, sha256: sha(b"gbe!"), ..Default::default() };
         let tools = vec![("steam_api64.dll".to_string(), 4u64, tools_dir.join("steam_api64.dll"))];
-        assert!(local_twin(&mut finder, &list, &want, &tools).is_none());
+        assert!(local_twin(&mut finder, &twins, &want, &tools).is_none());
         write(&tools_dir, "steam_api64.dll", b"gbe!");
-        assert!(local_twin(&mut finder, &list, &want, &tools).is_some());
+        assert!(local_twin(&mut finder, &twins, &want, &tools).is_some());
+        // A file that is itself wanted is never the source of another.
+        let gone = file("bin/steam_api64.dll.kryoto", b"valve", Role::EmulatorAdded);
+        assert!(!twins_of(&list, &[gone]).contains_key(sha(b"valve").as_str()));
         assert!(place(&dir, &tools_dir.join("steam_api64.dll"), "../escape.dll", &want.sha256).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1865,6 +1896,23 @@ mod tests {
         assert_eq!(names, vec![("x64/Steam_Api64.dll".to_string(), "Hades/x64/steam_api64.dll".to_string()), ("Hades.exe".to_string(), "Hades/Hades.exe".to_string())]);
         let flat: Vec<String> = ["a.exe".to_string()].to_vec();
         assert_eq!(archive_prefix(&flat, &["A.exe".to_string()]).as_deref(), Some(""));
+        // The shortest folder wins a tie, as before.
+        let both: Vec<String> = ["a/x.dll", "b/c/x.dll"].map(String::from).to_vec();
+        assert_eq!(archive_prefix(&both, &["x.dll".to_string()]).as_deref(), Some("a/"));
+        assert_eq!(archive_prefix(&both, &["c/x.dll".to_string()]).as_deref(), Some("b/"));
+        assert_eq!(archive_prefix(&both, &["gone.dll".to_string()]), None);
+    }
+
+    #[test]
+    fn many_missing_files_against_a_big_archive_are_matched_quickly() {
+        // 40,000 missing files of a 40,000-file archive: compared pair by pair
+        // that was 1.6 billion comparisons on a frozen progress line.
+        let entries: Vec<String> = (0..40_000).map(|i| format!("Game/data/{}/file{i}.pak", i % 97)).collect();
+        let wanted: Vec<String> = (0..40_000).map(|i| format!("data/{}/file{i}.pak", i % 97)).collect();
+        let started = Instant::now();
+        assert_eq!(archive_prefix(&entries, &wanted).as_deref(), Some("game/"));
+        assert_eq!(archive_names(&entries, "game/", &wanted).len(), 40_000);
+        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
     }
 
     /// Packs a small game with this PC's 7-Zip, then takes one file back out
