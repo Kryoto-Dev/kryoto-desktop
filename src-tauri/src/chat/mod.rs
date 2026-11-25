@@ -804,15 +804,46 @@ pub async fn chat_ice_servers(app: AppHandle) -> Result<serde_json::Value, Strin
 
 // ---- the public room (not end-to-end encrypted) ---------------------------------
 
-/// Messages in the public room (newest, or only those after `after`).
+/// The path of a room read: `after` is the newest message id on screen, `since`
+/// kryo.to's own clock from the last read (an ISO time it sent as `now`), which
+/// asks for what was edited, reacted to or removed meanwhile. Anything that is
+/// not exactly those shapes is left off.
+fn room_list_path(after: Option<String>, since: Option<String>) -> String {
+    let after = after.filter(|a| !a.is_empty() && a.len() <= 20 && a.bytes().all(|b| b.is_ascii_digit()));
+    let since = since.filter(|s| !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'-' | b':' | b'.' | b'T' | b'Z')));
+    let mut query = Vec::new();
+    if let Some(a) = after {
+        query.push(format!("after={a}"));
+    }
+    if let Some(s) = since {
+        query.push(format!("since={s}"));
+    }
+    if query.is_empty() { "/api/chat/room".to_string() } else { format!("/api/chat/room?{}", query.join("&")) }
+}
+
+/// Messages in the public room (newest, or only those after `after`), and with
+/// `since` what happened to older ones.
 #[tauri::command]
-pub async fn room_list(app: AppHandle, after: Option<String>) -> Result<serde_json::Value, String> {
+pub async fn room_list(app: AppHandle, after: Option<String>, since: Option<String>) -> Result<serde_json::Value, String> {
     let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
-    let path = match after.filter(|a| !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit())) {
-        Some(a) => format!("/api/chat/room?after={a}"),
-        None => "/api/chat/room".to_string(),
-    };
-    auth::api(&api_base(&app), &token, reqwest::Method::GET, &path, None).await
+    auth::api(&api_base(&app), &token, reqwest::Method::GET, &room_list_path(after, since), None).await
+}
+
+/// Change the words of your own room message (kryo.to allows it for a day).
+#[tauri::command]
+pub async fn room_edit(app: AppHandle, id: String, text: String) -> Result<serde_json::Value, String> {
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    let id = user_id(&id)?;
+    auth::api(&api_base(&app), &token, reqwest::Method::PATCH, &format!("/api/chat/room/{id}"), Some(serde_json::json!({ "text": text }))).await
+}
+
+/// Put a reaction on a room message or take it off: kryo.to's own reactions,
+/// the same as on write-ups. Answers the message's reactions as they are now.
+#[tauri::command]
+pub async fn room_react(app: AppHandle, id: String, emoji: String, on: bool) -> Result<serde_json::Value, String> {
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    let id = user_id(&id)?;
+    auth::api(&api_base(&app), &token, reqwest::Method::POST, &format!("/api/chat/room/{id}/reactions"), Some(serde_json::json!({ "emoji": emoji, "on": on }))).await
 }
 
 #[tauri::command]
@@ -1103,6 +1134,18 @@ fn whoami() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_room_read_asks_only_for_what_it_should() {
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(room_list_path(None, None), "/api/chat/room");
+        assert_eq!(room_list_path(some("42"), None), "/api/chat/room?after=42");
+        assert_eq!(room_list_path(some("42"), some("2026-11-24T10:00:00.000Z")), "/api/chat/room?after=42&since=2026-11-24T10:00:00.000Z");
+        assert_eq!(room_list_path(None, some("2026-11-24T10:00:00.000Z")), "/api/chat/room?since=2026-11-24T10:00:00.000Z");
+        // Nothing else rides along in the address.
+        assert_eq!(room_list_path(some("42&x=1"), some("now&after=1")), "/api/chat/room");
+        assert_eq!(room_list_path(some(""), some("")), "/api/chat/room");
+    }
 
     #[test]
     fn chat_stays_with_its_own_account() {

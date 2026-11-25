@@ -210,9 +210,18 @@ export function createBackend(token: string, userId: string, onSignedOut: () => 
     chat_call_signal: async (a) => (await need()).sendCall(a.peer, a.callId, a.kind, a.payload),
     chat_ice_servers: () => api(token, 'GET', '/api/chat/ice'),
     online_lobby: () => null,
-    room_list: (a) => api(token, 'GET', a.after ? `/api/chat/room?after=${encodeURIComponent(a.after)}` : '/api/chat/room'),
+    room_list: (a) => {
+      // `since` is kryo.to's clock from the last read: with it the answer also says what was edited, reacted to or removed.
+      const query = new URLSearchParams()
+      if (a.after) query.set('after', String(a.after))
+      if (a.since) query.set('since', String(a.since))
+      const q = query.toString()
+      return api(token, 'GET', q ? `/api/chat/room?${q}` : '/api/chat/room')
+    },
     room_post: (a) => api(token, 'POST', '/api/chat/room', { text: a.text, replyTo: a.replyTo ?? null }),
     room_delete: (a) => api(token, 'DELETE', `/api/chat/room/${encodeURIComponent(a.id)}`),
+    room_edit: (a) => api(token, 'PATCH', `/api/chat/room/${encodeURIComponent(a.id)}`, { text: a.text }),
+    room_react: (a) => api(token, 'POST', `/api/chat/room/${encodeURIComponent(a.id)}/reactions`, { emoji: a.emoji, on: a.on !== false }),
     store_refresh_account: () => refreshFriends(),
     // The friends list's own actions (src/lib/friends.ts builds the route).
     friends_fetch: async (a) => {

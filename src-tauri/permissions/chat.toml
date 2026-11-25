@@ -53,6 +53,8 @@ commands.allow = [
   "chat_ice_servers",
   "room_post",
   "room_delete",
+  "room_edit",
+  "room_react",
   "chat_file_save",
   "chat_file_preview",
   "chat_groups",

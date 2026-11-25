@@ -1,27 +1,23 @@
 import { TeamName } from '@/ui/TeamName'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Globe, Reply, Send, Trash2, X } from '@/ui/pixel-icons'
+import { ArrowLeft, Globe, Pencil, Reply, Send, SmilePlus, Trash2, X } from '@/ui/pixel-icons'
 import { artSrc } from '@/lib/art'
 import { call, errorText } from '@/lib/bridge'
+import { QUICK_REACTIONS } from '@/lib/chat'
 import { Button, IconButton } from '@/ui'
 import { cn } from '@/lib/utils'
 import { RichText } from '@/rich/RichText'
 import { EmojiButton, RichTextarea, type MentionCandidate } from '@/rich/RichEditor'
+import { EmojiGlyph } from '@/rich/EmojiGlyph'
 import { jumpToMessage, messageAnchor } from '@/rich/jump'
+import { editableText } from '@/rich/mentions'
+import { isEmojiName } from '@/rich/rich-catalog'
 import { plainRich } from '@/rich/rich-text'
+import { applyRoomRead, canEditRoomMessage, type RoomMessage, type RoomReaction, type RoomRead } from './room-feed'
 
 /** People for the room's `@` list: anybody with an account kryo.to will name. */
 const findPeople = (q: string) =>
   q ? call<{ people: MentionCandidate[] }>('chat_mention_search', { query: q }).then((r) => r.people ?? []) : Promise.resolve([] as MentionCandidate[])
-
-type RoomMessage = {
-  id: string
-  body: string
-  /** The message this answers; `gone` when it was removed or cannot be shown. */
-  replyTo?: { id: string; gone: boolean; name: string | null; username: string | null; excerpt: string } | null
-  createdAt: string
-  user: { id: string; username: string; displayName: string | null; avatarUrl: string | null; supporter: boolean }
-}
 
 const MAX = 500
 const POLL_MS = 4000
@@ -30,6 +26,12 @@ const POLL_MS = 4000
  * The public room: one chat for everyone. Unlike every other chat here it is
  * NOT end-to-end encrypted - kryo.to keeps the messages for 30 days and
  * moderators can remove them - and the header says so.
+ *
+ * You can change your own message for a day (it then reads "edited"), remove
+ * it, and react to any message with kryo.to's own reactions (the same ones as
+ * on write-ups and comments: kryo.to decides everything). The room is joined
+ * with #kryoto-chat on the Kryoto Discord, so some messages were written
+ * there, by somebody whose Discord is linked to the account shown.
  */
 export function RoomPane({
   myUsername,
@@ -51,20 +53,21 @@ export function RoomPane({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [replyTo, setReplyTo] = useState<RoomMessage | null>(null)
+  const [editing, setEditing] = useState<RoomMessage | null>(null)
+  const [reactingTo, setReactingTo] = useState<string | null>(null)
   const last = useRef<string | null>(null)
+  /** kryo.to's clock at the last read: what changed on older messages since then comes with the next one. */
+  const since = useRef<string | null>(null)
   const bottom = useRef<HTMLDivElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
 
   const poll = useCallback(async () => {
-    const r = await call<{ messages: RoomMessage[]; canModerate: boolean }>('room_list', { after: last.current })
+    const r = await call<RoomRead>('room_list', { after: last.current, since: since.current })
     setCanModerate(r.canModerate)
+    if (r.now) since.current = r.now
     const newest = r.messages[r.messages.length - 1]
-    if (!newest) return
-    last.current = newest.id
-    setMessages((list) => {
-      const seen = new Set(list.map((m) => m.id))
-      return [...list, ...r.messages.filter((m) => !seen.has(m.id))].slice(-300)
-    })
+    if (newest) last.current = newest.id
+    if (newest || r.changed?.length || r.removed?.length) setMessages((list) => applyRoomRead(list, r))
   }, [])
 
   useEffect(() => {
@@ -88,16 +91,32 @@ export function RoomPane({
     bottom.current?.scrollIntoView({ block: 'end' })
   }, [messages.length])
 
+  // Starting a reply or an edit puts you in the message box.
+  useEffect(() => {
+    if (replyTo || editing) box.current?.focus()
+  }, [replyTo, editing])
+
+  const stopEditing = () => {
+    setEditing(null)
+    setText('')
+  }
+
   const send = async (said?: string) => {
     const value = (said ?? text).trim()
     if (!value || value.length > MAX || busy) return
     setBusy(true)
     setError(null)
     try {
-      await call('room_post', { text: value, replyTo: replyTo?.id ?? null })
-      if (said === undefined) setText('')
-      setReplyTo(null)
-      await poll()
+      if (editing && said === undefined) {
+        const r = await call<{ message: RoomMessage }>('room_edit', { id: editing.id, text: value })
+        setMessages((list) => list.map((m) => (m.id === r.message.id ? r.message : m)))
+        stopEditing()
+      } else {
+        await call('room_post', { text: value, replyTo: replyTo?.id ?? null })
+        if (said === undefined) setText('')
+        setReplyTo(null)
+        await poll()
+      }
     } catch (e) {
       setError(errorText(e))
     } finally {
@@ -107,8 +126,19 @@ export function RoomPane({
 
   const remove = (id: string) =>
     void call('room_delete', { id })
-      .then(() => setMessages((list) => list.filter((m) => m.id !== id)))
+      .then(() => {
+        setMessages((list) => list.filter((m) => m.id !== id))
+        if (editing?.id === id) stopEditing()
+      })
       .catch((e) => setError(errorText(e)))
+
+  const react = (m: RoomMessage, emoji: string) => {
+    const mine = m.reactions?.find((r) => r.emoji === emoji)?.mine ?? false
+    setReactingTo(null)
+    void call<{ reactions: RoomReaction[] }>('room_react', { id: m.id, emoji, on: !mine })
+      .then((r) => setMessages((list) => list.map((x) => (x.id === m.id ? { ...x, reactions: r.reactions ?? [] } : x))))
+      .catch((e) => setError(errorText(e)))
+  }
 
   return (
     <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
@@ -131,6 +161,8 @@ export function RoomPane({
         {messages.map((m) => {
           const name = m.user.displayName || m.user.username
           const mine = m.user.username === myUsername
+          const reactions = m.reactions ?? []
+          const actions = 'size-5 opacity-0 group-hover:opacity-100 focus:opacity-100 pointer-coarse:opacity-100'
           return (
             <div key={m.id} id={messageAnchor(m.id)} className="group flex items-start gap-2.5">
               <button type="button" onClick={() => onProfile(m.user.username)} className="shrink-0" aria-label={`${name}'s profile`}>
@@ -165,25 +197,36 @@ export function RoomPane({
                     </span>
                   )
                 ) : null}
-                <span className="flex items-center gap-2 text-[11px]">
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
                   <button type="button" onClick={() => onProfile(m.user.username)} className={cn('font-bold hover:underline', mine ? 'text-primary' : 'text-foreground')}>
                     <TeamName username={m.user.username}>{name}</TeamName>
                   </button>
                   <span className="text-muted-foreground">
                     {new Date(m.createdAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
                   </span>
-                  <IconButton
-                    label="Reply"
-                    className="size-5 opacity-0 group-hover:opacity-100 focus:opacity-100 pointer-coarse:opacity-100"
-                    onClick={() => {
-                      setReplyTo(m)
-                      box.current?.focus()
-                    }}
-                  >
+                  {m.editedAt ? <span className="text-muted-foreground">(edited)</span> : null}
+                  {m.origin === 'discord' ? <span className="text-muted-foreground">from Discord</span> : null}
+                  <IconButton label="Reply" className={actions} onClick={() => { setEditing(null); setReplyTo(m) }}>
                     <Reply className="size-3" />
                   </IconButton>
+                  <IconButton label="React" className={actions} onClick={() => setReactingTo(reactingTo === m.id ? null : m.id)}>
+                    <SmilePlus className="size-3" />
+                  </IconButton>
+                  {mine && canEditRoomMessage(m, Date.now()) ? (
+                    <IconButton
+                      label="Edit"
+                      className={actions}
+                      onClick={() => {
+                        setReplyTo(null)
+                        setEditing(m)
+                        setText(editableText(m.body).slice(0, MAX))
+                      }}
+                    >
+                      <Pencil className="size-3" />
+                    </IconButton>
+                  ) : null}
                   {mine || canModerate ? (
-                    <IconButton label="Remove message" className="size-5 opacity-0 group-hover:opacity-100 focus:opacity-100 pointer-coarse:opacity-100" onClick={() => remove(m.id)}>
+                    <IconButton label="Remove message" className={actions} onClick={() => remove(m.id)}>
                       <Trash2 className="size-3" />
                     </IconButton>
                   ) : null}
@@ -193,6 +236,37 @@ export function RoomPane({
                 <p className="whitespace-pre-wrap break-words text-sm text-foreground">
                   <RichText text={m.body} />
                 </p>
+                {reactions.length > 0 ? (
+                  <span className="mt-0.5 flex flex-wrap gap-2" role="group" aria-label="Reactions">
+                    {reactions.map((r) => (
+                      <button
+                        key={r.emoji}
+                        type="button"
+                        aria-pressed={r.mine}
+                        title={`${r.people.map((p) => p.name).join(', ') || 'Somebody'} reacted with ${isEmojiName(r.emoji) ? `:${r.emoji}:` : r.emoji}`}
+                        onClick={() => react(m, r.emoji)}
+                        className={cn(
+                          'kryo-pill inline-flex h-8 items-center gap-1 border px-2 text-xs tabular-nums transition-colors',
+                          r.mine ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        <EmojiGlyph emoji={r.emoji} size={20} />
+                        {r.count}
+                      </button>
+                    ))}
+                  </span>
+                ) : null}
+                {reactingTo === m.id ? (
+                  <span className="kryo-pill mt-0.5 flex w-fit max-w-full flex-wrap gap-1 border border-border bg-card px-2 py-1">
+                    {QUICK_REACTIONS.map((e) => (
+                      <button key={e} type="button" className="kryo-radius inline-flex size-8 items-center justify-center text-lg hover:bg-secondary" onClick={() => react(m, e)} aria-label={`React ${e}`}>
+                        <span className="kryo-emoji-char">{e}</span>
+                      </button>
+                    ))}
+                    {/* Everything else, from the same picker as the message box. */}
+                    <EmojiButton standard stickers={false} rank={meRank} align="left" onPick={(token, kind) => react(m, kind === 'char' ? token : token.slice(1, -1))} />
+                  </span>
+                ) : null}
               </div>
             </div>
           )
@@ -201,12 +275,18 @@ export function RoomPane({
       </div>
       <footer className="grid gap-2 border-t border-border px-5 py-3">
         {error ? <p className="text-xs text-destructive">{error}</p> : null}
-        {replyTo ? (
+        {replyTo || editing ? (
           <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
             <span className="min-w-0 truncate">
-              Replying to <b className="text-foreground">{replyTo.user.displayName || replyTo.user.username}</b>: {plainRich(replyTo.body).slice(0, 80)}
+              {editing ? (
+                'Editing your message'
+              ) : (
+                <>
+                  Replying to <b className="text-foreground">{replyTo?.user.displayName || replyTo?.user.username}</b>: {plainRich(replyTo?.body ?? '').slice(0, 80)}
+                </>
+              )}
             </span>
-            <IconButton label="Cancel" className="size-6" onClick={() => setReplyTo(null)}>
+            <IconButton label="Cancel" className="size-6" onClick={() => (editing ? stopEditing() : setReplyTo(null))}>
               <X className="size-3" />
             </IconButton>
           </div>
@@ -224,15 +304,18 @@ export function RoomPane({
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
                 void send()
+              } else if (e.key === 'Escape' && editing) {
+                e.preventDefault()
+                stopEditing()
               }
             }}
             rows={1}
             placeholder="Message everyone"
-            aria-label="Message the public room"
+            aria-label={editing ? 'Edit your message' : 'Message the public room'}
             className="kryo-radius block max-h-32 min-h-9 w-full resize-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-foreground"
           />
-          <EmojiButton rank={meRank} target={box} value={text} onValueChange={(v) => setText(v.slice(0, MAX))} onPick={(token) => void send(token)} />
-          <Button variant="primary" size="sm" disabled={!text.trim() || busy} onClick={() => send()} aria-label="Send">
+          <EmojiButton rank={meRank} target={box} value={text} onValueChange={(v) => setText(v.slice(0, MAX))} onPick={editing ? undefined : (token) => void send(token)} />
+          <Button variant="primary" size="sm" disabled={!text.trim() || busy} onClick={() => send()} aria-label={editing ? 'Save' : 'Send'}>
             <Send className="size-3" />
           </Button>
         </div>

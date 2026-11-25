@@ -1,14 +1,14 @@
 {
   "name": "kryoto-desktop",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "check:styles": "node scripts/check-styles.mjs",
-    "check": "node scripts/check-styles.mjs && tsc --noEmit && node --test src/web/send-rules.test.ts src/web/history-rules.test.ts src/lib/playtime-math.test.ts src/lib/text-size-keys.test.ts src/lib/window-fit.test.ts src/pet/working-pose.test.ts src/ui/float-place.test.ts src/web/friends-poll.test.ts src/lib/autofix.test.ts src/lib/release-files.test.ts src/lib/online-fix.test.ts src/lib/quick-exit.test.ts src/lib/language-packs.test.ts src/lib/from-file.test.ts src/lib/repair-errors.test.ts src/bigpicture/screensavers/screensavers.test.ts",
-    "test": "node --test src/web/send-rules.test.ts src/web/history-rules.test.ts src/lib/playtime-math.test.ts src/lib/text-size-keys.test.ts src/lib/window-fit.test.ts src/pet/working-pose.test.ts src/ui/float-place.test.ts src/web/friends-poll.test.ts src/lib/autofix.test.ts src/lib/release-files.test.ts src/lib/online-fix.test.ts src/lib/quick-exit.test.ts src/lib/language-packs.test.ts src/lib/from-file.test.ts src/lib/repair-errors.test.ts src/bigpicture/screensavers/screensavers.test.ts",
+    "check": "node scripts/check-styles.mjs && tsc --noEmit && node --test src/web/send-rules.test.ts src/web/history-rules.test.ts src/lib/playtime-math.test.ts src/lib/text-size-keys.test.ts src/lib/window-fit.test.ts src/pet/working-pose.test.ts src/ui/float-place.test.ts src/web/friends-poll.test.ts src/lib/autofix.test.ts src/lib/release-files.test.ts src/lib/online-fix.test.ts src/lib/quick-exit.test.ts src/lib/language-packs.test.ts src/lib/from-file.test.ts src/lib/repair-errors.test.ts src/bigpicture/screensavers/screensavers.test.ts src/friends/room-feed.test.ts",
+    "test": "node --test src/web/send-rules.test.ts src/web/history-rules.test.ts src/lib/playtime-math.test.ts src/lib/text-size-keys.test.ts src/lib/window-fit.test.ts src/pet/working-pose.test.ts src/ui/float-place.test.ts src/web/friends-poll.test.ts src/lib/autofix.test.ts src/lib/release-files.test.ts src/lib/online-fix.test.ts src/lib/quick-exit.test.ts src/lib/language-packs.test.ts src/lib/from-file.test.ts src/lib/repair-errors.test.ts src/bigpicture/screensavers/screensavers.test.ts src/friends/room-feed.test.ts",
     "build": "tsc --noEmit && vite build",
     "app:dev": "node scripts/dev.mjs",
     "app:dev:plain": "node scripts/dev.mjs -- --no-default-features --features dev-plain-chat-store",

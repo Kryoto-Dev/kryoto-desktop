@@ -396,8 +396,9 @@ type PreviewMsg = {
   status: string; reactions: { emoji: string; userIds: string[] }[]
 }
 const previewMsgs: PreviewMsg[] = []
-const previewRoom: { id: string; body: string; replyTo?: { id: string; gone: boolean; name: string | null; username: string | null; excerpt: string } | null; createdAt: string; user: { id: string; username: string; displayName: string | null; avatarUrl: string | null; supporter: boolean } }[] = [
-  { id: '1', body: 'anyone up for Lethal Company tonight?', createdAt: new Date().toISOString(), user: { id: '2', username: 'bo', displayName: 'Bo', avatarUrl: null, supporter: true } },
+type PreviewRoomReaction = { emoji: string; count: number; mine: boolean; people: { name: string; username: string | null }[] }
+const previewRoom: { id: string; body: string; replyTo?: { id: string; gone: boolean; name: string | null; username: string | null; excerpt: string } | null; createdAt: string; editedAt?: string | null; origin?: 'discord' | null; reactions?: PreviewRoomReaction[]; user: { id: string; username: string; displayName: string | null; avatarUrl: string | null; supporter: boolean } }[] = [
+  { id: '1', body: 'anyone up for Lethal Company tonight?', createdAt: new Date().toISOString(), origin: 'discord', reactions: [{ emoji: '🔥', count: 2, mine: false, people: [{ name: 'Sol', username: 'sol' }, { name: 'Anonymous', username: null }] }], user: { id: '2', username: 'bo', displayName: 'Bo', avatarUrl: null, supporter: true } },
 ]
 const previewVerified = new Set<string>()
 let previewGroups: { id: string; name: string; members: { userId: string; role: string }[]; myRole: string }[] = [
@@ -684,7 +685,32 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     })
     return {}
   },
-  room_delete: () => null,
+  room_delete: (a) => {
+    const at = previewRoom.findIndex((m) => m.id === a.id)
+    if (at >= 0) previewRoom.splice(at, 1)
+    return null
+  },
+  room_edit: (a) => {
+    const m = previewRoom.find((x) => x.id === a.id)
+    if (!m) throw new Error('No such message.')
+    m.body = String(a.text)
+    m.editedAt = new Date().toISOString()
+    return { message: m }
+  },
+  room_react: (a) => {
+    const m = previewRoom.find((x) => x.id === a.id)
+    if (!m) throw new Error('That is not there any more.')
+    const list = (m.reactions ??= [])
+    const emoji = String(a.emoji)
+    const r = list.find((x) => x.emoji === emoji)
+    if (a.on !== false && !r) list.push({ emoji, count: 1, mine: true, people: [{ name: 'Mira', username: 'mira' }] })
+    else if (a.on !== false && r && !r.mine) Object.assign(r, { count: r.count + 1, mine: true })
+    else if (a.on === false && r?.mine) {
+      if (r.count <= 1) list.splice(list.indexOf(r), 1)
+      else Object.assign(r, { count: r.count - 1, mine: false })
+    }
+    return { reactions: [...list] }
+  },
   chat_call_signal: () => null,
   chat_ice_servers: () => ({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] }),
   chat_file_save: () => null,
