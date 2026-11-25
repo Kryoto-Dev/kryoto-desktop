@@ -610,7 +610,7 @@ fn remove_file(f: &Path) -> bool {
 /// Folders inside the game's folder left empty, the folder itself once empty,
 /// then empty folders above it up to its library folder. Only ever empty
 /// ones: `remove_dir` refuses any other.
-fn prune(plan: &Plan) {
+pub(crate) fn prune(plan: &Plan) {
     if plan.folder.is_dir() {
         let mut dirs: Vec<PathBuf> = walkdir::WalkDir::new(&plan.folder)
             .follow_links(false)
