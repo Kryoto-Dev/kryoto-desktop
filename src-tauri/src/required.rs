@@ -158,6 +158,11 @@ pub fn decide(current: &str, kept: Option<&Kept>, now: u64, fresh: bool) -> Requ
 
 static NOW: Mutex<Option<Required>> = Mutex::new(None);
 
+/// Why a command that can do harm is refused. Remote does not send a refused
+/// uninstall or unlist again (remote.rs): once updated, one sent days ago
+/// would then happen out of the blue.
+pub const REFUSAL: &str = "Update Kryoto Desktop first: this version has a serious problem, so downloads, repairs, uninstalling and moving games wait until it is updated.";
+
 /// For the commands that can do harm: refused while this copy must update.
 pub fn refuse() -> Result<(), String> {
     refusal(NOW.lock().unwrap_or_else(|e| e.into_inner()).as_ref())
@@ -165,7 +170,7 @@ pub fn refuse() -> Result<(), String> {
 
 fn refusal(now: Option<&Required>) -> Result<(), String> {
     if now.is_some_and(|r| r.blocked) {
-        return Err("Update Kryoto Desktop first: this version has a serious problem, so downloads, repairs, uninstalling and moving games wait until it is updated.".into());
+        return Err(REFUSAL.into());
     }
     Ok(())
 }
