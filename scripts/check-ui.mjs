@@ -763,6 +763,36 @@ try {
       await shelf.getByRole('menuitem', { name: /^Add to collection\s*1$/ }).waitFor()
     } finally { await shelf.close() }
   })
+  await check('a blocked network shows how to change DNS on this PC, without kryo.to', async () => {
+    // Windows 10 and 11 both say "Windows NT 10.0": only the platform version tells them apart.
+    for (const [os, platformVersion] of [['Windows NT 10.0; Win64; x64', '15.0.0'], ['Windows NT 10.0; Win64; x64', '10.0.0'], ['X11; Linux x86_64', null]]) {
+      const context = await browser.newContext({ userAgent: `Mozilla/5.0 (${os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36` })
+      if (platformVersion) {
+        await context.addInitScript((v) => Object.defineProperty(navigator, 'userAgentData', { value: { getHighEntropyValues: async () => ({ platformVersion: v }) } }), platformVersion)
+      }
+      const ui = await context.newPage()
+      ui.on('pageerror', e => failures.push(e.message))
+      try {
+        await ui.goto(`${base}/test/ui.html`)
+        await ui.locator('#blocked').click()
+        const dialog = ui.getByRole('dialog', { name: 'Your network is blocking kryo.to', exact: true })
+        const how = dialog.getByText('Show me how', { exact: true })
+        assert.equal(await dialog.getByText('SNI or IP block', { exact: false }).isVisible(), false)
+        await how.click()
+        await dialog.getByText('SNI or IP block', { exact: false }).waitFor()
+        const eleven = platformVersion === '15.0.0'
+        const ten = platformVersion === '10.0.0'
+        if (eleven) await dialog.getByText('On Windows 11, encrypted DNS:', { exact: true }).waitFor()
+        if (ten) await dialog.getByText('On Windows 10:', { exact: true }).waitFor()
+        assert.equal(await dialog.getByText('Preferred DNS: 1.1.1.1', { exact: false }).isVisible(), eleven)
+        assert.equal(await dialog.getByText('Turn on IPv6', { exact: false }).isVisible(), eleven)
+        assert.equal(await dialog.getByText('netsh dns set encryption', { exact: false }).isVisible(), eleven)
+        assert.equal(await dialog.getByText('Network and Sharing Center', { exact: false }).isVisible(), ten)
+        assert.equal(await dialog.getByText('netsh interface ipv6 set dnsservers', { exact: false }).isVisible(), eleven || ten)
+        assert.equal(await dialog.getByText('DNSOverTLS=yes', { exact: false }).isVisible(), !platformVersion)
+      } finally { await context.close() }
+    }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
