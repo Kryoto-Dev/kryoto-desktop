@@ -1385,7 +1385,11 @@ fn installed_build_in<'a>(games: &'a [LibraryGame], d: &Download) -> Option<&'a 
     let version = d.release.as_deref().or(d.meta.version.as_deref())?;
     // A file whose hash is known and is not the one installed is another
     // upload of that build (replaced on kryo.to): an update, not the same one.
+    // A game from the player's own file matched nothing kryo.to lists, so
+    // whatever its name said, kryo.to's file is never the one installed: its
+    // Update was thrown away here as "already installed".
     let same_file = |g: &LibraryGame| match (g.build_sha.as_deref(), d.sha256.as_deref()) {
+        _ if g.unverified => false,
         (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
         _ => true,
     };
@@ -6986,6 +6990,11 @@ mod tests {
         assert!(installed_build_in(&games, &d).is_some());
         d.sha256 = Some(b.clone());
         assert!(installed_build_in(&games, &d).is_none(), "fetched, and it is another file");
+        // "Game v1.0 - kryoto.7z" from the player's own file: no hash, and the
+        // same number as kryo.to's build, which is still an update.
+        let own = vec![LibraryGame { slug: Some("g".into()), version: Some("1.0".into()), unverified: true, ..Default::default() }];
+        d.sha256 = None;
+        assert!(installed_build_in(&own, &d).is_none(), "the player's own file is never kryo.to's");
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { automaticArtwork, coverFor } from '@/lib/game-artwork'
 import { autofixBlock } from '@/lib/autofix'
+import { ownFileLatest } from '@/lib/from-file'
 import type { FilesRestored, FilesState } from '@/lib/release-files'
 import type { OnlineFixState } from '@/lib/online-fix'
 
@@ -176,7 +177,9 @@ export type KryoAddon = {
 export const NEW_UPLOAD = ' (new upload)'
 
 /** The build kryo.to offers this installed game now, given its current version: that, or the same one marked {@link NEW_UPLOAD}. */
-export async function latestFor(game: Pick<LibraryGame, 'slug' | 'version' | 'buildSha'>, version: string | null): Promise<string | null> {
+export async function latestFor(game: Pick<LibraryGame, 'slug' | 'version' | 'buildSha' | 'unverified'>, version: string | null): Promise<string | null> {
+  // From the player's own file, never Kryoto's copy: kryo.to's build is always offered.
+  if (game.slug && game.unverified) return ownFileLatest(game.version, version, NEW_UPLOAD)
   if (!game.slug || !game.buildSha || (version && version !== (game.version ?? ''))) return version
   // The same number (or none): only the file says whether it is the same build.
   // Read even when the links are withheld: the hashes still come.
