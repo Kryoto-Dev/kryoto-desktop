@@ -475,7 +475,10 @@ fn write_all(conn: &mut Connection, cols: &[String], data: &Path, config: &Path,
         let mut files = vec![yml.to_string_lossy().into_owned()];
         // Lutris reads `<slug>.jpg` whatever the picture's format.
         let cover = data.join("coverart").join(format!("{slug}.jpg"));
-        let ours = before.is_some_and(|a| a.files.iter().any(|f| Path::new(f) == cover));
+        // Lutris keys covers by slug alone: once another game has this slug,
+        // the picture is that game's too, and Kryoto no longer owns it.
+        let shared = before.is_some_and(|a| tx.query_row("SELECT COUNT(*) FROM games WHERE slug = ?1 AND id != ?2", rusqlite::params![a.slug, a.id], |r| r.get::<_, i64>(0)).unwrap_or(1) > 0);
+        let ours = !shared && before.is_some_and(|a| a.files.iter().any(|f| Path::new(f) == cover));
         let mut has_cover = ours;
         match &g.cover {
             // A cover Lutris or the player put there is left alone.
@@ -535,7 +538,9 @@ fn write_all(conn: &mut Connection, cols: &[String], data: &Path, config: &Path,
 }
 
 /// Take back games Kryoto added: only rows that are still exactly those
-/// (same id, slug and settings file), with the files written for them.
+/// (same id, slug and settings file), with the files written for them. A
+/// game whose row is gone keeps its files, and a cover stays while another
+/// game has the same slug: Lutris finds covers by slug, so it is that game's.
 pub fn take_back(data: &Path, added: &[Added], backups: &Path, now: u64) -> Result<usize, String> {
     if added.is_empty() {
         return Ok(0);
@@ -544,15 +549,23 @@ pub fn take_back(data: &Path, added: &[Added], backups: &Path, now: u64) -> Resu
     columns(&conn)?;
     back_up(data, backups, now)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| format!("Lutris's library could not be changed: {e}"))?;
-    let mut removed = 0;
+    let mut gone: Vec<&Added> = Vec::new();
     for a in added {
-        removed += tx.execute("DELETE FROM games WHERE id = ?1 AND slug = ?2 AND configpath = ?3", rusqlite::params![a.id, a.slug, a.configpath]).map_err(|e| e.to_string())?;
+        if tx.execute("DELETE FROM games WHERE id = ?1 AND slug = ?2 AND configpath = ?3", rusqlite::params![a.id, a.slug, a.configpath]).map_err(|e| e.to_string())? == 1 {
+            gone.push(a);
+        }
+    }
+    let mut files: Vec<&String> = Vec::new();
+    for a in &gone {
+        let cover = data.join("coverart").join(format!("{}.jpg", a.slug));
+        let shared = tx.query_row("SELECT COUNT(*) FROM games WHERE slug = ?1", [&a.slug], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())? > 0;
+        files.extend(a.files.iter().filter(|f| !shared || Path::new(f) != cover));
     }
     tx.commit().map_err(|e| format!("Lutris's library could not be changed: {e}"))?;
-    for f in added.iter().flat_map(|a| &a.files) {
+    for f in files {
         let _ = std::fs::remove_file(f);
     }
-    Ok(removed)
+    Ok(gone.len())
 }
 
 /// Synthetic Lutris folders, for tests and `examples/make-lutris-library.rs`.
@@ -711,6 +724,36 @@ mod tests {
         assert_eq!(rows(&data), others);
         assert!(ledger.iter().flat_map(|a| &a.files).all(|f| !Path::new(f).exists()));
         assert!(data.join("coverart/the-witcher.jpg").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn undo_leaves_a_cover_another_game_now_uses() {
+        let root = temp("shared-cover");
+        let (data, config) = library(&root);
+        let backups = root.join("backups");
+        let w = send(&data, &config, &[outgoing("lantern", "Lantern Rite"), outgoing("moss", "Moss")], &[], &backups, 1_800_000_000).unwrap();
+        let conn = Connection::open(data.join("pga.db")).unwrap();
+        // Lantern: the player removed Kryoto's entry in Lutris and installed
+        // the game through Lutris, same slug, with a cover of their own.
+        conn.execute("DELETE FROM games WHERE slug = 'lantern'", []).unwrap();
+        add(&conn, &config, "lantern", "Lantern Rite", "wine", "/g/lantern", true, 1.0, 0, Some("game:\n  exe: l.exe\n")).unwrap();
+        // Moss: Lutris added its own Moss beside Kryoto's.
+        let theirs = add(&conn, &config, "moss", "Moss", "wine", "/g/moss", true, 1.0, 0, None).unwrap();
+        std::fs::write(data.join("coverart/lantern.jpg"), b"custom").unwrap();
+        // Sending Moss again leaves the cover it now shares alone.
+        std::fs::write(data.join("coverart/moss.jpg"), b"theirs").unwrap();
+        let moss: Vec<Added> = w.games.iter().filter(|a| a.key == "moss").cloned().collect();
+        let again = send(&data, &config, &[outgoing("moss", "Moss")], &moss, &backups, 1_800_000_100).unwrap();
+        assert_eq!((again.updated, again.pictures), (1, 0));
+        assert_eq!(std::fs::read(data.join("coverart/moss.jpg")).unwrap(), b"theirs");
+        assert!(!again.games[0].files.iter().any(|f| f.ends_with("moss.jpg")));
+        // Undo with the first ledger: Kryoto's Moss goes, nothing of Lutris's does.
+        assert_eq!(take_back(&data, &w.games, &backups, 1_800_000_200).unwrap(), 1);
+        assert_eq!(std::fs::read(data.join("coverart/lantern.jpg")).unwrap(), b"custom");
+        assert_eq!(std::fs::read(data.join("coverart/moss.jpg")).unwrap(), b"theirs");
+        assert!(rows(&data).iter().any(|r| r.0 == theirs));
+        assert!(!Path::new(&moss[0].files[0]).exists(), "Kryoto's own settings file goes");
         let _ = std::fs::remove_dir_all(root);
     }
 
