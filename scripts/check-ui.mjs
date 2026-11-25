@@ -698,6 +698,22 @@ try {
       assert.equal(await linux.getByText('On Linux', { exact: true }).count(), 0)
     } finally { await context.close() }
   })
+  await check('Art and Contribute open from the Community menu and light its tab', async () => {
+    const shell = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+    shell.on('pageerror', e => failures.push(e.message))
+    await shell.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await shell.goto(base)
+      await shell.getByRole('complementary', { name: 'Your games' }).waitFor()
+      const community = shell.getByRole('button', { name: 'Community', exact: true })
+      assert.equal(await community.getAttribute('aria-current'), null)
+      await community.hover()
+      await shell.getByRole('menuitem', { name: 'Contribute', exact: true }).waitFor()
+      await shell.getByRole('menuitem', { name: 'Art', exact: true }).click()
+      // kryo.to/art is a Community page, not the Store's.
+      await shell.waitForFunction(() => [...document.querySelectorAll('button[aria-current="page"]')].some(b => b.textContent === 'Community'))
+    } finally { await shell.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
