@@ -6,8 +6,11 @@ export type Artwork = {
   hero: string | null
   header?: string | null
   logo?: string | null
+  /** Steam's small square icon, for the Library list. */
+  icon?: string | null
   customCover?: string | null
   customHero?: string | null
+  customIcon?: string | null
 }
 export type ArtMatch = { appid: string; title: string; cover: string | null }
 
@@ -28,7 +31,7 @@ export async function searchArtwork(title: string, signal?: AbortSignal): Promis
   return ((await res.json()) as { results: ArtMatch[] }).results
 }
 
-type SteamArt = { capsule: string | null; hero: string | null; header: string | null; logo: string | null }
+type SteamArt = { capsule: string | null; hero: string | null; header: string | null; logo: string | null; icon?: string | null }
 
 export async function fetchArtwork(appid: string, signal?: AbortSignal): Promise<Artwork> {
   let art: SteamArt
@@ -39,7 +42,7 @@ export async function fetchArtwork(appid: string, signal?: AbortSignal): Promise
     if (!res.ok) throw new Error('Artwork is unavailable for this game. You can choose your own pictures.')
     art = (await res.json()) as SteamArt
   }
-  return { cover: art.capsule ?? art.header, hero: art.hero ?? art.header, header: art.header, logo: art.logo }
+  return { cover: art.capsule ?? art.header, hero: art.hero ?? art.header, header: art.header, logo: art.logo, icon: art.icon ?? null }
 }
 
 /** Only an exact title match is automatic; other results need the player's choice. */
