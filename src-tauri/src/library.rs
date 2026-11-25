@@ -2559,6 +2559,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A download a level down (Library\Celeste\Celeste, with its install
+    /// record and marker there): Rename and Move take Celeste, which holds the
+    /// game alone. Another release's record inside still refuses.
+    #[test]
+    fn rename_folder_takes_a_wrapper_with_the_games_own_record_a_level_down() {
+        use kryoto_repair::community::Stamp;
+        let root = std::env::temp_dir().join(format!("kryoto-rename-wrapper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let lib = root.join("Library");
+        let (outer, inner) = (lib.join("Celeste"), lib.join("Celeste").join("Celeste"));
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("Celeste.exe"), b"x").unwrap();
+        let record = |at: &std::path::Path, file: &str| {
+            let r = crate::community_offer::ReleaseRecord { at: 1, files: [(file.to_string(), Stamp { size: 1, modified_ms: 0 })].into(), ..Default::default() };
+            std::fs::write(at.join(crate::community_offer::RELEASE_RECORD), serde_json::to_vec(&r).unwrap()).unwrap();
+        };
+        let game = LibraryGame { id: "celeste".into(), title: "Celeste".into(), install_dir: inner.to_string_lossy().into_owned(), ..Default::default() };
+        std::fs::write(inner.join(MARKER), serde_json::to_vec(&game).unwrap()).unwrap();
+        record(&inner, "Celeste.exe");
+        let (games, folders) = (vec![game.clone()], vec![lib.to_string_lossy().into_owned()]);
+        let plain = |p: &std::path::Path| dunce::canonicalize(p).unwrap();
+        assert_eq!(rename_target(&games, &folders, &game), Ok((plain(&inner), plain(&outer))));
+        let mods = inner.join("Mods").join("Other");
+        std::fs::create_dir_all(&mods).unwrap();
+        record(&mods, "Other.exe");
+        assert!(rename_target(&games, &folders, &game).unwrap_err().contains("another release"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_scan_finds_only_lost_kryoto_installs() {
         use super::marked_games;

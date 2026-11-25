@@ -385,6 +385,12 @@ fn entry_inside<'a>(known: &'a Known, game: &LibraryGame, leaving: &[&str], fold
 fn walk(folder: &Path, game: &LibraryGame, games: &[LibraryGame], leaving: &[&str]) -> Result<Vec<(PathBuf, u64)>, String> {
     let shown = show(folder);
     let mut out = Vec::new();
+    // Where the game's own install record is: a level down or more when the
+    // folder wraps the game's root (Library\Celeste\Celeste), which is still
+    // the game's alone. Another game's record refuses, even one leaving with
+    // it: that game may keep its saves and mods there, which a delete of the
+    // whole folder would take.
+    let own_record = dunce::canonicalize(&game.install_dir).ok();
     for e in walkdir::WalkDir::new(folder).follow_links(false) {
         let e = e.map_err(|e| format!("Kryoto could not read everything in {shown} ({e}), so it deletes nothing in it."))?;
         if e.depth() == 0 {
@@ -422,7 +428,7 @@ fn walk(folder: &Path, game: &LibraryGame, games: &[LibraryGame], leaving: &[&st
                 return Err(format!("{shown} also holds {title}, so Kryoto deletes nothing in it."));
             }
         }
-        if e.depth() > 1 && name == RELEASE_RECORD {
+        if e.depth() > 1 && name == RELEASE_RECORD && !path.parent().zip(own_record.as_deref()).is_some_and(|(p, d)| same_dir(p, d)) {
             return Err(format!("{shown} also holds another release ({}), so Kryoto deletes nothing in it.", show(path.parent().unwrap_or(&path))));
         }
         let size = e.metadata().map(|m| m.len()).unwrap_or(0);
@@ -1099,6 +1105,32 @@ mod tests {
         let k = known(&games, &folders);
         assert!(refused(&plan(&k, &ga, &["doom"])).contains("gzdoom"));
         assert!(matches!(plan(&k, &ga, &["doom", "gzdoom"]), Verdict::Delete(_)));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Another game's install record inside refuses, even one picked with it:
+    /// that game keeps its saves and mods there, which a delete of the whole
+    /// folder would take.
+    #[test]
+    fn another_games_record_inside_refuses_even_leaving_together() {
+        let base = scratch("together-record");
+        let pack = base.join("Pack");
+        put(&pack.join("Pack.exe"), b"pack");
+        let extra = pack.join("Extra");
+        put(&extra.join("Extra.exe"), b"extra");
+        let mut ga = game("pack", &pack);
+        ga.title = "Pack".into();
+        let gb = game("extra", &extra);
+        mark(&ga);
+        mark(&gb);
+        record(&extra);
+        put(&extra.join("www").join("save").join("file1.rpgsave"), b"save");
+        let folders = vec![text(&base)];
+        let games = vec![ga.clone(), gb.clone()];
+        let k = known(&games, &folders);
+        assert!(matches!(plan(&k, &gb, &["pack", "extra"]), Verdict::Delete(p) if p.kept_files == 1));
+        assert!(refused(&plan(&k, &ga, &["pack", "extra"])).contains("another release"));
+        assert!(extra.join("www").join("save").join("file1.rpgsave").exists());
         let _ = std::fs::remove_dir_all(base);
     }
 
