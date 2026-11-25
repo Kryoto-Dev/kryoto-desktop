@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { call, isTauri, on } from '@/lib/bridge'
-import { fetchCatalogGame, type LibraryGame } from '@/lib/library'
+import { fetchCatalogGame, saysGone, type LibraryGame } from '@/lib/library'
 
 /**
  * The signed-in account's kryo.to library - the games marked Playing, Plan to
@@ -128,32 +128,70 @@ export function setSavedStatusMany(slugs: string[], status: SavedStatus | null) 
 }
 
 /* Saved entries carry a cover but not whether the game is adult, so their
-   art stays blurred until the catalog has said. One lookup per game, kept
+   art stays blurred until the catalog has said. One answer per game, kept
    for the session. */
 const nsfwBySlug = new Map<string, boolean>()
 const pending = new Set<string>()
-/** Asked once and not answered (a game taken off kryo.to, a failed call): not asked again this session, and stays blurred. */
-const unanswered = new Set<string>()
+/** Taken off kryo.to: not asked again this session, and stays blurred. */
+const gone = new Set<string>()
+/**
+ * Failed for now (offline, kryo.to busy): asked again after a wait that
+ * doubles each time, so one blip does not blur a game for the session and a
+ * kryo.to that stays down is not asked over and over.
+ */
+const failed = new Map<string, { tries: number; at: number }>()
+const RETRY_MS = 10_000
+const RETRY_MAX_MS = 10 * 60_000
+const dueAt = (slug: string) => {
+  const f = failed.get(slug)
+  return f ? f.at + Math.min(RETRY_MS * 2 ** (f.tries - 1), RETRY_MAX_MS) : 0
+}
+
+/**
+ * Every mounted hook, woken when a batch of lookups settles. The hook that
+ * asked may have moved on (its list changed while the lookups were out), so
+ * whichever hooks are still showing those games look again and set the retry.
+ */
+const settled = new Set<() => void>()
 
 export function useAdultFlags(slugs: string[]) {
-  const [, bump] = useState(0)
+  const [tick, setTick] = useState(0)
   useEffect(() => {
-    const todo = slugs.filter((s) => !nsfwBySlug.has(s) && !pending.has(s) && !unanswered.has(s)).slice(0, 40)
-    if (!todo.length) return
-    let cancelled = false
-    todo.forEach((s) => pending.add(s))
-    void Promise.all(
-      todo.map((s) =>
-        fetchCatalogGame(s)
-          .then((g) => nsfwBySlug.set(s, !!g.nsfw))
-          .catch(() => unanswered.add(s))
-          .finally(() => pending.delete(s)),
-      ),
-    ).then(() => !cancelled && bump((n) => n + 1))
+    const wake = () => setTick((n) => n + 1)
+    settled.add(wake)
     return () => {
-      cancelled = true
+      settled.delete(wake)
     }
-  }, [slugs])
+  }, [])
+  useEffect(() => {
+    const now = Date.now()
+    const todo = slugs.filter((s) => !nsfwBySlug.has(s) && !pending.has(s) && !gone.has(s) && dueAt(s) <= now).slice(0, 40)
+    if (todo.length) {
+      todo.forEach((s) => pending.add(s))
+      void Promise.all(
+        todo.map((s) =>
+          fetchCatalogGame(s)
+            .then((g) => {
+              nsfwBySlug.set(s, !!g.nsfw)
+              failed.delete(s)
+            })
+            .catch((e: unknown) => {
+              if (saysGone(e, s)) {
+                gone.add(s)
+                failed.delete(s)
+              } else failed.set(s, { tries: (failed.get(s)?.tries ?? 0) + 1, at: Date.now() })
+            })
+            .finally(() => pending.delete(s)),
+        ),
+      ).then(() => settled.forEach((wake) => wake()))
+      return
+    }
+    // Nothing to ask now: wake when the first failed one is due again.
+    const next = Math.min(...slugs.filter((s) => failed.has(s) && !pending.has(s) && !gone.has(s)).map(dueAt))
+    if (!Number.isFinite(next)) return
+    const timer = setTimeout(() => setTick((n) => n + 1), Math.max(0, next - now))
+    return () => clearTimeout(timer)
+  }, [slugs, tick])
   /** Unknown counts as adult: blurred until proven otherwise. */
   return (slug: string) => nsfwBySlug.get(slug) ?? true
 }

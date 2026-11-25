@@ -772,6 +772,92 @@ try {
       } finally { await page.close() }
     }
   })
+  await check('a saved game whose adult lookup failed once is asked again, and its cover clears', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    page.on('pageerror', e => failures.push(e.message))
+    await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+    let asked = 0
+    await page.route('**/api/games/hades-ii', route => {
+      asked += 1
+      return asked === 1
+        ? route.fulfill({ status: 503, body: 'busy' })
+        : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ game: { title: 'Hades II', nsfw: false } }) })
+    })
+    const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
+    await page.route('**/api/steam/image.jpg?**', route => route.fulfill({ status: 200, contentType: 'image/png', body: pixel }))
+    try {
+      await page.goto(base)
+      await page.getByRole('checkbox', { name: /Show games not on this PC/ }).click()
+      const cover = page.getByRole('button', { name: 'Open Hades II', exact: true }).locator('img')
+      await cover.waitFor()
+      // Unknown counts as adult; the second answer, not a restart, says otherwise.
+      await page.waitForFunction(() => {
+        const img = document.querySelector('button[aria-label="Open Hades II"] img')
+        return !!img && !img.className.includes('blur-2xl')
+      }, null, { timeout: 30_000 })
+      assert.ok(asked >= 2)
+    } finally { await page.close() }
+  })
+  await check('a saved game that failed once and then turns out gone is not asked about over and over', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    page.on('pageerror', e => failures.push(e.message))
+    await page.addInitScript(() => {
+      localStorage.setItem('kryo:runtimes-ask', 'never')
+      // A hook that keeps waking itself shows up as timers set back to back.
+      const set = window.setTimeout
+      window.timersSet = 0
+      window.setTimeout = (...a) => { window.timersSet += 1; return set(...a) }
+    })
+    let asked = 0
+    await page.route('**/api/games/hades-ii', route => {
+      asked += 1
+      return route.fulfill({ status: asked === 1 ? 503 : 404, body: '' })
+    })
+    try {
+      await page.goto(base)
+      await page.getByRole('checkbox', { name: /Show games not on this PC/ }).click()
+      for (const end = Date.now() + 30_000; asked < 2 && Date.now() < end;) await page.waitForTimeout(250)
+      assert.ok(asked >= 2)
+      await page.waitForTimeout(500)
+      const before = await page.evaluate(() => window.timersSet)
+      await page.waitForTimeout(1_000)
+      assert.ok(await page.evaluate(n => window.timersSet - n, before) < 50)
+    } finally { await page.close() }
+  })
+  await check('a saved game lookup that fails while the list changes is still asked again', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    page.on('pageerror', e => failures.push(e.message))
+    await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+    let asked = 0
+    let answer = () => {}
+    const held = new Promise(resolve => { answer = resolve })
+    await page.route('**/api/games/hades-ii', async route => {
+      asked += 1
+      if (asked === 1) {
+        await held
+        return route.fulfill({ status: 503, body: 'busy' })
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ game: { title: 'Hades II', nsfw: false } }) })
+    })
+    const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
+    await page.route('**/api/steam/image.jpg?**', route => route.fulfill({ status: 200, contentType: 'image/png', body: pixel }))
+    try {
+      await page.goto(base)
+      const notHere = page.getByRole('checkbox', { name: /Show games not on this PC/ })
+      await notHere.click()
+      for (const end = Date.now() + 10_000; asked < 1 && Date.now() < end;) await page.waitForTimeout(100)
+      // The list changes while the lookup is out, so the run that asked is gone when it fails.
+      await notHere.click()
+      await notHere.click()
+      await page.getByRole('button', { name: 'Open Hades II', exact: true }).locator('img').waitFor()
+      answer()
+      await page.waitForFunction(() => {
+        const img = document.querySelector('button[aria-label="Open Hades II"] img')
+        return !!img && !img.className.includes('blur-2xl')
+      }, null, { timeout: 30_000 })
+      assert.ok(asked >= 2)
+    } finally { await page.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }
