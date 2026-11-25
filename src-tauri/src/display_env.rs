@@ -183,9 +183,34 @@ pub fn read_markers(never_drew: bool, renderer_crashed: bool, dmabuf_failed: boo
 }
 
 /// Set in the environment of a copy that the app started to replace itself
-/// (`watch_crashes`): its instance check waits for the old copy's port
-/// (system.rs), and it never restarts itself a second time.
+/// (`watch_crashes`, `restart_compatible`): its instance check waits for the
+/// old copy's port (system.rs), and it never restarts itself a second time.
 pub const RELAUNCHED: &str = "KRYOTO_RELAUNCHED";
+/// What `RELAUNCHED` is set to for a restart the player asked for (the tray's
+/// "Start in compatible graphics"): the new copy shows its window.
+pub const ASKED: &str = "asked";
+
+/// What `RELAUNCHED` said when this copy started. Read once and taken out of
+/// the environment, so what this copy starts does not pass it on: a
+/// `kryoto://` link from a browser it opened started a copy that waited five
+/// seconds for a port that never freed.
+pub fn relaunched() -> Option<&'static str> {
+    static AT_START: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    AT_START.get_or_init(|| take_var(RELAUNCHED)).as_deref()
+}
+
+fn take_var(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok();
+    std::env::remove_var(name);
+    value
+}
+
+/// Whether this start stays in the tray. A copy the player asked for is one
+/// they want to see, even when the copy before it started to the tray at
+/// sign-in and passed `--tray` on.
+pub fn to_tray(args: &[String], relaunched: Option<&str>) -> bool {
+    args.iter().any(|a| a == "--tray") && relaunched != Some(ASKED)
+}
 
 /// Whether this start should leave the "did it draw?" marker. Only a start
 /// that shows its window can remove it: a copy that hands over to the one
@@ -745,7 +770,7 @@ pub fn watch_crashes(view: &tauri::Webview) {
                 *v
             });
             let on_cpu = std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some_and(|v| !v.is_empty() && v != "0");
-            let relaunched = std::env::var_os(RELAUNCHED).is_some();
+            let relaunched = relaunched().is_some();
             let step = crash_step(in_a_row, now.saturating_sub(last_reload), on_cpu, relaunched);
             crate::logging::error(
                 "display",
@@ -874,6 +899,9 @@ pub fn restart_compatible<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         return;
     }
     crate::logging::info("display", "Start in compatible graphics, from the tray: restarting with hardware rendering off");
+    // The new copy waits for this one's port instead of handing over to it
+    // as it quits, which left no Kryoto running at all.
+    std::env::set_var(RELAUNCHED, ASKED);
     app.restart();
 }
 
@@ -900,6 +928,27 @@ mod tests {
         let p = plan(Mode::Auto, env_mode(&args(&["x", SAFE_FLAG]), None, None).as_deref(), none, Facts { nvidia: true, render_node: true, ..Facts::default() });
         assert_eq!(p.mode, Mode::Compatible);
         assert_eq!(vars(&p), ["WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE"]);
+    }
+
+    /// A copy started to the tray at sign-in passes `--tray` on when the
+    /// tray restarts it in Compatible: that one is asked for, so it shows.
+    #[test]
+    fn starting_compatible_from_the_tray_shows_the_window() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(to_tray(&args(&["kryoto-desktop", "--tray"]), None));
+        assert!(to_tray(&args(&["kryoto-desktop", "--tray"]), Some("display")));
+        assert!(!to_tray(&args(&["kryoto-desktop", "--tray"]), Some(ASKED)));
+        assert!(!to_tray(&args(&["kryoto-desktop"]), None));
+    }
+
+    /// The mark a restarted copy reads is taken out of its environment, so a
+    /// browser or game it opens does not pass it on to a later start.
+    #[test]
+    fn the_restart_mark_is_not_passed_on() {
+        std::env::set_var("KRYOTO_TEST_TAKE_VAR", ASKED);
+        assert_eq!(take_var("KRYOTO_TEST_TAKE_VAR").as_deref(), Some(ASKED));
+        assert!(std::env::var_os("KRYOTO_TEST_TAKE_VAR").is_none());
+        assert_eq!(take_var("KRYOTO_TEST_TAKE_VAR"), None);
     }
 
     #[test]

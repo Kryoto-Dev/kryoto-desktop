@@ -2073,7 +2073,8 @@ pub fn run() {
         // not leave the "did it draw?" marker behind (KB-0311).
         return;
     }
-    let to_tray = std::env::args().any(|a| a == "--tray");
+    let args: Vec<String> = std::env::args().collect();
+    let to_tray = display_env::to_tray(&args, display_env::relaunched());
     // Still before GTK starts (the Builder below), which reads these variables.
     display_env::apply(display_env::arms_probe(true, to_tray));
     appimage_tls::apply();
