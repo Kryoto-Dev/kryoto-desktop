@@ -60,6 +60,14 @@ fn is_sign_in_page(url: &Url) -> bool {
 /// (or the catalog address set in Settings); `from` is the page it leaves.
 pub fn route(url: &Url, ours: bool, from: Option<&Url>) -> Outside {
     if ours && is_kryoto_discord_start(url) {
+        // The sign-in box's own code (`?desktop=`): this is a sign-in whatever
+        // page it seems to leave. kryo.to changes page without a load, so the
+        // address the webview reports can still be the one before /login, and
+        // the player was sent to that page in the browser, signed in nowhere
+        // (KB-0348, seen on Ubuntu on 24 November).
+        if crate::signin_handoff::code_in(url).is_some() {
+            return Outside::Browser(url.clone());
+        }
         // Linking from a signed-in page: the browser may be signed out, or
         // someone else, and Discord on its own there signs in (or makes an
         // account) rather than links. The page the button is on opens
@@ -120,6 +128,13 @@ mod tests {
         // The sign-in box's code goes along whole: the browser brings it back.
         let boxed = u("https://kryo.to/api/auth/discord?next=%2F&desktop=ABCDEFGH");
         assert_eq!(route(&boxed, true, Some(&u("https://kryo.to/login?next=/"))), Outside::Browser(boxed.clone()));
+        // Also when the webview still reports the page before /login (KB-0348).
+        for stale in ["https://kryo.to/", "https://kryo.to/library", "https://kryo.to/settings#connections"] {
+            assert_eq!(route(&boxed, true, Some(&u(stale))), Outside::Browser(boxed.clone()), "{stale}");
+        }
+        // A code that is none is no sign-in: linking keeps its rule.
+        let odd = u("https://kryo.to/api/auth/discord?desktop=1");
+        assert_eq!(route(&odd, true, Some(&u("https://kryo.to/settings"))), Outside::Browser(u("https://kryo.to/settings")));
         let invite = u("https://kryo.to/api/auth/discord?invite=abc");
         assert_eq!(route(&invite, true, Some(&u("https://kryo.to/invite/abc"))), Outside::Browser(invite.clone()));
         // Its callback is kryo.to's own page and stays.

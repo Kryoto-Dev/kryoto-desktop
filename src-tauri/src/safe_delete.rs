@@ -465,10 +465,58 @@ fn bin_on(folder: &Path, bytes: u64) -> Bin {
 }
 
 #[cfg(target_os = "linux")]
-fn bin_on(_folder: &Path, _bytes: u64) -> Bin {
-    match gio_runs() {
+fn bin_on(folder: &Path, _bytes: u64) -> Bin {
+    match gio_runs().and_then(|()| drive_trash(folder)) {
         Ok(()) => Bin::Yes,
         Err(why) => Bin::No(why),
+    }
+}
+
+#[cfg(target_os = "linux")]
+const NO_DRIVE_TRASH: &str = "This drive has no Trash Kryoto can use.";
+
+/// Whether the drive `folder` is on has a Trash, so the player is told before
+/// the first press. Files on the home's own drive go to the home Trash. Any
+/// other drive needs `.Trash/<uid>` or `.Trash-<uid>` in its top folder, or a
+/// top folder one can be made in (the freedesktop Trash rules). Only a clear
+/// no is a no: what cannot be told here is left to gio, which answers itself.
+#[cfg(target_os = "linux")]
+fn drive_trash(folder: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Ok(()) };
+    let (Ok(there), Ok(here)) = (std::fs::metadata(folder), std::fs::metadata(&home)) else { return Ok(()) };
+    if there.dev() == here.dev() {
+        return Ok(());
+    }
+    let Ok(folder) = folder.canonicalize() else { return Ok(()) };
+    let top = folder
+        .ancestors()
+        .take_while(|a| std::fs::metadata(a).is_ok_and(|m| m.dev() == there.dev()))
+        .last()
+        .map(Path::to_path_buf);
+    let Some(top) = top else { return Ok(()) };
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    if trash_fits(&top, uid) { Ok(()) } else { Err(NO_DRIVE_TRASH.to_string()) }
+}
+
+#[cfg(target_os = "linux")]
+fn trash_fits(top: &Path, uid: u32) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let writable = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes()).is_ok_and(|c| {
+            // SAFETY: `c` is a valid NUL-terminated string for the whole call.
+            unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+        })
+    };
+    let shared = top.join(".Trash");
+    if std::fs::symlink_metadata(&shared).is_ok_and(|m| m.is_dir()) && (writable(&shared) || writable(&shared.join(uid.to_string()))) {
+        return true;
+    }
+    let own = top.join(format!(".Trash-{uid}"));
+    match std::fs::symlink_metadata(&own) {
+        Ok(m) => m.is_dir() && writable(&own),
+        Err(_) => writable(top),
     }
 }
 
@@ -617,7 +665,9 @@ fn trash(paths: &[PathBuf]) -> Result<(), String> {
         let mut cmd = gio_command().ok_or("no gio")?;
         let out = cmd.arg("trash").arg("--").args(chunk).output().map_err(|e| e.to_string())?;
         if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            // gio's own words hold whole paths: they go to the log, not the dialog.
+            crate::logging::warn("uninstall", &format!("gio trash: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            return Err("this drive's Trash refused it".to_string());
         }
     }
     Ok(())
@@ -1118,6 +1168,21 @@ mod tests {
         assert_eq!(p.files.len(), 3, "{p:?}");
         assert!(!dir.join("game.exe").exists() && !dir.join("data.pak").exists() && dir.join("notes.txt").exists());
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A drive without a usable Trash is told before the player confirms.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_drive_without_a_trash_is_known_beforehand() {
+        let top = scratch("drivetrash");
+        std::fs::create_dir_all(&top).unwrap();
+        assert!(trash_fits(&top, 4242), "a top folder a Trash can be made in");
+        put(&top.join(".Trash-4242"), b"not a folder");
+        assert!(!trash_fits(&top, 4242), "something else has the Trash's name");
+        std::fs::remove_file(top.join(".Trash-4242")).unwrap();
+        std::fs::create_dir(top.join(".Trash-4242")).unwrap();
+        assert!(trash_fits(&top, 4242), "its own Trash");
+        let _ = std::fs::remove_dir_all(top);
     }
 
     /// Too many separate files, or too many bytes, are deleted for good only
