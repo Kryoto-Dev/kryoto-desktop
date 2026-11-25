@@ -18,7 +18,9 @@
 //! - With that install record (`.kryoto-release.json`: every file the
 //!   installer unpacked, written since 0.3.0) or kryo.to's list of the
 //!   release's files: those files and Kryoto's own, then folders left empty.
-//!   Anything else stays.
+//!   Anything else stays. A record from before it noted only what it
+//!   unpacked lists the whole folder, saves too: only the files kryo.to's
+//!   list also has, and without that list, refused when it lists a save.
 //! - Without either (installs before 0.3.0): the folder that holds this game's
 //!   own `.kryoto-game.json`, inside a library folder and named for the game,
 //!   and only when something says Kryoto installed it (the archive's hash, a
@@ -136,7 +138,11 @@ fn settle(known: &Known, game: &LibraryGame, leaving: &[&str], narrow: bool) -> 
     }
     let own_marker = read_marker(&folder).is_some_and(|m| same_game(&m, game));
     let list: Option<Vec<(String, u64)>> = match &record {
-        Some(r) => Some(r.files.iter().map(|(p, s)| (p.clone(), s.size)).collect()),
+        Some(r) if r.unpacked => Some(r.files.iter().map(|(p, s)| (p.clone(), s.size)).collect()),
+        Some(r) => match older_record(r, known.release_list.as_deref(), &folder) {
+            Ok(list) => Some(list),
+            Err(why) => return Verdict::Refused(why),
+        },
         // kryo.to's list says what the release is, not where: only for the
         // folder carrying this game's marker, and only when that folder
         // really holds the release (Properties > Browse can point anywhere).
@@ -252,6 +258,44 @@ fn inside(g: &LibraryGame, game: &LibraryGame, folder: &Path) -> bool {
 /// only ever set by an install, or a row in Downloads for it.
 fn installed_by_kryoto(known: &Known, game: &LibraryGame) -> bool {
     game.build_sha.is_some() || game.unverified || known.downloaded.iter().any(|(id, _)| *id == game.id)
+}
+
+/// The files of a record written before Kryoto noted only what it unpacked.
+/// That one listed the whole folder after the install, so after an update, or
+/// an install into a folder of the player's, it lists their saves, mods and
+/// own files too. Only those kryo.to's list of the release also has go, when
+/// one is kept and the folder holds it. Without it, a record listing a save
+/// the game keeps in its folder is refused: it was made after the game saved
+/// there, and anything else the player put there may be in it as well.
+fn older_record(record: &ReleaseRecord, release: Option<&[(String, u64)]>, folder: &Path) -> Result<Vec<(String, u64)>, String> {
+    let files = record.files.iter().map(|(p, s)| (p.clone(), s.size));
+    if let Some(release) = release.filter(|l| holds_release(folder, l)) {
+        let theirs: HashSet<String> = release.iter().map(|(p, _)| key(p)).collect();
+        return Ok(files.filter(|(p, _)| theirs.contains(&key(p))).collect());
+    }
+    let saves = save_places(folder);
+    if record.files.keys().any(|rel| saves.iter().any(|s| path_is_in(rel, s))) {
+        return Err(format!(
+            "Kryoto noted the files in {} after the game had saved there, so its record may count your saves and mods as the game's, and it deletes nothing. Remove it from the Library only, then delete the folder yourself if it holds only this game.",
+            show(folder)
+        ));
+    }
+    Ok(files.collect())
+}
+
+/// Where the game keeps saves in its own folder, as they are on the disk and
+/// relative to it: the Steam emulator's, and its engine's (RPG Maker's
+/// `www/save`, Ren'Py's `game/saves`, Unreal's `Saved/SaveGames`).
+fn save_places(folder: &Path) -> Vec<String> {
+    let roots = kryoto_saves::SaveRoots { game_dir: Some(folder.to_path_buf()), ..Default::default() };
+    kryoto_saves::emulator::rules(folder, None)
+        .into_iter()
+        .chain(kryoto_saves::engine::rules(folder, &roots, &Default::default()))
+        .filter(|r| r.root == kryoto_saves::Root::GameDir && !r.path.is_empty())
+        .flat_map(|r| kryoto_saves::rules::expand(&r, &roots))
+        .filter_map(|p| p.strip_prefix(folder).ok().map(|r| r.to_string_lossy().into_owned()))
+        .filter(|r| !r.is_empty())
+        .collect()
 }
 
 /// A folder of `total` bytes is far bigger than the `listed` installed in it.
@@ -794,7 +838,7 @@ mod tests {
             .filter(|e| e.file_type().is_file())
             .map(|e| (e.path().strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/"), Stamp { size: e.metadata().unwrap().len(), modified_ms: 0 }))
             .collect();
-        let r = ReleaseRecord { version: Some("1".into()), source: None, at: 1, files };
+        let r = ReleaseRecord { version: Some("1".into()), source: None, at: 1, files, unpacked: true };
         put(&dir.join(RELEASE_RECORD), &serde_json::to_vec(&r).unwrap());
     }
 
@@ -1038,6 +1082,38 @@ mod tests {
         assert!(!p.whole && p.kept_files == 2, "{p:?}");
         assert!(!dir.join("Hades.exe").exists() && !dir.join("bin").exists() && !dir.join(MARKER).exists());
         assert!(dir.join("mods").join("mine.pak").exists() && dir.join("saves").join("slot1.sav").exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A record from before Kryoto noted only what it unpacked lists the whole
+    /// folder, saves and mods too once an update went in over them. With
+    /// kryo.to's list of the release only its files go; without it, a record
+    /// listing a save is refused.
+    #[test]
+    fn an_older_record_of_the_whole_folder_keeps_saves_and_mods() {
+        let base = scratch("older-record");
+        let dir = base.join("Hades");
+        put(&dir.join("Game.exe"), b"game");
+        put(&dir.join("www").join("data").join("System.json"), b"{}");
+        put(&dir.join("www").join("save").join("file1.rpgsave"), b"save");
+        put(&dir.join("mods").join("mine.pak"), b"a mod");
+        let g = game("hades", &dir);
+        mark(&g);
+        record(&dir);
+        // As it was written then.
+        let mut r: ReleaseRecord = read_json(&dir.join(RELEASE_RECORD)).unwrap();
+        r.unpacked = false;
+        put(&dir.join(RELEASE_RECORD), &serde_json::to_vec(&r).unwrap());
+        let folders = vec![text(&base)];
+        let games = vec![g.clone()];
+        assert!(refused(&plan(&known(&games, &folders), &g, &[])).contains("after the game had saved"));
+        assert!(dir.join("www").join("save").join("file1.rpgsave").exists());
+        let listed = vec![("Game.exe".into(), 4), ("www/data/System.json".into(), 2)];
+        let k = Known { release_list: Some(listed), ..known(&games, &folders) };
+        let p = uninstall(plan(&k, &g, &[]));
+        assert!(!p.whole && p.kept_files == 2, "{p:?}");
+        assert!(!dir.join("Game.exe").exists() && !dir.join("www").join("data").exists());
+        assert!(dir.join("www").join("save").join("file1.rpgsave").exists() && dir.join("mods").join("mine.pak").exists());
         let _ = std::fs::remove_dir_all(base);
     }
 

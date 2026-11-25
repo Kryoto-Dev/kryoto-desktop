@@ -1185,7 +1185,7 @@ mod tests {
     fn record_at(at: &Path, files: &[&str]) {
         let files: std::collections::BTreeMap<String, kryoto_repair::community::Stamp> =
             files.iter().map(|f| (f.to_string(), kryoto_repair::community::Stamp { size: 1, modified_ms: 0 })).collect();
-        let record = crate::community_offer::ReleaseRecord { version: Some("1.0".into()), source: None, at: 1, files };
+        let record = crate::community_offer::ReleaseRecord { version: Some("1.0".into()), source: None, at: 1, files, unpacked: true };
         std::fs::write(at.join(crate::community_offer::RELEASE_RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
     }
 

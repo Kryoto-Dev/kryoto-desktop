@@ -3,8 +3,8 @@
 //!
 //! Nothing here takes the player's word for a file. The steps, in order:
 //!
-//!   1. When Kryoto installs a release, [`record_release`] notes every file's
-//!      size and time in `.kryoto-release.json` beside the game.
+//!   1. When Kryoto installs a release, [`record_release`] notes the size and
+//!      time of every file it unpacked in `.kryoto-release.json` beside the game.
 //!   2. An updater that brings the game past Kryoto's release writes
 //!      `.kryoto-update.json` ([`UpdateRecord`]): the version it made and every
 //!      file it wrote, with what each is. That record is the only way a game
@@ -47,6 +47,10 @@ pub struct ReleaseRecord {
     pub source: Option<String>,
     pub at: u64,
     pub files: BTreeMap<String, Stamp>,
+    /// `files` are only what Kryoto's installs unpacked. A record without it
+    /// listed the whole folder after the install, the player's saves and mods
+    /// too, so none of its files carry over to the next one.
+    pub unpacked: bool,
 }
 
 /// What an updater did to a game folder. Written by the updater, read here.
@@ -113,22 +117,43 @@ fn edit_update(dir: &Path, f: impl FnOnce(&mut UpdateRecord)) {
 /// 1. A Kryoto release was installed here: note its files, off the UI thread
 ///    (a big game on a hard disk takes a while to walk). An earlier update record
 ///    belongs to the build this one replaced, so it goes.
+///    `unpacked` are the files the install wrote, relative to the game's folder.
 ///    `lost` are files the release has that never arrived (antivirus.rs
 ///    `unpack_losses`): kept in the record, so they read as missing.
-pub fn record_release(game: &LibraryGame, lost: &[(String, u64)]) {
+pub fn record_release(game: &LibraryGame, unpacked: &[String], lost: &[(String, u64)]) {
     let dir = PathBuf::from(&game.install_dir);
-    let record = ReleaseRecord { version: game.version.clone(), source: game.source.clone(), at: now(), files: BTreeMap::new() };
-    let lost = lost.to_vec();
+    let record = ReleaseRecord { version: game.version.clone(), source: game.source.clone(), at: now(), files: BTreeMap::new(), unpacked: true };
+    let (unpacked, lost) = (unpacked.to_vec(), lost.to_vec());
     std::thread::spawn(move || {
         let _ = std::fs::remove_file(dir.join(UPDATE_RECORD));
-        let mut files = cu::stamp_tree(&dir);
-        for (rel, size) in lost {
-            files.entry(rel).or_insert(Stamp { size, modified_ms: 0 });
-        }
+        let files = release_files(&dir, &unpacked, &lost);
         if let Err(e) = write_json(&dir.join(RELEASE_RECORD), &ReleaseRecord { files, ..record }) {
             crate::logging::warn("community", &format!("{}: could not note the release's files: {e}", dir.display()));
         }
     });
+}
+
+/// The files the record lists: what this install unpacked, as they are now;
+/// those the release before it unpacked that are still there (an update
+/// leaves the ones it no longer ships); and `lost`. Never anything else in
+/// the folder: an update or a reinstall merges into one that holds the
+/// player's saves, mods and own files, and an uninstall deletes what the
+/// record lists.
+fn release_files(dir: &Path, unpacked: &[String], lost: &[(String, u64)]) -> BTreeMap<String, Stamp> {
+    let mut files: BTreeMap<String, Stamp> = read_json::<ReleaseRecord>(&dir.join(RELEASE_RECORD))
+        .filter(|r| r.unpacked)
+        .map(|r| r.files.into_iter().filter(|(rel, _)| cu::safe_path(rel) && dir.join(rel).is_file()).collect())
+        .unwrap_or_default();
+    // Kryoto's own bookkeeping at the top is never the release's (stamp_tree).
+    for rel in unpacked.iter().filter(|rel| !rel.split('/').next().unwrap_or_default().starts_with(".kryoto")) {
+        if let Some(stamp) = cu::stamp(&dir.join(rel)) {
+            files.insert(rel.clone(), stamp);
+        }
+    }
+    for (rel, size) in lost {
+        files.entry(rel.clone()).or_insert(Stamp { size: *size, modified_ms: 0 });
+    }
+    files
 }
 
 fn shots_dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
@@ -681,6 +706,31 @@ mod tests {
         assert_eq!(r.playtest.as_ref().map(|p| (p.seconds, p.exit_code)), Some((700, Some(0))));
         game.source = Some("Steam + RUNE".into());
         assert!(pending(&game).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An update merges into a folder the game has saved in: the record lists
+    /// what the install unpacked and the earlier release's files still there,
+    /// never the saves, mods or the player's own files, which an uninstall
+    /// would then delete as the game's.
+    #[test]
+    fn the_release_record_lists_only_what_installs_unpacked() {
+        let dir = std::env::temp_dir().join(format!("kry-release-record-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for rel in ["Game.exe", "data/old.pak", "data/new.pak", "www/save/file1.rpgsave", "mods/mine.pak"] {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        let keys = |files: BTreeMap<String, Stamp>| files.into_keys().collect::<Vec<_>>();
+        // A record from before, of the whole folder: none of it carries over.
+        write_json(&dir.join(RELEASE_RECORD), &ReleaseRecord { at: 1, files: cu::stamp_tree(&dir), ..Default::default() }).unwrap();
+        assert_eq!(keys(release_files(&dir, &["Game.exe".into()], &[])), ["Game.exe"]);
+        // The release before this one: its files still there stay, one gone does not.
+        let files = [("Game.exe", 1), ("data/old.pak", 1), ("gone.dll", 9)].map(|(p, size)| (p.to_string(), Stamp { size, modified_ms: 0 })).into();
+        write_json(&dir.join(RELEASE_RECORD), &ReleaseRecord { at: 1, files, unpacked: true, ..Default::default() }).unwrap();
+        let unpacked = ["Game.exe".to_string(), "data/new.pak".to_string()];
+        assert_eq!(keys(release_files(&dir, &unpacked, &[("bin/lost.dll".into(), 5)])), ["Game.exe", "bin/lost.dll", "data/new.pak", "data/old.pak"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
