@@ -1003,13 +1003,16 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
       )
       .catch((e) => lib.setError(errorText(e)))
   }
+  // A collection's games come back in lowercase (collections.rs `clean`); a
+  // Library game's slug is as its release file wrote it.
+  const inList = (c: (typeof ownLists)[number], slug: string) => c.games.some((x) => x.slug === slug.toLowerCase())
   // One Track row in the right-click menu; it opens the statuses in its place.
   const shelfMenu = (slug: string): MenuEntry[] => {
     const now = saved.find(e => e.slug === slug)?.status
     return [
       { label: 'Track', icon: <Bookmark />, hint: now ? STATUS_LABEL[now] : undefined, onSelect: () => setCtx(ctx && { ...ctx, track: true }) },
       // Steam-style categories are kryo.to collections; they show as groups in the Library (suggestion #71).
-      { label: 'Add to collection', icon: <FolderPlus />, hint: ownLists.filter((c) => c.games.some((x) => x.slug === slug)).length ? String(ownLists.filter((c) => c.games.some((x) => x.slug === slug)).length) : undefined, onSelect: () => setCtx(ctx && { ...ctx, collect: true }) },
+      { label: 'Add to collection', icon: <FolderPlus />, hint: ownLists.filter((c) => inList(c, slug)).length ? String(ownLists.filter((c) => inList(c, slug)).length) : undefined, onSelect: () => setCtx(ctx && { ...ctx, collect: true }) },
       { separator: true },
     ]
   }
@@ -1025,7 +1028,7 @@ export function Shell({ startPage, account, browser, inbox: inboxState }: { star
   const collectMenu = (slug: string): MenuEntry[] => [
     { heading: 'Your collections' },
     ...ownLists.map((c) => {
-      const has = c.games.some((x) => x.slug === slug)
+      const has = inList(c, slug)
       return { label: c.name, checked: has, onSelect: () => void collectionsApi.setItem(c.id, slug, !has).catch((e) => lib.setError(errorText(e))) }
     }),
     ...(ownLists.length ? [{ separator: true } as MenuEntry] : []),
