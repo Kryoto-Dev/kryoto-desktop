@@ -514,6 +514,9 @@ export function slugFrom(input: string): string | null {
 
 const goneText = (slug: string) => `kryo.to has no game at /game/${slug}.`
 
+/** `fetchCatalogGame` failed because kryo.to took the game off, not for now. */
+export const saysGone = (e: unknown, slug: string) => e instanceof Error && e.message === goneText(slug)
+
 /**
  * kryo.to's answer for a game was 404 or 410 less than a day ago (src-tauri
  * catalog_gone.rs); with `gone`, remember or forget that first. False where
