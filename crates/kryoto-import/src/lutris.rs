@@ -326,15 +326,23 @@ fn free_slug(conn: &Connection, key: &str, mine: &[String]) -> Result<String, St
     Ok(slug)
 }
 
+/// The `game` keys Kryoto writes: what Lutris starts, with what, and where.
+/// None for one it leaves out.
+fn own_keys(g: &NewGame) -> [(&'static str, Option<String>); 3] {
+    [
+        ("exe", Some(g.exe.clone())),
+        ("args", Some(g.args.clone()).filter(|a| !a.is_empty())),
+        ("working_dir", Path::new(&g.exe).parent().map(|d| d.to_string_lossy().into_owned())),
+    ]
+}
+
 /// A Lutris game's YAML for a program Lutris starts as it is.
 pub fn game_yaml(g: &NewGame) -> String {
     let mut game = Mapping::new();
-    game.insert("exe".into(), g.exe.clone().into());
-    if !g.args.is_empty() {
-        game.insert("args".into(), g.args.clone().into());
-    }
-    if let Some(dir) = Path::new(&g.exe).parent() {
-        game.insert("working_dir".into(), dir.to_string_lossy().into_owned().into());
+    for (k, v) in own_keys(g) {
+        if let Some(v) = v {
+            game.insert(k.into(), v.into());
+        }
     }
     let mut system = Mapping::new();
     // Lutris's own libraries are for games, not for a WebKit app.
@@ -344,6 +352,31 @@ pub fn game_yaml(g: &NewGame) -> String {
     doc.insert("linux".into(), Yaml::Mapping(Mapping::new()));
     doc.insert("system".into(), Yaml::Mapping(system));
     serde_yaml::to_string(&Yaml::Mapping(doc)).unwrap_or_default()
+}
+
+/// The YAML for a game sent before, from the file Lutris has: only Kryoto's
+/// own keys change, so what the player set in Lutris's Configure (Wine,
+/// environment, gamescope) stays. None when the file is right already. A file
+/// that is missing or does not parse gets the whole YAML: Lutris could not
+/// start the game from it either.
+fn updated_yaml(old: &str, g: &NewGame) -> Option<String> {
+    let Ok(Yaml::Mapping(mut doc)) = serde_yaml::from_str::<Yaml>(old) else { return Some(game_yaml(g)) };
+    let before = doc.clone();
+    if !doc.get("game").is_some_and(Yaml::is_mapping) {
+        doc.insert("game".into(), Yaml::Mapping(Mapping::new()));
+    }
+    let Some(Yaml::Mapping(game)) = doc.get_mut("game") else { return Some(game_yaml(g)) };
+    for (k, v) in own_keys(g) {
+        match v {
+            Some(v) => {
+                game.insert(k.into(), v.into());
+            }
+            None => {
+                game.remove(k);
+            }
+        }
+    }
+    (doc != before).then(|| serde_yaml::to_string(&Yaml::Mapping(doc)).unwrap_or_default())
 }
 
 /// What this run wrote, so a failure takes it all back.
@@ -432,7 +465,13 @@ fn write_all(conn: &mut Connection, cols: &[String], data: &Path, config: &Path,
         };
         slugs.push(slug.clone());
         let yml = config.join("games").join(format!("{configpath}.yml"));
-        undo.write(&yml, game_yaml(g).as_bytes())?;
+        let text = match before {
+            Some(_) => updated_yaml(&std::fs::read_to_string(&yml).unwrap_or_default(), g),
+            None => Some(game_yaml(g)),
+        };
+        if let Some(text) = text {
+            undo.write(&yml, text.as_bytes())?;
+        }
         let mut files = vec![yml.to_string_lossy().into_owned()];
         // Lutris reads `<slug>.jpg` whatever the picture's format.
         let cover = data.join("coverart").join(format!("{slug}.jpg"));
@@ -672,6 +711,29 @@ mod tests {
         assert_eq!(rows(&data), others);
         assert!(ledger.iter().flat_map(|a| &a.files).all(|f| !Path::new(f).exists()));
         assert!(data.join("coverart/the-witcher.jpg").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sending_again_keeps_what_the_player_set_in_lutris() {
+        let root = temp("keep-yaml");
+        let (data, config) = library(&root);
+        let backups = root.join("backups");
+        let w = send(&data, &config, &[outgoing("lantern", "Lantern Rite")], &[], &backups, 1_800_000_000).unwrap();
+        let yml = PathBuf::from(&w.games[0].files[0]);
+        // The player's Configure in Lutris: gamescope, an env var, the runtime back on.
+        let mine = "# mine\ngame:\n  exe: /usr/bin/kryoto-desktop\n  args: kryoto://library/lantern\n  working_dir: /usr/bin\n  prefix: /p\nlinux:\n  gamescope: true\nsystem:\n  env:\n    MANGOHUD: '1'\n";
+        std::fs::write(&yml, mine).unwrap();
+        // Nothing of Kryoto's changed: the file is left as it is.
+        send(&data, &config, &[outgoing("lantern", "Lantern Rite")], &w.games, &backups, 1_800_000_100).unwrap();
+        assert_eq!(std::fs::read_to_string(&yml).unwrap(), mine);
+        // Kryoto moved: only its own keys change.
+        let moved = NewGame { exe: "/opt/kryoto/kryoto-desktop".into(), args: String::new(), ..outgoing("lantern", "Lantern Rite") };
+        send(&data, &config, &[moved], &w.games, &backups, 1_800_000_200).unwrap();
+        let doc: Yaml = serde_yaml::from_str(&std::fs::read_to_string(&yml).unwrap()).unwrap();
+        assert_eq!((doc["game"]["exe"].as_str(), doc["game"]["working_dir"].as_str(), doc["game"].get("args")), (Some("/opt/kryoto/kryoto-desktop"), Some("/opt/kryoto"), None));
+        assert_eq!((doc["game"]["prefix"].as_str(), doc["linux"]["gamescope"].as_bool(), doc["system"]["env"]["MANGOHUD"].as_str()), (Some("/p"), Some(true), Some("1")));
+        assert_eq!(doc["system"].get("disable_runtime"), None);
         let _ = std::fs::remove_dir_all(root);
     }
 
