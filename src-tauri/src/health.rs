@@ -45,6 +45,10 @@ const FAILS: u32 = 3;
 const GRACE: Duration = Duration::from_secs(30);
 /// How long the feed gets to catch up before "it says the site is fine" is believed.
 const FEED_LAG: Duration = Duration::from_secs(120);
+/// How long a status page gone quiet after saying "down" still means that
+/// outage. It sits on its own server, so it rarely goes with the site; a
+/// network that cuts kryo.to takes it too, and there "down" stayed for good.
+const FEED_QUIET: Duration = Duration::from_secs(300);
 /// Good answers in a row before an outage is over.
 const OKS: u32 = 2;
 /// Reads in a row before a partial problem is shown, or taken away.
@@ -191,6 +195,8 @@ struct Watch {
     feed: Option<Feed>,
     /// Since when the status page has said the site is fine, while it does.
     feed_fine: Option<Instant>,
+    /// When the status page last said the site is down.
+    feed_bad: Option<Instant>,
     state: State,
     parts: Vec<String>,
     seen_parts: Vec<String>,
@@ -207,6 +213,10 @@ impl Watch {
             match &feed {
                 Some(Feed::Says { site_bad: false, .. }) => {
                     self.feed_fine.get_or_insert(now);
+                }
+                Some(Feed::Says { site_bad: true, .. }) => {
+                    self.feed_fine = None;
+                    self.feed_bad = Some(now);
                 }
                 _ => self.feed_fine = None,
             }
@@ -246,8 +256,11 @@ impl Watch {
                             self.parts.clear();
                         }
                     }
+                    // Gone quiet in an outage it had reported: still that
+                    // outage for `FEED_QUIET`, then only unreachable here.
                     _ => {
-                        if self.state != State::Down {
+                        let quiet = self.feed_bad.is_none_or(|bad| now.duration_since(bad) >= FEED_QUIET);
+                        if self.state != State::Down || quiet {
                             self.state = State::Unreachable;
                             self.parts.clear();
                         }
@@ -324,7 +337,8 @@ impl Watch {
         match &self.feed {
             Some(Feed::Says { site_bad: true, .. }) => false,
             Some(Feed::Says { site_bad: false, .. }) => self.said_fine(since, now) >= FEED_LAG,
-            // Gone quiet in an outage it had reported: still that outage.
+            // Gone quiet in an outage it had reported: still that outage,
+            // until `step` has given up on it (`FEED_QUIET`).
             Some(Feed::Dead) | None => self.state != State::Down,
         }
     }
@@ -767,16 +781,36 @@ mod tests {
     }
 
     /// The status page goes quiet in the middle of an outage it had reported:
-    /// still that outage, not a block.
+    /// still that outage, not a block, for a while.
     #[test]
     fn an_outage_that_takes_the_status_page_along_is_still_down() {
         let (mut w, t) = (Watch::default(), Instant::now());
         for at in (0..=60).step_by(10) {
             look(&mut w, t, at, SITE_DOWN, true);
         }
-        for at in (70..=400).step_by(10) {
+        for at in (70..=350).step_by(10) {
             assert_eq!(look(&mut w, t, at, "<html>", true), (State::Down, false), "at {at}");
         }
+    }
+
+    /// "Down" seen at home, then a network that cuts kryo.to and the status
+    /// page with it: nothing there ever answers, so "down" stayed for good and
+    /// the help for a blocked network never came.
+    #[test]
+    fn down_does_not_stick_once_the_status_page_has_long_gone_quiet() {
+        let (mut w, t) = (Watch::default(), Instant::now());
+        for at in (0..=60).step_by(10) {
+            look(&mut w, t, at, SITE_DOWN, true);
+        }
+        assert_eq!(w.state, State::Down);
+        for at in (70..=350).step_by(10) {
+            look(&mut w, t, at, "<html>", true);
+        }
+        for at in (360..=900).step_by(10) {
+            assert_eq!(look(&mut w, t, at, "<html>", true), (State::Unreachable, true), "at {at}");
+        }
+        // The status page back and saying "down" again: that outage again.
+        assert_eq!(look(&mut w, t, 910, SITE_DOWN, true), (State::Down, false));
     }
 
     #[test]
