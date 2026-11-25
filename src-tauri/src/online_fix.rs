@@ -60,7 +60,8 @@ pub struct Lookup {
     pub made_for: Option<String>,
     /// That version is newer than the one installed.
     pub newer_needed: bool,
-    /// Why it could not be read, for `unreachable`.
+    /// Why it could not be read, for `unreachable`. For `none`, why there is
+    /// none when the folder says (only an Xbox app fix, `fixsite::GDK_ONLY`).
     pub detail: Option<String>,
 }
 
@@ -208,7 +209,10 @@ async fn look_up(title: &str, slug: Option<&str>, installed: Option<&str>) -> Lo
         Ok((code, _)) => return unreachable(format!("online-fix.me answered {code}")),
         Err(e) => return unreachable(e),
     };
-    let Some(fix) = fixsite::generic_fix(&fixes) else { return Lookup { status: "none", page: Some(page_url), made_for, ..Default::default() } };
+    let Some(fix) = fixsite::generic_fix(&fixes) else {
+        let detail = fixsite::only_gdk(&fixes).then(|| fixsite::GDK_ONLY.to_string());
+        return Lookup { status: "none", page: Some(page_url), made_for, detail, ..Default::default() };
+    };
     Lookup {
         status: "found",
         newer_needed: newer_needed(made_for.as_deref(), installed),
@@ -348,6 +352,11 @@ async fn install(app: &AppHandle, game_id: &str, archive: &Path, published: Opti
     if let Some(why) = state_of(app, &game).blocked {
         return Err(why);
     }
+    // By its name, before anything is read: "I have the file" takes any
+    // archive the player picks.
+    if archive.file_name().is_some_and(|n| fixsite::is_gdk(&n.to_string_lossy())) {
+        return Err(fixsite::GDK_REFUSED.into());
+    }
     let root = crate::repair::root(app, &game)?;
     let appid = crate::achievements::appid_for(app, &game)
         .await
@@ -439,7 +448,7 @@ pub async fn online_fix_get(app: AppHandle, game_id: String) -> Result<OnlineFix
         return Err(match lookup.status {
             "unreachable" => "online-fix.me did not answer. It may be down or blocked where you are. Try again later, or download the fix in your browser and use I have the file.".into(),
             "signin" => "online-fix.me wants you to sign in before it shows this game's files. Open its page, sign in there, then try again.".into(),
-            _ => "online-fix.me has no online fix for this game.".into(),
+            _ => lookup.detail.unwrap_or_else(|| "online-fix.me has no online fix for this game.".into()),
         });
     };
     if library::is_running(&app, &game_id) {

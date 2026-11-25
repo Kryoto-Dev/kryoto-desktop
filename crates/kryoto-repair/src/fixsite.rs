@@ -129,17 +129,38 @@ pub fn parse_listing(html: &str, base: &str) -> Vec<RemoteFile> {
         .collect()
 }
 
-/// The generic Steam fix among a `Fix Repair/` folder's files, else its only one.
+/// The generic Steam fix among a `Fix Repair/` folder's files, else its only
+/// one. Never a fix for the Xbox app (`is_gdk`), which would otherwise pass as
+/// "generic", or as the only file.
 pub fn generic_fix(files: &[RemoteFile]) -> Option<&RemoteFile> {
-    files
-        .iter()
+    let steam = || files.iter().filter(|f| !is_gdk(&f.name));
+    steam()
         .find(|f| {
             let n = f.name.to_ascii_lowercase();
             n.contains("generic") && n.contains("steam")
         })
-        .or_else(|| files.iter().find(|f| f.name.to_ascii_lowercase().contains("generic")))
-        .or(if files.len() == 1 { files.first() } else { None })
+        .or_else(|| steam().find(|f| f.name.to_ascii_lowercase().contains("generic")))
+        .or(if files.len() == 1 { steam().next() } else { None })
 }
+
+/// A fix made for the Xbox app's games (Microsoft's GDK), by its name
+/// (`<Game>_Fix_Repair_GDK_Generic.rar`). It does not fit the Steam release
+/// a Kryoto game is, so it is never put in.
+pub fn is_gdk(name: &str) -> bool {
+    name.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w.eq_ignore_ascii_case("gdk"))
+}
+
+/// online-fix.me has a fix for the game, but only for the Xbox app.
+pub fn only_gdk(files: &[RemoteFile]) -> bool {
+    generic_fix(files).is_none() && files.iter().any(|f| is_gdk(&f.name))
+}
+
+/// What the player reads when online-fix.me has only an Xbox app fix.
+pub const GDK_ONLY: &str = "online-fix.me has only an Xbox app (GDK) fix for this game. Kryoto puts in the Steam fix only.";
+
+/// What the player reads when the archive they gave is the Xbox app fix.
+pub const GDK_REFUSED: &str =
+    "That is online-fix.me's fix for the Xbox app (GDK), not for Steam, so Kryoto did not use it. Kryoto puts in the Steam fix only.";
 
 /// The game version online-fix.me's release is, from its archive names in
 /// the game's folder (`Gamble.With.Your.Friends.v1.0.11-OFME.rar`, or
@@ -284,6 +305,30 @@ mod tests {
         let fix = generic_fix(&fixes).unwrap();
         assert_eq!(fix.size, "11M");
         assert!(fix.url.ends_with("/Fix%20Repair/GambleWithYourFriends_Fix_Repair_Steam_Generic.rar"));
+    }
+
+    #[test]
+    fn never_picks_the_xbox_app_fix() {
+        let file = |name: &str| RemoteFile { name: name.into(), url: format!("https://uploads.online-fix.me:2053/uploads/G/Fix%20Repair/{name}"), size: "11M".into() };
+        let gdk = file("Game_Fix_Repair_GDK_Generic.rar");
+        let steam = file("Game_Fix_Repair_Steam_Generic.rar");
+        assert!(is_gdk(&gdk.name));
+        assert!(!is_gdk(&steam.name));
+        assert!(!is_gdk("Gdkingdom_Fix_Repair_Steam_Generic.rar"), "a word, not a part of one");
+        // Beside the Steam fix, in either order: the Steam fix.
+        assert_eq!(generic_fix(&[gdk.clone(), steam.clone()]), Some(&steam));
+        assert_eq!(generic_fix(&[steam.clone(), gdk.clone()]), Some(&steam));
+        assert!(!only_gdk(&[gdk.clone(), steam.clone()]));
+        // Alone, or beside something that is not a generic fix: none, and said why.
+        assert_eq!(generic_fix(std::slice::from_ref(&gdk)), None);
+        assert!(only_gdk(std::slice::from_ref(&gdk)));
+        assert_eq!(generic_fix(&[gdk.clone(), file("Readme.zip")]), None);
+        // Without one, as before: a generic fix, or the only file.
+        let other = file("Game_Fix_Repair_Generic.rar");
+        assert_eq!(generic_fix(&[file("Game_Fix_Repair_Epic.rar"), other.clone()]), Some(&other));
+        assert_eq!(generic_fix(&[file("Game_Fix.rar")]).map(|f| f.name.as_str()), Some("Game_Fix.rar"));
+        assert_eq!(generic_fix(&[]), None);
+        assert!(!only_gdk(&[]));
     }
 
     #[test]

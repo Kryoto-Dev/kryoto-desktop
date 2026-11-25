@@ -23,6 +23,10 @@ test('no fix, no answer and a sign-in wall each say what to do', () => {
   const none = onlineFixView(state({ lookup: lookup({ status: 'none', file: null }) }))!
   assert.equal(none.line, 'online-fix.me has no online fix for this game.')
   assert.equal(none.get, null)
+  const gdk = onlineFixView(state({ lookup: lookup({ status: 'none', file: null, detail: 'online-fix.me has only an Xbox app (GDK) fix for this game. Kryoto puts in the Steam fix only.' }) }))!
+  assert.match(gdk.line, /only an Xbox app \(GDK\) fix/)
+  assert.equal(gdk.get, null)
+  assert.ok(!gdk.fromFile)
   const down = onlineFixView(state({ lookup: lookup({ status: 'unreachable', file: null }) }))!
   assert.ok(down.retry && down.fromFile && /did not answer/.test(down.line))
   const wall = onlineFixView(state({ lookup: lookup({ status: 'signin', file: null }) }))!
