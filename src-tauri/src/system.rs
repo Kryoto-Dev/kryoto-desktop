@@ -37,6 +37,40 @@ fn instance_port() -> u16 {
 }
 const HELLO: &str = "kryoto-desktop show";
 const ANSWER: &str = "kryoto-desktop ok";
+/// A later start with `--safe-graphics` (KB-0377). Not `HELLO` and more: a
+/// copy that runs reads anything after `HELLO ` as a link.
+const SAFE_HELLO: &str = "kryoto-desktop safe-graphics";
+
+/// What a later copy asks of the running one.
+#[derive(Debug, PartialEq, Eq)]
+enum Ask {
+    Show,
+    Link(String),
+    SafeGraphics,
+}
+
+/// A link wins over `--safe-graphics`: with `KRYOTO_SAFE_GRAPHICS` set for
+/// good, every game shortcut and browser link carries both, and the copy that
+/// runs already draws on the CPU.
+fn hello_line(link: Option<String>, safe: bool) -> String {
+    match (link, safe) {
+        (Some(link), _) => format!("{HELLO} {link}"),
+        (None, true) => SAFE_HELLO.to_string(),
+        (None, false) => HELLO.to_string(),
+    }
+}
+
+fn read_hello(line: &str) -> Option<Ask> {
+    let line = line.trim();
+    if line == SAFE_HELLO {
+        return Some(Ask::SafeGraphics);
+    }
+    match line.strip_prefix(HELLO)? {
+        "" => Some(Ask::Show),
+        rest if rest.starts_with(' ') => Some(Ask::Link(rest.trim().to_string())),
+        _ => None,
+    }
+}
 
 /// Take the instance port, or - when a Kryoto is already running - ask it to
 /// come to the front and say so. Anything else on the port that does not
@@ -62,28 +96,45 @@ pub fn claim_instance() -> Instance {
     match TcpListener::bind(("127.0.0.1", instance_port())) {
         Ok(l) => Instance::First(l),
         Err(_) => {
-            let Ok(mut s) = TcpStream::connect_timeout(&([127, 0, 0, 1], instance_port()).into(), Duration::from_millis(600))
-            else {
-                return Instance::Unguarded;
-            };
-            // A slow while: the first copy takes the port at once, but only
-            // answers once it has started, and on a hard disk that takes
-            // seconds. Giving up early started a second copy beside it.
-            let _ = s.set_read_timeout(Some(Duration::from_secs(6)));
             // A `kryoto://` link this copy was started for rides on the same
-            // line, so the running copy opens it (see links.rs).
-            let hello = match crate::links::from_args() {
-                Some(link) => format!("{HELLO} {link}"),
-                None => HELLO.to_string(),
-            };
-            if writeln!(s, "{hello}").is_err() {
-                return Instance::Unguarded;
-            }
-            let mut line = String::new();
-            let _ = BufReader::new(&s).read_line(&mut line);
-            if line.trim() == ANSWER { Instance::AlreadyRunning } else { Instance::Unguarded }
+            // line, so the running copy opens it (see links.rs). So does
+            // `--safe-graphics`, which this copy cannot act on itself: without
+            // it the player got the same black window back, and no word why.
+            // Not from a copy the app started, whose old one is quitting.
+            let args: Vec<String> = std::env::args().collect();
+            let safe = cfg!(target_os = "linux")
+                && crate::display_env::relaunched().is_none()
+                && crate::display_env::env_mode(&args, None, std::env::var(crate::display_env::SAFE_VAR).ok()).is_some();
+            hand_over(instance_port(), &hello_line(crate::links::from_args(), safe))
         }
     }
+}
+
+/// Say `hello` to the copy on `port`. One from before `SAFE_HELLO` hangs up
+/// on it without a word: asked to come to the front instead, as it was
+/// before, rather than a second copy starting beside it.
+fn hand_over(port: u16, hello: &str) -> Instance {
+    let mut answer = say(port, hello);
+    if hello == SAFE_HELLO && answer.as_deref() == Some("") {
+        answer = say(port, HELLO);
+    }
+    match answer {
+        Some(line) if line.trim() == ANSWER => Instance::AlreadyRunning,
+        _ => Instance::Unguarded,
+    }
+}
+
+/// The running copy's answer to `hello`: empty when it hung up without one.
+fn say(port: u16, hello: &str) -> Option<String> {
+    let mut s = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(600)).ok()?;
+    // A slow while: the first copy takes the port at once, but only answers
+    // once it has started, and on a hard disk that takes seconds. Giving up
+    // early started a second copy beside it.
+    let _ = s.set_read_timeout(Some(Duration::from_secs(6)));
+    writeln!(s, "{hello}").ok()?;
+    let mut line = String::new();
+    BufReader::new(&s).read_line(&mut line).ok()?;
+    Some(line)
 }
 
 /// Answer later copies: bring the window back, and open the link one carried.
@@ -96,20 +147,29 @@ pub fn serve_instance<R: Runtime>(app: AppHandle<R>, listener: TcpListener) {
             if reader.read_line(&mut line).is_err() {
                 continue;
             }
-            let line = line.trim();
-            let link = match line.strip_prefix(HELLO) {
-                Some("") => None,
-                Some(rest) if rest.starts_with(' ') => Some(rest.trim().to_string()),
-                _ => continue,
-            };
+            let Some(ask) = read_hello(&line) else { continue };
             let mut w = &stream;
             let _ = writeln!(w, "{ANSWER}");
-            match link {
-                Some(url) => crate::links::deliver(&app, &url),
-                None => show_main(&app),
+            match ask {
+                Ask::Link(url) => crate::links::deliver(&app, &url),
+                Ask::Show => show_main(&app),
+                Ask::SafeGraphics => safe_graphics(&app),
             }
         }
     });
+}
+
+/// `--safe-graphics` given to a later start: on the main thread, as the
+/// tray's "Start in compatible graphics" is.
+fn safe_graphics<R: Runtime>(app: &AppHandle<R>) {
+    #[cfg(target_os = "linux")]
+    {
+        let handle = app.clone();
+        if app.run_on_main_thread(move || crate::display_env::restart_safe(&handle)).is_ok() {
+            return;
+        }
+    }
+    show_main(app);
 }
 
 pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
@@ -1076,6 +1136,47 @@ pub fn os_dark() -> Option<bool> {
         "prefer-dark" => Some(true),
         "prefer-light" | "default" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::{hand_over, hello_line, read_hello, Ask, Instance, ANSWER, HELLO, SAFE_HELLO};
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    /// KB-0377: `--safe-graphics` given while Kryoto runs reaches the running
+    /// copy, and is never taken for a link. A link still opens with the flag
+    /// or the variable set: that start was for the link.
+    #[test]
+    fn a_second_start_with_safe_graphics_says_so() {
+        assert_eq!(read_hello(&hello_line(None, true)), Some(Ask::SafeGraphics));
+        assert_eq!(read_hello(&hello_line(Some("kryoto://game/x".into()), true)), Some(Ask::Link("kryoto://game/x".into())));
+        assert_eq!(read_hello(&hello_line(None, false)), Some(Ask::Show));
+        assert_eq!(read_hello(&hello_line(Some("kryoto://game/x".into()), false)), Some(Ask::Link("kryoto://game/x".into())));
+        assert_eq!(read_hello("kryoto-desktop showing"), None);
+        assert_eq!(read_hello("something else"), None);
+    }
+
+    /// A copy from before the safe-graphics ask, still running after an
+    /// update, hangs up on it: it is asked to come to the front instead, and
+    /// no second copy starts beside it.
+    #[test]
+    fn an_older_copy_still_comes_to_the_front() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten().take(2) {
+                let mut line = String::new();
+                let _ = BufReader::new(&stream).read_line(&mut line);
+                // As 0.4.0 reads it.
+                if matches!(line.trim().strip_prefix(HELLO), Some(rest) if rest.is_empty() || rest.starts_with(' ')) {
+                    let mut w = &stream;
+                    let _ = writeln!(w, "{ANSWER}");
+                }
+            }
+        });
+        assert!(matches!(hand_over(port, SAFE_HELLO), Instance::AlreadyRunning));
     }
 }
 

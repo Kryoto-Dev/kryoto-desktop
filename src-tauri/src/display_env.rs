@@ -102,6 +102,7 @@ pub struct Facts {
 /// `kryoto-desktop --safe-graphics`, or with `KRYOTO_SAFE_GRAPHICS=1`, and this
 /// start is Compatible. The saved choice is not changed.
 pub const SAFE_FLAG: &str = "--safe-graphics";
+pub const SAFE_VAR: &str = "KRYOTO_SAFE_GRAPHICS";
 
 /// The mode the environment asks for: the safe-graphics flag or variable,
 /// else `KRYOTO_GPU`. Pure, for the tests.
@@ -187,7 +188,8 @@ pub fn read_markers(never_drew: bool, renderer_crashed: bool, dmabuf_failed: boo
 /// old copy's port (system.rs), and it never restarts itself a second time.
 pub const RELAUNCHED: &str = "KRYOTO_RELAUNCHED";
 /// What `RELAUNCHED` is set to for a restart the player asked for (the tray's
-/// "Start in compatible graphics"): the new copy shows its window.
+/// "Start in compatible graphics", or `--safe-graphics` given to a second
+/// start): the new copy shows its window.
 pub const ASKED: &str = "asked";
 
 /// What `RELAUNCHED` said when this copy started. Read once and taken out of
@@ -631,7 +633,7 @@ mod linux {
         migrate();
         let saved = saved_mode();
         let args: Vec<String> = std::env::args().collect();
-        let safe_var = std::env::var("KRYOTO_SAFE_GRAPHICS").ok();
+        let safe_var = std::env::var(SAFE_VAR).ok();
         let safe = env_mode(&args, None, safe_var.clone()).is_some();
         let asked = env_mode(&args, std::env::var("KRYOTO_GPU").ok(), safe_var);
         let is_set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
@@ -901,6 +903,24 @@ pub fn restart_compatible<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     crate::logging::info("display", "Start in compatible graphics, from the tray: restarting with hardware rendering off");
     // The new copy waits for this one's port instead of handing over to it
     // as it quits, which left no Kryoto running at all.
+    std::env::set_var(RELAUNCHED, ASKED);
+    app.restart();
+}
+
+/// `--safe-graphics` (or `KRYOTO_SAFE_GRAPHICS`) given to a start while this
+/// copy runs (system.rs `serve_instance`): it only brought back the same
+/// black window. This copy starts again in Compatible, for that start only as
+/// the flag says, and shows its window. Already drawing on the CPU, it only
+/// comes to the front.
+#[cfg(target_os = "linux")]
+pub fn restart_safe<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let on_cpu = std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some_and(|v| !v.is_empty() && v != "0");
+    if on_cpu {
+        crate::system::show_main(app);
+        return;
+    }
+    crate::logging::info("display", "started again with --safe-graphics: restarting with hardware rendering off for that start");
+    std::env::set_var(SAFE_VAR, "1");
     std::env::set_var(RELAUNCHED, ASKED);
     app.restart();
 }
