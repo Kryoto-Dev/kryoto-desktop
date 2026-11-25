@@ -925,7 +925,8 @@ pub fn after_install<R: Runtime>(app: &AppHandle<R>, game_id: &str) {
     });
 }
 
-/// A game's list, its findings, and what the Emulator row says about it.
+/// A game's list and its findings, for the Files row. What the release's
+/// emulator is comes from repair.rs `game_emulators`, for the Emulator row.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilesState {
@@ -933,14 +934,8 @@ pub struct FilesState {
     /// `unknown`: not asked yet, or this game is not a kryo.to release.
     pub list: &'static str,
     pub files: usize,
-    pub emulator: Option<String>,
-    pub emulator_off: bool,
-    /// Steam files the uploader kept as the game shipped them.
-    pub kept_own: Vec<String>,
     pub report: Option<CheckReport>,
     pub checking: bool,
-    /// The download is still on this PC: missing files come from it.
-    pub archive: bool,
     /// "12.3 GB": what downloading it again takes.
     pub download_size: Option<String>,
 }
@@ -962,12 +957,8 @@ fn state_of<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> FilesState {
             "unknown"
         },
         files: list.map(|l| l.listed().len()).unwrap_or(0),
-        emulator: list.and_then(FileList::emulator_words),
-        emulator_off: list.is_some_and(|l| l.emulator_off),
-        kept_own: list.map(|l| l.excluded.clone()).unwrap_or_default(),
         report: current(e.report.filter(|_| list.is_some()), game, &root),
         checking: CHECKING.lock().map(|c| c.iter().any(|(id, _)| id == &game.id)).unwrap_or(false),
-        archive: kept_archive(app, game).is_some(),
         download_size: e.download_size,
     }
 }
