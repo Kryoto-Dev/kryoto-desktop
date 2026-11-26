@@ -956,6 +956,11 @@ pub fn library_plain_folder(app: AppHandle, id: String) -> Result<LibraryGame, S
         Some(5) | Some(32) => format!("Windows would not rename {name}: something has a file in it open. Close the game, its launcher and any folder window showing it, then try again."),
         _ => format!("Could not rename {name}: {e}"),
     })?;
+    // The originals its add-ons keep sit beside it under its name: renamed too.
+    if let Err(e) = crate::addons::carry_backups(&top, &to) {
+        let _ = std::fs::rename(&to, &top);
+        return Err(format!("{e}. The folder kept its name."));
+    }
     let rest = install.strip_prefix(&top).map(Path::to_path_buf).unwrap_or_default();
     let moved = update(&app, |games| {
         let g = games.iter_mut().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
@@ -967,6 +972,7 @@ pub fn library_plain_folder(app: AppHandle, id: String) -> Result<LibraryGame, S
         Err(e) => {
             // The list could not take the new place: put the old name back.
             let _ = std::fs::rename(&to, &top);
+            let _ = crate::addons::carry_backups(&to, &top);
             return Err(e);
         }
     };

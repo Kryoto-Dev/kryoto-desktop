@@ -293,6 +293,10 @@ pub fn recover_on_start<R: Runtime>(app: &AppHandle<R>) {
     let app = app.clone();
     std::thread::spawn(move || {
         for (j, res) in recover_interrupted(&data) {
+            // Its add-ons' copies of the files it wrote over are back too.
+            if res.is_ok() {
+                crate::addons::update_undone(&app, &j);
+            }
             let (title, body) = match &res {
                 Ok(()) => (
                     format!("{} was put back", j.title),
@@ -362,6 +366,8 @@ pub fn game_update_undo(app: AppHandle, slug: String) -> Result<(), String> {
         }
         Ok(())
     })?;
+    // The add-ons' copies of the files the update wrote over are back: theirs again.
+    crate::addons::update_undone(&app, &j);
     let _ = app.emit("library-changed", ());
     Ok(())
 }

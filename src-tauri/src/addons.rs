@@ -30,6 +30,25 @@ pub struct InstalledAddon {
     /// The game's files it replaced, kept under `backup_dir` for Undo.
     pub replaced: Vec<String>,
     pub installed_at: u64,
+    /// Its files the game's last update wrote over, taken off the two lists
+    /// above: they are the new build's now. Go back to the previous build
+    /// puts this add-on's copies back, and these with them (`take_back`).
+    #[serde(skip_serializing_if = "WrittenOver::is_empty")]
+    pub updated: WrittenOver,
+}
+
+/// The paths a game update took off an add-on's `files` and `replaced`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WrittenOver {
+    pub files: Vec<String>,
+    pub replaced: Vec<String>,
+}
+
+impl WrittenOver {
+    fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.replaced.is_empty()
+    }
 }
 
 fn now() -> u64 {
@@ -45,6 +64,95 @@ pub fn backups_of(root: &Path) -> PathBuf {
 
 fn backup_dir(root: &Path, file: &str) -> PathBuf {
     backups_of(root).join(downloads::safe_name(file))
+}
+
+/// The game's folder `from` is now `to` (moved or renamed): its add-on
+/// backups go along, under the new name, or Undo would find none of the
+/// originals they keep. A rename when it can, else a copy and the old one gone.
+/// Once the copy is whole it is the one Undo reads, so an old file that will
+/// not go is only left behind, not a failure.
+pub(crate) fn carry_backups(from: &Path, to: &Path) -> Result<(), String> {
+    let (old, new) = (backups_of(from), backups_of(to));
+    if !old.is_dir() {
+        return Ok(());
+    }
+    if std::fs::rename(&old, &new).is_ok() {
+        return Ok(());
+    }
+    if let Err(e) = crate::storage::copy_tree(&old, &new, &mut |_| {}) {
+        let _ = std::fs::remove_dir_all(&new);
+        return Err(format!("Could not move its add-ons' kept files: {e}"));
+    }
+    if let Err(e) = std::fs::remove_dir_all(&old) {
+        crate::logging::warn("addons", &format!("Could not remove the old copy of its add-ons' kept files at {}: {e}", old.display()));
+    }
+    Ok(())
+}
+
+/// The files of `addons` a game update is about to write over: `staging` is
+/// the unpacked update, merged into `dest`. Relative to `root`, as recorded.
+pub(crate) fn shipped(addons: &[InstalledAddon], root: &Path, staging: &Path, dest: &Path) -> Vec<String> {
+    let (root, dest) = (dunce::simplified(root), dunce::simplified(dest));
+    let in_update = |rel: &String| {
+        crate::launch::inside(root, rel).ok().and_then(|p| p.strip_prefix(dest).ok().map(|r| staging.join(r))).is_some_and(|p| p.is_file())
+    };
+    let mut out: Vec<String> = addons.iter().flat_map(|a| a.files.iter()).filter(|rel| in_update(rel)).cloned().collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A game update wrote its own files over `paths` (from `shipped`): they are
+/// the new build's now. Each add-on lets go of them, so Undo neither deletes
+/// the new build's file nor puts the old build's back over it. What it let go
+/// is noted in `updated`, and the originals it kept stay (Undo clears them
+/// with the rest): Go back to the previous build makes them its own again.
+/// Run on every update, even one that writes over none, so `updated` is only
+/// ever the last update's.
+pub(crate) fn let_go(addons: &mut [InstalledAddon], paths: &[String]) {
+    for a in addons.iter_mut() {
+        a.updated = WrittenOver {
+            files: a.files.iter().filter(|r| paths.contains(r)).cloned().collect(),
+            replaced: a.replaced.iter().filter(|r| paths.contains(r)).cloned().collect(),
+        };
+        a.files.retain(|r| !paths.contains(r));
+        a.replaced.retain(|r| !paths.contains(r));
+    }
+}
+
+/// The game's last update was undone, or rolled back after it was cut off:
+/// its backup put back the files it had replaced (`restored`, relative to
+/// `dest`), the add-ons' copies among them. Those are the add-ons' again, so
+/// Undo takes them out and puts the game's originals back.
+pub(crate) fn take_back(addons: &mut [InstalledAddon], root: &Path, dest: &Path, restored: &[String]) {
+    let (root, dest) = (dunce::simplified(root), dunce::simplified(dest));
+    let put_back = |rel: &String| {
+        crate::launch::inside(root, rel)
+            .ok()
+            .and_then(|p| p.strip_prefix(dest).ok().map(|r| r.to_string_lossy().replace('\\', "/")))
+            .is_some_and(|r| restored.contains(&r))
+    };
+    for a in addons.iter_mut() {
+        let over = std::mem::take(&mut a.updated);
+        a.files.extend(over.files.into_iter().filter(|r| put_back(r)));
+        a.replaced.extend(over.replaced.into_iter().filter(|r| put_back(r)));
+        for list in [&mut a.files, &mut a.replaced] {
+            list.sort();
+            list.dedup();
+        }
+    }
+}
+
+/// `take_back` for the game a game update's journal belongs to.
+pub(crate) fn update_undone<R: Runtime>(app: &AppHandle<R>, journal: &crate::game_update::Journal) {
+    let dest = PathBuf::from(&journal.dest);
+    let _ = library::update(app, |games| {
+        if let Some(g) = games.iter_mut().find(|g| g.slug.as_deref() == Some(journal.slug.as_str())) {
+            let root = game_root(app, g);
+            take_back(&mut g.addons, &root, &dest, &journal.replaced);
+        }
+        Ok(())
+    });
 }
 
 /// What applying records: the files written, and the game's files moved aside.
@@ -192,7 +300,7 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
     files.dedup();
     library::update(app, |games| {
         if let Some(g) = games.iter_mut().find(|g| g.id == game.id) {
-            let addon = InstalledAddon { label: label.clone(), file: file.clone(), files, replaced, installed_at: now() };
+            let addon = InstalledAddon { label: label.clone(), file: file.clone(), files, replaced, installed_at: now(), updated: before.updated.clone() };
             // Applied again, it keeps its place: the list is the order the
             // add-ons first went on, which is how their kept originals stack.
             match g.addons.iter_mut().find(|a| a.file == file) {
@@ -451,8 +559,23 @@ pub fn addon_undo(app: AppHandle, game_id: String, file: String) -> Result<Libra
         Ok(g.clone())
     })?;
     let _ = app.emit("library-changed", ());
-    let Undone { put_back } = undone?;
+    let Undone { put_back, missing } = undone?;
     crate::logging::info("addons", &format!("{} removed from {} ({put_back} files put back)", addon.label, game.title));
+    // Said, not skipped quietly: the game is missing these files now.
+    if !missing.is_empty() {
+        crate::logging::warn("addons", &format!("{}: the game's own {} not found to put back", addon.label, missing.join(", ")));
+        let _ = app.emit(
+            "notify",
+            downloads::Notice::new(
+                &format!("{} removed, with files missing", addon.label),
+                &format!(
+                    "Kryoto could not find the game's own {} to put back. Get the files back under Properties > Emulator & fixes > Files.",
+                    missing.join(", ")
+                ),
+                Some(game.id.clone()),
+            ),
+        );
+    }
     Ok(updated)
 }
 
@@ -460,6 +583,8 @@ pub fn addon_undo(app: AppHandle, game_id: String, file: String) -> Result<Libra
 #[derive(Debug, Default)]
 struct Undone {
     put_back: usize,
+    /// Originals it had no kept copy of (see `remove`).
+    missing: Vec<String>,
 }
 
 /// Undo on disk: the add-on's files out, the originals back, its empty folders gone.
@@ -473,6 +598,10 @@ struct Undone {
 /// use), the caller saves what is left, and Undo again carries on from there
 /// instead of doing a step twice: handing over an original it already handed
 /// over, or deleting one it already put back.
+///
+/// Says which originals it should put back and found no copy of (their kept
+/// files were lost, as a Move or Rename folder used to leave them), so the
+/// player hears which of the game's files are missing.
 fn remove(root: &Path, addon: &mut InstalledAddon, later: &mut [InstalledAddon]) -> Result<Undone, String> {
     let backup = backup_dir(root, &addon.file);
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -488,14 +617,17 @@ fn remove(root: &Path, addon: &mut InstalledAddon, later: &mut [InstalledAddon])
     for rel in addon.replaced.clone() {
         let kept = crate::launch::inside(&backup, &rel)?;
         let path = crate::launch::inside(root, &rel)?;
-        if kept.is_file() {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("Could not put back {rel}: {e}"))?;
-            }
-            std::fs::rename(&kept, &path).map_err(|e| format!("Could not put back {rel}: {e}"))?;
-            undone.put_back += 1;
+        if !kept.is_file() {
+            // Stays on the list: said again if this Undo has to be retried.
+            undone.missing.push(rel);
+            continue;
         }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Could not put back {rel}: {e}"))?;
+        }
+        std::fs::rename(&kept, &path).map_err(|e| format!("Could not put back {rel}: {e}"))?;
         addon.replaced.retain(|r| r != &rel);
+        undone.put_back += 1;
     }
     let _ = std::fs::remove_dir_all(&backup);
     let _ = std::fs::remove_dir(backups_of(root));
@@ -532,7 +664,9 @@ fn take_out(root: &Path, backup: &Path, addon: &mut InstalledAddon, later: &mut 
 
 /// `rel` stays as `above` wrote it. What `above` kept for it was this
 /// add-on's copy; it keeps the game's original instead, or nothing when this
-/// add-on added the file (`replaced` false), so its Undo deletes it.
+/// add-on added the file (`replaced` false), so its Undo deletes it. An
+/// original that was lost stays on `above`'s list with nothing kept, so its
+/// Undo says the game's file is missing rather than putting this one's back.
 fn hand_over(root: &Path, backup: &Path, replaced: bool, above: &mut InstalledAddon, rel: &String) -> Result<(), String> {
     let theirs = crate::launch::inside(&backup_dir(root, &above.file), rel)?;
     let kept = crate::launch::inside(backup, rel)?;
@@ -541,17 +675,18 @@ fn hand_over(root: &Path, backup: &Path, replaced: bool, above: &mut InstalledAd
             std::fs::create_dir_all(parent).map_err(|e| format!("Could not keep {rel}: {e}"))?;
         }
         std::fs::rename(&kept, &theirs).map_err(|e| format!("Could not keep {rel}: {e}"))?;
-        if !above.replaced.contains(rel) {
-            above.replaced.push(rel.clone());
-            above.replaced.sort();
-        }
-    } else if !replaced {
+    } else {
         match std::fs::remove_file(&theirs) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("Could not let go of {rel}: {e}")),
         }
+    }
+    if !replaced {
         above.replaced.retain(|r| r != rel);
+    } else if !above.replaced.contains(rel) {
+        above.replaced.push(rel.clone());
+        above.replaced.sort();
     }
     Ok(())
 }
@@ -611,7 +746,7 @@ mod tests {
         assert!(again.replaced.is_empty());
 
         let mut record = InstalledAddon { label: "DLC: Japan".into(), file: "Game - DLC Japan - kryoto.7z".into(), files: done.files, replaced: done.replaced, ..Default::default() };
-        remove(&game, &mut record, &mut []).unwrap();
+        assert!(remove(&game, &mut record, &mut []).unwrap().missing.is_empty());
         assert_eq!(std::fs::read_to_string(game.join("bin/steam_api64.dll")).unwrap(), "original");
         assert!(!game.join("lang").exists());
         assert!(!backups_of(&game).exists());
@@ -685,7 +820,7 @@ mod tests {
     }
 
     fn undo(game: &Path, list: &mut Vec<InstalledAddon>, file: &str) {
-        try_undo(game, list, file).unwrap();
+        assert!(try_undo(game, list, file).unwrap().missing.is_empty());
     }
 
     #[test]
@@ -788,6 +923,115 @@ mod tests {
             assert_eq!(tree(&game), vanilla, "{order}: the game's files as they were");
             assert!(!backups_of(&game).exists(), "{order}: no backups left");
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Unpack a game update in `staging` over `game` as `downloads::install`
+    /// does, with its backup in `backups` for Go back: what it wrote over.
+    fn update(game: &Path, list: &mut [InstalledAddon], staging: &Path, backups: &Path) -> crate::game_update::Journal {
+        let journal = crate::game_update::prepare(crate::game_update::Prepare {
+            slug: "game",
+            title: "Game",
+            staging,
+            dest: game,
+            backup_root: backups,
+            from_version: None,
+            to_version: None,
+        })
+        .unwrap();
+        let written = shipped(list, game, staging, game);
+        for rel in journal.replaced.iter().chain(&journal.added) {
+            std::fs::rename(staging.join(rel), game.join(rel)).unwrap();
+        }
+        let_go(list, &written);
+        journal
+    }
+
+    #[test]
+    fn undo_after_an_update_keeps_the_new_builds_files() {
+        let base = std::env::temp_dir().join("kryoto-addon-update-test");
+        for then in ["kept", "gone back", "back one of two"] {
+            let _ = std::fs::remove_dir_all(&base);
+            let game = base.join("Game");
+            std::fs::create_dir_all(game.join("bin")).unwrap();
+            std::fs::write(game.join("bin/text.pak"), "old build").unwrap();
+            let vanilla = tree(&game);
+            let mut list = vec![apply(&game, "Language: Japanese", "ja.7z", &[("bin/text.pak", "ja"), ("bin/ja.pak", "ja"), ("bin/font.ttf", "ja")])];
+            let applied = list[0].clone();
+            // The update ships text.pak and, new in this build, ja.pak; not font.ttf.
+            let staging = base.join(".Game.installing");
+            std::fs::create_dir_all(staging.join("bin")).unwrap();
+            std::fs::write(staging.join("bin/text.pak"), "new build").unwrap();
+            std::fs::write(staging.join("bin/ja.pak"), "new build").unwrap();
+            assert_eq!(shipped(&list, &game, &staging, &game), ["bin/ja.pak", "bin/text.pak"]);
+            let mut journal = update(&game, &mut list, &staging, &base.join("Backups"));
+            assert_eq!(list[0].files, ["bin/font.ttf"]);
+            assert!(list[0].replaced.is_empty(), "the old build's text.pak is not put back over the new one");
+            match then {
+                "kept" => {
+                    undo(&game, &mut list, "ja.7z");
+                    let now = tree(&game);
+                    assert_eq!(now.len(), 2, "the add-on's own font is gone: {now:?}");
+                    assert_eq!((now["bin/text.pak"].as_str(), now["bin/ja.pak"].as_str()), ("new build", "new build"));
+                }
+                "gone back" => {
+                    // Go back to the previous build (or the rollback, at the next start, of an update cut off).
+                    crate::game_update::restore(&mut journal).unwrap();
+                    take_back(&mut list, &game, &game, &journal.replaced);
+                    assert_eq!((&list[0].files, &list[0].replaced), (&applied.files, &applied.replaced));
+                    undo(&game, &mut list, "ja.7z");
+                    assert_eq!(tree(&game), vanilla, "the old build's own files, the add-on's gone");
+                }
+                _ => {
+                    // A second update, of none of the add-on's files, then Go back: one step only.
+                    std::fs::create_dir_all(staging.join("bin")).unwrap();
+                    std::fs::write(staging.join("bin/text.pak"), "newer build").unwrap();
+                    let mut second = update(&game, &mut list, &staging, &base.join("Backups 2"));
+                    crate::game_update::restore(&mut second).unwrap();
+                    take_back(&mut list, &game, &game, &second.replaced);
+                    assert_eq!(list[0].files, ["bin/font.ttf"], "the first update's files stay the game's");
+                    undo(&game, &mut list, "ja.7z");
+                    let now = tree(&game);
+                    assert_eq!((now.len(), now["bin/text.pak"].as_str()), (2, "new build"));
+                }
+            }
+            assert!(!backups_of(&game).exists(), "{then}: no backups left");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn undo_after_a_move_or_rename_finds_the_originals() {
+        let base = std::env::temp_dir().join("kryoto-addon-move-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let game = base.join("Game’s Folder");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(game.join("text.pak"), "game").unwrap();
+        let mut record = apply(&game, "Language: Japanese", "ja.7z", &[("text.pak", "ja")]);
+        // Rename folder; a move to another library folder is the same, a level over.
+        let renamed = base.join("Library 2").join("Games Folder");
+        std::fs::create_dir_all(renamed.parent().unwrap()).unwrap();
+        std::fs::rename(&game, &renamed).unwrap();
+        carry_backups(&game, &renamed).unwrap();
+        assert!(!backups_of(&game).exists() && backups_of(&renamed).is_dir());
+        assert!(remove(&renamed, &mut record, &mut []).unwrap().missing.is_empty());
+        assert_eq!(std::fs::read_to_string(renamed.join("text.pak")).unwrap(), "game");
+        assert!(!backups_of(&renamed).exists());
+
+        // Kept files that are gone are said, not skipped quietly.
+        let mut record = apply(&renamed, "Language: Japanese", "ja.7z", &[("text.pak", "ja")]);
+        std::fs::remove_dir_all(backups_of(&renamed)).unwrap();
+        assert_eq!(remove(&renamed, &mut record, &mut []).unwrap().missing, ["text.pak"]);
+
+        // Two on the file: the one under it lets go, the last one says so.
+        std::fs::write(renamed.join("text.pak"), "game").unwrap();
+        let mut list = vec![apply(&renamed, "Language: Japanese", "ja.7z", &[("text.pak", "ja")])];
+        list.push(apply(&renamed, "Language: French", "fr.7z", &[("text.pak", "fr")]));
+        std::fs::remove_file(backup_dir(&renamed, "ja.7z").join("text.pak")).unwrap();
+        undo(&renamed, &mut list, "ja.7z");
+        assert_eq!(std::fs::read_to_string(renamed.join("text.pak")).unwrap(), "fr");
+        assert_eq!(try_undo(&renamed, &mut list, "fr.7z").unwrap().missing, ["text.pak"]);
+        assert!(!renamed.join("text.pak").exists(), "not the Japanese pack's copy put back");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

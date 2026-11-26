@@ -618,6 +618,12 @@ pub fn recover_move<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return set_aside(&path, &journal, "the game's library entry changed since");
     }
     recover_paths(&journal, &game.install_dir)?;
+    // Moved, and stopped before its add-ons' kept files went along.
+    if same_path(&game.install_dir, &journal.new_dir) {
+        if let Err(e) = crate::addons::carry_backups(&journal.from, &journal.dest) {
+            crate::logging::warn("storage", &format!("An interrupted move left its add-ons' kept files beside {}: {e}", journal.from.display()));
+        }
+    }
     if journal.from.exists() && journal.dest.exists() {
         let extra = if same_path(&game.install_dir, &journal.new_dir) { &journal.from } else { &journal.dest };
         crate::logging::warn("storage", &format!("An interrupted move kept a second folder at {}. Inspect it before removing it.", extra.display()));
@@ -669,7 +675,7 @@ fn install_suffix(from: &Path, install: &Path) -> Result<PathBuf, String> {
     install.strip_prefix(from).map(Path::to_path_buf).map_err(|_| "The install folder is outside the game folder.".into())
 }
 
-fn copy_tree(from: &Path, to: &Path, progress: &mut dyn FnMut(u64)) -> std::io::Result<()> {
+pub(crate) fn copy_tree(from: &Path, to: &Path, progress: &mut dyn FnMut(u64)) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
@@ -847,6 +853,16 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     })
     .await
     .map_err(|e| e.to_string())? };
+    // The originals its add-ons keep sit beside the folder, under its name.
+    let (from_c, dest_c) = (from.clone(), dest.clone());
+    let carried = tauri::async_runtime::spawn_blocking(move || crate::addons::carry_backups(&from_c, &dest_c)).await.map_err(|e| e.to_string())?;
+    let leftover = match carried {
+        Ok(()) => leftover,
+        Err(e) => {
+            let note = format!("{e}, so taking an add-on out may leave some of the game's files missing.");
+            Some(leftover.map_or_else(|| format!("Moved. {note}"), |l| format!("{l} {note}")))
+        }
+    };
     if let Some(note) = &leftover {
         crate::logging::warn("storage", &format!("moving {id}: {note}"));
     }

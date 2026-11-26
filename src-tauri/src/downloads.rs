@@ -5230,7 +5230,14 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     let room_needed = unpacked.map(|size| size + if same_drive { archive_len } else { 0 }).unwrap_or(archive_len * 2);
     let (title_clone, parent_clone) = (title.clone(), parent.clone());
     let (journal_slug, to_version) = (item.slug.clone().unwrap_or_default(), item.meta.version.clone());
-    let damaged = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<String>, Option<crate::game_update::Journal>), String> {
+    // The add-ons on the game, and the folder their files are relative to: an
+    // update that ships one of those files makes it the new build's (below).
+    let addons = existing.as_ref().filter(|g| !g.addons.is_empty()).map(|g| (crate::addons::game_root(app, g), g.addons.clone()));
+    let addons_c = addons.clone();
+    let shipped = move |staging: &Path, dest: &Path| addons_c.as_ref().map(|(root, list)| crate::addons::shipped(list, root, staging, dest)).unwrap_or_default();
+    // What the unpack reported damaged, the update's journal, and the add-on files it wrote over.
+    type Merged = (Vec<String>, Option<crate::game_update::Journal>, Vec<String>);
+    let damaged = tauri::async_runtime::spawn_blocking(move || -> Result<Merged, String> {
         let (title, parent) = (title_clone, parent_clone);
         // An unpack HatchZip left half done carries on from where it got to;
         // what it had already written is part of that.
@@ -5247,9 +5254,10 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&placed, std::fs::Permissions::from_mode(0o755));
             }
+            let over_addons = shipped(&staging_clone, &dest_clone);
             move_tree(&staging_clone, &dest_clone).map_err(|e| format!("Installing into {} failed: {e}", dest_clone.display()))?;
             let _ = std::fs::remove_dir_all(&staging_clone);
-            return Ok((Vec::new(), None));
+            return Ok((Vec::new(), None, over_addons));
         }
         let progress = |done: u64, total: Option<u64>| {
             edit(&progress_app, &progress_id, |d| {
@@ -5307,6 +5315,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             }
             None => None,
         };
+        let over_addons = shipped(&top, &dest_clone);
         if let Err(e) = move_tree(&top, &dest_clone) {
             return Err(match journal {
                 Some(mut j) => match crate::game_update::restore(&mut j) {
@@ -5317,11 +5326,11 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             });
         }
         let _ = std::fs::remove_dir_all(&staging_clone);
-        Ok((damaged, journal))
+        Ok((damaged, journal, over_addons))
     })
     .await
     .map_err(|e| e.to_string())??;
-    let (damaged, journal) = damaged;
+    let (damaged, journal, over_addons) = damaged;
     let warning = damage_warning(&damaged, item.verified);
     if let Some(w) = &warning {
         crate::logging::error("install", &format!("{title}: {w}"));
@@ -5339,6 +5348,18 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .filter_map(|(rel, size)| Some((dest.join(&rel).strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/"), size)))
         .collect();
     let game = library::upsert_installed(app, installed_entry(&item, &title, &root, executable))?;
+    // Files the update wrote over an add-on's are the new build's: Undo must
+    // neither delete them nor put the old build's originals back over them.
+    // Said on every update, even of none of them, so Go back to the previous
+    // build only gives back what this update took (`addons::take_back`).
+    if addons.is_some() {
+        let _ = library::update(app, |games| {
+            if let Some(g) = games.iter_mut().find(|g| g.id == game.id) {
+                crate::addons::let_go(&mut g.addons, &over_addons);
+            }
+            Ok(())
+        });
+    }
     // Only now, with the library saying so, is the update done; until here a
     // crash leaves the journal at "applying" and the next start rolls it back.
     if let Some(mut j) = journal {
