@@ -102,6 +102,7 @@ pub struct Facts {
 /// `kryoto-desktop --safe-graphics`, or with `KRYOTO_SAFE_GRAPHICS=1`, and this
 /// start is Compatible. The saved choice is not changed.
 pub const SAFE_FLAG: &str = "--safe-graphics";
+pub const SAFE_VAR: &str = "KRYOTO_SAFE_GRAPHICS";
 
 /// The mode the environment asks for: the safe-graphics flag or variable,
 /// else `KRYOTO_GPU`. Pure, for the tests.
@@ -183,9 +184,35 @@ pub fn read_markers(never_drew: bool, renderer_crashed: bool, dmabuf_failed: boo
 }
 
 /// Set in the environment of a copy that the app started to replace itself
-/// (`watch_crashes`): its instance check waits for the old copy's port
-/// (system.rs), and it never restarts itself a second time.
+/// (`watch_crashes`, `restart_compatible`): its instance check waits for the
+/// old copy's port (system.rs), and it never restarts itself a second time.
 pub const RELAUNCHED: &str = "KRYOTO_RELAUNCHED";
+/// What `RELAUNCHED` is set to for a restart the player asked for (the tray's
+/// "Start in compatible graphics", or `--safe-graphics` given to a second
+/// start): the new copy shows its window.
+pub const ASKED: &str = "asked";
+
+/// What `RELAUNCHED` said when this copy started. Read once and taken out of
+/// the environment, so what this copy starts does not pass it on: a
+/// `kryoto://` link from a browser it opened started a copy that waited five
+/// seconds for a port that never freed.
+pub fn relaunched() -> Option<&'static str> {
+    static AT_START: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    AT_START.get_or_init(|| take_var(RELAUNCHED)).as_deref()
+}
+
+fn take_var(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok();
+    std::env::remove_var(name);
+    value
+}
+
+/// Whether this start stays in the tray. A copy the player asked for is one
+/// they want to see, even when the copy before it started to the tray at
+/// sign-in and passed `--tray` on.
+pub fn to_tray(args: &[String], relaunched: Option<&str>) -> bool {
+    args.iter().any(|a| a == "--tray") && relaunched != Some(ASKED)
+}
 
 /// Whether this start should leave the "did it draw?" marker. Only a start
 /// that shows its window can remove it: a copy that hands over to the one
@@ -314,6 +341,77 @@ pub fn modules_have_nvidia(modules: &str) -> bool {
     modules.lines().any(|l| l.split_whitespace().next() == Some("nvidia"))
 }
 
+// ---- What actually draws (report-A, KB-0377) ----------------------------
+//
+// The mode says what WebKit was asked for, not what it got. The AppImage's
+// WebKit can fail to load the system's GL (a rolling distribution, NVIDIA's
+// driver) and fall back to Mesa's software rasterizer without a word, so every
+// mode draws on the CPU and none of them helps. The shell asks WebGL, once at
+// start, which renderer it got (`display_rendered`).
+
+/// What drew the shell's first frame, by WebGL's word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Drawing {
+    /// A graphics driver.
+    Gpu,
+    /// Mesa's software rasterizer: the graphics driver is not in use.
+    Cpu,
+    /// WebGL did not start at all. Expected with compositing off (Compatible).
+    NoWebgl,
+    /// WebGL started but did not name its renderer.
+    Unknown,
+}
+
+/// From WebGL's `UNMASKED_RENDERER_WEBGL`: llvmpipe, softpipe and swrast are
+/// Mesa drawing on the CPU, and some drivers just say "Software Rasterizer".
+pub fn drawing_of(webgl: bool, renderer: Option<&str>) -> Drawing {
+    if !webgl {
+        return Drawing::NoWebgl;
+    }
+    let Some(name) = renderer.map(str::trim).filter(|r| !r.is_empty()) else { return Drawing::Unknown };
+    let name = name.to_ascii_lowercase();
+    if ["llvmpipe", "softpipe", "swrast", "software"].iter().any(|s| name.contains(s)) {
+        Drawing::Cpu
+    } else {
+        Drawing::Gpu
+    }
+}
+
+/// Every frame is drawn on the CPU: compositing is off (Compatible), or WebGL
+/// says its renderer is a software one.
+pub fn on_cpu(compositing_off: bool, drawing: Option<Drawing>) -> bool {
+    compositing_off || drawing == Some(Drawing::Cpu)
+}
+
+/// KB-0377: Automatic on NVIDIA keeps GPU compositing on, so WebKit needs the
+/// driver's GL. When WebGL could not get it (no WebGL, or Mesa's software
+/// renderer), that is the machine whose window stays black until something
+/// moves. Said in the log and in Settings; the mode itself is not changed,
+/// since two requestAnimationFrames fire even while the window shows black,
+/// and nothing here can tell a black window from one that drew. Not with
+/// compositing off (`compositing_off`, the person's own variable): then
+/// WebGL is not meant to start, and the window draws on the CPU as asked.
+pub fn may_stay_black(running: Mode, nvidia: bool, compositing_off: bool, drawing: Drawing) -> bool {
+    running == Mode::Auto && nvidia && !compositing_off && matches!(drawing, Drawing::Cpu | Drawing::NoWebgl)
+}
+
+/// Settings > Graphics > Still backgrounds: the player's choice, else on
+/// while drawing on the CPU, where every moving frame costs the processor.
+pub fn still_backgrounds(choice: Option<bool>, on_cpu: bool) -> bool {
+    choice.unwrap_or(on_cpu)
+}
+
+/// Still backgrounds for this run. Always off outside Linux: Windows has no
+/// graphics modes and draws its pages on the GPU.
+pub fn still_now(choice: Option<bool>) -> bool {
+    #[cfg(target_os = "linux")]
+    let on_cpu = linux::current().is_some_and(|s| s.on_cpu);
+    #[cfg(not(target_os = "linux"))]
+    let on_cpu = false;
+    cfg!(target_os = "linux") && still_backgrounds(choice, on_cpu)
+}
+
 // ---- The machine (Linux) ------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
@@ -326,12 +424,26 @@ pub struct DisplayState {
     pub healed: bool,
     /// The AppImage, with its own WebKit: it plays no video (ReleaseIntro.tsx, KB-0259).
     pub appimage: bool,
+    /// WebGL's renderer, once the shell has drawn and said (`display_rendered`).
+    pub renderer: Option<String>,
+    pub drawing: Option<Drawing>,
+    /// Every frame is drawn on the CPU (`on_cpu`): Still backgrounds is on by default.
+    pub on_cpu: bool,
+    /// Automatic on NVIDIA without the driver's GL (`may_stay_black`):
+    /// Settings points to Start in compatible graphics.
+    pub may_stay_black: bool,
+    /// The mode this run uses, and whether NVIDIA's driver is loaded.
+    #[serde(skip)]
+    pub running: Mode,
+    #[serde(skip)]
+    pub nvidia: bool,
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
 
     pub static STATE: OnceLock<DisplayState> = OnceLock::new();
@@ -606,7 +718,7 @@ mod linux {
         migrate();
         let saved = saved_mode();
         let args: Vec<String> = std::env::args().collect();
-        let safe_var = std::env::var("KRYOTO_SAFE_GRAPHICS").ok();
+        let safe_var = std::env::var(SAFE_VAR).ok();
         let safe = env_mode(&args, None, safe_var.clone()).is_some();
         let asked = env_mode(&args, std::env::var("KRYOTO_GPU").ok(), safe_var);
         let is_set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
@@ -652,7 +764,71 @@ mod linux {
             let _ = std::fs::write(f, "starting");
         }
         let mode = if p.healed { Mode::Compatible } else { saved };
-        let _ = STATE.set(DisplayState { mode, reason: p.reason, healed: p.healed, appimage: facts.appimage });
+        let _ = STATE.set(DisplayState {
+            mode,
+            reason: p.reason,
+            healed: p.healed,
+            appimage: facts.appimage,
+            renderer: None,
+            drawing: None,
+            on_cpu: false,
+            may_stay_black: false,
+            running: p.mode,
+            nvidia: facts.nvidia,
+        });
+    }
+
+    /// What WebGL said drew the first frame (`display_rendered`), once.
+    pub static RENDERER: OnceLock<(Drawing, Option<String>)> = OnceLock::new();
+
+    /// The shell was told to ask WebGL (`display_webgl_ask`).
+    pub static ASKED: AtomicBool = AtomicBool::new(false);
+
+    /// The shell was told to ask WebGL and never said what it got: its page
+    /// loaded again first, so its process ended, most likely as WebGL started.
+    pub fn unanswered() -> bool {
+        ASKED.load(Ordering::SeqCst) && RENDERER.get().is_none()
+    }
+
+    /// WebKit was told to draw every frame on the CPU (Compatible, or the
+    /// person's own variable).
+    pub fn compositing_off() -> bool {
+        std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some_and(|v| !v.is_empty() && v != "0")
+    }
+
+    /// This run's state, with what WebGL said once it has.
+    pub fn current() -> Option<DisplayState> {
+        let mut s = STATE.get().cloned()?;
+        if let Some((drawing, renderer)) = RENDERER.get() {
+            s.drawing = Some(*drawing);
+            s.renderer = renderer.clone();
+        }
+        s.on_cpu = on_cpu(compositing_off(), s.drawing);
+        s.may_stay_black = s.drawing.is_some_and(|d| may_stay_black(s.running, s.nvidia, compositing_off(), d));
+        Some(s)
+    }
+
+    /// The shell drew and asked WebGL what drew it. Logged beside the mode
+    /// line, so a report shows at once whether the driver was in use.
+    pub fn note_renderer(webgl: bool, renderer: Option<String>) {
+        let renderer = renderer.map(|r| r.trim().chars().take(200).collect::<String>()).filter(|r| !r.is_empty());
+        let drawing = drawing_of(webgl, renderer.as_deref());
+        if RENDERER.set((drawing, renderer.clone())).is_err() {
+            return;
+        }
+        let how = super::describe().unwrap_or_default();
+        let name = renderer.as_deref().unwrap_or("not named");
+        match drawing {
+            Drawing::Cpu => crate::logging::warn("display", &format!("drawing on the CPU: WebGL's renderer is {name}, so the graphics driver is not in use ({how})")),
+            Drawing::NoWebgl => crate::logging::info("display", &format!("WebGL did not start ({how})")),
+            Drawing::Gpu | Drawing::Unknown => crate::logging::info("display", &format!("WebGL's renderer: {name} ({how})")),
+        }
+        if current().is_some_and(|s| s.may_stay_black) {
+            crate::logging::warn(
+                "display",
+                "Automatic on NVIDIA without the driver's GL: if the window stays black until something moves (KB-0377), use the tray's Start in compatible graphics",
+            );
+        }
     }
 }
 
@@ -744,8 +920,8 @@ pub fn watch_crashes(view: &tauri::Webview) {
                 v.0 += 1;
                 *v
             });
-            let on_cpu = std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some_and(|v| !v.is_empty() && v != "0");
-            let relaunched = std::env::var_os(RELAUNCHED).is_some();
+            let on_cpu = linux::compositing_off();
+            let relaunched = relaunched().is_some();
             let step = crash_step(in_a_row, now.saturating_sub(last_reload), on_cpu, relaunched);
             crate::logging::error(
                 "display",
@@ -816,20 +992,56 @@ fn tell_it_cannot_draw(app: &tauri::AppHandle, wv: &webkit2gtk::WebView, quit: b
 #[cfg(not(target_os = "linux"))]
 pub fn watch_crashes(_view: &tauri::Webview) {}
 
-/// The shell drew its first frame: this start worked.
+/// Whether the shell asks WebGL what draws it: on Linux, once per run.
+/// Asking makes a WebGL context, which on a broken driver can end the page's
+/// process. The page loaded again after that is not asked a second time, or
+/// it would crash again soon after its reload and stay dead (`crash_step`).
 #[tauri::command]
-pub fn display_rendered() {
+pub fn display_webgl_ask() -> bool {
     #[cfg(target_os = "linux")]
-    if let Some(f) = linux::probe_file() {
-        let _ = std::fs::remove_file(f);
+    let ask = !linux::ASKED.swap(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(target_os = "linux"))]
+    let ask = false;
+    ask
+}
+
+/// The shell drew its first frame: this start worked. When it was told to
+/// ask (`display_webgl_ask`), it asked WebGL first and says what it got
+/// (`webgl`, `renderer`), so the marker stays until that answer is in
+/// (KB-0377) and what drew a start that worked is in the log. A shell that
+/// was not told to ask drew all the same, so the marker goes either way.
+#[tauri::command]
+pub fn display_rendered(app: tauri::AppHandle, webgl: Option<bool>, renderer: Option<String>) {
+    #[cfg(target_os = "linux")]
+    {
+        use tauri::Emitter;
+        let webgl = match webgl {
+            None if linux::unanswered() => {
+                crate::logging::warn("display", "the shell's page loaded again before WebGL said what draws it: its process likely ended as WebGL started");
+                Some(false)
+            }
+            webgl => webgl,
+        };
+        if let Some(webgl) = webgl {
+            linux::note_renderer(webgl, renderer);
+            let _ = app.emit_to("main", "display-state", ());
+            // The Store may have loaded before WebGL answered: a software
+            // renderer turns Still backgrounds on there too.
+            crate::store_still(&app, crate::settings::load(&app).still_backgrounds);
+        }
+        if let Some(f) = linux::probe_file() {
+            let _ = std::fs::remove_file(f);
+        }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (app, webgl, renderer);
 }
 
 /// What Settings shows: the saved mode and what this run uses. None off Linux.
 #[cfg(target_os = "linux")]
 #[tauri::command]
 pub fn display_state() -> Option<DisplayState> {
-    linux::STATE.get().cloned().map(|mut s| {
+    linux::current().map(|mut s| {
         s.mode = linux::saved_mode();
         s
     })
@@ -874,6 +1086,27 @@ pub fn restart_compatible<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         return;
     }
     crate::logging::info("display", "Start in compatible graphics, from the tray: restarting with hardware rendering off");
+    // The new copy waits for this one's port instead of handing over to it
+    // as it quits, which left no Kryoto running at all.
+    std::env::set_var(RELAUNCHED, ASKED);
+    app.restart();
+}
+
+/// `--safe-graphics` (or `KRYOTO_SAFE_GRAPHICS`) given to a start while this
+/// copy runs (system.rs `serve_instance`): it only brought back the same
+/// black window. This copy starts again in Compatible, for that start only as
+/// the flag says, and shows its window. Already drawing on the CPU, it only
+/// comes to the front.
+#[cfg(target_os = "linux")]
+pub fn restart_safe<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let on_cpu = std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some_and(|v| !v.is_empty() && v != "0");
+    if on_cpu {
+        crate::system::show_main(app);
+        return;
+    }
+    crate::logging::info("display", "started again with --safe-graphics: restarting with hardware rendering off for that start");
+    std::env::set_var(SAFE_VAR, "1");
+    std::env::set_var(RELAUNCHED, ASKED);
     app.restart();
 }
 
@@ -900,6 +1133,27 @@ mod tests {
         let p = plan(Mode::Auto, env_mode(&args(&["x", SAFE_FLAG]), None, None).as_deref(), none, Facts { nvidia: true, render_node: true, ..Facts::default() });
         assert_eq!(p.mode, Mode::Compatible);
         assert_eq!(vars(&p), ["WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE"]);
+    }
+
+    /// A copy started to the tray at sign-in passes `--tray` on when the
+    /// tray restarts it in Compatible: that one is asked for, so it shows.
+    #[test]
+    fn starting_compatible_from_the_tray_shows_the_window() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(to_tray(&args(&["kryoto-desktop", "--tray"]), None));
+        assert!(to_tray(&args(&["kryoto-desktop", "--tray"]), Some("display")));
+        assert!(!to_tray(&args(&["kryoto-desktop", "--tray"]), Some(ASKED)));
+        assert!(!to_tray(&args(&["kryoto-desktop"]), None));
+    }
+
+    /// The mark a restarted copy reads is taken out of its environment, so a
+    /// browser or game it opens does not pass it on to a later start.
+    #[test]
+    fn the_restart_mark_is_not_passed_on() {
+        std::env::set_var("KRYOTO_TEST_TAKE_VAR", ASKED);
+        assert_eq!(take_var("KRYOTO_TEST_TAKE_VAR").as_deref(), Some(ASKED));
+        assert!(std::env::var_os("KRYOTO_TEST_TAKE_VAR").is_none());
+        assert_eq!(take_var("KRYOTO_TEST_TAKE_VAR"), None);
     }
 
     #[test]
@@ -1057,6 +1311,59 @@ mod tests {
         assert!(c.contains("<include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>"));
         assert!(c.contains("<dir>/tmp/.mount_x/usr/share/kryoto/fonts</dir>"));
         assert!(c.contains("<glob>/usr/share/fonts/a&amp;b/Noto-COLRv1.ttf</glob>"));
+    }
+
+    /// report-A: the AppImage's WebKit on Mesa's software rasterizer looked
+    /// like a slow GPU, and no mode in Settings changed it.
+    #[test]
+    fn webgl_names_a_software_renderer() {
+        assert_eq!(drawing_of(true, Some("llvmpipe (LLVM 19.1.7, 256 bits)")), Drawing::Cpu);
+        assert_eq!(drawing_of(true, Some("softpipe")), Drawing::Cpu);
+        assert_eq!(drawing_of(true, Some("Mesa DRI swrast")), Drawing::Cpu);
+        assert_eq!(drawing_of(true, Some("Software Rasterizer")), Drawing::Cpu);
+        assert_eq!(drawing_of(true, Some("NVIDIA GeForce RTX 3070/PCIe/SSE2")), Drawing::Gpu);
+        assert_eq!(drawing_of(true, Some("AMD Radeon RX 7800 XT (radeonsi, navi32, LLVM 19.1.7, DRM 3.59)")), Drawing::Gpu);
+        // Not named, or no WebGL at all: nothing is claimed about the driver.
+        assert_eq!(drawing_of(true, Some("  ")), Drawing::Unknown);
+        assert_eq!(drawing_of(true, None), Drawing::Unknown);
+        assert_eq!(drawing_of(false, Some("llvmpipe")), Drawing::NoWebgl);
+    }
+
+    #[test]
+    fn compatible_or_a_software_renderer_is_the_cpu() {
+        assert!(on_cpu(true, None));
+        assert!(on_cpu(false, Some(Drawing::Cpu)));
+        assert!(!on_cpu(false, Some(Drawing::Gpu)));
+        assert!(!on_cpu(false, Some(Drawing::NoWebgl)));
+        assert!(!on_cpu(false, None));
+    }
+
+    /// KB-0377: only Automatic on NVIDIA leans on the driver's GL with no
+    /// way out of its own; Compatible and Full were picked, or healed to.
+    #[test]
+    fn automatic_on_nvidia_without_the_drivers_gl_may_stay_black() {
+        assert!(may_stay_black(Mode::Auto, true, false, Drawing::NoWebgl));
+        assert!(may_stay_black(Mode::Auto, true, false, Drawing::Cpu));
+        assert!(!may_stay_black(Mode::Auto, true, false, Drawing::Gpu));
+        assert!(!may_stay_black(Mode::Auto, true, false, Drawing::Unknown));
+        assert!(!may_stay_black(Mode::Auto, false, false, Drawing::NoWebgl));
+        assert!(!may_stay_black(Mode::Compatible, true, true, Drawing::NoWebgl));
+        assert!(!may_stay_black(Mode::Full, true, false, Drawing::Cpu));
+        // The person's own WEBKIT_DISABLE_COMPOSITING_MODE on Automatic: no
+        // WebGL is what they asked for, not a driver that failed.
+        assert!(!may_stay_black(Mode::Auto, true, true, Drawing::NoWebgl));
+    }
+
+    /// report-A: on by itself where the CPU draws every frame; the player's
+    /// choice wins either way.
+    #[test]
+    fn still_backgrounds_follow_the_cpu_until_picked() {
+        assert!(still_backgrounds(None, true));
+        assert!(!still_backgrounds(None, false));
+        assert!(!still_backgrounds(Some(false), true));
+        assert!(still_backgrounds(Some(true), false));
+        #[cfg(not(target_os = "linux"))]
+        assert!(!still_now(Some(true)), "Windows keeps its backgrounds");
     }
 
     #[test]

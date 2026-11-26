@@ -698,6 +698,124 @@ try {
       assert.equal(await linux.getByText('On Linux', { exact: true }).count(), 0)
     } finally { await context.close() }
   })
+  await check('Settings > Graphics says when the Linux build draws on the CPU, and only there', async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15' })
+    await context.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    const graphics = async (page, query) => {
+      page.on('pageerror', e => failures.push(e.message))
+      await page.goto(`${base}${query}`)
+      await page.getByRole('complementary', { name: 'Your games' }).waitFor()
+      await page.getByRole('button', { name: 'Account menu' }).click()
+      await page.getByRole('menuitem', { name: /Settings/ }).click()
+      await page.getByRole('button', { name: 'General', exact: true }).click()
+      await page.getByText('Built-in browser', { exact: true }).waitFor()
+    }
+    try {
+      const software = await context.newPage()
+      await graphics(software, '?software')
+      await software.getByText("Drawing on the CPU: the graphics driver is not in use. WebGL's renderer is llvmpipe (LLVM 19.1.7, 256 bits).", { exact: true }).waitFor()
+      const gpu = await context.newPage()
+      await graphics(gpu, '')
+      await gpu.getByText('Graphics', { exact: true }).waitFor()
+      await gpu.getByText(/^Now: Automatic/).waitFor()
+      assert.equal(await gpu.getByText(/Drawing on the CPU/).count(), 0)
+    } finally { await context.close() }
+    // Windows has no graphics modes, so no section.
+    const winContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0' })
+    await winContext.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    const windows = await winContext.newPage()
+    try {
+      await graphics(windows, '?software')
+      await windows.waitForTimeout(300)
+      assert.equal(await windows.getByText(/^Now: /).count(), 0)
+      assert.equal(await windows.getByText(/Drawing on the CPU/).count(), 0)
+    } finally { await winContext.close() }
+  })
+  await check('Still backgrounds is on by itself while Linux draws on the CPU, and holds the welcome wall still', async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15' })
+    await context.addInitScript(() => {
+      performance.setResourceTimingBufferSize(4000)
+      localStorage.setItem('kryo:runtimes-ask', 'never')
+      localStorage.setItem('kryoto.wall', JSON.stringify(Array.from({ length: 12 }, (_, i) => `/brand/wall-web.jpg?${i}`)))
+    })
+    // The welcome screen's wall, drawn on its own: its last column's drift.
+    const wall = page => page.evaluate(async () => {
+      const loaded = n => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(n))
+      // Vite serves React as CommonJS wrapped in a default export.
+      const react = await import(loaded('/deps/react.js'))
+      const dom = await import(loaded('/deps/react-dom_client.js'))
+      const createElement = react.createElement ?? react.default.createElement
+      const createRoot = dom.createRoot ?? dom.default.createRoot
+      const { CoverWall } = await import(loaded('/src/ui/CoverWall.tsx'))
+      const host = document.body.appendChild(document.createElement('div'))
+      host.id = 'wall-check'
+      createRoot(host).render(createElement(CoverWall))
+    })
+    const drift = page => page.waitForFunction(() => {
+      const track = document.querySelector('#wall-check .kryo-wall-track')
+      return track && getComputedStyle(track).animationName
+    }).then(h => h.jsonValue())
+    const settings = async page => {
+      page.on('pageerror', e => failures.push(e.message))
+      await page.getByRole('complementary', { name: 'Your games' }).waitFor()
+      await page.getByRole('button', { name: 'Account menu' }).click()
+      await page.getByRole('menuitem', { name: /Settings/ }).click()
+      await page.getByRole('button', { name: 'General', exact: true }).click()
+      return page.getByRole('checkbox', { name: 'Still backgrounds' })
+    }
+    try {
+      const software = await context.newPage()
+      await software.goto(`${base}?software`)
+      const still = await settings(software)
+      await still.waitFor()
+      assert.equal(await still.isChecked(), true)
+      await wall(software)
+      // Held still by the reduced-motion rule, not hidden.
+      await software.waitForFunction(() => getComputedStyle(document.querySelector('#wall-check .kryo-wall-track') ?? document.body).animationName === 'none')
+      assert.equal(await software.locator('#wall-check .kryo-wall').evaluate(el => getComputedStyle(el).opacity), '0.45')
+      // The player's choice wins: off, and the wall moves again.
+      await still.click()
+      await software.waitForFunction(async () => (await (await import('/src/lib/bridge.ts')).call('settings_get')).stillBackgrounds === false)
+      await software.waitForFunction(() => getComputedStyle(document.querySelector('#wall-check .kryo-wall-track')).animationName === 'kryo-wall-drift')
+      assert.equal(await still.isChecked(), false)
+      await software.close()
+      // A graphics driver in use: off until picked.
+      const gpu = await context.newPage()
+      await gpu.goto(base)
+      const moving = await settings(gpu)
+      await moving.waitFor()
+      assert.equal(await moving.isChecked(), false)
+      await wall(gpu)
+      assert.equal(await drift(gpu), 'kryo-wall-drift')
+    } finally { await context.close() }
+  })
+  await check('Settings > Graphics points to compatible graphics when Automatic on NVIDIA gets no driver for WebGL', async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15' })
+    await context.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    const hint = async (query) => {
+      const page = await context.newPage()
+      page.on('pageerror', e => failures.push(e.message))
+      await page.goto(`${base}${query}`)
+      await page.getByRole('complementary', { name: 'Your games' }).waitFor()
+      await page.getByRole('button', { name: 'Account menu' }).click()
+      await page.getByRole('menuitem', { name: /Settings/ }).click()
+      await page.getByRole('button', { name: 'General', exact: true }).click()
+      await page.getByText(/^Now: Automatic/).waitFor()
+      return page.locator('p', { hasText: 'Window black or flickering?' })
+    }
+    try {
+      for (const query of ['?nowebgl', '?software']) {
+        const said = await hint(query)
+        assert.match(await said.textContent(), /^WebGL could not use the NVIDIA driver, so the window may stay black until something moves\. Window black/)
+        assert.match(await said.getAttribute('class'), /text-foreground/)
+      }
+      // The driver drew: the way out stays, quietly.
+      const quiet = await hint('')
+      assert.equal(await quiet.count(), 1)
+      assert.doesNotMatch(await quiet.textContent(), /WebGL could not/)
+      assert.match(await quiet.getAttribute('class'), /text-muted-foreground/)
+    } finally { await context.close() }
+  })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')
 } finally { await browser.close() }

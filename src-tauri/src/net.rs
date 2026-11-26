@@ -204,9 +204,11 @@ pub fn ech_for(url: &str) -> Option<std::sync::Arc<rustls::ClientConfig>> {
 }
 
 /// Which of our names publish kryo.to's key: `Some(true)` it does, `Some(false)`
-/// it does not (or a different one), `None` being looked up. A name not looked
-/// up yet starts its lookup and goes plain this once; `ech_generation` moves on
-/// when it turns out to have the key, so long-lived clients are built again.
+/// it does not (or one for another front), `None` being looked up. A name not
+/// looked up yet starts its lookup and goes plain this once; `ech_generation`
+/// moves on when it turns out to have the key, so long-lived clients are built
+/// again. A lookup no resolver answered is not "no key": it stays `None` for
+/// `ECH_RETRY`, then the next use asks again.
 static KEYED: Mutex<Option<HashMap<String, Option<bool>>>> = Mutex::new(None);
 
 fn host_has_key(host: &str) -> bool {
@@ -218,11 +220,13 @@ fn host_has_key(host: &str) -> bool {
             map.insert(host.to_string(), None);
             let host = host.to_string();
             tauri::async_runtime::spawn(async move {
-                let same = match (ech_keys(&host).await, ech_list()) {
-                    (Some(theirs), Some(ours)) => theirs == ours,
-                    _ => false,
-                };
-                note_key(&host, same);
+                match ech_keys(&host).await {
+                    Some(theirs) => note_key(&host, theirs.is_some_and(|theirs| ech_list().is_some_and(|ours| same_front(&theirs, &ours)))),
+                    None => {
+                        tokio::time::sleep(ECH_RETRY).await;
+                        forget_key(&host);
+                    }
+                }
             });
             false
         }
@@ -236,6 +240,44 @@ fn note_key(host: &str, same: bool) {
     if same {
         ECH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// A name whose lookup got no answer: looked up again on its next use. An
+/// answer that came in meanwhile stays.
+fn forget_key(host: &str) {
+    if let Ok(mut keyed) = KEYED.lock() {
+        if let Some(map) = keyed.as_mut() {
+            if map.get(host) == Some(&None) {
+                map.remove(host);
+            }
+        }
+    }
+}
+
+/// The name a key list is for: its first config's `public_name`. Cloudflare's
+/// is `cloudflare-ech.com` for every site behind it, whatever the key bytes.
+fn ech_front(list: &[u8]) -> Option<&[u8]> {
+    let config = list.get(2..)?;
+    if config.get(..2)? != [0xfe, 0x0d] {
+        return None;
+    }
+    let len16 = |at: usize| Some(u16::from_be_bytes([*config.get(at)?, *config.get(at + 1)?]) as usize);
+    // Version, length, config_id and kem_id; then the key and the suites.
+    let mut at = 7;
+    at += 2 + len16(at)?;
+    at += 2 + len16(at)?;
+    // maximum_name_length, then the name.
+    at += 1;
+    let name = *config.get(at)? as usize;
+    config.get(at + 1..at + 1 + name)
+}
+
+/// Whether a name's key list is kryo.to's: the same front, not the same bytes.
+/// Cloudflare turns its keys over and each name's record is cached on its own,
+/// so for a while after, two of its names can carry different keys. Telling
+/// dl.kryo.to apart then left its downloads plain for half an hour (KB-0347).
+fn same_front(theirs: &[u8], ours: &[u8]) -> bool {
+    theirs == ours || ech_front(theirs).is_some_and(|name| Some(name) == ech_front(ours))
 }
 
 /// What is known about Encrypted Client Hello on this network.
@@ -301,6 +343,10 @@ pub async fn check_ech() {
         };
         let was_on = matches!(*state, Ech::Works(..));
         let was_known = !matches!(*state, Ech::Unknown);
+        let was_list = match &*state {
+            Ech::Works(_, list, _) => Some(list.clone()),
+            _ => None,
+        };
         *state = match result {
             Ok((config, list)) => {
                 if !was_on {
@@ -319,22 +365,28 @@ pub async fn check_ech() {
                 Ech::Off(Instant::now())
             }
         };
-        let works = matches!(*state, Ech::Works(..));
-        if was_on != works || !was_known {
+        let list = match &*state {
+            Ech::Works(_, list, _) => Some(list),
+            _ => None,
+        };
+        // On, off, or a new key: a client built before is built again.
+        if was_list.as_ref() != list || !was_known {
             ECH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        works
+        list.is_some()
     };
     // The download host before any download needs it: looked up on first use,
     // its first connection would go out plain and be cut on such a network.
+    // With no answer, that first use asks again.
     if works {
-        let same = ech_keys("dl.kryo.to").await.is_some_and(|theirs| Some(theirs) == ech_list());
-        note_key("dl.kryo.to", same);
+        if let Some(theirs) = ech_keys("dl.kryo.to").await {
+            note_key("dl.kryo.to", theirs.is_some_and(|theirs| ech_list().is_some_and(|ours| same_front(&theirs, &ours))));
+        }
     }
 }
 
 async fn try_ech() -> Result<(std::sync::Arc<rustls::ClientConfig>, Vec<u8>), String> {
-    let list = ech_keys("kryo.to").await.ok_or("no key in kryo.to's DNS (or no secure resolver answered)")?;
+    let list = ech_keys("kryo.to").await.flatten().ok_or("no key in kryo.to's DNS (or no secure resolver answered)")?;
     let config = std::sync::Arc::new(ech_client_config(&list)?);
     let client = builder()
         .use_preconfigured_tls((*config).clone())
@@ -362,17 +414,33 @@ fn ech_in(body: &str) -> Option<Vec<u8>> {
     })
 }
 
-async fn ech_keys(host: &str) -> Option<Vec<u8>> {
+/// What a DNS-over-HTTPS JSON answer says of a name's key: `Some(Some(list))`
+/// its key list, `Some(None)` the name was looked up and has none, `None`
+/// nothing to go by (not an answer, or the resolver failed).
+fn key_in(body: &str) -> Option<Option<Vec<u8>>> {
+    if let Some(list) = ech_in(body) {
+        return Some(Some(list));
+    }
+    let json = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    // NOERROR or NXDOMAIN.
+    matches!(json["Status"].as_u64(), Some(0 | 3)).then_some(None)
+}
+
+/// A name's key list, as `key_in` says; `None` when no resolver answered.
+async fn ech_keys(host: &str) -> Option<Option<Vec<u8>>> {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(6)).build().ok()?;
+    let mut answered = false;
     for base in ["https://1.1.1.1/dns-query", "https://8.8.8.8/resolve"] {
         let res = client.get(base).query(&[("name", host), ("type", "HTTPS")]).header("accept", "application/dns-json").send().await;
         if let Ok(res) = res {
-            if let Some(list) = ech_in(&res.text().await.unwrap_or_default()) {
-                return Some(list);
+            match key_in(&res.text().await.unwrap_or_default()) {
+                Some(Some(list)) => return Some(Some(list)),
+                Some(None) => answered = true,
+                None => {}
             }
         }
     }
-    None
+    answered.then_some(None)
 }
 
 /// Both root sets, as reqwest loads them for every other client (Cargo.toml).
@@ -584,6 +652,50 @@ mod tests {
         assert!(ech_client_config(&list).is_ok());
         assert!(ech_in(r#"{"Answer":[{"type":65,"data":"1 . alpn=h2"}]}"#).is_none());
         assert!(ech_in("not json").is_none());
+    }
+
+    /// A key Cloudflare has turned over, as one name's cached record still
+    /// carries it: the same front, so kryo.to's key. Only a key for another
+    /// front is not.
+    #[test]
+    fn a_turned_over_key_is_still_kryotos() {
+        let body = r#"{"Answer":[{"type":65,"data":"1 . ech=AEX+DQBBpQAgACAuwMQtM1v9kQJyUlfYP1aqdSNI2MqKHEv0m5sJCYAFJQAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="}]}"#;
+        let ours = ech_in(body).unwrap();
+        assert_eq!(ech_front(&ours), Some(&b"cloudflare-ech.com"[..]));
+        let mut turned = ours.clone();
+        turned[20] ^= 0xff;
+        assert!(same_front(&turned, &ours));
+        let mut other = ours.clone();
+        let at = ours.len() - 2 - 18;
+        other.splice(at..at + 18, b"another-front.test".iter().copied());
+        assert_eq!(ech_front(&other), Some(&b"another-front.test"[..]));
+        assert!(!same_front(&other, &ours));
+        assert!(ech_front(b"not a key list").is_none());
+        assert!(!same_front(b"not a key list", &ours));
+    }
+
+    /// chat.kryo.to publishes no key: a resolver's answer says so, and that
+    /// is kept. A lookup nobody answered says nothing, and is forgotten so the
+    /// name's next use asks again.
+    #[test]
+    fn no_answer_is_not_no_key() {
+        let with_key = r#"{"Status":0,"Answer":[{"type":65,"data":"1 . ech=AEX+DQBBpQAgACAuwMQtM1v9kQJyUlfYP1aqdSNI2MqKHEv0m5sJCYAFJQAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="}]}"#;
+        assert_eq!(key_in(with_key), Some(ech_in(with_key)));
+        assert_eq!(key_in(r#"{"Status":0,"Answer":[{"type":65,"data":"1 . alpn=h2"}]}"#), Some(None));
+        assert_eq!(key_in(r#"{"Status":0}"#), Some(None));
+        assert_eq!(key_in(r#"{"Status":3}"#), Some(None));
+        assert_eq!(key_in(r#"{"Status":2}"#), None);
+        assert_eq!(key_in("not json"), None);
+        assert_eq!(key_in(""), None);
+
+        KEYED.lock().unwrap().get_or_insert_with(HashMap::new).insert("unanswered.test".into(), None);
+        note_key("answered.test", false);
+        forget_key("unanswered.test");
+        forget_key("answered.test");
+        let keyed = KEYED.lock().unwrap();
+        let map = keyed.as_ref().unwrap();
+        assert_eq!(map.get("unanswered.test"), None);
+        assert_eq!(map.get("answered.test"), Some(&Some(false)));
     }
 
     /// Only Kryoto's own HTTPS addresses get the encrypted name.

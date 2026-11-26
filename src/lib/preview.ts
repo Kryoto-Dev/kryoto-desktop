@@ -27,6 +27,8 @@ export const previewBus = {
   },
 }
 
+let displayMode = 'auto'
+
 const TEXT_SIZE_STEPS = [90, 100, 110, 125, 150]
 let textSize = 100
 const setTextSize = (p: number) => {
@@ -176,6 +178,7 @@ const settings: Record<string, unknown> = {
   linuxMangohud: false,
   linuxGamemode: false,
   linuxFsr: false,
+  stillBackgrounds: null,
   gameLanguage: '',
   cloudSaves: true,
   cloudSavesOnExit: true,
@@ -925,6 +928,33 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     return clone(g)
   },
   settings_save: (a) => ({ ...Object.assign(settings, a.settings) }),
+  // Settings > Graphics (display_env.rs): only a Linux browser has it, as only
+  // the Linux build does. `?software` is a machine whose WebGL got Mesa's
+  // software renderer instead of the graphics driver (report-A), `?nowebgl`
+  // one where WebGL did not start at all (KB-0377). Both run Automatic on
+  // NVIDIA, so the window may stay black.
+  display_state: () => {
+    if (!/Linux/i.test(navigator.userAgent)) return null
+    const software = location.search.includes('software')
+    const noWebgl = location.search.includes('nowebgl')
+    return {
+      mode: displayMode,
+      reason: 'Automatic: NVIDIA driver, DMA-BUF rendering off',
+      healed: false,
+      appimage: true,
+      renderer: software ? 'llvmpipe (LLVM 19.1.7, 256 bits)' : noWebgl ? null : 'NVIDIA GeForce RTX 3070/PCIe/SSE2',
+      drawing: software ? 'cpu' : noWebgl ? 'noWebgl' : 'gpu',
+      onCpu: software,
+      mayStayBlack: software || noWebgl,
+    }
+  },
+  display_set_mode: (a) => {
+    displayMode = String(a.mode)
+    return null
+  },
+  display_rendered: () => null,
+  // Only the Linux build asks WebGL what draws it.
+  display_webgl_ask: () => false,
   // The app zooms every view (text_size.rs); here only the choice is kept.
   text_size_get: () => textSize,
   text_size_set: (a) => setTextSize(Number(a.percent)),

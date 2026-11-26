@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { call } from '@/lib/bridge'
+import { call, on } from '@/lib/bridge'
 import { clearCatalogEndpointCache } from '@/lib/endpoint'
 
 export type Palette = 'monochrome' | 'oled' | 'amber' | 'emerald' | 'nord' | 'sepia' | 'blossom'
@@ -69,6 +69,11 @@ export type Settings = {
   linuxGamemode: boolean
   /** Linux: Proton-GE's FSR upscaling at lower fullscreen resolutions. */
   linuxFsr: boolean
+  /**
+   * Linux: the welcome screen's wall and the Store's animations hold still.
+   * Null until the player picks: then on while drawing on the CPU (`stillBackgrounds`).
+   */
+  stillBackgrounds?: boolean | null
   /** The name in games: your K// username, `playerName`, or each build's own. */
   playerNameMode: PlayerNameMode
   playerName: string
@@ -274,13 +279,80 @@ function publish(s: Settings) {
 
 /** How the Linux build draws its window (src-tauri/src/display_env.rs). */
 export type DisplayMode = 'auto' | 'compatible' | 'full'
-export type DisplayState = { mode: DisplayMode; reason: string; healed: boolean; appimage?: boolean }
+/** What drew the first frame, by WebGL's word (display_env.rs `drawing_of`). */
+export type Drawing = 'gpu' | 'cpu' | 'noWebgl' | 'unknown'
+export type DisplayState = {
+  mode: DisplayMode
+  reason: string
+  healed: boolean
+  appimage?: boolean
+  /** WebGL's renderer, once the shell has drawn and said. */
+  renderer?: string | null
+  drawing?: Drawing | null
+  /** Every frame is drawn on the CPU: Compatible, or a software renderer. */
+  onCpu?: boolean
+  /** Automatic on NVIDIA, and WebGL did not get the driver (KB-0377): the window may stay black. */
+  mayStayBlack?: boolean
+}
+
+/**
+ * Which renderer WebGL got: Mesa's software one (llvmpipe) means the graphics
+ * driver is not in use, whatever the mode says (report-A). Asked once, on a
+ * throwaway canvas that is let go of at once.
+ */
+export function webglRenderer(): { webgl: boolean; renderer: string | null } {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl')
+    if (!gl) return { webgl: false, renderer: null }
+    const info = gl.getExtension('WEBGL_debug_renderer_info')
+    const renderer = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : null
+    gl.getExtension('WEBGL_lose_context')?.loseContext()
+    return { webgl: true, renderer: typeof renderer === 'string' ? renderer : null }
+  } catch {
+    return { webgl: false, renderer: null }
+  }
+}
 
 export const displayApi = {
   /** Null outside the Linux build. */
   state: () => call<DisplayState | null>('display_state'),
   /** Takes effect on the next start. */
   setMode: (mode: DisplayMode) => call<void>('display_set_mode', { mode }),
+}
+
+/**
+ * Still backgrounds (Linux): the player's choice, else on while every frame is
+ * drawn on the CPU, where a moving wall costs the processor (display_env.rs
+ * `still_backgrounds`). Always off outside Linux, where there is no display state.
+ */
+export function stillBackgrounds(s: Pick<Settings, 'stillBackgrounds'> | null, state: DisplayState | null): boolean {
+  if (!state) return false
+  return s?.stillBackgrounds ?? state.onCpu ?? false
+}
+
+/** The Linux build's display state, read again once the shell says what drew it (`display-state`). Null elsewhere. */
+export function useDisplayState(): DisplayState | null {
+  const [state, setState] = useState<DisplayState | null>(null)
+  useEffect(() => {
+    let live = true
+    const read = () =>
+      void displayApi
+        .state()
+        .then((s) => live && setState(s))
+        .catch(() => {})
+    read()
+    const off = on('display-state', read)
+    return () => {
+      live = false
+      void off.then((f) => f())
+    }
+  }, [])
+  return state
+}
+
+/** Whether moving backgrounds hold still here (`stillBackgrounds`). */
+export function useStillBackgrounds(): boolean {
+  return stillBackgrounds(useSettings(), useDisplayState())
 }
 
 /** Where saves or achievements are kept: kryo.to, this PC, or your own server. */

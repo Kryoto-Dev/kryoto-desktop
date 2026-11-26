@@ -1163,6 +1163,8 @@ fn enqueue_item<R: Runtime>(
 /// default folder). Each takes its place like any download and gets its link
 /// at its turn. One already on its way is left as it is. How many were queued.
 pub fn enqueue_collection<R: Runtime>(app: &AppHandle<R>, games: &[crate::collections::Game], library_dir: Option<String>) -> Result<usize, String> {
+    // A version kryo.to no longer allows (required.rs) starts nothing new.
+    crate::required::refuse()?;
     let state = app.state::<Downloads>();
     let mut added: Vec<String> = Vec::new();
     {
@@ -1323,6 +1325,9 @@ pub fn asks_for_folder(settings: &crate::settings::Settings, installed: bool) ->
 // `async`: off the window's thread, as it saves the settings and the queue.
 #[tauri::command(async)]
 pub fn download_pick_folder(app: AppHandle, id: String, folder: String, always_default: bool) -> Result<(), String> {
+    // The answer starts the download: not on a version kryo.to no longer
+    // allows (required.rs). The question stays for after the update.
+    crate::required::refuse()?;
     let mut settings = crate::settings::load(&app);
     let folders = crate::settings::all_folders(&settings);
     let folder = folders.iter().find(|f| crate::settings::same_path(f, &folder)).cloned().ok_or("That is not one of your library folders.")?;
@@ -3747,6 +3752,9 @@ fn waiting_order<R: Runtime>(app: &AppHandle<R>, active: Option<&str>) -> Vec<St
 
 /// Mark a stopped download queued again and start its task.
 fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    // Resume, Retry and Move to now, from here, the phone or Remote: a
+    // version kryo.to no longer allows (required.rs) carries nothing on.
+    crate::required::refuse()?;
     if let Some(flag) = app.state::<Downloads>().controls.lock().map_err(|_| "Download controls are unavailable.")?.get(id) {
         return if flag.load(Ordering::SeqCst) == 0 { Ok(()) } else { Err("Wait for the download to stop, then try again.".into()) };
     }
@@ -6162,10 +6170,16 @@ pub fn download_pause(app: AppHandle, state: State<'_, Downloads>, id: String) {
         stop_resolving(&app, &id);
         // A waiting one stops at once instead of at its next check.
         state.turn.notify_waiters();
-    } else if edit(&app, &id, |_| {}).is_some_and(|d| matches!(d.status, Status::Queued | Status::Resolving | Status::Downloading)) {
+    } else if edit(&app, &id, |_| {}).is_some_and(|d| pauses_without_worker(d.status)) {
         // Nothing running behind the row, so nothing would ever say it stopped.
         set_status(&app, &id, Status::Paused, None);
     }
+}
+
+/// Pause on a row with nothing running behind it marks it Paused only if it
+/// was on its way. One that is unpacking, failed or finished keeps its status.
+fn pauses_without_worker(status: Status) -> bool {
+    matches!(status, Status::Queued | Status::Resolving | Status::Downloading)
 }
 
 /// A download stopped while its mirror's page was open: close the page.
@@ -6185,6 +6199,8 @@ pub fn download_resume(app: AppHandle, id: String) -> Result<(), String> {
 /// or replaced archive is what the check is there to catch.
 #[tauri::command]
 pub fn download_install_anyway(app: AppHandle, id: String) -> Result<(), String> {
+    // Before the row is marked as checked: refused, it still asks once updated.
+    crate::required::refuse()?;
     let d = edit(&app, &id, |_| {}).ok_or("That download is gone.")?;
     if d.status != Status::Failed || !d.hash_mismatch || !Path::new(&d.archive_path).is_file() {
         return Err("There is no unchecked archive to install. Retry to download it again.".into());
@@ -6305,6 +6321,19 @@ pub fn download_remove(app: AppHandle, state: State<'_, Downloads>, id: String) 
 mod tests {
     use super::*;
 
+    /// Pause from the phone or kryo.to goes through `download_pause` too: a
+    /// row merging an update stays Extracting, so Play still waits for it,
+    /// and a failed one keeps Install anyway.
+    #[test]
+    fn pause_without_a_worker_only_stops_a_row_on_its_way() {
+        for status in [Status::Queued, Status::Resolving, Status::Downloading] {
+            assert!(pauses_without_worker(status), "{status:?}");
+        }
+        for status in [Status::Extracting, Status::Verifying, Status::Failed, Status::Canceled, Status::Paused, Status::Installed] {
+            assert!(!pauses_without_worker(status), "{status:?}");
+        }
+    }
+
     #[test]
     fn asks_where_only_with_two_folders_and_a_new_game() {
         let mut s = crate::settings::Settings { library_dir: "C:/Games".into(), ..Default::default() };
@@ -6317,6 +6346,22 @@ mod tests {
         s.library_folders = vec!["D:/Games".into()];
         s.ask_install_folder = false;
         assert!(!asks_for_folder(&s, false), "always the default");
+    }
+
+    /// A version kryo.to no longer allows (required.rs) starts no download,
+    /// whoever asks: the phone and Remote too.
+    #[test]
+    fn a_blocked_version_starts_no_download() {
+        let src = include_str!("downloads.rs");
+        for (item, then) in [
+            ("pub fn enqueue_collection<", "list.insert("),
+            // Resume, Retry, Move to now, a sign-in's retry.
+            ("fn requeue<", "edit(app, id"),
+            ("pub fn download_install_anyway(", "d.hash_mismatch = false"),
+            ("pub fn download_pick_folder(", "edit(&app, &id"),
+        ] {
+            assert!(crate::required::refuses_before(src, item, then), "{item} must refuse first");
+        }
     }
 
     /// A failed row from last week still says the build kryo.to served then.

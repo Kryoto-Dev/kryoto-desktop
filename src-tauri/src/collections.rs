@@ -203,6 +203,9 @@ pub fn collections_state(app: AppHandle) -> Result<State, String> {
 /// account had no tie to is followed, so its new games are heard about.
 #[tauri::command(async)]
 pub fn collection_install(app: AppHandle, id: String, slugs: Vec<String>, folder: Option<String>) -> Result<usize, String> {
+    // A version kryo.to no longer allows (required.rs): refused before the
+    // collection is marked installed or followed, not only at the queue.
+    crate::required::refuse()?;
     let settings = crate::settings::load(&app);
     let library_dir = match folder {
         Some(f) => {
@@ -283,6 +286,7 @@ pub fn store_install_collection(app: AppHandle, webview: Webview, collection: Co
 /// Sent from a phone or kryo.to: everything missing, into the default folder
 /// (nobody may be at this PC). What it holds came with the command.
 pub fn install_all(app: &AppHandle, collection: Collection) -> Result<usize, String> {
+    crate::required::refuse()?;
     let c = clean(collection).ok_or("Not a kryo.to collection.")?;
     let id = c.id.clone();
     let on_pc = on_this_pc(app);
@@ -304,6 +308,15 @@ mod tests {
 
     fn collection(id: &str, slugs: &[&str]) -> Collection {
         Collection { id: id.into(), name: "List".into(), href: "/user/mira/c/list".into(), role: "following".into(), games: slugs.iter().map(|s| game(s)).collect() }
+    }
+
+    /// A collection sent from Remote to a version kryo.to no longer allows
+    /// (required.rs) queues nothing and is not marked installed or followed.
+    #[test]
+    fn a_blocked_version_installs_no_collection() {
+        let src = include_str!("collections.rs");
+        assert!(crate::required::refuses_before(src, "pub fn collection_install(", "s.tracked.insert("));
+        assert!(crate::required::refuses_before(src, "pub fn install_all(", "remember(app"));
     }
 
     #[test]

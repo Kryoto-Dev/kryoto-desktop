@@ -76,6 +76,10 @@ pub struct Settings {
     pub linux_gamemode: bool,
     /// Linux: Proton-GE's FSR upscaling at lower fullscreen resolutions.
     pub linux_fsr: bool,
+    /// Linux: the welcome screen's wall and the Store's animations hold
+    /// still. None until the player picks: then on while drawing on the CPU
+    /// (display_env.rs `still_backgrounds`).
+    pub still_backgrounds: Option<bool>,
     /// Settings written before 0.3 had 8 connections as the default. The first
     /// load after that moves an untouched 8 to the new default of 16, once.
     /// Missing from an old file reads as false (the field's own default, not
@@ -276,6 +280,7 @@ impl Default for Settings {
             linux_mangohud: false,
             linux_gamemode: false,
             linux_fsr: false,
+            still_backgrounds: None,
             connections_v2: true,
             player_name_mode: crate::player_name::Mode::Account,
             player_name: String::new(),
@@ -634,6 +639,9 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
     }
     if before.block_ads != settings.block_ads {
         crate::adblock::set_enabled(&app, settings.block_ads);
+    }
+    if before.still_backgrounds != settings.still_backgrounds {
+        crate::store_still(&app, settings.still_backgrounds);
     }
     if before.saves_endpoint != settings.saves_endpoint
         || before.achievements_endpoint != settings.achievements_endpoint

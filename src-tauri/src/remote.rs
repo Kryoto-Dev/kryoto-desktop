@@ -287,7 +287,7 @@ fn game_id_of(c: &RemoteCommand) -> Result<String, String> {
 /// Do what kryo.to queued: start a download (from kryo.to's own filehost only),
 /// or pause, resume or cancel one. Confirm each durable acceptance separately.
 #[tauri::command(async)]
-pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads>, commands: Vec<RemoteCommand>) -> Result<Vec<RemoteResult>, String> {
+pub fn remote_apply(app: AppHandle, webview: Webview, commands: Vec<RemoteCommand>) -> Result<Vec<RemoteResult>, String> {
     remote_from_store(&app, &webview)?;
     let _guard = APPLY.lock().map_err(|_| "remote command lock poisoned")?;
     let settings = crate::settings::load(&app);
@@ -308,6 +308,7 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
             results.push(RemoteResult { id, error: Some(OFF.into()), retryable: false });
             continue;
         }
+        let kind = c.kind.clone();
         let accepted = accept_once(&file, &mut receipts, &id, now, || -> Result<(), String> { match c.kind.as_str() {
             "download" => {
                 let slug = c.slug.filter(|s| !s.is_empty() && s.len() <= 160 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
@@ -349,24 +350,7 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
             }
             "pause" | "resume" | "cancel" => {
                 let download_id = c.download_id.filter(|i| !i.is_empty() && i.len() <= 80).ok_or("Invalid download ID.")?;
-                let current = downloads::snapshot(&app, &download_id).ok_or("That download is no longer in the list.")?;
-                if current.status == downloads::Status::Installed {
-                    return Err("That download has already finished transferring.".into());
-                }
-                match c.kind.as_str() {
-                    "pause" => {
-                        downloads::download_pause(app.clone(), state.clone(), download_id.clone());
-                        downloads::remote_control(&app, &download_id, downloads::Status::Paused)?;
-                    }
-                    "resume" => {
-                        downloads::download_resume(app.clone(), download_id)?;
-                        downloads::persist_checked(&app)?;
-                    }
-                    _ => {
-                        downloads::download_cancel(app.clone(), state.clone(), download_id.clone());
-                        downloads::remote_control(&app, &download_id, downloads::Status::Canceled)?;
-                    }
-                }
+                phone::control_download(&app, &download_id, c.kind.as_str())?;
             }
             // Protocol 3: what the phone does on this network, through kryo.to.
             "clear" => {
@@ -403,6 +387,9 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
             "uninstall" | "unlist" => {
                 let game = game_id_of(&c)?;
                 phone::check_removable(&app, &game)?;
+                // Here, not only in the task below: refused there, it was
+                // reported to kryo.to as done and never shown.
+                crate::required::refuse()?;
                 let delete_files = c.kind == "uninstall";
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -418,7 +405,7 @@ pub fn remote_apply(app: AppHandle, webview: Webview, state: State<'_, Downloads
             receipts.remove(&id);
             crate::logging::error("remote", e);
         }
-        let retryable = error.as_deref().is_none_or(retryable_error);
+        let retryable = error.as_deref().is_none_or(|e| retryable(&kind, e));
         results.push(RemoteResult { id, error, retryable });
     }
     Ok(results)
@@ -431,6 +418,13 @@ fn retryable_error(error: &str) -> bool {
         "This download does not come from Kryoto." | "That download is no longer in the list." |
         "That download has already finished transferring." | "Unknown remote action." |
         "Invalid game ID." | "That game is no longer in the library." | "Stop the game first." | "Cancel it first." | OFF)
+}
+
+/// An uninstall or unlist refused while this version must update is not
+/// sent again: once updated, one sent days ago would then happen out of the
+/// blue. A download refused then still is, and goes ahead once it is updated.
+fn retryable(kind: &str, error: &str) -> bool {
+    retryable_error(error) && !(matches!(kind, "uninstall" | "unlist") && error == crate::required::REFUSAL)
 }
 
 fn read_receipts(file: &std::path::Path) -> Result<BTreeMap<String, u64>, String> {
@@ -471,6 +465,26 @@ mod tests {
         assert!(retryable_error("Could not save remote receipt: access denied"));
         assert!(retryable_error("Wait for the download to stop, then try again."));
         assert!(!retryable_error(OFF));
+    }
+
+    #[test]
+    fn a_refused_removal_is_not_sent_again_but_a_refused_download_is() {
+        let refused = crate::required::REFUSAL;
+        assert!(!retryable("uninstall", refused));
+        assert!(!retryable("unlist", refused));
+        for kind in ["download", "collection", "resume"] {
+            assert!(retryable(kind, refused), "{kind}");
+        }
+        assert!(retryable("uninstall", "Wait for the download to stop, then try again."));
+        assert!(!retryable("download", OFF));
+    }
+
+    /// An uninstall or unlist a blocked version refuses (required.rs) comes
+    /// back as the command's error, not as done with the refusal in the log.
+    #[test]
+    fn a_refused_removal_is_reported_to_kryo_to() {
+        let src = include_str!("remote.rs");
+        assert!(crate::required::refuses_before(src, "\"uninstall\" | \"unlist\" => {", "tauri::async_runtime::spawn("));
     }
 
     #[test]

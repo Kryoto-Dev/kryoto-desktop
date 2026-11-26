@@ -449,7 +449,7 @@ async fn upload<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, local: &Loca
     progress.report("uploading", 0, written.size);
     let prepared = api.prepare(body).await?;
     let (uploading, size) = (progress.share(), written.size);
-    let sent = api::upload(&prepared.url, &prepared.headers, &out, written.size, move |done| uploading.report("uploading", done, size)).await;
+    let sent = api.upload(&prepared.url, &prepared.headers, &out, written.size, move |done| uploading.report("uploading", done, size)).await;
     let _ = std::fs::remove_file(&out);
     sent.map_err(ApiError::Other)?;
     progress.report("checking", 0, 0);
@@ -612,7 +612,7 @@ async fn fetch_and_put<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, versi
     let file = dir.join("in.ksave");
     let max = account(app).allowance.map(|a| a.max_backup_bytes).filter(|m| *m > 0).unwrap_or(DEFAULT_MAX_BACKUP).max(link.size) + (1 << 20);
     let size = link.size;
-    api::download(&link.url, &file, max, |done, total| progress.report("downloading", done, if size > 0 { size } else { total })).await?;
+    api.download(&link.url, &file, max, |done, total| progress.report("downloading", done, if size > 0 { size } else { total })).await?;
     progress.report("checking", 0, 0);
     let got = bundle::digest(&file)?;
     if !link.sha256.is_empty() && got.sha256 != link.sha256 {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { artSrc } from '@/lib/art'
 import { catalogApiUrl } from '@/lib/endpoint'
+import { useStillBackgrounds } from '@/lib/settings'
 
 const KEY = 'kryoto.wall'
 
@@ -31,10 +32,13 @@ function remembered(): string[] {
  * The last covers seen are kept, so it is there at once and offline, and art
  * comes through the client's disk cache. Each column is one CSS animation on
  * the compositor: no JavaScript runs once it has started. Reduced motion holds
- * it still, and with nothing to show the screen is simply plain.
+ * it still, and so does Still backgrounds (Linux, on by itself while drawing on
+ * the CPU, where WebKitGTK repaints every moving frame). With nothing to show
+ * the screen is simply plain.
  */
 export function CoverWall() {
   const [covers, setCovers] = useState(remembered)
+  const still = useStillBackgrounds()
 
   useEffect(() => {
     let live = true
@@ -63,7 +67,7 @@ export function CoverWall() {
   }
   const columns = Array.from({ length: COLUMNS }, (_, col) => Array.from({ length: ROWS }, (_, row) => covers[(col * 5 + row * 3) % covers.length]!))
   return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+    <div aria-hidden data-still={still || undefined} className="pointer-events-none absolute inset-0 overflow-hidden">
       <div className="kryo-wall absolute left-1/2 top-1/2 flex gap-3">
         {columns.map((tiles, col) => (
           <div key={col} className="w-48 shrink-0" style={{ marginTop: col % 2 ? '2.5rem' : 0 }}>

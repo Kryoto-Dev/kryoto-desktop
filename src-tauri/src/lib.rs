@@ -547,11 +547,27 @@ fn disable_browser_menu(view: &tauri::Webview) {
 ///   (`__kryoDesktopRefresh`) or every ten minutes.
 /// * Clicks, so an open menu closes like it would over any other page.
 ///
-/// BROWSER_STATE_SCRIPT for a page, `kryo` when it is kryo.to's.
-fn store_script(kryo: bool) -> String {
+/// BROWSER_STATE_SCRIPT for a page, `kryo` when it is kryo.to's, `still`
+/// with Still backgrounds on (`display_env::still_now`).
+fn store_script(kryo: bool, still: bool) -> String {
     BROWSER_STATE_SCRIPT
         .replace("__KRYO__", if kryo { "true" } else { "false" })
         .replace("__STILL_WALL__", if cfg!(target_os = "linux") { "true" } else { "false" })
+        .replace("__STILL__", if still { "true" } else { "false" })
+}
+
+/// Still backgrounds for the Store's pages now. Off Linux it is always off,
+/// so the settings are not read on every page load there.
+fn store_still_now<R: Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    cfg!(target_os = "linux") && display_env::still_now(settings::load(app).still_backgrounds)
+}
+
+/// Still backgrounds changed in Settings: the open Store page follows at once.
+pub(crate) fn store_still<R: Runtime>(app: &tauri::AppHandle<R>, choice: Option<bool>) {
+    let on = display_env::still_now(choice);
+    if let Some(view) = app.get_webview(STORE) {
+        let _ = view.eval(format!("window.__kryoStill && window.__kryoStill({on})"));
+    }
 }
 
 const BROWSER_STATE_SCRIPT: &str = r#"
@@ -990,6 +1006,19 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     const lite = document.createElement('style');
     lite.textContent = '*,*::before,*::after{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}';
     (document.head || document.documentElement).append(lite);
+    // Still backgrounds (Settings > Graphics, on by itself while drawing on
+    // the CPU): every animation and transition ends at once, so nothing keeps
+    // the page repainting. Ended, not removed: what fades in still ends
+    // shown, and a menu that waits for its animation to end still closes.
+    const still = document.createElement('style');
+    still.textContent = '*,*::before,*::after{animation-duration:0.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;transition-duration:0.01ms!important;transition-delay:0s!important}';
+    window.__kryoStill = (on) => {
+      try {
+        if (on) (document.head || document.documentElement).append(still);
+        else still.remove();
+      } catch (_) {}
+    };
+    window.__kryoStill(__STILL__);
   }
   // The tab and title bar menus, drawn here: the Store is a web view laid over
   // the shell, so a menu in the shell's page would open underneath it. This
@@ -2073,7 +2102,8 @@ pub fn run() {
         // not leave the "did it draw?" marker behind (KB-0311).
         return;
     }
-    let to_tray = std::env::args().any(|a| a == "--tray");
+    let args: Vec<String> = std::env::args().collect();
+    let to_tray = display_env::to_tray(&args, display_env::relaunched());
     // Still before GTK starts (the Builder below), which reads these variables.
     display_env::apply(display_env::arms_probe(true, to_tray));
     appimage_tls::apply();
@@ -2100,6 +2130,9 @@ pub fn run() {
             if let Ok(dir) = app.path().app_data_dir() {
                 keyring_memory::set_dir(dir);
             }
+            // Before the phone, Remote, a second copy or the window can ask
+            // for anything: a version kryo.to blocked last time stays blocked.
+            required::init(app.handle());
             // `--tray` only ever comes from the start-with-Windows entry. With
             // the switch off, that entry is left over (settings reset or
             // restored, an old install): take it away and don't start.
@@ -2343,13 +2376,13 @@ pub fn run() {
                         }
                         let Ok(url) = view.url() else { return };
                         let kryo = is_kryoto(&url, view.app_handle());
-                        let script = store_script(kryo);
+                        let script = store_script(kryo, store_still_now(view.app_handle()));
                         let _ = view.eval(format!("if (document.readyState !== 'loading' && !window.__kryoDesktop && location.href !== 'about:blank') {{ {script} }}"));
                     }
                 });
             } else {
                 let kryo = is_kryoto(payload.url(), webview.app_handle());
-                let _ = webview.eval(store_script(kryo));
+                let _ = webview.eval(store_script(kryo, store_still_now(webview.app_handle())));
                 if kryo && !KRYOTO_ANSWERED.load(std::sync::atomic::Ordering::SeqCst) {
                     watch_store_is_kryoto(webview.clone(), load, payload.url().to_string());
                 }
@@ -2388,9 +2421,11 @@ pub fn run() {
             links::take_pending_link,
             update_mirror::update_check_mirror,
             required::required_check,
+            required::required_held,
             required::store_required_check,
             store_mint_release,
             display_env::display_rendered,
+            display_env::display_webgl_ask,
             game_logs::game_logs,
             remote::remote_snapshot,
             remote::remote_phone_seen,
@@ -2706,6 +2741,18 @@ mod tests {
         assert!(missing.is_empty(), "add to permissions/shell.toml: {missing:?}");
     }
 
+    /// A version kryo.to blocked last time is blocked from its first moment
+    /// (required.rs): the kept answer is read before anything that takes
+    /// requests or carries work on is started.
+    #[test]
+    fn the_kept_required_answer_is_read_first() {
+        let src = include_str!("lib.rs");
+        let seed = src.find("required::init(app.handle())").expect("required::init in setup");
+        for later in ["remote::start(app", "downloads::init(app", "system::serve_instance(app", "phone::start_if_enabled(app"] {
+            assert!(seed < src.find(later).unwrap(), "{later} runs before required::init");
+        }
+    }
+
     /// The friends list reaches only its own routes through the Store's session.
     #[test]
     fn friend_actions_stay_on_their_routes() {
@@ -2778,6 +2825,25 @@ mod tests {
         assert_eq!(cap["webviews"], serde_json::json!(["main"]));
         assert_eq!(cap["windows"], serde_json::json!(["main"]));
         assert!(cap.get("remote").is_none(), "chat must never be granted to remote URLs");
+    }
+
+    /// Still backgrounds reach the Store's pages: the script starts with them
+    /// on or off and keeps the switch for Settings, with no placeholder left
+    /// for the page to choke on.
+    #[test]
+    fn the_store_script_carries_still_backgrounds() {
+        let on = store_script(true, true);
+        let off = store_script(true, false);
+        assert!(on.contains("window.__kryoStill(true);"));
+        assert!(off.contains("window.__kryoStill(false);"));
+        for s in [&on, &off] {
+            assert!(s.contains("window.__kryoStill = (on) =>"));
+            assert!(!s.contains("__STILL__") && !s.contains("__STILL_WALL__") && !s.contains("__KRYO__"));
+        }
+        // Animations end at once rather than being removed, so what fades in
+        // still ends shown.
+        assert!(BROWSER_STATE_SCRIPT.contains("animation-duration:0.01ms!important"));
+        assert!(BROWSER_STATE_SCRIPT.contains("transition-duration:0.01ms!important"));
     }
 
     /// Remote is opt-in (remote.rs): a Store page can only say it was turned
