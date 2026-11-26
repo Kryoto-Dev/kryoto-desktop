@@ -57,12 +57,11 @@ pub(super) fn options_line(env: &[(String, String)], prefix: Option<&str>, args:
     if let Some(p) = prefix {
         words.push(format!("WINEPREFIX={}", quote(p)));
     }
-    let args = args.map(str::trim).filter(|a| !a.is_empty());
-    match (words.is_empty(), args) {
-        (true, None) => None,
-        (true, Some(a)) => Some(a.to_string()),
-        (false, a) => Some(format!("{} %command%{}", words.join(" "), a.map(|a| format!(" {a}")).unwrap_or_default())),
+    if words.is_empty() {
+        return super::arguments_line(args);
     }
+    let args = args.map(str::trim).filter(|a| !a.is_empty());
+    Some(format!("{} %command%{}", words.join(" "), args.map(|a| format!(" {a}")).unwrap_or_default()))
 }
 
 /// One of Lutris's games as Bridge takes it. Pure, for the tests.
@@ -87,7 +86,10 @@ pub(super) fn incoming(g: LutrisGame, data: &Path) -> Incoming {
     let wine = runner == "wine";
     let launch_options = options_line(&g.env, g.prefix.as_deref().filter(|_| wine), g.args.as_deref());
     Incoming {
-        key: g.id.to_string(),
+        // Lutris gives a removed game's id to the next one it adds, so the
+        // slug goes with it: a new game is never taken for an old one.
+        key: format!("{}:{}", g.id, g.slug),
+        old_key: Some(g.id.to_string()),
         title: g.name,
         executable: g.exe.filter(|_| g.installed),
         playtime_seconds: g.playtime_seconds,
@@ -174,6 +176,17 @@ fn eligible(g: &LibraryGame) -> bool {
     super::sendable(g) && !g.origin.as_deref().is_some_and(|o| o.starts_with("lutris:"))
 }
 
+/// What to tell the player when a send could not be noted: `took_back` is
+/// how taking its new games back out went, None when it put in none (only
+/// games already there were updated). Pure, for the tests.
+fn not_noted(e: &str, took_back: Option<Result<usize, String>>) -> String {
+    match took_back {
+        None => format!("Kryoto could not note what it sent: {e}"),
+        Some(Ok(_)) => format!("Kryoto could not note what it sent, so it took the new games back out: {e}"),
+        Some(Err(back)) => format!("Kryoto could not note what it sent, and could not take the new games back out of Lutris ({back}): {e}"),
+    }
+}
+
 fn dev_guard() -> Result<(), String> {
     #[cfg(debug_assertions)]
     if dev_dir().is_none() {
@@ -219,11 +232,12 @@ impl Export for Lutris {
         ledger.sent.retain(|a| !written.games.iter().any(|w| w.key == a.key));
         ledger.sent.extend(written.games.iter().cloned());
         // A game nothing remembers could not be undone: if the ledger cannot
-        // be written, the new games go back out.
+        // be written, the rows this send put in go back out, even one whose
+        // key the old ledger has (the player had removed its row). The ones
+        // updated in place stay, as the old ledger still knows them.
         if let Err(e) = ledger_file(app).and_then(|f| crate::saves::write_json(&f, &ledger)) {
-            let new: Vec<Added> = written.games.iter().filter(|w| !load_ledger(app).sent.iter().any(|a| a.key == w.key)).cloned().collect();
-            let _ = lu::take_back(dir, &new, &backups(app)?, super::now());
-            return Err(format!("Kryoto could not note what it sent, so it took the games back out: {e}"));
+            let took_back = (!written.inserted.is_empty()).then(|| backups(app).and_then(|b| lu::take_back(dir, &written.inserted, &b, super::now())));
+            return Err(not_noted(&e, took_back));
         }
         crate::logging::info("bridge", &format!("lutris: {} games added, {} updated", written.added, written.updated));
         Ok(Sent { added: written.added, updated: written.updated, pictures: written.pictures, backup: written.backup.map(|b| b.to_string_lossy().into_owned()) })
@@ -244,7 +258,7 @@ mod tests {
     use super::*;
 
     fn lutris(runner: &str, exe: Option<&str>) -> LutrisGame {
-        LutrisGame { id: 7, name: "The Witcher".into(), runner: runner.into(), installed: true, exe: exe.map(String::from), playtime_seconds: 45_000, ..Default::default() }
+        LutrisGame { id: 7, slug: "the-witcher".into(), name: "The Witcher".into(), runner: runner.into(), installed: true, exe: exe.map(String::from), playtime_seconds: 45_000, ..Default::default() }
     }
 
     #[test]
@@ -259,7 +273,7 @@ mod tests {
         g.wine_version = Some("lutris-GE-8".into());
         g.env = vec![("DXVK_HUD".into(), "fps".into())];
         let h = incoming(g, &root);
-        assert_eq!((h.key.as_str(), h.executable.as_deref(), h.cannot), ("7", Some("/games/witcher/drive_c/witcher.exe"), None));
+        assert_eq!((h.key.as_str(), h.executable.as_deref(), h.cannot), ("7:the-witcher", Some("/games/witcher/drive_c/witcher.exe"), None));
         assert_eq!(h.launch_options.as_deref(), Some("DXVK_HUD=fps WINEPREFIX='/games/witcher pfx' %command% -skipintro"));
         assert_eq!(h.proton_path.as_deref().map(Path::new), Some(wine.join("wine").as_path()));
         // What Kryoto's launch reads back from that line.
@@ -290,7 +304,11 @@ mod tests {
     #[test]
     fn the_options_line_only_when_there_is_something_to_say() {
         assert_eq!(options_line(&[], None, None), None);
-        assert_eq!(options_line(&[], None, Some(" -w ")).as_deref(), Some("-w"));
+        assert_eq!(options_line(&[], None, Some(" -w ")).as_deref(), Some("%command% -w"));
+        // Arguments that look like settings are still arguments.
+        let line = options_line(&[], None, Some("ResX=1920 ResY=1080 -windowed")).unwrap();
+        let read = crate::launch::parse_line(&line);
+        assert_eq!((read.env.len(), read.extra_args.as_str()), (0, "ResX=1920 ResY=1080 -windowed"));
         assert_eq!(options_line(&[("A".into(), "it's".into())], None, None).as_deref(), Some("A=\"it's\" %command%"));
         // The prefix Lutris set wins over one in the game's own environment.
         assert_eq!(options_line(&[("WINEPREFIX".into(), "/old".into())], Some("/new"), None).as_deref(), Some("WINEPREFIX=/new %command%"));
@@ -302,5 +320,13 @@ mod tests {
         assert!(eligible(&g));
         assert!(!eligible(&LibraryGame { origin: Some("lutris:7".into()), ..g.clone() }));
         assert!(!eligible(&LibraryGame { launcher: Some("steam".into()), ..g }));
+    }
+
+    #[test]
+    fn a_send_that_could_not_be_noted_says_only_what_happened() {
+        // Only games already in Lutris were updated: nothing was taken out.
+        assert_eq!(not_noted("disk full", None), "Kryoto could not note what it sent: disk full");
+        assert!(not_noted("disk full", Some(Ok(2))).contains("so it took the new games back out"));
+        assert!(not_noted("disk full", Some(Err("locked".into()))).contains("could not take the new games back out of Lutris (locked)"));
     }
 }

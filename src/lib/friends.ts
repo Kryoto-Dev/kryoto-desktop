@@ -1,5 +1,6 @@
 import { call, isTauri, isWeb, on } from '@/lib/bridge'
 import { syncEmojiUsage } from '@/rich/emoji-usage'
+import { storeAnswer, type StoreDone } from '@/lib/store-answer'
 
 /**
  * Managing friends from the friends list itself: requests, answers, removing,
@@ -49,12 +50,11 @@ export function friendFetch(a: FriendAction): FriendFetch {
   }
 }
 
-type Done = { id: string; ok: boolean; status: number; data?: Record<string, unknown> | null }
-
 /**
  * One request through the Store's kryo.to page, with its session, answered
  * by `store-friend-done`. The native side allows only the friends list's
- * routes, the account's play-time read and whether it wrote a game up (lib.rs `friend_route_allowed`).
+ * routes, the account's play-time read, whether it wrote a game up and a game
+ * put in or taken out of a collection (lib.rs `friend_route_allowed`).
  */
 export function viaStore(f: FriendFetch): Promise<Record<string, unknown>> {
   const ticket = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
@@ -64,13 +64,15 @@ export function viaStore(f: FriendFetch): Promise<Record<string, unknown>> {
       stop?.()
       reject(new Error('kryo.to did not answer. Check that you are signed in in the Store, then try again.'))
     }, 20_000)
-    void on<Done>('store-friend-done', (r) => {
+    void on<StoreDone>('store-friend-done', (r) => {
       if (r.id !== ticket) return
       window.clearTimeout(timer)
       stop?.()
-      const data = r.data ?? {}
-      if (r.ok) resolve(data)
-      else reject(new Error(typeof data.error === 'string' ? data.error : r.status === 0 ? 'Could not reach kryo.to.' : `kryo.to answered ${r.status}.`))
+      try {
+        resolve(storeAnswer(r))
+      } catch (e) {
+        reject(e as Error)
+      }
     })
       .then((fn) => {
         stop = fn
@@ -84,10 +86,16 @@ export function viaStore(f: FriendFetch): Promise<Record<string, unknown>> {
   })
 }
 
+/**
+ * One request on the signed-in account: the Store's page in the app, the token
+ * in the web chat. Rejects with kryo.to's own words when it refuses.
+ */
+export const accountFetch = (f: FriendFetch): Promise<Record<string, unknown>> =>
+  isTauri() && !isWeb() ? viaStore(f) : call<Record<string, unknown>>('friends_fetch', f)
+
 /** Run one action; resolves kryo.to's answer, rejects with its error in words. */
 export async function friendAction(a: FriendAction): Promise<Record<string, unknown>> {
-  const f = friendFetch(a)
-  const data = isTauri() && !isWeb() ? await viaStore(f) : await call<Record<string, unknown>>('friends_fetch', f)
+  const data = await accountFetch(friendFetch(a))
   // The lists change with every action: ask for them again (the Store page
   // also does this itself once its request settles).
   void call('store_refresh_account').catch(() => {})
@@ -109,12 +117,11 @@ export function followEmojiUsage(username: string | null): void {
     syncEmojiUsage(null)
     return
   }
-  const go = (f: FriendFetch) => (isTauri() && !isWeb() ? viaStore(f) : call<Record<string, unknown>>('friends_fetch', f))
   syncEmojiUsage({
     load: () =>
-      go({ method: 'GET', path: '/api/account/emoji-usage' }).then((d) =>
+      accountFetch({ method: 'GET', path: '/api/account/emoji-usage' }).then((d) =>
         d && typeof d.tally === 'object' && d.tally ? (d.tally as Record<string, number>) : null,
       ),
-    save: (tally) => go({ method: 'PUT', path: '/api/account/emoji-usage', body: { tally } }),
+    save: (tally) => accountFetch({ method: 'PUT', path: '/api/account/emoji-usage', body: { tally } }),
   })
 }

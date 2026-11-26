@@ -9,6 +9,7 @@ import { CoverWall } from '@/ui/CoverWall'
 import { WORDMARK } from '@/ui/ascii/cells'
 import { SplashScene } from '@/boot/SplashScene'
 import { RuntimesPrompt, useStartupRuntimes } from '@/boot/RuntimesPrompt'
+import { settledOn } from '@/boot/sign-in-page'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { isTauri, exitApp, mountStore, navigateCatalog, openExternal, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
 import { isOutage, pokeHealth, useServiceHealth } from '@/lib/health'
@@ -329,17 +330,8 @@ function GuestButton({ onGuest }: { onGuest: () => void }) {
 /** How long the box says "Signing you in" before it shows the page again. */
 const FINISH_WAIT_MS = 12_000
 
-/** kryo.to's pages for signing in, where the box stays open. */
-function onSignInPage(url: string): boolean {
-  try {
-    return /^\/(login|register|signup|link|invite|recover|forgot-password|reset-password|verify-email)(\/|$)/.test(new URL(url).pathname)
-  } catch {
-    return true
-  }
-}
-
 /** kryo.to's sign-in page in a box, in the Store's web view. */
-function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack: () => void; onRetry: () => void }) {
+export function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack: () => void; onRetry: () => void }) {
   const slot = useRef<HTMLDivElement | null>(null)
   const [opened, setOpened] = useState(false)
 
@@ -372,7 +364,8 @@ function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack
   // takes the account in. Said here, over the page, until the account arrives
   // (Welcome then goes on by itself); a page that stays somewhere else for long
   // is shown again.
-  const finishing = opened && !page.loading && !page.error && !!page.url && !onSignInPage(page.url)
+  const settled = settledOn(page, opened)
+  const finishing = settled === 'elsewhere'
   const [stale, setStale] = useState(false)
   useEffect(() => {
     setStale(false)
@@ -384,6 +377,14 @@ function SignInPanel({ page, onBack, onRetry }: { page: BrowserPageState; onBack
     }, FINISH_WAIT_MS)
     return () => window.clearTimeout(t)
   }, [finishing])
+  // Sent back to a sign-in page before the account arrived (the site bounced
+  // it to /login, or wants the email checked): the page shows again, or the
+  // box would sit empty. Only once it has loaded there, so a page on its way
+  // never flashes over "Signing you in".
+  const backOnSignIn = settled === 'sign-in'
+  useEffect(() => {
+    if (backOnSignIn && isTauri()) void setStoreVisible(true)
+  }, [backOnSignIn])
   const ready = opened && !page.loading
   return (
     <section className="no-drag kryo-pop kryo-radius grid min-h-0 w-[460px] grid-rows-[auto_1fr] overflow-hidden border border-border bg-background shadow-2xl shadow-black/70">

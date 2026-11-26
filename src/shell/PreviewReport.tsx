@@ -6,6 +6,7 @@ import { RichText } from '@/rich/RichText'
 import { call } from '@/lib/bridge'
 import { IS_PREVIEW_BUILD } from '@/lib/endpoint'
 import { cn } from '@/lib/utils'
+import { clearDraft, readDraft, saveDraft, type ReportDraft } from '@/shell/report-draft'
 
 /**
  * Report a bug / Suggest something, in Kryoto Desktop Preview's title bar (the
@@ -25,6 +26,15 @@ const STATUS: Record<string, string> = { new: 'Waiting', accepted: 'Accepted', f
 const TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'video/mp4', 'video/webm']
 /** A box of several lines takes the reader's box corners: the one-line field's pill would make it a capsule. */
 const BOX = 'kryo-radius block w-full resize-y border border-border bg-background px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-foreground'
+
+/** This window's session storage, or none where the browser refuses it. Gone when the app closes. */
+function session(): Storage | null {
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
+  }
+}
 
 export function PreviewReportButton({ page, username }: { page: string; username: string | null }) {
   const [open, setOpen] = useState(false)
@@ -59,16 +69,39 @@ export function PreviewReportButton({ page, username }: { page: string; username
   )
 }
 
-function ReportDialog({ page, username, shot, dropShot, onClose }: { page: string; username: string; shot: string | null; dropShot: () => void; onClose: () => void }) {
-  const [kind, setKind] = useState<Kind>('bug')
-  const [what, setWhat] = useState('')
-  const [steps, setSteps] = useState('')
+/** Exported for the UI harness (test/ui.tsx); the app opens it from the button above. */
+export function ReportDialog({ page, username, shot, dropShot, onClose }: { page: string; username: string; shot: string | null; dropShot: () => void; onClose: () => void }) {
+  // What was typed before the dialog last closed comes back with it.
+  const [draft] = useState(() => readDraft(session(), username))
+  const [kind, setKind] = useState<Kind>(draft?.kind ?? 'bug')
+  const [what, setWhat] = useState(draft?.what ?? '')
+  const [steps, setSteps] = useState(draft?.steps ?? '')
   const [files, setFiles] = useState<{ name: string; mime: string; data: string }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [sent, setSent] = useState(false)
   const picker = useRef<HTMLInputElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
   const stepsBox = useRef<HTMLTextAreaElement>(null)
+  const unsaved = useRef<ReportDraft | null>(null)
+  // Set the moment kryo.to takes the report, before the dialog redraws: a
+  // save still waiting from a key pressed while it was sending must not bring
+  // the sent words back as a draft.
+  const gone = useRef(false)
+
+  // Kept a moment after the last key, and at once if the dialog closes first.
+  useEffect(() => {
+    if (sent || kind === 'yours') return
+    const now: ReportDraft = { kind, what, steps }
+    unsaved.current = now
+    const timer = window.setTimeout(() => {
+      if (!gone.current) saveDraft(session(), username, now)
+      unsaved.current = null
+    }, 400)
+    return () => window.clearTimeout(timer)
+  }, [kind, what, steps, sent, username])
+  useEffect(() => () => {
+    if (unsaved.current && !gone.current) saveDraft(session(), username, unsaved.current)
+  }, [username])
 
   async function add(list: FileList) {
     for (const f of [...list].slice(0, 4 - files.length)) {
@@ -96,6 +129,9 @@ function ReportDialog({ page, username, shot, dropShot, onClose }: { page: strin
     const all = [...(shot ? [{ name: 'screenshot.png', mime: 'image/png', data: shot }] : []), ...files]
     try {
       await call('preview_report_send', { report: { kind, what, steps: kind === 'bug' ? steps : '', page, files: all } })
+      gone.current = true
+      unsaved.current = null
+      clearDraft(session(), username)
       setSent(true)
     } catch (e) {
       setError(typeof e === 'string' ? e : e instanceof Error ? e.message : 'Could not send it.')

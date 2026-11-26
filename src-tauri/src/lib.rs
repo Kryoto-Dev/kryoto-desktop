@@ -1140,9 +1140,7 @@ fn game_slug(url: &url::Url, settings: &settings::Settings) -> Option<String> {
     if !settings::is_catalog_origin(url, settings) {
         return None;
     }
-    let valid = |s: &str| {
-        !s.is_empty() && s.len() <= 160 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    };
+    let valid = |s: &str| collections::plain_slug(&s.to_ascii_lowercase());
     let mut parts = url.path_segments()?;
     // A tester's page for a game in testing (`/testers/<slug>`) is that game's
     // page too. Unnamed, its download was looked up by title, which a game
@@ -1164,9 +1162,7 @@ fn download_context(url: &url::Url) -> (Option<String>, Option<String>) {
     let Some(fragment) = url.fragment() else { return (None, None) };
     let fields: std::collections::HashMap<String, String> =
         url::form_urlencoded::parse(fragment.as_bytes()).into_owned().collect();
-    let slug = fields.get("kryoto-game").filter(|slug| {
-        !slug.is_empty() && slug.len() <= 120 && slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    });
+    let slug = fields.get("kryoto-game").filter(|slug| collections::plain_slug(&slug.to_ascii_lowercase()));
     let title = fields.get("kryoto-title").filter(|title| !title.trim().is_empty() && title.len() <= 300);
     (slug.map(|slug| slug.to_ascii_lowercase()), title.cloned())
 }
@@ -1372,7 +1368,7 @@ fn store_expect_download(
         return Err("Only kryo.to names its downloads.".into());
     }
     let slug = slug.trim().to_ascii_lowercase();
-    if slug.is_empty() || slug.len() > 160 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !collections::plain_slug(&slug) {
         return Err("Not a kryo.to game.".into());
     }
     let title = title
@@ -1500,7 +1496,7 @@ fn store_download_link(
 ) -> Result<(), String> {
     from_kryoto_store(&app, &webview)?;
     let slug = slug.trim().to_ascii_lowercase();
-    if slug.is_empty() || slug.len() > 160 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !collections::plain_slug(&slug) {
         return Err("Not a kryo.to game.".into());
     }
     let title = title
@@ -1745,7 +1741,8 @@ fn store_set_status(
     cover: Option<String>,
 ) -> Result<(), String> {
     const STATUSES: [&str; 7] = ["playing", "plan", "completed", "onhold", "dropped", "favorite", "notinterested"];
-    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    let slug = slug.trim().to_ascii_lowercase();
+    if !collections::plain_slug(&slug) {
         return Err("Not a kryo.to game.".into());
     }
     if status.as_deref().is_some_and(|s| !STATUSES.contains(&s)) {
@@ -1773,33 +1770,6 @@ fn store_set_status(
     };
     view.eval(format!("{call}.finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())"))
         .map_err(|e| e.to_string())
-}
-
-/// Put a game in one of the account's kryo.to collections, or take it out
-/// (`add` false): a Library right-click files a game the way Steam's categories
-/// do (kryo.to suggestion #71). kryo.to's `/api/account/collections/<id>/items`,
-/// run in the Store's page like `store_set_status`; the page reports the
-/// collections back, so the Library's groups follow.
-#[tauri::command]
-fn store_collection_item(app: tauri::AppHandle, id: String, slug: String, add: bool) -> Result<(), String> {
-    if id.is_empty() || id.len() > 20 || !id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("Not a kryo.to collection.".into());
-    }
-    if slug.is_empty() || slug.len() > 200 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        return Err("Not a kryo.to game.".into());
-    }
-    let view = store(&app)?;
-    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
-        return Err("Open kryo.to first.".into());
-    }
-    let then = ".finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())";
-    let script = if add {
-        let body = serde_json::to_string(&serde_json::json!({ "slug": slug }).to_string()).map_err(|e| e.to_string())?;
-        format!("fetch('/api/account/collections/{id}/items',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:{body}}}){then}")
-    } else {
-        format!("fetch('/api/account/collections/{id}/items?slug={slug}',{{method:'DELETE',credentials:'include'}}){then}")
-    };
-    view.eval(script).map_err(|e| e.to_string())
 }
 
 /// Move many games in the account's kryo.to library to one status at once, or
@@ -1858,7 +1828,8 @@ pub(crate) fn store_send_hidden<R: Runtime>(app: &tauri::AppHandle<R>, slugs: &[
 /// player's own session; a beat that stops arriving ages out on the site.
 #[tauri::command]
 fn store_report_playing(app: tauri::AppHandle, slug: String, playing: bool) -> Result<(), String> {
-    if slug.is_empty() || slug.len() > 120 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    let slug = slug.trim().to_ascii_lowercase();
+    if !collections::plain_slug(&slug) {
         return Err("Not a kryo.to game.".into());
     }
     let view = store(&app)?;
@@ -1939,7 +1910,8 @@ fn store_carry_done(app: tauri::AppHandle, webview: tauri::Webview, id: String, 
 }
 
 /// Whether the friends list may send this request: only the routes behind its
-/// own actions (`src/lib/friends.ts`), never an arbitrary path on the account.
+/// own actions (`src/lib/friends.ts`) and the few reads and writes the shell
+/// makes the same way, never an arbitrary path on the account.
 fn friend_route_allowed(method: &str, path: &str) -> bool {
     let id = |s: &str| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit());
     let parts: Vec<&str> = path.split('/').collect();
@@ -1955,8 +1927,13 @@ fn friend_route_allowed(method: &str, path: &str) -> bool {
         ("GET", ["", "api", rest]) if rest.starts_with("reactions?t=") => reaction_targets_allowed(&rest["reactions?t=".len()..]),
         ("GET", ["", "api", "account", rest]) => playtime_query_allowed(rest),
         // Whether the account wrote a game up yet, for the "write one?" card.
-        ("GET", ["", "api", "games", slug, "writeups?mine=1"]) => {
-            !slug.is_empty() && slug.len() <= 120 && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        ("GET", ["", "api", "games", slug, "writeups?mine=1"]) => collections::plain_slug(slug),
+        // A game put in one of the account's collections from the Library, or
+        // taken out (src/lib/collections.ts): kryo.to's answer comes back, so a
+        // refusal is shown in its words instead of nothing happening.
+        ("POST", ["", "api", "account", "collections", n, "items"]) => id(n),
+        ("DELETE", ["", "api", "account", "collections", n, rest]) => {
+            id(n) && rest.strip_prefix("items?slug=").is_some_and(collections::plain_slug)
         }
         _ => false,
     }
@@ -2530,7 +2507,6 @@ pub fn run() {
             store_friend_done,
             store_set_status,
             store_set_status_many,
-            store_collection_item,
             store_report_play,
             store_report_carry,
             store_report_playing,
@@ -2758,6 +2734,36 @@ mod tests {
         assert!(!friend_route_allowed("DELETE", "/api/reactions"));
     }
 
+    /// Filing a game in a collection reaches only that collection's items.
+    #[test]
+    fn collection_items_stay_on_their_route() {
+        let long = format!("/api/account/collections/12/items?slug={}", "a".repeat(160));
+        let too_long = format!("/api/account/collections/12/items?slug={}", "a".repeat(161));
+        for (m, p) in [
+            ("POST", "/api/account/collections/12/items"),
+            ("DELETE", "/api/account/collections/12/items?slug=hades-ii"),
+            ("DELETE", long.as_str()),
+        ] {
+            assert!(friend_route_allowed(m, p), "{m} {p}");
+        }
+        for (m, p) in [
+            ("POST", "/api/account/collections/../items"),
+            ("POST", "/api/account/collections/123456789012345678901/items"),
+            ("POST", "/api/account/collections/12/items?slug=celeste"),
+            ("PUT", "/api/account/collections/12/items"),
+            ("GET", "/api/account/collections/12/items"),
+            ("DELETE", "/api/account/collections/12/items"),
+            ("DELETE", "/api/account/collections/12/items?slug=../auth"),
+            ("DELETE", "/api/account/collections/12/items?slug=celeste&x=1"),
+            ("DELETE", "/api/account/collections/12/items?slug=Celeste"),
+            ("DELETE", too_long.as_str()),
+            ("DELETE", "/api/account/collections/12"),
+            ("POST", "/api/account/collections/12/items/x"),
+        ] {
+            assert!(!friend_route_allowed(m, p), "{m} {p}");
+        }
+    }
+
     /// Chat acts on the account's encrypted messages and keys: only the
     /// shell's own `main` view may call it. A Store page (any remote site) and
     /// the menu view must never be granted a chat command.
@@ -2862,6 +2868,19 @@ mod tests {
         );
         url.set_fragment(None);
         assert_eq!(url.as_str(), "https://dl.kryo.to/d/signed");
+    }
+
+    /// The same game names as everywhere else (collections::plain_slug): a
+    /// game the Store downloads is one its page, collections and play
+    /// reports take too.
+    #[test]
+    fn download_context_takes_the_one_slug_rule() {
+        let at = |slug: &str| download_context(&format!("https://dl.kryo.to/d/x#kryoto-game={slug}").parse().unwrap()).0;
+        let long = "a".repeat(160);
+        assert_eq!(at(&long), Some(long.clone()));
+        assert_eq!(at(&"a".repeat(161)), None);
+        assert_eq!(at("Hades-II"), Some("hades-ii".into()));
+        assert_eq!(at("a_b"), None);
     }
 
     /// The canvas modal's download used to arrive as "Download": WebView2

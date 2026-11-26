@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { call, on } from '@/lib/bridge'
+import { accountFetch } from '@/lib/friends'
 
 /** Mirrors `src-tauri/src/collections.rs`. */
 
@@ -33,8 +34,17 @@ export const collections = {
   later: (id: string) => call<void>('collection_later', { id }),
   /** Stop watching it. Its games stay. */
   forget: (id: string) => call<void>('collection_forget', { id }),
-  /** Put a game in one of the account's collections, or take it out (suggestion #71). */
-  setItem: (id: string, slug: string, add: boolean) => call<void>('store_collection_item', { id, slug, add }),
+  /**
+   * Put a game in one of the account's collections, or take it out (suggestion
+   * #71). kryo.to's answer comes back, so a refusal is said in its words; the
+   * Store page reports the collections again once the request settles. The
+   * slug in lowercase, as kryo.to writes it: an older release file may not.
+   */
+  setItem: async (id: string, slug: string, add: boolean) => {
+    const path = `/api/account/collections/${id}/items`
+    slug = slug.toLowerCase()
+    await accountFetch(add ? { method: 'POST', path, body: { slug } } : { method: 'DELETE', path: `${path}?slug=${slug}` })
+  },
 }
 
 let current = EMPTY

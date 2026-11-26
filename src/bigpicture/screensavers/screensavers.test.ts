@@ -1,11 +1,11 @@
 // `pnpm test`: node's own runner, which reads TypeScript as it is.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { capDelay, capReady, dot, FULL, glyph, HALF, INK_ALPHA, isGlyph, levelOf, LOW, PEAK, pitchFor, restSpots, seeded, TRACE, wholeBacking } from './engine.ts'
+import { capDelay, capReady, dot, FULL, glyph, HALF, INK_ALPHA, isGlyph, levelOf, LOW, PEAK, pitchFor, restSpots, ROW_PITCH, type Scene, seeded, STILL_MS, TRACE, type VariantSpec, wholeBacking } from './engine.ts'
 import { MARK_CELLS, MARK_COLS, MARK_DOTS, MARK_ROWS } from './mark-data.ts'
 import { cellInk } from './matrix-ink.ts'
 import { clockDigits, COLON, NUMERAL_H, NUMERAL_W, NUMERALS } from './numerals.ts'
-import { shuffleOrder } from './shuffle.ts'
+import { makeShuffle, SHUFFLE_MS, shuffleOrder } from './shuffle.ts'
 import { lastPlayedTitle, saverText, saverTitles } from './titles.ts'
 
 test('every numeral is five dots across and seven down, and no two are alike', () => {
@@ -107,6 +107,33 @@ test('shuffle plays every one before any comes back, never the same twice in a r
     for (let round = 0; round < 6; round++) assert.deepEqual(order.slice(round * 4, round * 4 + 4).sort(), [...ids].sort())
     for (let i = 1; i < order.length; i++) assert.notEqual(order[i], order[i - 1], `seed ${seed} at ${i}`)
   }
+})
+
+test('with motion reduced, Shuffle still moves on, and keeps the one showing up to date', () => {
+  const drawn: string[] = []
+  const child = (id: string, stillFor?: (now: Date) => number): VariantSpec => ({ id, name: id, stillFor, make: () => ({ frame: () => void drawn.push(id) }) })
+  const shuffle = makeShuffle([child('still'), child('clock', () => 1_000)])
+  const grid = { cols: 2, rows: 2, cells: new Uint32Array(4), view: { c0: 0, r0: 0, c1: 2, r1: 2 }, rowPitch: ROW_PITCH }
+  const scene: Scene = { grid, titles: () => [], lastPlayed: () => null, reduced: true, thumb: false, rand: seeded(7), underlay: () => {}, setScale: () => grid }
+  const runner = shuffle.make(scene)
+  const now = new Date(2026, 10, 23, 9, 41)
+  runner.frame(0)
+  const first = drawn.at(-1)!
+  // The clock's own minute, not the general few minutes.
+  assert.equal(runner.stillFor?.(now), first === 'clock' ? 1_000 : STILL_MS)
+  runner.frame(SHUFFLE_MS - 10)
+  assert.equal(drawn.at(-1), first)
+  assert.equal(runner.stillFor?.(now), 10, 'no later than the end of its turn')
+  runner.frame(SHUFFLE_MS)
+  assert.notEqual(drawn.at(-1), first, 'the other one, once the turn is over')
+
+  // A Settings thumbnail does not cut to another every few seconds either.
+  const thumb = shuffle.make({ ...scene, thumb: true, rand: seeded(7) })
+  thumb.frame(0)
+  const shown = drawn.at(-1)!
+  thumb.frame(60_000)
+  assert.equal(drawn.at(-1), shown)
+  assert.equal(thumb.stillFor?.(now), shown === 'clock' ? 1_000 : STILL_MS)
 })
 
 test('titles leave out hidden games, and adult ones unless the reader shows them', () => {

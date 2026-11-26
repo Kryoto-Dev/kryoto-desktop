@@ -10,6 +10,7 @@
 
 import { PREVIEW_FRIENDS, type FriendsState } from '@/hooks/useFriends'
 import type { WhenDone } from '@/lib/downloads'
+import { storeAnswer } from '@/lib/store-answer'
 
 type Handler = (p: unknown) => void
 const listeners = new Map<string, Set<Handler>>()
@@ -510,8 +511,26 @@ function previewFriendFetch(a: Record<string, unknown>): Record<string, unknown>
   return answer
 }
 
+/**
+ * Library right-click > Add to collection (lib/collections.ts `setItem`,
+ * suggestion #71). kryo.to once refused a game with "A game slug is
+ * required"; Hollow Knight stands in for it. The refusal is read the way the
+ * app reads the Store page's answer (`storeAnswer`), so its words reach the player.
+ */
+function previewCollectionItem(a: Record<string, unknown>): Record<string, unknown> {
+  const [, , , , id, rest] = String(a.path).split('/')
+  const add = a.method === 'POST'
+  const slug = add ? String((a.body as { slug?: unknown } | null)?.slug ?? '') : new URLSearchParams(rest?.split('?')[1]).get('slug') ?? ''
+  if (add && slug === 'hollow-knight') return storeAnswer({ ok: false, status: 400, data: { error: 'A game slug is required.' } })
+  const c = collectionsPreview.collections.find((x) => x.id === id)
+  if (!c) throw new Error('That collection is gone.')
+  c.games = add ? (c.games.some((g) => g.slug === slug) ? c.games : [...c.games, collectionGame(slug, slug, 1)]) : c.games.filter((g) => g.slug !== slug)
+  previewBus.emit('collections-state', clone(collectionsPreview))
+  return { ok: true }
+}
+
 const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
-  friends_fetch: (a) => previewFriendFetch(a),
+  friends_fetch: (a) => (String(a.path).startsWith('/api/account/collections/') ? previewCollectionItem(a) : previewFriendFetch(a)),
   store_refresh_account: () => null,
   // Community updates (src-tauri community_offer.rs): the first game has a newer build, half played.
   community_offer_state: (a) => (a.id === games[0]?.id
@@ -966,15 +985,6 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   ],
   library_restore_found: (a) => (a.dirs as string[]).length,
   collections_state: () => clone(collectionsPreview),
-  // Library right-click > Add to collection (lib.rs store_collection_item, suggestion #71).
-  store_collection_item: (a) => {
-    const c = collectionsPreview.collections.find((x) => x.id === a.id)
-    if (!c) return null
-    const slug = String(a.slug)
-    c.games = a.add ? (c.games.some((g) => g.slug === slug) ? c.games : [...c.games, collectionGame(slug, slug, 1)]) : c.games.filter((g) => g.slug !== slug)
-    previewBus.emit('collections-state', clone(collectionsPreview))
-    return null
-  },
   collection_install: (a) => {
     const c = collectionsPreview.collections.find((x) => x.id === a.id)
     if (!collectionsPreview.installed.includes(String(a.id))) collectionsPreview.installed.push(String(a.id))

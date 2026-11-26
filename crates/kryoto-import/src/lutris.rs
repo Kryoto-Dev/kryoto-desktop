@@ -209,8 +209,10 @@ fn settings(g: &mut LutrisGame, raw: &str, home: Option<&Path>) {
             if e.starts_with('/') || Path::new(&e).is_absolute() {
                 e
             } else {
-                // Lutris: a relative exe is in the working folder, else the game's folder.
-                match working.as_deref().or(g.directory.as_deref()) {
+                // Lutris joins a relative exe onto the game's folder; the
+                // working folder is only where it starts, so it is the base
+                // only for a game with no folder.
+                match g.directory.as_deref().or(working.as_deref()) {
                     Some(base) => Path::new(base).join(&e).to_string_lossy().into_owned(),
                     None => e,
                 }
@@ -266,6 +268,10 @@ pub struct Added {
 pub struct Written {
     /// Every game of this send, new or updated, for the ledger.
     pub games: Vec<Added>,
+    /// The ones this send put in as new rows: what to take back if the
+    /// ledger cannot be written. A game sent before whose row the player
+    /// removed is one of them, under the key the ledger already has.
+    pub inserted: Vec<Added>,
     pub added: usize,
     pub updated: usize,
     pub pictures: usize,
@@ -299,11 +305,41 @@ fn columns(conn: &Connection) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// How many copies of Lutris's library Kryoto keeps. Each is the whole
+/// library, which holds Lutris's Steam, GOG and Epic lists too.
+const KEEP_BACKUPS: usize = 5;
+
 fn back_up(data: &Path, backups: &Path, now: u64) -> Result<PathBuf, String> {
     std::fs::create_dir_all(backups).map_err(|e| e.to_string())?;
-    let copy = backups.join(format!("lutris-pga-{now}.db"));
+    // Two changes in the same second each keep their own copy: the one from
+    // before a send is never replaced by the one its take-back makes.
+    let mut copy = backups.join(format!("lutris-pga-{now}.db"));
+    let mut n = 2;
+    while copy.exists() {
+        copy = backups.join(format!("lutris-pga-{now}-{n}.db"));
+        n += 1;
+    }
     std::fs::copy(data.join("pga.db"), &copy).map_err(|e| format!("Could not copy Lutris's library first, so nothing was changed: {e}"))?;
+    prune_backups(backups, &copy);
     Ok(copy)
+}
+
+/// `lutris-pga-<seconds>[-<n>].db`: when it was made, for keeping the newest.
+/// None for any other file (Steam's copies share the folder). Pure, for the tests.
+fn backup_order(name: &str) -> Option<(u64, u64)> {
+    let stem = name.strip_prefix("lutris-pga-")?.strip_suffix(".db")?;
+    let (secs, n) = stem.split_once('-').unwrap_or((stem, "1"));
+    Some((secs.parse().ok()?, n.parse().ok()?))
+}
+
+/// Only the newest copies stay, and always the one just made.
+fn prune_backups(backups: &Path, keep: &Path) {
+    let Ok(dir) = std::fs::read_dir(backups) else { return };
+    let mut copies: Vec<((u64, u64), PathBuf)> = dir.filter_map(Result::ok).filter_map(|e| Some((backup_order(&e.file_name().to_string_lossy())?, e.path()))).collect();
+    copies.sort_by_key(|c| std::cmp::Reverse(c.0));
+    for (_, old) in copies.into_iter().skip(KEEP_BACKUPS).filter(|(_, p)| p != keep) {
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 /// A slug no other game in Lutris has, so its cover and settings are its own.
@@ -324,15 +360,23 @@ fn free_slug(conn: &Connection, key: &str, mine: &[String]) -> Result<String, St
     Ok(slug)
 }
 
+/// The `game` keys Kryoto writes: what Lutris starts, with what, and where.
+/// None for one it leaves out.
+fn own_keys(g: &NewGame) -> [(&'static str, Option<String>); 3] {
+    [
+        ("exe", Some(g.exe.clone())),
+        ("args", Some(g.args.clone()).filter(|a| !a.is_empty())),
+        ("working_dir", Path::new(&g.exe).parent().map(|d| d.to_string_lossy().into_owned())),
+    ]
+}
+
 /// A Lutris game's YAML for a program Lutris starts as it is.
 pub fn game_yaml(g: &NewGame) -> String {
     let mut game = Mapping::new();
-    game.insert("exe".into(), g.exe.clone().into());
-    if !g.args.is_empty() {
-        game.insert("args".into(), g.args.clone().into());
-    }
-    if let Some(dir) = Path::new(&g.exe).parent() {
-        game.insert("working_dir".into(), dir.to_string_lossy().into_owned().into());
+    for (k, v) in own_keys(g) {
+        if let Some(v) = v {
+            game.insert(k.into(), v.into());
+        }
     }
     let mut system = Mapping::new();
     // Lutris's own libraries are for games, not for a WebKit app.
@@ -342,6 +386,31 @@ pub fn game_yaml(g: &NewGame) -> String {
     doc.insert("linux".into(), Yaml::Mapping(Mapping::new()));
     doc.insert("system".into(), Yaml::Mapping(system));
     serde_yaml::to_string(&Yaml::Mapping(doc)).unwrap_or_default()
+}
+
+/// The YAML for a game sent before, from the file Lutris has: only Kryoto's
+/// own keys change, so what the player set in Lutris's Configure (Wine,
+/// environment, gamescope) stays. None when the file is right already. A file
+/// that is missing or does not parse gets the whole YAML: Lutris could not
+/// start the game from it either.
+fn updated_yaml(old: &str, g: &NewGame) -> Option<String> {
+    let Ok(Yaml::Mapping(mut doc)) = serde_yaml::from_str::<Yaml>(old) else { return Some(game_yaml(g)) };
+    let before = doc.clone();
+    if !doc.get("game").is_some_and(Yaml::is_mapping) {
+        doc.insert("game".into(), Yaml::Mapping(Mapping::new()));
+    }
+    let Some(Yaml::Mapping(game)) = doc.get_mut("game") else { return Some(game_yaml(g)) };
+    for (k, v) in own_keys(g) {
+        match v {
+            Some(v) => {
+                game.insert(k.into(), v.into());
+            }
+            None => {
+                game.remove(k);
+            }
+        }
+    }
+    (doc != before).then(|| serde_yaml::to_string(&Yaml::Mapping(doc)).unwrap_or_default())
 }
 
 /// What this run wrote, so a failure takes it all back.
@@ -381,6 +450,10 @@ impl Undo {
 /// Add these games to Lutris, or update the ones sent before (`earlier`,
 /// from the ledger) whose row is still there. All or nothing.
 pub fn send(data: &Path, config: &Path, games: &[NewGame], earlier: &[Added], backups: &Path, now: u64) -> Result<Written, String> {
+    // Nothing to write: no copy of the library either.
+    if games.is_empty() {
+        return Ok(Written::default());
+    }
     let mut conn = open_write(data)?;
     let cols = columns(&conn)?;
     let backup = back_up(data, backups, now)?;
@@ -430,11 +503,20 @@ fn write_all(conn: &mut Connection, cols: &[String], data: &Path, config: &Path,
         };
         slugs.push(slug.clone());
         let yml = config.join("games").join(format!("{configpath}.yml"));
-        undo.write(&yml, game_yaml(g).as_bytes())?;
+        let text = match before {
+            Some(_) => updated_yaml(&std::fs::read_to_string(&yml).unwrap_or_default(), g),
+            None => Some(game_yaml(g)),
+        };
+        if let Some(text) = text {
+            undo.write(&yml, text.as_bytes())?;
+        }
         let mut files = vec![yml.to_string_lossy().into_owned()];
         // Lutris reads `<slug>.jpg` whatever the picture's format.
         let cover = data.join("coverart").join(format!("{slug}.jpg"));
-        let ours = before.is_some_and(|a| a.files.iter().any(|f| Path::new(f) == cover));
+        // Lutris keys covers by slug alone: once another game has this slug,
+        // the picture is that game's too, and Kryoto no longer owns it.
+        let shared = before.is_some_and(|a| tx.query_row("SELECT COUNT(*) FROM games WHERE slug = ?1 AND id != ?2", rusqlite::params![a.slug, a.id], |r| r.get::<_, i64>(0)).unwrap_or(1) > 0);
+        let ours = !shared && before.is_some_and(|a| a.files.iter().any(|f| Path::new(f) == cover));
         let mut has_cover = ours;
         match &g.cover {
             // A cover Lutris or the player put there is left alone.
@@ -487,14 +569,20 @@ fn write_all(conn: &mut Connection, cols: &[String], data: &Path, config: &Path,
                 tx.last_insert_rowid()
             }
         };
-        out.games.push(Added { key: g.key.clone(), id, slug, configpath, files });
+        let entry = Added { key: g.key.clone(), id, slug, configpath, files };
+        if before.is_none() {
+            out.inserted.push(entry.clone());
+        }
+        out.games.push(entry);
     }
     tx.commit().map_err(busy)?;
     Ok(out)
 }
 
 /// Take back games Kryoto added: only rows that are still exactly those
-/// (same id, slug and settings file), with the files written for them.
+/// (same id, slug and settings file), with the files written for them. A
+/// game whose row is gone keeps its files, and a cover stays while another
+/// game has the same slug: Lutris finds covers by slug, so it is that game's.
 pub fn take_back(data: &Path, added: &[Added], backups: &Path, now: u64) -> Result<usize, String> {
     if added.is_empty() {
         return Ok(0);
@@ -503,15 +591,23 @@ pub fn take_back(data: &Path, added: &[Added], backups: &Path, now: u64) -> Resu
     columns(&conn)?;
     back_up(data, backups, now)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| format!("Lutris's library could not be changed: {e}"))?;
-    let mut removed = 0;
+    let mut gone: Vec<&Added> = Vec::new();
     for a in added {
-        removed += tx.execute("DELETE FROM games WHERE id = ?1 AND slug = ?2 AND configpath = ?3", rusqlite::params![a.id, a.slug, a.configpath]).map_err(|e| e.to_string())?;
+        if tx.execute("DELETE FROM games WHERE id = ?1 AND slug = ?2 AND configpath = ?3", rusqlite::params![a.id, a.slug, a.configpath]).map_err(|e| e.to_string())? == 1 {
+            gone.push(a);
+        }
+    }
+    let mut files: Vec<&String> = Vec::new();
+    for a in &gone {
+        let cover = data.join("coverart").join(format!("{}.jpg", a.slug));
+        let shared = tx.query_row("SELECT COUNT(*) FROM games WHERE slug = ?1", [&a.slug], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())? > 0;
+        files.extend(a.files.iter().filter(|f| !shared || Path::new(f) != cover));
     }
     tx.commit().map_err(|e| format!("Lutris's library could not be changed: {e}"))?;
-    for f in added.iter().flat_map(|a| &a.files) {
+    for f in files {
         let _ = std::fs::remove_file(f);
     }
-    Ok(removed)
+    Ok(gone.len())
 }
 
 /// Synthetic Lutris folders, for tests and `examples/make-lutris-library.rs`.
@@ -611,6 +707,17 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_exe_is_in_the_games_folder_not_where_it_starts() {
+        let mut g = LutrisGame { directory: Some("/games/foo".into()), ..Default::default() };
+        settings(&mut g, "game:\n  exe: drive_c/Foo/bin/foo.exe\n  working_dir: /games/foo/drive_c/Foo\n", None);
+        assert_eq!(Path::new(g.exe.as_deref().unwrap()), Path::new("/games/foo/drive_c/Foo/bin/foo.exe"));
+        // No folder in Lutris's library: the working folder is all there is.
+        let mut g = LutrisGame::default();
+        settings(&mut g, "game:\n  exe: bin/foo.exe\n  working_dir: /games/bar\n", None);
+        assert_eq!(Path::new(g.exe.as_deref().unwrap()), Path::new("/games/bar/bin/foo.exe"));
+    }
+
+    #[test]
     fn finds_the_flatpak_and_a_picked_folder() {
         let root = temp("find");
         let flat = root.join(".var/app/net.lutris.Lutris");
@@ -659,6 +766,106 @@ mod tests {
         assert_eq!(rows(&data), others);
         assert!(ledger.iter().flat_map(|a| &a.files).all(|f| !Path::new(f).exists()));
         assert!(data.join("coverart/the-witcher.jpg").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_the_newest_library_copies_are_kept() {
+        let root = temp("backups");
+        let (data, config) = library(&root);
+        let backups = root.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::write(backups.join("shortcuts-1-100.vdf"), b"steam's").unwrap();
+        // Nothing to send: nothing copied.
+        assert_eq!(send(&data, &config, &[], &[], &backups, 1_800_000_000).unwrap().backup, None);
+        let mut sent = Vec::new();
+        for i in 0..7 {
+            let w = send(&data, &config, &[outgoing("lantern", "Lantern Rite")], &sent, &backups, 1_800_000_000 + i).unwrap();
+            sent = w.games;
+        }
+        // A take-back in the same second as the send keeps the send's copy.
+        let w = send(&data, &config, &[outgoing("moss", "Moss")], &[], &backups, 1_800_000_010).unwrap();
+        take_back(&data, &w.games, &backups, 1_800_000_010).unwrap();
+        assert!(w.backup.as_ref().unwrap().is_file());
+        let mut names: Vec<String> = std::fs::read_dir(&backups).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["lutris-pga-1800000004.db", "lutris-pga-1800000005.db", "lutris-pga-1800000006.db", "lutris-pga-1800000010-2.db", "lutris-pga-1800000010.db", "shortcuts-1-100.vdf"]);
+        assert_eq!(backup_order("lutris-pga-12-3.db"), Some((12, 3)));
+        assert_eq!(backup_order("lutris-pga-x.db"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_send_says_which_rows_it_put_in() {
+        let root = temp("inserted");
+        let (data, config) = library(&root);
+        let backups = root.join("backups");
+        let w = send(&data, &config, &[outgoing("lantern", "Lantern Rite"), outgoing("moss", "Moss")], &[], &backups, 1_800_000_000).unwrap();
+        assert_eq!(w.inserted, w.games);
+        // The player removed Lantern in Lutris: sending it again puts in a new row.
+        Connection::open(data.join("pga.db")).unwrap().execute("DELETE FROM games WHERE slug = 'lantern'", []).unwrap();
+        let before = rows(&data);
+        let again = send(&data, &config, &[outgoing("lantern", "Lantern Rite"), outgoing("moss", "Moss")], &w.games, &backups, 1_800_000_100).unwrap();
+        assert_eq!((again.added, again.updated), (1, 1));
+        assert_eq!(again.inserted.len(), 1);
+        assert_eq!(again.inserted[0].key, "lantern");
+        assert_ne!(again.inserted[0].configpath, w.games[0].configpath);
+        // Taking back just those leaves Lutris as it was before this send.
+        assert_eq!(take_back(&data, &again.inserted, &backups, 1_800_000_200).unwrap(), 1);
+        assert_eq!(rows(&data), before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn undo_leaves_a_cover_another_game_now_uses() {
+        let root = temp("shared-cover");
+        let (data, config) = library(&root);
+        let backups = root.join("backups");
+        let w = send(&data, &config, &[outgoing("lantern", "Lantern Rite"), outgoing("moss", "Moss")], &[], &backups, 1_800_000_000).unwrap();
+        let conn = Connection::open(data.join("pga.db")).unwrap();
+        // Lantern: the player removed Kryoto's entry in Lutris and installed
+        // the game through Lutris, same slug, with a cover of their own.
+        conn.execute("DELETE FROM games WHERE slug = 'lantern'", []).unwrap();
+        add(&conn, &config, "lantern", "Lantern Rite", "wine", "/g/lantern", true, 1.0, 0, Some("game:\n  exe: l.exe\n")).unwrap();
+        // Moss: Lutris added its own Moss beside Kryoto's.
+        let theirs = add(&conn, &config, "moss", "Moss", "wine", "/g/moss", true, 1.0, 0, None).unwrap();
+        std::fs::write(data.join("coverart/lantern.jpg"), b"custom").unwrap();
+        // Sending Moss again leaves the cover it now shares alone.
+        std::fs::write(data.join("coverart/moss.jpg"), b"theirs").unwrap();
+        let moss: Vec<Added> = w.games.iter().filter(|a| a.key == "moss").cloned().collect();
+        let again = send(&data, &config, &[outgoing("moss", "Moss")], &moss, &backups, 1_800_000_100).unwrap();
+        assert_eq!((again.updated, again.pictures), (1, 0));
+        assert_eq!(std::fs::read(data.join("coverart/moss.jpg")).unwrap(), b"theirs");
+        assert!(!again.games[0].files.iter().any(|f| f.ends_with("moss.jpg")));
+        // Undo with the first ledger: Kryoto's Moss goes, nothing of Lutris's does.
+        assert_eq!(take_back(&data, &w.games, &backups, 1_800_000_200).unwrap(), 1);
+        assert_eq!(std::fs::read(data.join("coverart/lantern.jpg")).unwrap(), b"custom");
+        assert_eq!(std::fs::read(data.join("coverart/moss.jpg")).unwrap(), b"theirs");
+        assert!(rows(&data).iter().any(|r| r.0 == theirs));
+        assert!(!Path::new(&moss[0].files[0]).exists(), "Kryoto's own settings file goes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sending_again_keeps_what_the_player_set_in_lutris() {
+        let root = temp("keep-yaml");
+        let (data, config) = library(&root);
+        let backups = root.join("backups");
+        let w = send(&data, &config, &[outgoing("lantern", "Lantern Rite")], &[], &backups, 1_800_000_000).unwrap();
+        let yml = PathBuf::from(&w.games[0].files[0]);
+        // The player's Configure in Lutris: gamescope, an env var, the runtime back on.
+        let mine = "# mine\ngame:\n  exe: /usr/bin/kryoto-desktop\n  args: kryoto://library/lantern\n  working_dir: /usr/bin\n  prefix: /p\nlinux:\n  gamescope: true\nsystem:\n  env:\n    MANGOHUD: '1'\n";
+        std::fs::write(&yml, mine).unwrap();
+        // Nothing of Kryoto's changed: the file is left as it is.
+        send(&data, &config, &[outgoing("lantern", "Lantern Rite")], &w.games, &backups, 1_800_000_100).unwrap();
+        assert_eq!(std::fs::read_to_string(&yml).unwrap(), mine);
+        // Kryoto moved: only its own keys change.
+        let moved = NewGame { exe: "/opt/kryoto/kryoto-desktop".into(), args: String::new(), ..outgoing("lantern", "Lantern Rite") };
+        send(&data, &config, &[moved], &w.games, &backups, 1_800_000_200).unwrap();
+        let doc: Yaml = serde_yaml::from_str(&std::fs::read_to_string(&yml).unwrap()).unwrap();
+        assert_eq!((doc["game"]["exe"].as_str(), doc["game"]["working_dir"].as_str(), doc["game"].get("args")), (Some("/opt/kryoto/kryoto-desktop"), Some("/opt/kryoto"), None));
+        assert_eq!((doc["game"]["prefix"].as_str(), doc["linux"]["gamescope"].as_bool(), doc["system"]["env"]["MANGOHUD"].as_str()), (Some("/p"), Some(true), Some("1")));
+        assert_eq!(doc["system"].get("disable_runtime"), None);
         let _ = std::fs::remove_dir_all(root);
     }
 

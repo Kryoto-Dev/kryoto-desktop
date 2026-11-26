@@ -514,6 +514,9 @@ export function slugFrom(input: string): string | null {
 
 const goneText = (slug: string) => `kryo.to has no game at /game/${slug}.`
 
+/** `fetchCatalogGame` failed because kryo.to took the game off, not for now. */
+export const saysGone = (e: unknown, slug: string) => e instanceof Error && e.message === goneText(slug)
+
 /**
  * kryo.to's answer for a game was 404 or 410 less than a day ago (src-tauri
  * catalog_gone.rs); with `gone`, remember or forget that first. False where
@@ -750,6 +753,23 @@ export function steamLine(game: LibraryGame, entry: number | null): string {
 }
 
 export const isWindowsHost = () => /Windows/i.test(navigator.userAgent)
+export const isLinuxHost = () => /Linux/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent)
+
+type HighEntropy = { getHighEntropyValues(hints: string[]): Promise<{ platformVersion?: string }> }
+/**
+ * Whether this Windows is 11. Windows 10 and 11 both say "Windows NT 10.0";
+ * only the platform version tells them apart (13 and up is 11). Not known
+ * counts as 11, which most players have.
+ */
+export async function isWindows11(): Promise<boolean> {
+  try {
+    const ua = (navigator as Navigator & { userAgentData?: HighEntropy }).userAgentData
+    const version = (await ua?.getHighEntropyValues(['platformVersion']))?.platformVersion
+    return !version || Number.parseInt(version, 10) >= 13
+  } catch {
+    return true
+  }
+}
 
 /** The last part of a path (a game's folder name). */
 export const folderName = (path: string) => path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? path

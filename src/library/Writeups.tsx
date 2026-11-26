@@ -3,8 +3,7 @@ import { CircleCheck, CircleX, Flame } from '@/ui/pixel-icons'
 import { Caption } from '@/ui'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { fetchGameApi } from '@/lib/library'
-import { viaStore } from '@/lib/friends'
-import { isTauri, isWeb, call } from '@/lib/bridge'
+import { accountFetch } from '@/lib/friends'
 import { cn } from '@/lib/utils'
 import { useAccount } from '@/hooks/useAccount'
 import { RichText } from '@/rich/RichText'
@@ -33,8 +32,7 @@ const SHOWN = 2
 
 /** A reading or a reaction through the Store's kryo.to page, signed in as the player (lib.rs `friend_route_allowed`). */
 function signed(method: 'GET' | 'POST', path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const f = { method, path, body }
-  return isTauri() && !isWeb() ? viaStore(f) : call<Record<string, unknown>>('friends_fetch', f)
+  return accountFetch({ method, path, body })
 }
 
 export function LibraryWriteups({ slug, onWeb, own = false }: { slug: string; onWeb: (path: string) => void; own?: boolean }) {

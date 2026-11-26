@@ -193,6 +193,22 @@ try {
     assert(await nav.evaluate(() => window.navFixture.calls.includes('menu_close')))
     await nav.close()
   })
+  await check('the sign-in box shows its page again when sent back to a sign-in page', async () => {
+    const signin = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    signin.on('pageerror', e => failures.push(e.message))
+    await signin.goto(`${base}/test/signin.html`)
+    await signin.waitForFunction(() => window.signinFixture.shown() === true)
+    // Signed in: the page moves on, and the box says so over a hidden page.
+    await signin.evaluate(() => window.signinFixture.at('https://kryo.to/'))
+    await signin.waitForFunction(() => window.signinFixture.shown() === false)
+    // The site sends it back to have the email checked: shown once it has loaded there.
+    await signin.evaluate(() => window.signinFixture.at('https://kryo.to/verify-email', true))
+    await signin.waitForTimeout(300)
+    assert.equal(await signin.evaluate(() => window.signinFixture.shown()), false)
+    await signin.evaluate(() => window.signinFixture.at('https://kryo.to/verify-email'))
+    await signin.waitForFunction(() => window.signinFixture.shown() === true, null, { timeout: 5_000 })
+    await signin.close()
+  })
   await page.goto(`${base}/test/ui.html`)
   await check('loading is distinct from an empty download list', async () => {
     await expectText('#downloads', 'Loading downloads')
@@ -497,6 +513,105 @@ try {
       assert.equal(await notify.isChecked(), false)
     } finally { await pads.close() }
   })
+  const saverPage = async () => {
+    const saver = await browser.newPage({ viewport: { width: 800, height: 450 } })
+    saver.on('pageerror', e => failures.push(e.message))
+    await saver.goto(`${base}/test/saver.html`)
+    await saver.waitForFunction(() => document.querySelector('#loaded')?.textContent === 'true')
+    return saver
+  }
+  await check("the screensaver holds a still frame with Kryoto's own Reduce motion on", async () => {
+    const saver = await saverPage()
+    try {
+      // Only Kryoto's setting: the system still allows motion.
+      assert.equal(await saver.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), false)
+      const frames = await saver.evaluate(async () => {
+        document.documentElement.dataset.motion = 'reduced'
+        const stop = window.saverFixture.mount('mark')
+        await new Promise(r => setTimeout(r, 1500))
+        stop()
+        return window.saverFixture.frames
+      })
+      assert.equal(frames, 1)
+    } finally { await saver.close() }
+  })
+  await check("Field's start-screen scene moves only with the still frame when Kryoto's Reduce motion is on", async () => {
+    const saver = await browser.newPage({ viewport: { width: 800, height: 450 } })
+    saver.on('pageerror', e => failures.push(e.message))
+    try {
+      await saver.clock.install()
+      await saver.goto(`${base}/test/saver.html`)
+      await saver.clock.runFor(500)
+      const place = () => saver.evaluate(() => document.querySelector('#shown [style*="translate"]')?.getAttribute('style') ?? null)
+      await saver.evaluate(() => {
+        document.documentElement.dataset.motion = 'reduced'
+        window.stopSaver = window.saverFixture.show('field')
+      })
+      await saver.clock.runFor(1_000)
+      const first = await place()
+      assert.ok(first, 'the start-screen scene is underneath')
+      // Past the 90 seconds it moves after with motion allowed.
+      await saver.clock.runFor(100_000)
+      assert.equal(await place(), first)
+      // And on once the still frame's few minutes are up.
+      await saver.clock.runFor(90_000)
+      assert.notEqual(await place(), first)
+      await saver.evaluate(() => window.stopSaver())
+    } finally { await saver.close() }
+  })
+  await check('the screensaver redraws for a new palette, not for every write to the page class', async () => {
+    const saver = await saverPage()
+    try {
+      const drawn = await saver.evaluate(async () => {
+        // Sprites are drawn into a sheet that is never on the page: count those draws.
+        let sprites = 0
+        const ctx = CanvasRenderingContext2D.prototype
+        for (const name of ['fill', 'fillText']) {
+          const draw = ctx[name]
+          ctx[name] = function (...args) {
+            if (!this.canvas.isConnected) sprites++
+            return draw.apply(this, args)
+          }
+        }
+        const wait = ms => new Promise(r => setTimeout(r, ms))
+        const during = async (fn) => {
+          sprites = 0
+          const churn = fn && setInterval(fn, 16)
+          await wait(1000)
+          clearInterval(churn)
+          return sprites
+        }
+        const stop = window.saverFixture.mount('mark')
+        await wait(800)
+        const still = await during()
+        // What pad-nav does on every mouse move.
+        const moves = await during(() => document.documentElement.classList.remove('kryo-pad'))
+        document.documentElement.style.setProperty('--primary', 'rgb(200, 40, 40)')
+        const palette = await during()
+        stop()
+        return { still, moves, palette, frames: window.saverFixture.frames }
+      })
+      assert(drawn.frames > 20, `${drawn.frames} frames`)
+      assert(drawn.moves <= drawn.still + 10, `sprites drawn again on mouse moves: ${JSON.stringify(drawn)}`)
+      assert(drawn.palette > 0, `a new palette redraws: ${JSON.stringify(drawn)}`)
+    } finally { await saver.close() }
+  })
+  await check("a new window size starts the screensaver over without the last one's start-screen scene", async () => {
+    const saver = await saverPage()
+    try {
+      // As Shuffle on Field, starting over on a screensaver that wants nothing underneath.
+      await saver.evaluate(() => {
+        let starts = 0
+        const spec = { id: 'test', name: 'Test', make: scene => { if (starts++ === 0) scene.underlay('splash'); return { frame: () => {} } } }
+        window.stopSaver = window.saverFixture.mount(spec)
+      })
+      assert.deepEqual(await saver.evaluate(() => window.saverFixture.underlays), ['splash'])
+      await saver.setViewportSize({ width: 640, height: 360 })
+      await saver.waitForFunction(() => window.saverFixture.underlays.length > 1)
+      assert.equal(await saver.evaluate(() => window.saverFixture.underlays.at(-1)), null)
+      await saver.evaluate(() => window.stopSaver())
+    } finally { await saver.close() }
+  })
   await check('a Settings switch does not undo where saves are kept, chosen on the same page', async () => {
     const cloud = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     cloud.on('pageerror', e => failures.push(e.message))
@@ -697,6 +812,187 @@ try {
       await linux.waitForTimeout(300)
       assert.equal(await linux.getByText('On Linux', { exact: true }).count(), 0)
     } finally { await context.close() }
+  })
+  await check('Art and Contribute open from the Community menu and light its tab', async () => {
+    const shell = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+    shell.on('pageerror', e => failures.push(e.message))
+    await shell.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await shell.goto(base)
+      await shell.getByRole('complementary', { name: 'Your games' }).waitFor()
+      const community = shell.getByRole('button', { name: 'Community', exact: true })
+      assert.equal(await community.getAttribute('aria-current'), null)
+      await community.hover()
+      await shell.getByRole('menuitem', { name: 'Contribute', exact: true }).waitFor()
+      await shell.getByRole('menuitem', { name: 'Art', exact: true }).click()
+      // kryo.to/art is a Community page, not the Store's.
+      await shell.waitForFunction(() => [...document.querySelectorAll('button[aria-current="page"]')].some(b => b.textContent === 'Community'))
+    } finally { await shell.close() }
+  })
+  await check('a Preview report keeps its text when closed, for that account only, and starts empty once sent', async () => {
+    const ui = await browser.newPage()
+    ui.on('pageerror', e => failures.push(e.message))
+    try {
+      await ui.goto(`${base}/test/ui.html`)
+      await ui.locator('#report').click()
+      const dialog = ui.getByRole('dialog', { name: 'Report a bug', exact: true })
+      await dialog.getByRole('textbox', { name: 'What happened', exact: true }).fill('The Store went white')
+      await dialog.getByRole('textbox', { name: 'Steps to see it', exact: true }).fill('Open Downloads')
+      // Closed at once, before the pause that saves it.
+      await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+      await dialog.waitFor({ state: 'detached' })
+      // Another account signed in on this PC starts empty: the report would go out under its name.
+      await ui.locator('#report-other').click()
+      assert.equal(await dialog.getByRole('textbox', { name: 'What happened', exact: true }).inputValue(), '')
+      await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+      await dialog.waitFor({ state: 'detached' })
+      await ui.locator('#report').click()
+      assert.equal(await dialog.getByRole('textbox', { name: 'What happened', exact: true }).inputValue(), 'The Store went white')
+      assert.equal(await dialog.getByRole('textbox', { name: 'Steps to see it', exact: true }).inputValue(), 'Open Downloads')
+      await dialog.getByRole('button', { name: 'Send the report' }).click()
+      await dialog.getByText('Sent. Thank you.').waitFor()
+      await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+      await dialog.waitFor({ state: 'detached' })
+      await ui.locator('#report').click()
+      assert.equal(await dialog.getByRole('textbox', { name: 'What happened', exact: true }).inputValue(), '')
+    } finally { await ui.close() }
+  })
+  await check("a game kryo.to will not put in a collection says why, in kryo.to's words", async () => {
+    const shelf = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+    shelf.on('pageerror', e => failures.push(e.message))
+    await shelf.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    try {
+      await shelf.goto(base)
+      const rail = shelf.getByRole('complementary', { name: 'Your games' })
+      const collect = async (title, list) => {
+        await rail.getByRole('button', { name: title, exact: true }).click({ button: 'right' })
+        await shelf.getByRole('menuitem', { name: 'Add to collection' }).click()
+        await shelf.getByRole('menuitem', { name: list }).click()
+      }
+      // The preview's kryo.to refuses Hollow Knight, as it once did a game (plan 01).
+      await collect('Hollow Knight', 'Cozy nights')
+      await shelf.locator('.kryo-toast').filter({ hasText: 'A game slug is required.' }).waitFor()
+      // Another game goes in, and the menu shows it there.
+      await collect('Hades', 'Finished in a weekend')
+      await rail.getByRole('button', { name: 'Hades', exact: true }).click({ button: 'right' })
+      await shelf.getByRole('menuitem', { name: /^Add to collection\s*1$/ }).waitFor()
+    } finally { await shelf.close() }
+  })
+  await check('a blocked network shows how to change DNS on this PC, without kryo.to', async () => {
+    // Windows 10 and 11 both say "Windows NT 10.0": only the platform version tells them apart.
+    for (const [os, platformVersion] of [['Windows NT 10.0; Win64; x64', '15.0.0'], ['Windows NT 10.0; Win64; x64', '10.0.0'], ['X11; Linux x86_64', null]]) {
+      const context = await browser.newContext({ userAgent: `Mozilla/5.0 (${os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36` })
+      if (platformVersion) {
+        await context.addInitScript((v) => Object.defineProperty(navigator, 'userAgentData', { value: { getHighEntropyValues: async () => ({ platformVersion: v }) } }), platformVersion)
+      }
+      const ui = await context.newPage()
+      ui.on('pageerror', e => failures.push(e.message))
+      try {
+        await ui.goto(`${base}/test/ui.html`)
+        await ui.locator('#blocked').click()
+        const dialog = ui.getByRole('dialog', { name: 'Your network is blocking kryo.to', exact: true })
+        const how = dialog.getByText('Show me how', { exact: true })
+        assert.equal(await dialog.getByText('SNI or IP block', { exact: false }).isVisible(), false)
+        await how.click()
+        await dialog.getByText('SNI or IP block', { exact: false }).waitFor()
+        const eleven = platformVersion === '15.0.0'
+        const ten = platformVersion === '10.0.0'
+        if (eleven) await dialog.getByText('On Windows 11, encrypted DNS:', { exact: true }).waitFor()
+        if (ten) await dialog.getByText('On Windows 10:', { exact: true }).waitFor()
+        assert.equal(await dialog.getByText('Preferred DNS: 1.1.1.1', { exact: false }).isVisible(), eleven)
+        assert.equal(await dialog.getByText('Turn on IPv6', { exact: false }).isVisible(), eleven)
+        assert.equal(await dialog.getByText('netsh dns set encryption', { exact: false }).isVisible(), eleven)
+        assert.equal(await dialog.getByText('Network and Sharing Center', { exact: false }).isVisible(), ten)
+        assert.equal(await dialog.getByText('netsh interface ipv6 set dnsservers', { exact: false }).isVisible(), eleven || ten)
+        assert.equal(await dialog.getByText('DNSOverTLS=yes', { exact: false }).isVisible(), !platformVersion)
+      } finally { await context.close() }
+    }
+  })
+  await check('a saved game whose adult lookup failed once is asked again, and its cover clears', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    page.on('pageerror', e => failures.push(e.message))
+    await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+    let asked = 0
+    await page.route('**/api/games/hades-ii', route => {
+      asked += 1
+      return asked === 1
+        ? route.fulfill({ status: 503, body: 'busy' })
+        : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ game: { title: 'Hades II', nsfw: false } }) })
+    })
+    const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
+    await page.route('**/api/steam/image.jpg?**', route => route.fulfill({ status: 200, contentType: 'image/png', body: pixel }))
+    try {
+      await page.goto(base)
+      await page.getByRole('checkbox', { name: /Show games not on this PC/ }).click()
+      const cover = page.getByRole('button', { name: 'Open Hades II', exact: true }).locator('img')
+      await cover.waitFor()
+      // Unknown counts as adult; the second answer, not a restart, says otherwise.
+      await page.waitForFunction(() => {
+        const img = document.querySelector('button[aria-label="Open Hades II"] img')
+        return !!img && !img.className.includes('blur-2xl')
+      }, null, { timeout: 30_000 })
+      assert.ok(asked >= 2)
+    } finally { await page.close() }
+  })
+  await check('a saved game that failed once and then turns out gone is not asked about over and over', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    page.on('pageerror', e => failures.push(e.message))
+    await page.addInitScript(() => {
+      localStorage.setItem('kryo:runtimes-ask', 'never')
+      // A hook that keeps waking itself shows up as timers set back to back.
+      const set = window.setTimeout
+      window.timersSet = 0
+      window.setTimeout = (...a) => { window.timersSet += 1; return set(...a) }
+    })
+    let asked = 0
+    await page.route('**/api/games/hades-ii', route => {
+      asked += 1
+      return route.fulfill({ status: asked === 1 ? 503 : 404, body: '' })
+    })
+    try {
+      await page.goto(base)
+      await page.getByRole('checkbox', { name: /Show games not on this PC/ }).click()
+      for (const end = Date.now() + 30_000; asked < 2 && Date.now() < end;) await page.waitForTimeout(250)
+      assert.ok(asked >= 2)
+      await page.waitForTimeout(500)
+      const before = await page.evaluate(() => window.timersSet)
+      await page.waitForTimeout(1_000)
+      assert.ok(await page.evaluate(n => window.timersSet - n, before) < 50)
+    } finally { await page.close() }
+  })
+  await check('a saved game lookup that fails while the list changes is still asked again', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    page.on('pageerror', e => failures.push(e.message))
+    await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+    let asked = 0
+    let answer = () => {}
+    const held = new Promise(resolve => { answer = resolve })
+    await page.route('**/api/games/hades-ii', async route => {
+      asked += 1
+      if (asked === 1) {
+        await held
+        return route.fulfill({ status: 503, body: 'busy' })
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ game: { title: 'Hades II', nsfw: false } }) })
+    })
+    const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
+    await page.route('**/api/steam/image.jpg?**', route => route.fulfill({ status: 200, contentType: 'image/png', body: pixel }))
+    try {
+      await page.goto(base)
+      const notHere = page.getByRole('checkbox', { name: /Show games not on this PC/ })
+      await notHere.click()
+      for (const end = Date.now() + 10_000; asked < 1 && Date.now() < end;) await page.waitForTimeout(100)
+      // The list changes while the lookup is out, so the run that asked is gone when it fails.
+      await notHere.click()
+      await notHere.click()
+      await page.getByRole('button', { name: 'Open Hades II', exact: true }).locator('img').waitFor()
+      answer()
+      await page.waitForFunction(() => {
+        const img = document.querySelector('button[aria-label="Open Hades II"] img')
+        return !!img && !img.className.includes('blur-2xl')
+      }, null, { timeout: 30_000 })
+      assert.ok(asked >= 2)
+    } finally { await page.close() }
   })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')

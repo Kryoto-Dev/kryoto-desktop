@@ -290,8 +290,11 @@ export function usePadNavigation({
       }
     }).then(keep)
 
-    // The pad's focus ring goes as soon as the mouse is used again.
-    const pointer = () => document.documentElement.classList.remove('kryo-pad')
+    // The pad's focus ring goes as soon as the mouse is used again. Only when
+    // it is on: every write to the page's class wakes whatever watches it.
+    const pointer = () => {
+      if (document.documentElement.classList.contains('kryo-pad')) document.documentElement.classList.remove('kryo-pad')
+    }
     window.addEventListener('pointerdown', pointer)
     window.addEventListener('pointermove', pointer)
 
