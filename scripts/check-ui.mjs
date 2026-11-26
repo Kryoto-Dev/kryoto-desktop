@@ -654,6 +654,24 @@ try {
       assert.equal(await region.getByText('This copy does not record achievements', { exact: true }).count(), 0)
     } finally { await page.close() }
   })
+  await check("a copy from the player's own file is offered kryo.to's build even under the same number", async () => {
+    const own = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    own.on('pageerror', e => failures.push(e.message))
+    await own.addInitScript(() => { localStorage.setItem('kryo:runtimes-ask', 'never') })
+    await own.route('**/api/games/stardew-valley', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ game: { title: 'Stardew Valley', version: '1.6' } }) }))
+    try {
+      await own.goto(base)
+      await own.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Stardew Valley', exact: true }).click()
+      const region = own.getByRole('region', { name: 'Stardew Valley', exact: true })
+      await region.getByText("Yours is from your own file, not verified against it.").waitFor()
+      await region.getByRole('button', { name: 'Update', exact: true }).waitFor()
+      // kryo.to names no build: the banner names none either, not the file's own number.
+      await own.route('**/api/games/stardew-valley', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ game: { title: 'Stardew Valley' } }) }))
+      await own.reload()
+      await own.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Stardew Valley', exact: true }).click()
+      await region.getByText("Kryoto's copy of this game is on kryo.to.").waitFor()
+    } finally { await own.close() }
+  })
   await check('a game shows its Linux compatibility and setup through the shared renderer, and an untested game shows none', async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' })
     const linux = await context.newPage()

@@ -1,7 +1,7 @@
 // `pnpm test`: node's own runner, which reads TypeScript as it is.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { fileVerdict, pickDropped, type ArchiveLook } from './from-file.ts'
+import { fileVerdict, ownFileLatest, pickDropped, type ArchiveLook } from './from-file.ts'
 
 const look = (over: Partial<ArchiveLook> = {}): ArchiveLook => ({
   path: 'D:\\Downloads\\Captain Hardcore - kryoto.7z',
@@ -56,4 +56,13 @@ test('of several dropped files, the archive is taken', () => {
   assert.equal(pickDropped(['C:\\a\\notes.txt', 'C:\\a\\Game - kryoto.7z']), 'C:\\a\\Game - kryoto.7z')
   assert.equal(pickDropped(['C:\\a\\notes.txt']), 'C:\\a\\notes.txt')
   assert.equal(pickDropped([]), null)
+})
+
+test("a copy from the player's own file is offered kryo.to's build, even under the same number", () => {
+  const mark = ' (new upload)'
+  // "Game v1.2 - kryoto.7z", an older upload of 1.2 kryo.to has since replaced.
+  assert.equal(ownFileLatest('1.2', '1.2', mark), '1.2 (new upload)')
+  assert.equal(ownFileLatest(null, null, mark), 'This build (new upload)')
+  assert.equal(ownFileLatest(null, '1.2', mark), '1.2')
+  assert.equal(ownFileLatest('1.1', '1.2', mark), '1.2')
 })

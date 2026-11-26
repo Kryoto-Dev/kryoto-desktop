@@ -192,7 +192,8 @@ export function GamePage({
         setLatest(c.version)
         if (game.slug) latestRef.current?.(game.slug, c.version)
         // The same number (or none): the file decides, and asking costs a request.
-        if (game.buildSha && !(c.version && c.version !== (game.version ?? ''))) {
+        // A copy from the player's own file is never Kryoto's (`latestFor`).
+        if ((game.buildSha || game.unverified) && !(c.version && c.version !== (game.version ?? ''))) {
           void latestFor(game, c.version).then((l) => {
             if (cancelled || l === c.version) return
             setLatest(l)
@@ -399,7 +400,9 @@ export function GamePage({
         <Banner>
           <Download className="size-4 shrink-0" />
           <span className="grow text-xs">
-            {reuploaded ? (
+            {reuploaded && game.unverified ? (
+              <>Kryoto's copy of {catalog?.version ? <b className="text-foreground">{catalog.version}</b> : 'this game'} is on kryo.to. Yours is from your own file, not verified against it.</>
+            ) : reuploaded ? (
               <>kryo.to has a new upload of {game.version ? <b className="text-foreground">{game.version}</b> : 'this game'}: the file you installed was replaced.</>
             ) : (
               <>A newer build is on kryo.to <b className="text-foreground">{latest}</b>. You have {game.version ?? (game.unverified ? 'a copy from your own file' : 'an older one')}.</>

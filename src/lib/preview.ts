@@ -98,7 +98,8 @@ const games = [
   }),
   game(504230, 'Celeste', { playtimeSeconds: 30000, lastPlayed: now() - 86400 * 9 }),
   game(1145360, 'Hades', { playtimeSeconds: 72000, lastPlayed: now() - 86400 * 30, source: 'Steam + Kryoto Online', launcher: 'steam' }),
-  game(413150, 'Stardew Valley', { playtimeSeconds: 0 }),
+  // Installed from the player's own file, which matched nothing kryo.to lists.
+  game(413150, 'Stardew Valley', { playtimeSeconds: 0, version: '1.6', unverified: true }),
   // One Steam game, two listings: the public build and the gb27 beta.
   game(2027330, 'GoreBox', { steamBranch: 'public', playtimeSeconds: 7200, lastPlayed: now() - 86400 * 2 }),
   game(2027330, 'GoreBox27 (early access)', { steamBranch: 'gb27', playtimeSeconds: 3600, lastPlayed: now() - 86400 }),

@@ -72,6 +72,19 @@ export function fileVerdict(look: ArchiveLook): FileVerdict {
   }
 }
 
+/**
+ * The build kryo.to offers a game installed from the player's own file that
+ * matched nothing it lists (src-tauri library.rs `unverified`), given its
+ * current `version`. The file's name can carry that same number, or none, and
+ * it is still not Kryoto's copy: then the number comes back marked
+ * `newUpload` (library.ts `NEW_UPLOAD`), which every place that offers
+ * updates reads as newer.
+ */
+export function ownFileLatest(installed: string | null | undefined, version: string | null, newUpload: string): string {
+  if (version && version !== (installed ?? '')) return version
+  return `${version || installed || 'This build'}${newUpload}`
+}
+
 /** The kinds of file a drop or the picker hands over: Kryoto's own downloads are .7z. */
 export const ARCHIVE_EXTENSIONS = ['7z']
 
