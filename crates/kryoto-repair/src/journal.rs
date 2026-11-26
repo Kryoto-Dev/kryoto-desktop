@@ -47,6 +47,10 @@ pub fn make_writable(path: &Path) -> Result<(), String> {
     permissions.set_readonly(false);
     fs::set_permissions(path, permissions).map_err(|e| e.to_string())
 }
+/// What the lock's holder is doing, said both to a second change and to
+/// Play. Not only Repair holds it: the online fix, the release's emulator
+/// swap, Get the files back, add-ons and the installer do too.
+const BUSY: &str = "Kryoto is changing this game's files (a repair, an add-on, an update or Get the files back). Wait for it to finish, then try again.";
 pub fn check_idle(root: &Path) -> Result<(), String> {
     let path = safe_path(root, ".kryoto-repair/lock")?;
     if !path.exists() {
@@ -54,9 +58,7 @@ pub fn check_idle(root: &Path) -> Result<(), String> {
     }
     let file = File::open(path).map_err(|e| e.to_string())?;
     match FileExt::try_lock_shared(&file) {
-        Err(e) if held(&e) => {
-            Err("A repair is running. Wait for it to finish before starting the game.".into())
-        }
+        Err(e) if held(&e) => Err(BUSY.into()),
         // A drive with no file locks (a network share, some FUSE mounts) has no
         // repair to wait for: this used to say one was running, for good.
         _ => Ok(()),
@@ -78,7 +80,7 @@ pub fn lock(root: &Path) -> Result<Lock, String> {
         .map_err(|e| e.to_string())?;
     if let Err(e) = file.try_lock_exclusive() {
         if held(&e) {
-            return Err("Another repair is already using this game folder.".into());
+            return Err(BUSY.into());
         }
     }
     Ok(Lock { _file: file })

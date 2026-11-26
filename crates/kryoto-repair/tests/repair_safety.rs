@@ -114,8 +114,10 @@ fn repair_lock_blocks_a_second_repair_and_game_launch() {
     let f = Folder::new();
     assert!(journal::check_idle(&f.0).is_ok());
     let lock = journal::lock(&f.0).unwrap();
-    assert!(journal::lock(&f.0).is_err());
-    assert!(journal::check_idle(&f.0).is_err());
+    // Not only a repair holds it, so neither refusal says it is one.
+    let busy = "Kryoto is changing this game's files (a repair, an add-on, an update or Get the files back). Wait for it to finish, then try again.";
+    assert_eq!(journal::lock(&f.0).err(), Some(busy.to_string()));
+    assert_eq!(journal::check_idle(&f.0), Err(busy.to_string()));
     drop(lock);
     assert!(journal::check_idle(&f.0).is_ok());
 }

@@ -346,6 +346,7 @@ pub fn game_update_undo(app: AppHandle, slug: String) -> Result<(), String> {
     }
     let games = crate::library::load(&app)?;
     let game = games.iter().find(|g| g.slug.as_deref() == Some(slug.as_str())).ok_or("That game is no longer in the library.")?;
+    let _busy = crate::busy::enter(&game.id, "going back to its previous build")?;
     if crate::library::is_running(&app, &game.id) {
         return Err("Close the game first.".into());
     }

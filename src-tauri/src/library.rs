@@ -925,6 +925,7 @@ pub fn library_relocate(app: AppHandle, id: String, exe_path: String) -> Result<
 /// stays where it is, and play time, settings and saves come along.
 #[tauri::command(async)]
 pub fn library_plain_folder(app: AppHandle, id: String) -> Result<LibraryGame, String> {
+    let _busy = crate::busy::enter(&id, "having its folder renamed")?;
     if is_running(&app, &id) {
         return Err("Close the game first: its files are in use.".into());
     }
@@ -1001,6 +1002,9 @@ fn rename_target(games: &[LibraryGame], folders: &[String], game: &LibraryGame) 
     let known = crate::safe_delete::Known { games, folders, home: crate::safe_delete::home(), release_list: None, downloaded: Vec::new() };
     let top_disk = dunce::canonicalize(&top).map_err(|e| e.to_string())?;
     crate::safe_delete::guard(&known, game, &[game.id.as_str()], &top_disk).map_err(|why| why.replace("so Kryoto deletes nothing in it.", "so Kryoto does not rename it."))?;
+    // Nor while a repair from another Kryoto, which the busy set cannot see,
+    // is still writing into it.
+    crate::busy::idle(&[&top, &full])?;
     Ok((dunce::simplified(&full).to_path_buf(), dunce::simplified(&top).to_path_buf()))
 }
 
@@ -1459,6 +1463,14 @@ fn uninstall_verdict<R: Runtime>(app: &AppHandle<R>, id: &str, leaving: &[&str])
     Ok((game, verdict))
 }
 
+/// An uninstall that deletes files recycles the game's own folder: not while
+/// a repair from another Kryoto, which the busy set cannot see, is changing
+/// it, or half the game would go and the repair would write into the rest.
+fn uninstall_idle(folders: &[String], game: &LibraryGame) -> Result<(), String> {
+    let root = crate::storage::game_folder(folders, game).unwrap_or_else(|| PathBuf::from(&game.install_dir));
+    crate::busy::idle(&[&root, Path::new(&game.install_dir)])
+}
+
 /// The games going in the same uninstall, this one included.
 fn leaving_with<'a>(id: &'a str, together: &'a Option<Vec<String>>) -> Vec<&'a str> {
     std::iter::once(id).chain(together.iter().flatten().map(String::as_str)).collect()
@@ -1516,6 +1528,7 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
     use crate::safe_delete::{bin_for, Bin, Verdict};
     // A version kryo.to no longer allows (required.rs): never, from anywhere.
     crate::required::refuse()?;
+    let _busy = crate::busy::enter(&id, "being uninstalled")?;
     // Its files are in use: the delete would stop partway, leaving half a game.
     if is_running(&app, &id) {
         return Err("Stop the game first.".into());
@@ -1524,6 +1537,7 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
     // Settle what goes before deleting anything, the Wine prefix too.
     let files = match game.as_ref().filter(|_| delete_files) {
         Some(game) => {
+            uninstall_idle(&crate::settings::all_folders(&crate::settings::load(&app)), game)?;
             let (app2, id2, together2) = (app.clone(), id.clone(), together.clone());
             let verdict = tauri::async_runtime::spawn_blocking(move || uninstall_verdict(&app2, &id2, &leaving_with(&id2, &together2)).map(|(_, v)| v))
                 .await
@@ -2247,7 +2261,7 @@ pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, rename_target, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
+    use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, rename_target, set_hidden, slugify, title_with_branch, uninstall_idle, LibraryGame, MARKER};
     use crate::launch::LaunchEntry;
 
     /// KB-0288: Properties offers the folder's start files, likeliest first,
@@ -2519,6 +2533,13 @@ mod tests {
         // A game in no library folder: its own folder, which c is in too.
         assert!(rename_target(&games, &folders, &games[2]).is_err());
         assert_eq!(rename_target(&games, &folders, &games[3]), Ok((plain(loose.join("C")), plain(loose.join("C")))));
+        // A folder another change holds the repair lock on: refused with the
+        // lock's words, and it keeps its name.
+        let lock = kryoto_repair::journal::lock(&pack.join("A")).unwrap();
+        assert!(rename_target(&games, &folders, &a).unwrap_err().starts_with("Kryoto is changing this game's files"));
+        assert!(pack.join("A").is_dir());
+        drop(lock);
+        assert!(rename_target(&games, &folders, &a).is_ok());
         // A folder two games really share: one entry's folder inside another's.
         let (x, y) = (game("x", lib.join("Shared")), game("y", lib.join("Shared").join("Y")));
         mark(lib.join("Shared"), &x);
@@ -2535,6 +2556,26 @@ mod tests {
         // The library folder itself, and a folder that is gone.
         assert!(rename_target(&games, &folders, &game("lib", lib.clone())).is_err());
         assert!(rename_target(&games, &folders, &game("gone", root.join("Gone"))).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An uninstall during a repair from another Kryoto recycled the folder
+    /// the repair was writing into. The lock is found on the game's own
+    /// folder, a level above its exe too.
+    #[test]
+    fn an_uninstall_waits_for_a_change_that_holds_the_folder() {
+        let root = std::env::temp_dir().join(format!("kryoto-uninstall-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (top, bin) = (root.join("Game"), root.join("Game").join("bin"));
+        std::fs::create_dir_all(&bin).unwrap();
+        let game = LibraryGame { id: "g".into(), title: "Game".into(), install_dir: bin.to_string_lossy().into_owned(), ..Default::default() };
+        std::fs::write(top.join(MARKER), serde_json::to_vec(&game).unwrap()).unwrap();
+        let folders = vec![root.to_string_lossy().into_owned()];
+        assert!(uninstall_idle(&folders, &game).is_ok());
+        let lock = kryoto_repair::journal::lock(&top).unwrap();
+        assert!(uninstall_idle(&folders, &game).unwrap_err().starts_with("Kryoto is changing this game's files"));
+        drop(lock);
+        assert!(uninstall_idle(&folders, &game).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 

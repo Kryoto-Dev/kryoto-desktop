@@ -116,6 +116,20 @@ pub(crate) async fn apply<R: Runtime>(
 ) -> Result<repair::RepairReport, String> {
     // A version kryo.to no longer allows (required.rs) changes no game's files.
     crate::required::refuse()?;
+    let busy = crate::busy::enter(game_id, "being repaired")?;
+    apply_held(app, game_id, source, achievements, &busy).await
+}
+
+/// `apply` for a caller that already holds the game in the busy set
+/// (`repair_switch`), where entering it again would refuse.
+async fn apply_held<R: Runtime>(
+    app: &AppHandle<R>,
+    game_id: &str,
+    source: Emulator,
+    achievements: bool,
+    busy: &crate::busy::Busy,
+) -> Result<repair::RepairReport, String> {
+    debug_assert_eq!(busy.id(), game_id);
     let (app, game_id) = (app.clone(), game_id.to_string());
     let before = game(&app, &game_id)?;
     if app
@@ -362,13 +376,16 @@ pub fn game_emulators(app: AppHandle, game_id: String) -> Result<Emulators, Stri
 #[tauri::command]
 pub async fn repair_switch(app: AppHandle, game_id: String, source: Emulator) -> Result<repair::RepairReport, String> {
     crate::required::refuse()?;
+    // One hold for the whole switch: between taking the old emulator out and
+    // putting the new one in, nothing else may change the folder.
+    let busy = crate::busy::enter(&game_id, "having its emulator changed")?;
     let before = game(&app, &game_id)?;
     if library::is_running(&app, &game_id) {
         return Err("Close the game before changing its emulator.".into());
     }
     let dir = root(&app, &before)?;
-    let cleaned = clear_for_switch(&app, &game_id, &before).await?;
-    match apply(&app, &game_id, source, false).await {
+    let cleaned = clear_for_switch(&app, &game_id, &before, &busy).await?;
+    match apply_held(&app, &game_id, source, false, &busy).await {
         Ok(report) => Ok(report),
         Err(error) if cleaned.is_some() => match crate::release_files::unclean(&dir) {
             Ok(_) => Err(error),
@@ -382,16 +399,16 @@ pub async fn repair_switch(app: AppHandle, game_id: String, source: Emulator) ->
 /// Kryoto put in before comes out (Undo, from its copies), then the release's
 /// own emulator by role when its file list is known. `Some` when the latter
 /// happened, for `release_files::unclean` if what follows fails.
-pub(crate) async fn clear_for_switch(app: &AppHandle, game_id: &str, before: &LibraryGame) -> Result<Option<(usize, usize)>, String> {
+pub(crate) async fn clear_for_switch(app: &AppHandle, game_id: &str, before: &LibraryGame, busy: &crate::busy::Busy) -> Result<Option<(usize, usize)>, String> {
     let dir = root(app, before)?;
     let applied = journal::load(&dir)?.is_some_and(|j| j.state != "undone");
     if applied || crate::release_files::has_swap(&dir) {
         progress(app, game_id, "Putting the game's own files back first", None);
-        repair_undo(app.clone(), game_id.to_string())?;
+        undo(app, game_id, busy)?;
     } else if before.online.is_some() {
         // Kryoto Online from before it went through Repair.
         progress(app, game_id, "Taking Kryoto Online out first", None);
-        crate::online::online_undo(app.clone(), game_id.to_string())?;
+        crate::online::undo(app, game_id, busy)?;
     }
     let cleaned = match crate::release_files::ensure_list(app, before, true).await {
         Some(list) => {
@@ -427,6 +444,17 @@ pub fn plain_warning(text: &str) -> String {
 
 #[tauri::command(async)]
 pub fn repair_undo(app: AppHandle, game_id: String) -> Result<(), String> {
+    // It writes the original files back into the folder: not while a Move
+    // copies it or an Uninstall recycles it.
+    let busy = crate::busy::enter(&game_id, "having its repair undone")?;
+    undo(&app, &game_id, &busy)
+}
+
+/// `repair_undo` for a caller that already holds the game in the busy set
+/// (an emulator switch, the online fix, taking Kryoto Online out).
+pub(crate) fn undo(app: &AppHandle, game_id: &str, busy: &crate::busy::Busy) -> Result<(), String> {
+    debug_assert_eq!(busy.id(), game_id);
+    let (app, game_id) = (app.clone(), game_id.to_string());
     let before = game(&app, &game_id)?;
     if app
         .state::<library::Running>()

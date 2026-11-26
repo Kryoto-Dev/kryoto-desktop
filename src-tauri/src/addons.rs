@@ -246,6 +246,7 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
                 format!("{label} is an add-on. Install {game} first, then download it again.")
             }
         })?;
+    let _busy = crate::busy::enter(&game.id, "getting an add-on")?;
     // Its files are in use while it runs. The archive stays, so Retry is quick.
     if library::is_running(app, &game.id) {
         return Err(downloads::close_first(&game.title));
@@ -259,6 +260,9 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
     }
 
     let root = game_root(app, &game);
+    // A repair from another Kryoto, or Play, waits on this as on a repair.
+    // A repair fix above takes it itself, under the repair journal.
+    let _lock = crate::busy::lock(&root)?;
     let staging = root.with_file_name(format!(".{}.addon", downloads::safe_name(&game.title)));
     let archive = PathBuf::from(&item.archive_path);
     let (root_c, staging_c) = (root.clone(), staging.clone());
@@ -530,6 +534,7 @@ async fn install_fix<R: Runtime>(
 /// files it replaced, then remove any folders it left empty.
 #[tauri::command(async)]
 pub fn addon_undo(app: AppHandle, game_id: String, file: String) -> Result<LibraryGame, String> {
+    let _busy = crate::busy::enter(&game_id, "having an add-on taken out")?;
     let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     let at = game.addons.iter().position(|a| a.file == file).ok_or("That add-on is not applied.")?;
     let addon = game.addons[at].clone();
@@ -538,6 +543,7 @@ pub fn addon_undo(app: AppHandle, game_id: String, file: String) -> Result<Libra
         return Err("Close the game first.".into());
     }
     let root = game_root(&app, &game);
+    let _lock = crate::busy::lock(&root)?;
     let mut left = addon.clone();
     let mut later = game.addons[at + 1..].to_vec();
     let undone = remove(&root, &mut left, &mut later);

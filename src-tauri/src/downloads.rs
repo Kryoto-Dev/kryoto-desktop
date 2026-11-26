@@ -5150,6 +5150,9 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .filter(|_| !settings.update_backup_dir.trim().is_empty())
         .map(|_| (PathBuf::from(settings.update_backup_dir.trim()), crate::game_update::data_dir(app)));
     let dest = install_dest(&games, settings, &item, &title);
+    // Over an installed game: nothing else changes its folder meanwhile, a
+    // Move, Uninstall or add-on included, until it is saved (dropped below).
+    let busy = existing.as_ref().map(|g| crate::busy::enter(&g.id, "being updated")).transpose()?;
     // An old repair backup must never restore files over a newer release.
     // Keep the same lock as the fixer through installation and library saving.
     // The achievements switch is Kryoto's own, not a choice made in Repair:
@@ -5389,6 +5392,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     let _ = app.emit("library-changed", ());
     // Installed and saved: the folder is free for Repair again.
     drop(repair_lock);
+    drop(busy);
     if achievements_back {
         let (app, id) = (app.clone(), game.id.clone());
         tauri::async_runtime::spawn(crate::achievements::turn_back_on(app, id));
