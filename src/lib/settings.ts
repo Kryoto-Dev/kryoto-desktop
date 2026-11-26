@@ -61,6 +61,8 @@ export type Settings = {
   speedLimitMb: number
   /** Speeds shown in Mbps instead of MB/s (suggestion #105). */
   speedInBits?: boolean
+  /** Where downloads come from first: mirror hosts and `kryoto` (our copy), best first. Empty is kryo.to's order (suggestion #110, lib/download-order.ts). */
+  downloadOrder?: string[]
   /** Blank uses production; set a local site origin while developing. */
   catalogEndpoint: string
   /** Linux: MangoHud's overlay on Windows games. */

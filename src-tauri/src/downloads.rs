@@ -189,12 +189,24 @@ pub struct Download {
     /// The player chose to install it although it matches no file kryo.to
     /// lists: it goes in marked "not verified against Kryoto's copy".
     pub not_verified: bool,
+    /// The sources this row already failed at: a mirror handed on from by
+    /// the player's download order (`hand_on`), or our own copy a mirror
+    /// took over from (`take_over_from_mirror`). Never gone back to, so a
+    /// row cannot go round them for ever. A Retry clears it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tried_sources: Vec<String>,
 }
 
 /// The archive this row may delete: one the app downloaded. A player's own
 /// file (`from_file`) is theirs and stays where it is.
 pub(crate) fn own_archive(d: &Download) -> Option<String> {
     (!d.from_file && !d.archive_path.is_empty()).then(|| d.archive_path.clone())
+}
+
+/// `own_archive`, unless another row holds the same file (two rows saved
+/// before each claimed a path of its own): deleting it would take theirs.
+pub(crate) fn unshared_archive<R: Runtime>(app: &AppHandle<R>, d: &Download) -> Option<String> {
+    own_archive(d).filter(|p| !held_elsewhere(app, &d.id, p))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -597,7 +609,8 @@ pub(crate) fn persist_checked<R: Runtime>(app: &AppHandle<R>) -> Result<(), Stri
     let list = app.state::<Downloads>().list.lock().map_err(|_| "download list lock poisoned")?.clone();
     let tmp = file.with_extension("json.tmp");
     let mut output = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    output.write_all(&serde_json::to_vec_pretty(&list).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    // Compact: only this file reads it back, and it is written on every change.
+    output.write_all(&serde_json::to_vec(&list).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     output.sync_all().map_err(|e| e.to_string())?;
     drop(output);
     std::fs::rename(tmp, file).map_err(|e| e.to_string())
@@ -772,9 +785,23 @@ fn set_status<R: Runtime>(app: &AppHandle<R>, id: &str, status: Status, error: O
         if matches!(status, Status::Installed | Status::Failed | Status::Canceled) {
             d.finished_at = Some(now());
         }
+        forget_ranges(d);
     });
     persist(app);
     emit(app, true);
+}
+
+/// A row that is done with its archive (installed, or cancelled and its
+/// archive deleted) has no use for its ranges. They were about 10 KB a row,
+/// saved with every change and sent to the window with every update, so the
+/// list grew heavier with the history. A failed row keeps them to resume.
+/// A cancel only counts once it has been tidied up (`settle_stopped`, nothing
+/// received): Cancel says so on the row at once, and a run that then fails
+/// instead leaves an archive that only its ranges can resume.
+fn forget_ranges(d: &mut Download) {
+    if d.status == Status::Installed || (d.status == Status::Canceled && d.received == 0) {
+        d.segments.clear();
+    }
 }
 
 /// Load what was left from last time. Anything that was moving is paused -
@@ -796,6 +823,8 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
             d.speed = 0;
         }
         d.notice = None;
+        // Rows finished before their ranges were dropped (`forget_ranges`).
+        forget_ranges(d);
         // The ranges are only ever saved once their bytes are on the disk;
         // `received` is the live count and can be ahead of them after a crash.
         if !d.segments.is_empty() {
@@ -1024,6 +1053,7 @@ fn enqueue_item<R: Runtime>(
     release: Option<String>,
     remote_id: Option<String>,
 ) -> Result<(), String> {
+    let started = Instant::now();
     // A version kryo.to no longer allows (required.rs) starts nothing new.
     crate::required::refuse()?;
     // A Download pressed for the game means kryo.to has it (again): its
@@ -1147,7 +1177,17 @@ fn enqueue_item<R: Runtime>(
     // Shown first, saved second: the row (and the folder question) must not
     // wait for a busy disk.
     emit(app, true);
-    if let Err(e) = persist_checked(app) {
+    // How long the row took to show, beside how many rows there are: the
+    // folder question was said to come slower as the history grew (plan 05).
+    let rows = state.list.lock().map(|l| l.len()).unwrap_or(0);
+    crate::logging::info("download", &format!("queued {id} in {} ms ({rows} rows, ask_folder {ask_folder})", started.elapsed().as_millis()));
+    // The whole list written and flushed to the disk: the likeliest slow step.
+    let saving = Instant::now();
+    let saved = persist_checked(app);
+    if saving.elapsed() > SLOW_SAVE {
+        crate::logging::warn("download", &format!("saving the queue for {id} took {} ms ({rows} rows)", saving.elapsed().as_millis()));
+    }
+    if let Err(e) = saved {
         if let Ok(mut list) = state.list.lock() { list.retain(|d| d.id != id); }
         emit(app, true);
         return Err(format!("Could not save the download queue: {e}"));
@@ -1158,6 +1198,9 @@ fn enqueue_item<R: Runtime>(
     }
     Ok(())
 }
+
+/// Saving the queue for longer than this is said in the log (plan 05).
+const SLOW_SAVE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Queue the games of a collection, in order, into `library_dir` (none is the
 /// default folder). Each takes its place like any download and gets its link
@@ -1861,6 +1904,24 @@ pub fn safe_name(name: &str) -> String {
 /// no plain spelling (a Japanese title) is left out; when nothing is left,
 /// `fallback` (the kryo.to slug) names it.
 pub fn plain_name(name: &str, fallback: Option<&str>) -> String {
+    let out = latin(name);
+    let named = out.chars().any(|c| c.is_ascii_alphanumeric());
+    match fallback.filter(|_| !named) {
+        Some(slug) => safe_name(slug),
+        None => safe_name(&out),
+    }
+}
+
+/// `name` in plain Latin letters (`Ōkami` is `Okami`, `Baldur’s` is
+/// `Baldur's`), leaving out what has no plain spelling: a folder's name, and
+/// what online-fix.me's Latin-only search can find a title by.
+pub fn latin(name: &str) -> String {
+    latin_with(name, |_| "")
+}
+
+/// `latin`, with `other` saying what a character with no plain spelling
+/// becomes.
+pub fn latin_with(name: &str, other: impl Fn(char) -> &'static str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
         if c.is_ascii() {
@@ -1881,49 +1942,53 @@ pub fn plain_name(name: &str, fallback: Option<&str>) -> String {
             'à'..='å' | 'ā' | 'ă' | 'ą' => "a",
             'Æ' => "AE",
             'æ' => "ae",
-            'Ç' | 'Ć' | 'Č' => "C",
-            'ç' | 'ć' | 'č' => "c",
+            'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => "C",
+            'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
             'Ď' | 'Đ' | 'Ð' => "D",
             'ď' | 'đ' | 'ð' => "d",
-            'È'..='Ë' | 'Ē' | 'Ė' | 'Ę' | 'Ě' => "E",
-            'è'..='ë' | 'ē' | 'ė' | 'ę' | 'ě' => "e",
-            'Ğ' => "G",
-            'ğ' => "g",
-            'Ì'..='Ï' | 'Ī' | 'İ' => "I",
-            'ì'..='ï' | 'ī' | 'ı' => "i",
-            'Ł' => "L",
-            'ł' => "l",
-            'Ñ' | 'Ń' | 'Ň' => "N",
-            'ñ' | 'ń' | 'ň' => "n",
-            'Ò'..='Ö' | 'Ø' | 'Ō' | 'Ő' => "O",
-            'ò'..='ö' | 'ø' | 'ō' | 'ő' => "o",
+            'È'..='Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => "E",
+            'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+            'Ĝ' | 'Ğ' | 'Ġ' | 'Ģ' => "G",
+            'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+            'Ĥ' | 'Ħ' => "H",
+            'ĥ' | 'ħ' => "h",
+            'Ì'..='Ï' | 'Ĩ' | 'Ī' | 'Ĭ' | 'Į' | 'İ' => "I",
+            'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+            'Ĵ' => "J",
+            'ĵ' => "j",
+            'Ķ' => "K",
+            'ķ' => "k",
+            'Ĺ' | 'Ļ' | 'Ľ' | 'Ŀ' | 'Ł' => "L",
+            'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+            'Ñ' | 'Ń' | 'Ņ' | 'Ň' => "N",
+            'ñ' | 'ń' | 'ņ' | 'ň' => "n",
+            'Ò'..='Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' | 'Ơ' => "O",
+            'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' | 'ơ' => "o",
             'Œ' => "OE",
             'œ' => "oe",
-            'Ř' => "R",
-            'ř' => "r",
-            'Ś' | 'Š' | 'Ş' => "S",
-            'ś' | 'š' | 'ş' => "s",
+            'Ŕ' | 'Ŗ' | 'Ř' => "R",
+            'ŕ' | 'ŗ' | 'ř' => "r",
+            'Ś' | 'Ŝ' | 'Š' | 'Ş' | 'Ș' => "S",
+            'ś' | 'ŝ' | 'š' | 'ş' | 'ș' => "s",
             'ß' => "ss",
-            'Ť' => "T",
-            'ť' => "t",
+            'Ţ' | 'Ť' | 'Ŧ' | 'Ț' => "T",
+            'ţ' | 'ť' | 'ŧ' | 'ț' => "t",
             'Þ' => "Th",
             'þ' => "th",
-            'Ù'..='Ü' | 'Ū' | 'Ů' | 'Ű' => "U",
-            'ù'..='ü' | 'ū' | 'ů' | 'ű' => "u",
-            'Ý' | 'Ÿ' => "Y",
-            'ý' | 'ÿ' => "y",
+            'Ù'..='Ü' | 'Ũ' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' | 'Ư' => "U",
+            'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' | 'ư' => "u",
+            'Ŵ' => "W",
+            'ŵ' => "w",
+            'Ý' | 'Ÿ' | 'Ŷ' => "Y",
+            'ý' | 'ÿ' | 'ŷ' => "y",
             'Ź' | 'Ż' | 'Ž' => "Z",
             'ź' | 'ż' | 'ž' => "z",
             // ™, ®, ©, symbols and scripts with no plain spelling.
-            _ => "",
+            _ => other(c),
         };
         out.push_str(plain);
     }
-    let named = out.chars().any(|c| c.is_ascii_alphanumeric());
-    match fallback.filter(|_| !named) {
-        Some(slug) => safe_name(slug),
-        None => safe_name(&out),
-    }
+    out
 }
 
 
@@ -2034,7 +2099,7 @@ fn already_had<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     let Some(game) = installed_build_in(&games, &d).filter(|g| Path::new(&g.install_dir).is_dir()) else { return false };
     let body = format!("{} is already in your Library, on this build.", game.title);
     let _ = app.emit("notify", Notice::new("Already installed", &body, Some(game.id.clone())));
-    if let Some(path) = own_archive(&d) {
+    if let Some(path) = unshared_archive(app, &d) {
         let _ = std::fs::remove_file(path);
     }
     drop_row(app, id);
@@ -2284,6 +2349,17 @@ async fn remint_same_file<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     false
 }
 
+/// The whole archive is on the disk, so Retry or Resume can skip fetching it.
+/// One stream counts only what the disk confirmed (`synced`), not the live
+/// count: after a failed last sync, Retry used to install what the disk never
+/// confirmed (KB-0308).
+fn fully_fetched(d: &Download) -> bool {
+    !d.archive_path.is_empty()
+        && d.total.is_some_and(|t| t > 0 && d.received >= t)
+        && d.segments.iter().all(|s| s.done >= s.len())
+        && (!d.segments.is_empty() || d.synced.is_none_or(|s| d.total.is_some_and(|t| s >= t)))
+}
+
 async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> Result<(), String> {
     let settings = crate::settings::load(app);
     let client = client_builder().build().map_err(|e| e.to_string())?;
@@ -2348,61 +2424,19 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
         };
     }
 
-    let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
-    let (mut client, mut connections) = (client.clone(), settings.connections);
-    // Our own link: see `own_client`. The pass from an earlier run goes back in.
-    let jar = Arc::new(reqwest::cookie::Jar::default());
-    if !is_mirror {
-        if let Some((pass, url)) = edit(app, id, |_| {}).and_then(|d| Some((d.resume_pass?, url::Url::parse(&d.url).ok()?))) {
-            jar.add_cookie_str(&pass, &url);
+    // A mirror that fails hands the row on to the next source in the
+    // player's download order (`hand_on`), and it is fetched again from there.
+    let client = loop {
+        match fetch_source(app, id, flag, &settings, &client).await {
+            Ok(Some(client)) => break client,
+            Ok(None) => return settle_stopped(app, id, flag),
+            Err((why, blame)) => match hand_on(app, id, flag, &settings, &why, blame).await {
+                HandOn::Moved => {}
+                HandOn::Stopped => return settle_stopped(app, id, flag),
+                HandOn::Stands => return Err(why),
+            },
         }
-    }
-    if !is_mirror {
-        if let Some(ours) = own_client(app, id, &jar) {
-            client = ours;
-        }
-    }
-    let already_complete = {
-        let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
-        let fetched = !d.archive_path.is_empty() && d.total.is_some_and(|t| t > 0 && d.received >= t) && d.segments.iter().all(|s| s.done >= s.len());
-        // Fetched once, but the file has gone since (an antivirus took it, or
-        // somebody tidied the folder): Retry fetches it again. It used to fail
-        // the same way for ever, "Could not read the archive to check it".
-        // An unpack in place has eaten its archive on purpose.
-        let path = Path::new(&d.archive_path);
-        let there = path.is_file() || crate::hatchzip::resumes(path);
-        if fetched && !there {
-            crate::logging::warn("download", &format!("{id}: the finished archive is gone; fetching it again"));
-            discard(app, id);
-        }
-        fetched && there
     };
-    if !already_complete {
-        if is_mirror {
-            match mirror_client(app, id, flag, false, settings.connections).await {
-                Ok(v) => (client, connections) = v,
-                Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
-                Err(e) => return Err(e),
-            }
-        }
-        set_status(app, id, Status::Downloading, None);
-        let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
-        // filez.stream: ciphertext by the host's grants, opened chunk by chunk here.
-        let filez = if is_mirror { edit(app, id, |_| {}).and_then(|d| crate::resolvers::filez::file_for(&d.url)) } else { None };
-        let done = match filez {
-            Some(file) => fetch_filez(app, id, flag, &mut client, &settings, &limiter, file).await?,
-            None => {
-                let fetched = fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror, &jar).await;
-                if !is_mirror {
-                    keep_resume_pass(app, id, &jar);
-                }
-                fetched?
-            }
-        };
-        if !done {
-            return settle_stopped(app, id, flag);
-        }
-    }
     identify(app, id, &client).await;
     // A DLC kryo.to's answer did not place (it was out of reach, or leaves links
     // out for this caller) still says what it is in its name.
@@ -2429,6 +2463,87 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &Arc<AtomicU8>) -> 
         Err(_) if flag.load(Ordering::SeqCst) != RUN => settle_stopped(app, id, flag),
         done => done,
     }
+}
+
+/// Fetch the archive from the row's source, our own link or its mirror.
+/// `Ok(None)`: paused or cancelled. The error says whether the source is to
+/// blame (its page could not be solved), which another source may get past.
+async fn fetch_source<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    flag: &Arc<AtomicU8>,
+    settings: &crate::settings::Settings,
+    client: &reqwest::Client,
+) -> Result<Option<reqwest::Client>, (String, bool)> {
+    let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
+    let (mut client, mut connections) = (client.clone(), settings.connections);
+    // Our own link: see `own_client`. The pass from an earlier run goes back in.
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    if !is_mirror {
+        if let Some((pass, url)) = edit(app, id, |_| {}).and_then(|d| Some((d.resume_pass?, url::Url::parse(&d.url).ok()?))) {
+            jar.add_cookie_str(&pass, &url);
+        }
+    }
+    if !is_mirror {
+        if let Some(ours) = own_client(app, id, &jar) {
+            client = ours;
+        }
+    }
+    // Two rows saved before each claimed its own archive can share one file:
+    // this one starts over in a file of its own instead of writing into the
+    // other's.
+    if edit(app, id, |_| {}).is_some_and(|d| !d.from_file && held_elsewhere(app, id, &d.archive_path)) {
+        crate::logging::warn("download", &format!("{id}: its archive is another download's too; starting over in its own file"));
+        edit(app, id, |d| {
+            d.archive_path.clear();
+            d.received = 0;
+            d.synced = None;
+            d.segments.clear();
+            d.verified = false;
+        });
+    }
+    let already_complete = {
+        let d = edit(app, id, |_| {}).ok_or(("The download is gone.".to_string(), false))?;
+        let fetched = fully_fetched(&d);
+        // Fetched once, but the file has gone since (an antivirus took it, or
+        // somebody tidied the folder): Retry fetches it again. It used to fail
+        // the same way for ever, "Could not read the archive to check it".
+        // An unpack in place has eaten its archive on purpose.
+        let path = Path::new(&d.archive_path);
+        let there = path.is_file() || crate::hatchzip::resumes(path);
+        if fetched && !there {
+            crate::logging::warn("download", &format!("{id}: the finished archive is gone; fetching it again"));
+            discard(app, id);
+        }
+        fetched && there
+    };
+    if !already_complete {
+        if is_mirror {
+            match mirror_client(app, id, flag, false, settings.connections).await {
+                Ok(v) => (client, connections) = v,
+                Err(_) if flag.load(Ordering::SeqCst) != RUN => return Ok(None),
+                Err(e) => return Err((e, true)),
+            }
+        }
+        set_status(app, id, Status::Downloading, None);
+        let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
+        // filez.stream: ciphertext by the host's grants, opened chunk by chunk here.
+        let filez = if is_mirror { edit(app, id, |_| {}).and_then(|d| crate::resolvers::filez::file_for(&d.url)) } else { None };
+        let done = match filez {
+            Some(file) => fetch_filez(app, id, flag, &mut client, settings, &limiter, file).await.map_err(|e| (e, false))?,
+            None => {
+                let fetched = fetch_all(app, id, flag, &mut client, &mut connections, settings, &limiter, is_mirror, &jar).await;
+                if !is_mirror {
+                    keep_resume_pass(app, id, &jar);
+                }
+                fetched.map_err(|e| (e, false))?
+            }
+        };
+        if !done {
+            return Ok(None);
+        }
+    }
+    Ok(Some(client))
 }
 
 /// Fetch every byte of the archive, riding out dropped connections.
@@ -2474,14 +2589,13 @@ async fn fetch_filez<R: Runtime>(
         crate::storage::check_download_room(&dir, &install_parent(app, &d, settings), file.size, file.size, install_size(&d), unpacks_in_place(&d), &d.meta.title)?;
         let name = safe_name(&file.name);
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot write to {}: {e}", dir.display()))?;
-        let path = dir.join(&name);
+        let path = claim(app, id, &dir, &name);
         crate::hatchzip::forget(&path);
         let f = std::fs::File::create(&path).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
         f.set_len(file.size).map_err(|e| format!("Cannot make room for {}: {e}", path.display()))?;
         drop(f);
         edit(app, id, |d| {
             d.file_name = name.clone();
-            d.archive_path = path.to_string_lossy().into_owned();
             name_from_file(d);
             d.total = Some(file.size);
             d.received = 0;
@@ -2893,13 +3007,13 @@ async fn fetch_all<R: Runtime>(
                     }
                 }
                 if failures > MAX_FAILURES {
-                    return Err(format!("The connection kept dropping ({e}). Resume to try again."));
+                    return Err(kept_failing(&e));
                 }
                 let wait = backoff(failures);
                 crate::logging::warn("download", &format!("{id}: {e}; trying again in {wait} s"));
                 edit(app, id, |d| {
                     d.speed = 0;
-                    d.notice = Some(format!("Connection lost. Trying again in {wait} s."));
+                    d.notice = Some(retry_notice(&e, wait));
                 });
                 emit(app, true);
                 if !wait_unless_stopped(flag, wait).await {
@@ -2924,13 +3038,46 @@ async fn fetch_all<R: Runtime>(
 /// minute of trying; it used to retry for as long as each try moved a byte.
 const OWN_CUTS_BEFORE_MIRROR: u32 = 6;
 
+/// A game's `/downloads` listing on kryo.to: with the player's session when
+/// there is one (it lists what this account may fetch), else as anyone.
+async fn sources_listing<R: Runtime>(app: &AppHandle<R>, slug: &str, settings: &crate::settings::Settings) -> Result<serde_json::Value, String> {
+    if let Ok(session) = crate::phone::session(app) {
+        return crate::phone::listing(&session, slug).await;
+    }
+    let endpoint = crate::settings::catalog_endpoint(settings);
+    client_builder()
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(format!("{endpoint}/api/games/{slug}/downloads"))
+        .send()
+        .await
+        .map_err(|e| crate::logging::why(&e.without_url()))?
+        .json()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The build a row downloads, in kryo.to's listing: the version picked, else the current one.
+fn listed_build<'a>(listing: &'a serde_json::Value, release: Option<&str>) -> Option<&'a serde_json::Value> {
+    let releases: Vec<&serde_json::Value> = listing["releases"].as_array().into_iter().flatten().collect();
+    release
+        .and_then(|v| releases.iter().find(|r| r["version"].as_str() == Some(v)))
+        .or_else(|| releases.iter().find(|r| r["primary"].as_bool() == Some(true)))
+        .copied()
+}
+
+/// The build has our own copy: a link of kryo.to's own, and not archived
+/// (an archived build is on its mirrors only), as the Library reads it.
+fn has_own_copy(listing: &serde_json::Value, release: Option<&str>) -> bool {
+    listed_build(listing, release).is_some_and(|r| {
+        r["archived"].as_bool() != Some(true)
+            && r["links"].as_array().into_iter().flatten().filter_map(|l| l["url"].as_str()).any(|u| u.starts_with("/api/download/"))
+    })
+}
+
 /// The mirror pages kryo.to lists for the build a row downloads, in its order.
 fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<String> {
-    let releases: Vec<&serde_json::Value> = listing["releases"].as_array().into_iter().flatten().collect();
-    let build = release
-        .and_then(|v| releases.iter().find(|r| r["version"].as_str() == Some(v)))
-        .or_else(|| releases.iter().find(|r| r["primary"].as_bool() == Some(true)));
-    build
+    listed_build(listing, release)
         .map(|r| {
             r["links"]
                 .as_array()
@@ -2944,37 +3091,57 @@ fn mirror_pages(listing: &serde_json::Value, release: Option<&str>) -> Vec<Strin
         .unwrap_or_default()
 }
 
+/// The size kryo.to lists for the build's file (`listed_build`): the one of
+/// this name, else its only one.
+fn listed_size(listing: &serde_json::Value, release: Option<&str>, file: Option<&str>) -> Option<u64> {
+    let sizes: Vec<(Option<&str>, u64)> = listed_build(listing, release)?["hashes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| Some((h["name"].as_str(), h["bytes"].as_u64()?)))
+        .collect();
+    let same = |n: &str| file.is_some_and(|f| safe_name(n).eq_ignore_ascii_case(&safe_name(f)));
+    let named = sizes.iter().find(|(n, _)| n.is_some_and(same));
+    named.or((sizes.len() == 1).then(|| &sizes[0])).map(|(_, b)| *b)
+}
+
+/// The size a mirror's copy must have to carry this download on: the one our
+/// host said. When it failed on the very first request, nothing is on disk
+/// and the size kryo.to lists for the build (`listed`) is the one, so the
+/// mirror starts it from zero with this file and not another packaging of
+/// the build (a `.rar` part, an older upload). Bytes on disk of a file whose
+/// size is not known cannot be matched to anyone's copy.
+fn takeover_size(total: Option<u64>, received: u64, listed: Option<u64>) -> Result<u64, &'static str> {
+    match (total, listed) {
+        (Some(t), _) => Ok(t),
+        (None, _) if received > 0 => Err("the file's size is not known yet"),
+        (None, Some(l)) => Ok(l),
+        (None, None) => Err("kryo.to lists no size for the file to check a mirror's copy by"),
+    }
+}
+
 /// Our own server keeps cutting this download: the same archive from one of
 /// the game's mirrors carries it on, from where every range got to. A mirror
 /// is only taken when its file is this one: the same size, and the same first
 /// bytes as what is on disk (the 7z start header, which names the archive's
-/// end). The checksum at the end still checks every byte. The mirror's
-/// client, its connection count and its name.
+/// end). The checksum at the end still checks every byte. When nothing came
+/// from our host at all, a copy of the size kryo.to lists starts it (`takeover_size`).
+/// Mirrors are asked in the player's download order, and never one this row
+/// already failed at; once one takes over, our copy counts as failed for this
+/// row. The mirror's client, its connection count and its name.
 async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8, settings: &crate::settings::Settings) -> Result<(reqwest::Client, u32, String), String> {
     let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let slug = d.slug.clone().ok_or("no game to ask kryo.to about")?;
     if crate::catalog_gone::is_gone(app, &slug) {
         return Err("the game is no longer on kryo.to".into());
     }
-    let total = d.total.ok_or("the file's size is not known yet")?;
-    let endpoint = crate::settings::catalog_endpoint(settings);
-    let listing = match crate::phone::session(app) {
-        Ok(session) => crate::phone::listing(&session, &slug).await?,
-        Err(_) => client_builder()
-            .build()
-            .map_err(|e| e.to_string())?
-            .get(format!("{endpoint}/api/games/{slug}/downloads"))
-            .send()
-            .await
-            .map_err(|e| crate::logging::why(&e.without_url()))?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?,
-    };
-    let pages = mirror_pages(&listing, d.release.as_deref());
+    let listing = sources_listing(app, &slug, settings).await?;
+    let pages = pages_in_order(mirror_pages(&listing, d.release.as_deref()), &settings.download_order, &d.tried_sources);
     if pages.is_empty() {
         return Err("the game has no mirror Kryoto downloads from".into());
     }
+    let file = Some(d.file_name.clone()).filter(|n| !n.is_empty()).or_else(|| file_name_in_link(&d.url));
+    let total = takeover_size(d.total, d.received, listed_size(&listing, d.release.as_deref(), file.as_deref()))?;
     // What is on disk of the start, to compare (zeros until range 0 has it).
     let ours: Vec<u8> = std::fs::File::open(&d.archive_path)
         .and_then(|mut f| {
@@ -3005,8 +3172,8 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
                 continue;
             }
         };
-        if resolved.size.is_some_and(|s| s != total) {
-            why.push(format!("{host}: another size ({} bytes, ours {total})", resolved.size.unwrap_or(0)));
+        if let Some(size) = resolved.size.filter(|s| *s != total) {
+            why.push(format!("{host}: another size ({size} bytes, ours {total})"));
             continue;
         }
         let (before_url, before_mirror, before_etag) = (d.url.clone(), d.mirror.clone(), d.etag.clone());
@@ -3025,18 +3192,27 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
             let url = edit(app, id, |_| {}).map(|r| r.url).unwrap_or_default();
             let res = send(client.get(&url).header(reqwest::header::RANGE, "bytes=0-31")).await.map_err(|_| "no answer".to_string())?;
             let size = content_range_of(&res).and_then(|r| r.total);
-            if res.status().as_u16() != 206 || size != Some(total) || is_web_page(&res) {
+            let fits = size == Some(total);
+            if res.status().as_u16() != 206 || !fits || not_the_file(content_type(&res), &[]).is_some() {
                 return Err(format!("answered {} for {} bytes", res.status().as_u16(), size.map_or("?".into(), |s| s.to_string())));
             }
             let head = res.bytes().await.map_err(|e| e.to_string())?;
             if have_head && head.as_ref() != ours.as_slice() {
                 return Err("another file (its first bytes differ)".into());
             }
+            if not_the_file(None, &head).is_some() {
+                return Err(format!("sent {} instead of the file", looks_like(&head)));
+            }
             Ok((client, n))
         }
         .await;
         match taken {
             Ok((client, n)) => {
+                edit(app, id, |row| {
+                    if !row.tried_sources.iter().any(|t| t == OWN_SOURCE) {
+                        row.tried_sources.push(OWN_SOURCE.to_string());
+                    }
+                });
                 persist(app);
                 return Ok((client, n, host));
             }
@@ -3057,14 +3233,162 @@ async fn take_over_from_mirror<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &
     Err(why.join("; "))
 }
 
-/// Bytes of the download on disk now.
+/// Our own copy, by name in the player's download order (Settings >
+/// Downloads); mirror hosts go by the name the resolvers give them.
+pub const OWN_SOURCE: &str = "kryoto";
+
+/// Where a source stands in the player's download order: its place, or
+/// after every name the order has.
+fn rank_in(order: &[String], name: &str) -> usize {
+    order.iter().position(|o| o.eq_ignore_ascii_case(name)).unwrap_or(order.len())
+}
+
+/// The mirror pages our own server's row may carry on from, in the
+/// player's download order (the hosts it ranks, by their place, then the
+/// rest as kryo.to lists them), without the hosts this row already failed at.
+fn pages_in_order(pages: Vec<String>, order: &[String], tried: &[String]) -> Vec<String> {
+    let host = |p: &str| crate::resolvers::classify(p).map(|(_, h)| h).unwrap_or_default();
+    let mut pages: Vec<String> = pages.into_iter().filter(|p| !tried.iter().any(|t| t.eq_ignore_ascii_case(host(p)))).collect();
+    pages.sort_by_key(|p| rank_in(order, host(p)));
+    pages
+}
+
+/// What every text says whose host's copy is gone or wrong for good: a 404
+/// or 451, a web page or another file where the archive should be, a copy
+/// cut short, a filez.stream file gone or damaged. Retry gets no further there.
+const GONE_FROM_HOST: &str = "Take another mirror";
+
+/// A mirror failure worth handing on: the host's copy is gone for good, or
+/// none of the file is here yet and another source may get past what
+/// stopped this one (its page could not be solved, `blame`, or it refused
+/// the download twice). With part of the file here, a timeout or a refusal
+/// stands, as before: Retry carries on from where it got. Not a full disk,
+/// a write that failed or a dropped line, which follow the player anywhere.
+fn worth_handing_on(why: &str, blame: bool, received: u64) -> bool {
+    why.contains(GONE_FROM_HOST) || (received == 0 && (blame || why.to_ascii_lowercase().contains("another mirror")))
+}
+
+/// Where a failed mirror row goes next by the player's download order: the
+/// first source after `failed` in it that the build has (`has`, and our own
+/// copy when `ours`) and that has not failed yet, else our own copy. None:
+/// no order set, or nothing left to try.
+fn next_source(order: &[String], failed: &str, has: &[&str], ours: bool, tried: &[String]) -> Option<String> {
+    if order.is_empty() {
+        return None;
+    }
+    let open = |name: &str| {
+        let on_build = if name.eq_ignore_ascii_case(OWN_SOURCE) { ours } else { has.iter().any(|h| h.eq_ignore_ascii_case(name)) };
+        on_build && !name.eq_ignore_ascii_case(failed) && !tried.iter().any(|t| t.eq_ignore_ascii_case(name))
+    };
+    let from = order.iter().position(|o| o.eq_ignore_ascii_case(failed)).map_or(0, |i| i + 1);
+    order[from..].iter().find(|o| open(o)).cloned().or_else(|| open(OWN_SOURCE).then(|| OWN_SOURCE.to_string()))
+}
+
+/// What `hand_on` did with a failed row.
+enum HandOn {
+    /// It is on its next source, to be fetched from there.
+    Moved,
+    /// The player paused or cancelled it meanwhile.
+    Stopped,
+    /// The failure stands, as it was.
+    Stands,
+}
+
+/// A mirror row failed (`why`), and the player set a download order: the row
+/// moves to the next source in it that the build has, else our own copy, and
+/// starts over there (another host's bytes are not stitched onto these). The
+/// sources it failed at are kept, so it never goes back to one. Nothing is
+/// thrown away until the next source is settled: our own link is asked for
+/// first, and a link that does not come leaves the row as it was.
+async fn hand_on<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8, settings: &crate::settings::Settings, why: &str, blame: bool) -> HandOn {
+    let stopped = || flag.load(Ordering::SeqCst) != RUN;
+    if settings.download_order.is_empty() || stopped() {
+        return HandOn::Stands;
+    }
+    let Some(d) = edit(app, id, |_| {}) else { return HandOn::Stands };
+    let (Some(failed), Some(slug)) = (d.mirror.clone(), d.slug.clone()) else { return HandOn::Stands };
+    if !worth_handing_on(why, blame, d.received) {
+        return HandOn::Stands;
+    }
+    let listing = match sources_listing(app, &slug, settings).await {
+        Ok(l) => l,
+        Err(e) => {
+            crate::logging::warn("download", &format!("{id}: {} failed ({why}); kryo.to's list of sources did not come ({e})", failed.host));
+            return HandOn::Stands;
+        }
+    };
+    if stopped() {
+        return HandOn::Stopped;
+    }
+    let pages: Vec<(String, String)> = mirror_pages(&listing, d.release.as_deref())
+        .into_iter()
+        .filter_map(|p| crate::resolvers::classify(&p).map(|(_, h)| (h.to_string(), p)))
+        .collect();
+    let has: Vec<&str> = pages.iter().map(|(h, _)| h.as_str()).collect();
+    let mut tried = d.tried_sources.clone();
+    tried.push(failed.host.clone());
+    // Our link is minted for an account: asked for as a guest, it would open
+    // Sign in and start the row again by itself later (`signed_out`).
+    let ours = has_own_copy(&listing, d.release.as_deref()) && crate::phone::session(app).is_ok();
+    let Some(next) = next_source(&settings.download_order, &failed.host, &has, ours, &tried) else {
+        crate::logging::warn("download", &format!("{id}: {} failed ({why}); no other source in the download order is left (tried {})", failed.host, tried.join(", ")));
+        return HandOn::Stands;
+    };
+    let to_ours = next.eq_ignore_ascii_case(OWN_SOURCE);
+    let to = if to_ours { "Kryoto's own copy".to_string() } else { next.clone() };
+    crate::logging::warn("download", &format!("{id}: {} failed ({why}); trying {to}, next in the download order", failed.host));
+    if to_ours {
+        set_status(app, id, Status::Resolving, None);
+        edit(app, id, |row| row.mirror = None);
+        let minted = mint_link(app, id).await;
+        if minted.is_err() || stopped() {
+            if let Err(e) = &minted {
+                crate::logging::error("download", &format!("{id}: Kryoto's own copy could not be asked for: {e}"));
+            }
+            edit(app, id, |row| {
+                row.mirror = Some(failed.clone());
+                row.url = d.url.clone();
+                row.family = d.family;
+            });
+            persist(app);
+            return if stopped() { HandOn::Stopped } else { HandOn::Stands };
+        }
+    }
+    discard(app, id);
+    if let Ok(mut map) = app.state::<Downloads>().resolved.lock() {
+        map.remove(id);
+    }
+    let page = pages.iter().find(|(h, _)| h.eq_ignore_ascii_case(&next)).map(|(h, p)| Mirror { page: p.clone(), host: h.clone() });
+    edit(app, id, |row| {
+        row.tried_sources = tried.clone();
+        // Another host's file: its size and name are its own, and it is saved
+        // under that name (`identify` matches the file by it).
+        row.total = None;
+        row.archive_path.clear();
+        row.file_name.clear();
+        row.resume_pass = None;
+        if !to_ours {
+            row.family = None;
+            row.mirror = page.clone();
+            if let Some(m) = &page {
+                row.url = m.page.clone();
+            }
+        }
+        row.notice = Some(format!("{} failed. Trying {to}.", failed.host));
+    });
+    persist(app);
+    emit(app, true);
+    HandOn::Moved
+}
+
+// Bytes of the download on disk now.
 fn received_now<R: Runtime>(app: &AppHandle<R>, id: &str) -> u64 {
     edit(app, id, |_| {}).map(|d| d.received).unwrap_or(0)
 }
 
 /// Throw away what was fetched so far, so the next try starts from zero.
 fn discard<R: Runtime>(app: &AppHandle<R>, id: &str) {
-    if let Some(path) = edit(app, id, |_| {}).as_ref().and_then(own_archive) {
+    if let Some(path) = edit(app, id, |_| {}).and_then(|d| unshared_archive(app, &d)) {
         let _ = std::fs::remove_file(&path);
         crate::hatchzip::forget(Path::new(&path));
     }
@@ -3750,6 +4074,8 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     if let Some(flag) = app.state::<Downloads>().controls.lock().map_err(|_| "Download controls are unavailable.")?.get(id) {
         return if flag.load(Ordering::SeqCst) == 0 { Ok(()) } else { Err("Wait for the download to stop, then try again.".into()) };
     }
+    // Worked out before `edit`, which holds the list.
+    let doomed = edit(app, id, |_| {}).and_then(|d| unshared_archive(app, &d));
     edit(app, id, |d| {
         // Retry on an archive that failed its check: that copy is thrown away
         // and the download starts over (Install anyway clears the flag first).
@@ -3757,7 +4083,9 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
         if d.hash_mismatch && d.from_file {
             d.hash_mismatch = false;
         } else if d.hash_mismatch {
-            let _ = std::fs::remove_file(&d.archive_path);
+            if let Some(path) = &doomed {
+                let _ = std::fs::remove_file(path);
+            }
             d.hash_mismatch = false;
             d.received = 0;
             d.segments.clear();
@@ -3768,6 +4096,7 @@ fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
         d.status = Status::Queued;
         // Resumed without an answer: the default folder.
         d.ask_folder = false;
+        d.tried_sources.clear();
     })
     .ok_or("That download is gone.")?;
     emit(app, true);
@@ -3821,7 +4150,7 @@ fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> 
                 d.received = 0;
             }
         });
-        let (archive, staging) = row.map(|d| (own_archive(&d), d.staging)).unwrap_or_default();
+        let (archive, staging) = row.map(|d| (unshared_archive(app, &d), d.staging)).unwrap_or_default();
         edit(app, id, |d| d.staging = None);
         set_status(app, id, Status::Canceled, None);
         clear_leftovers(archive, staging);
@@ -4189,6 +4518,29 @@ async fn size_by_asking(client: &reqwest::Client, url: &str) -> Option<u64> {
     client.head(url).timeout(wait).send().await.ok().filter(|r| r.status().is_success()).and_then(|r| r.content_length()).filter(|n| *n > 0)
 }
 
+/// The first chunk of an answer, waited on the way `transfer` waits on every
+/// one. `None` for an empty answer, or when the download was stopped (the
+/// caller looks at the flag).
+async fn first_chunk<S, B>(stream: &mut S, flag: &AtomicU8) -> Result<Option<B>, String>
+where
+    S: futures_util::Stream<Item = reqwest::Result<B>> + Unpin,
+{
+    let asked = Instant::now();
+    loop {
+        let next = tokio::time::timeout(STOP_POLL, stream.next()).await;
+        if flag.load(Ordering::SeqCst) != RUN {
+            return Ok(None);
+        }
+        match next {
+            Err(_) if asked.elapsed() >= STALL_TIMEOUT => return Err(format!("no data for {} s", STALL_TIMEOUT.as_secs())),
+            Err(_) => continue,
+            Ok(None) => return Ok(None),
+            Ok(Some(Ok(chunk))) => return Ok(Some(chunk)),
+            Ok(Some(Err(e))) => return Err(e.to_string()),
+        }
+    }
+}
+
 /// Move bytes on one stream. `Ok(true)` finished, `Ok(false)` paused or cancelled.
 async fn transfer<R: Runtime>(
     app: &AppHandle<R>,
@@ -4229,12 +4581,11 @@ async fn transfer<R: Runtime>(
         }
         return Err(Transfer::Restart(format!("the server has {total:?} bytes and {on_disk} are here")));
     }
-    check_status(status.as_u16())?;
-    // Never written as the archive: a page where the file should be. A host
-    // that answers ranges with a page falls back to this one stream first.
-    if is_web_page(&response) {
-        return Err(Transfer::Fatal(web_page_sent(&source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str())))));
-    }
+    let source = source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str()));
+    let response = check_answer(response, &source).await?;
+    // Never written as the archive: a page or a message where the file should
+    // be. A host that answers ranges with a page falls back to this one stream first.
+    let response = refuse_by_type(response, &source).await?;
     let resumed = status.as_u16() == 206;
     let range = content_range_of(&response);
     let etag = etag_of(&response);
@@ -4272,13 +4623,33 @@ async fn transfer<R: Runtime>(
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
         let dir = archive_dir(settings);
         std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
-        path = dir.join(&name);
+        path = claim(app, id, &dir, &name);
         edit(app, id, |d| {
             d.file_name = name.clone();
-            d.archive_path = path.to_string_lossy().into_owned();
             name_from_file(d);
         });
     }
+
+    let mut stream = response.bytes_stream();
+    // The start of a fresh answer is looked at before the file on disk is
+    // touched: a page or a JSON message sent with an archive's type (or none)
+    // is never written as the archive, and must not cost a resume its bytes.
+    let first = if resumed {
+        None
+    } else {
+        match first_chunk(&mut stream, flag).await {
+            Err(e) => return Err(Transfer::Retry(e)),
+            Ok(_) if flag.load(Ordering::SeqCst) != RUN => return Ok(false),
+            Ok(Some(chunk)) => {
+                if let Some(what) = not_the_file(None, &chunk) {
+                    crate::logging::error("download", &format!("{id}: {source} refused before writing: it starts as {}", looks_like(&chunk)));
+                    return Err(refuse_answer(what, &source));
+                }
+                Some(chunk)
+            }
+            Ok(None) => None,
+        }
+    };
 
     let file = tokio::fs::OpenOptions::new()
         .create(true)
@@ -4310,7 +4681,13 @@ async fn transfer<R: Runtime>(
         }
     });
 
-    let mut stream = response.bytes_stream();
+    if let Some(chunk) = first {
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| Transfer::Fatal(format!("Writing the download failed: {e}")))?;
+        received += chunk.len() as u64;
+        limiter.take(chunk.len() as u64).await;
+    }
     // The disk catching up in the background, on a second handle to the file,
     // so the stream never waits on it: how far it had got once it is done.
     let mut syncing: Option<tokio::task::JoinHandle<Option<u64>>> = None;
@@ -4485,13 +4862,132 @@ fn another_source(source: &str) -> &'static str {
     }
 }
 
-/// An answer that is a web page (a host's "file removed" or wait page, a
-/// network's block page) where a file was asked for.
-fn is_web_page(res: &reqwest::Response) -> bool {
-    res.headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"))
+/// What came back where the file was asked for, when it cannot be the file.
+#[derive(Debug, PartialEq)]
+enum NotTheFile {
+    /// A web page: a host's "file removed" or wait page, a network's block page.
+    Page,
+    /// A JSON message, with its `error` when it was read (dl.kryo.to's
+    /// `{"error":"storage_timeout"}`).
+    Json(Option<String>),
+}
+
+/// An answer's Content-Type, as sent.
+fn content_type(res: &reqwest::Response) -> Option<&str> {
+    res.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok())
+}
+
+/// Is a 2xx answer something other than the file? Told by its Content-Type,
+/// and by its first bytes when they are the start of the file (`head`, empty
+/// when they are not): a page or a JSON message was once written as the
+/// archive, and only the checksum at the end caught it.
+fn not_the_file(content_type: Option<&str>, head: &[u8]) -> Option<NotTheFile> {
+    let kind = content_type.unwrap_or_default().trim_start().to_ascii_lowercase();
+    let kind = kind.split(';').next().unwrap_or_default().trim();
+    if kind == "text/html" {
+        return Some(NotTheFile::Page);
+    }
+    if kind == "application/json" || kind.ends_with("+json") {
+        return Some(NotTheFile::Json(json_error(head)));
+    }
+    match looks_like(head) {
+        "a web page" => Some(NotTheFile::Page),
+        "a JSON answer" => Some(NotTheFile::Json(json_error(head))),
+        _ => None,
+    }
+}
+
+/// The `error` of a JSON message (`{"error":"storage_timeout"}`).
+fn json_error(body: &[u8]) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_slice(body).ok()?;
+    body["error"].as_str().map(str::to_string)
+}
+
+/// The start of an answer that is not the file, read for its reason: a
+/// message is small, and an archive sent with the wrong type is not read whole.
+async fn small_body(mut res: reqwest::Response) -> Vec<u8> {
+    let mut body = Vec::new();
+    let read = async {
+        while body.len() < 64 * 1024 {
+            match res.chunk().await {
+                Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+                _ => break,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(ANSWER_TIMEOUT, read).await;
+    body
+}
+
+/// `not_the_file` by the Content-Type alone, with a JSON message's reason
+/// read from its body. `Ok` hands the answer back when it may be the file.
+async fn refuse_by_type(res: reqwest::Response, source: &str) -> Result<reqwest::Response, Transfer> {
+    match not_the_file(content_type(&res), &[]) {
+        None => Ok(res),
+        Some(NotTheFile::Json(None)) => Err(refuse_answer(NotTheFile::Json(json_error(&small_body(res).await)), source)),
+        Some(what) => Err(refuse_answer(what, source)),
+    }
+}
+
+/// What to do with an answer that is not the file. A message from our own
+/// host is the host failing for now (its storage timing out), so it is tried
+/// again like a 5xx, and its mirrors after that; a page, or a mirror's
+/// message, is not the file and will not turn into it.
+fn refuse_answer(what: NotTheFile, source: &str) -> Transfer {
+    match what {
+        NotTheFile::Page => Transfer::Fatal(web_page_sent(source)),
+        NotTheFile::Json(reason) if source == OWN_HOST => Transfer::Retry(own_host_trouble(reason.as_deref().unwrap_or("no reason given"))),
+        NotTheFile::Json(reason) => Transfer::Fatal(format!(
+            "{source} sent a message instead of the file{}. {}",
+            reason.map(|r| format!(" ({r})")).unwrap_or_default(),
+            another_source(source)
+        )),
+    }
+}
+
+/// How the player is told our own host failed, by the reason it gave. Every
+/// line starts the same (`OWN_TROUBLE`), so the retry notice can say so.
+fn own_host_trouble(reason: &str) -> String {
+    if reason.contains("timeout") {
+        format!("{OWN_TROUBLE}timed out ({reason})")
+    } else {
+        format!("{OWN_TROUBLE}had a problem ({reason})")
+    }
+}
+
+/// How `own_host_trouble` starts.
+const OWN_TROUBLE: &str = "Kryoto's file host ";
+
+/// `check_status`, and for a 5xx from our own host the reason its JSON body
+/// gives (`{"error":"storage_timeout"}`): the log said only "the server
+/// answered 503", and the player read "Connection lost".
+async fn check_answer(res: reqwest::Response, source: &str) -> Result<reqwest::Response, Transfer> {
+    let code = res.status().as_u16();
+    match check_status(code) {
+        Ok(()) => Ok(res),
+        Err(Transfer::Retry(e)) if code >= 500 && source == OWN_HOST => {
+            Err(Transfer::Retry(json_error(&small_body(res).await).map_or(e, |reason| own_host_trouble(&reason))))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The notice while a download waits to try again.
+fn retry_notice(e: &str, wait: u64) -> String {
+    if e.starts_with(OWN_TROUBLE) {
+        format!("{e}. Trying again in {wait} s.")
+    } else {
+        format!("Connection lost. Trying again in {wait} s.")
+    }
+}
+
+/// Why a download stopped after trying again and again.
+fn kept_failing(e: &str) -> String {
+    if e.starts_with(OWN_TROUBLE) {
+        format!("{e} on every try. {}", another_source(OWN_HOST))
+    } else {
+        format!("The connection kept dropping ({e}). Resume to try again.")
+    }
 }
 
 /// The 7z signature every 7z archive starts with.
@@ -4592,13 +5088,11 @@ async fn transfer_parallel<R: Runtime>(
         let probe = send(client.get(&item.url).header(reqwest::header::RANGE, "bytes=0-31"));
         let Some(probe) = unless_stopped(flag, probe).await else { return Ok(false) };
         let probe = probe?;
-        check_status(probe.status().as_u16())?;
         let source = source_of(item.mirror.as_ref().map_or(item.url.as_str(), |m| m.page.as_str()));
+        let probe = check_answer(probe, &source).await?;
         // Before the one-stream fallback: a page answers a range with 200,
         // and was then downloaded as the archive (2026-11-22, a block page).
-        if is_web_page(&probe) {
-            return Err(Transfer::Fatal(web_page_sent(&source)));
-        }
+        let probe = refuse_by_type(probe, &source).await?;
         let total = (probe.status().as_u16() == 206).then(|| content_range_of(&probe).and_then(|r| r.total)).flatten();
         let Some(total) = total.filter(|t| *t > 0) else {
             drop(probe);
@@ -4616,6 +5110,11 @@ async fn transfer_parallel<R: Runtime>(
             .map(|n| safe_name(&n))
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
         let head = tokio::time::timeout(ANSWER_TIMEOUT, probe.bytes()).await.ok().and_then(Result::ok).unwrap_or_default();
+        // Any archive, not only a 7z: none starts as a page or a message.
+        if let Some(what) = not_the_file(None, &head) {
+            crate::logging::error("download", &format!("{id}: {source} refused before writing: it starts as {} ({total} bytes on offer)", looks_like(&head)));
+            return Err(refuse_answer(what, &source));
+        }
         if let Err(why) = check_head(&name, &head, total, &source) {
             crate::logging::error("download", &format!("{id}: {source} refused before writing: {} ({total} bytes on offer, starts as {})", why, looks_like(&head)));
             return Err(Transfer::Fatal(why));
@@ -4623,7 +5122,7 @@ async fn transfer_parallel<R: Runtime>(
         let dir = archive_dir(settings);
         crate::storage::check_download_room(&dir, &install_parent(app, &item, settings), total, total, install_size(&item), unpacks_in_place(&item), &item.meta.title).map_err(Transfer::Fatal)?;
         std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
-        let path = dir.join(&name);
+        let path = claim(app, id, &dir, &name);
         crate::hatchzip::forget(&path);
         let file = std::fs::File::create(&path).map_err(|e| Transfer::Fatal(format!("Cannot write {}: {e}", path.display())))?;
         file.set_len(total).map_err(|e| Transfer::Fatal(format!("Cannot make room for {}: {e}", path.display())))?;
@@ -4631,7 +5130,6 @@ async fn transfer_parallel<R: Runtime>(
         let segments = split(total, connections);
         edit(app, id, |d| {
             d.file_name = name.clone();
-            d.archive_path = path.to_string_lossy().into_owned();
             name_from_file(d);
             d.total = Some(total);
             d.received = 0;
@@ -4880,6 +5378,83 @@ fn archive_dir(settings: &crate::settings::Settings) -> PathBuf {
     }
 }
 
+/// Another row still needs the file at `path`: one not finished, the player's
+/// own file, an installed game's kept archive (Get the files back reads it),
+/// or a cancelled one whose task (`running`) has not let go of it yet. Two
+/// mirrors of one release send the same file name, and a second row used to
+/// write over the first's archive, and its Cancel deleted the other's.
+fn archive_shared(list: &[Download], running: &[String], id: &str, path: &str) -> bool {
+    !path.is_empty()
+        && list.iter().any(|d| {
+            d.id != id
+                && crate::settings::same_path(&d.archive_path, path)
+                && match d.status {
+                    _ if d.from_file => true,
+                    Status::Canceled => running.contains(&d.id),
+                    Status::Installed => Path::new(&d.archive_path).is_file(),
+                    _ => true,
+                }
+        })
+}
+
+/// The rows with a task behind them. Read before the list is locked, never
+/// while it is.
+fn running_ids<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    app.state::<Downloads>().controls.lock().map(|c| c.keys().cloned().collect()).unwrap_or_default()
+}
+
+fn held_elsewhere<R: Runtime>(app: &AppHandle<R>, id: &str, path: &str) -> bool {
+    let running = running_ids(app);
+    app.state::<Downloads>().list.lock().is_ok_and(|list| archive_shared(&list, &running, id, path))
+}
+
+/// `name` with ` (n)` before its extension; a split archive's volume number
+/// stays last (`Game (2).7z.001`).
+fn numbered_name(name: &str, n: usize) -> String {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((rest, volume)) if !volume.is_empty() && volume.bytes().all(|b| b.is_ascii_digit()) => match rest.rsplit_once('.') {
+            Some((stem, kind)) if !stem.is_empty() => (stem, format!(".{kind}.{volume}")),
+            _ => (rest, format!(".{volume}")),
+        },
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    format!("{stem} ({n}){ext}")
+}
+
+/// Where this row's archive goes: `name` in `dir`, else `name (2)`, `name (3)`
+/// ... when another row holds it. A row keeps the numbered path it already
+/// has, so starting over does not leave its old file behind.
+fn claim_archive_path(list: &[Download], running: &[String], id: &str, dir: &Path, name: &str) -> PathBuf {
+    let own = list.iter().find(|d| d.id == id).map(|d| d.archive_path.as_str()).unwrap_or_default();
+    let mut free = None;
+    for n in 1..=list.len() + 1 {
+        let path = dir.join(if n == 1 { name.to_string() } else { numbered_name(name, n) });
+        let text = path.to_string_lossy();
+        if archive_shared(list, running, id, &text) {
+            continue;
+        }
+        if crate::settings::same_path(own, &text) {
+            return path;
+        }
+        free.get_or_insert(path);
+    }
+    free.unwrap_or_else(|| dir.join(name))
+}
+
+/// `claim_archive_path`, written to the row under the same lock, so two
+/// downloads starting together never pick the same file.
+fn claim<R: Runtime>(app: &AppHandle<R>, id: &str, dir: &Path, name: &str) -> PathBuf {
+    let running = running_ids(app);
+    let state = app.state::<Downloads>();
+    let Ok(mut list) = state.list.lock() else { return dir.join(name) };
+    let path = claim_archive_path(&list, &running, id, dir, name);
+    if let Some(d) = list.iter_mut().find(|d| d.id == id) {
+        d.archive_path = path.to_string_lossy().into_owned();
+    }
+    path
+}
+
 /// The folder a download installs into: an update goes where the game already
 /// is (whichever library folder that is, under whatever its folder is called)
 /// so saves stay with it, and so does one kept outside the library folders
@@ -5039,11 +5614,11 @@ async fn fetch_range(
             Unsatisfiable::Retry(why) => Err(Transfer::Retry(why)),
         };
     }
-    check_status(res.status().as_u16())?;
-    // Never written into the archive: a page where the bytes should be.
-    if is_web_page(&res) {
-        return Err(Transfer::Fatal(web_page_sent(&source_of(url))));
-    }
+    let source = source_of(url);
+    let res = check_answer(res, &source).await?;
+    // Never written into the archive: a page or a message where the bytes
+    // should be. By its type only: a range's first bytes can be anything.
+    let res = refuse_by_type(res, &source).await?;
     if res.status().as_u16() != 206 {
         return Err(Transfer::NoRanges);
     }
@@ -5339,6 +5914,8 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         .filter_map(|(rel, size)| Some((dest.join(&rel).strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/"), size)))
         .collect();
     let game = library::upsert_installed(app, installed_entry(&item, &title, &root, executable))?;
+    // kryo.to lists no icon: Steam's, for the Library's list.
+    library::fill_icons(app);
     // Only now, with the library saying so, is the update done; until here a
     // crash leaves the journal at "applying" and the next start rolls it back.
     if let Some(mut j) = journal {
@@ -5346,7 +5923,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let _ = j.save();
         crate::game_update::drop_previous(&j);
     }
-    if let Some(path) = own_archive(&item).filter(|_| settings.delete_archives) {
+    if let Some(path) = unshared_archive(app, &item).filter(|_| settings.delete_archives) {
         let _ = std::fs::remove_file(path);
     }
     // Its art on disk now, so the Library shows it with no connection.
@@ -6276,7 +6853,7 @@ pub fn download_cancel(app: AppHandle, state: State<'_, Downloads>, id: String) 
     // Not running (paused or failed): tidy up here, the files in the background.
     let (archive, staging) = edit(&app, &id, |_| {})
         .filter(|d| d.status != Status::Installed)
-        .map(|d| (own_archive(&d), d.staging))
+        .map(|d| (unshared_archive(&app, &d), d.staging))
         .unwrap_or_default();
     edit(&app, &id, |d| {
         if !d.from_file {
@@ -6853,6 +7430,103 @@ mod tests {
         assert!(web_page_sent("VikingFile").ends_with("Take another mirror, or Kryoto's own copy."));
     }
 
+    /// A page or a JSON message where the file should be is told by its type,
+    /// or by its first bytes when it came with an archive's type or none.
+    #[test]
+    fn a_page_or_a_message_is_not_the_file() {
+        let timeout = br#"{"error":"storage_timeout"}"#;
+        let mut seven_z = SEVEN_Z_MAGIC.to_vec();
+        seven_z.extend_from_slice(&[0; 26]);
+        assert_eq!(not_the_file(Some("text/html; charset=utf-8"), &[]), Some(NotTheFile::Page));
+        assert_eq!(not_the_file(Some(" Text/HTML"), &[]), Some(NotTheFile::Page));
+        assert_eq!(not_the_file(Some("application/json"), &[]), Some(NotTheFile::Json(None)));
+        assert_eq!(not_the_file(Some("application/problem+json; charset=utf-8"), timeout), Some(NotTheFile::Json(Some("storage_timeout".into()))));
+        // A 200 sent as an archive, or with no type, that starts as a message.
+        assert_eq!(not_the_file(Some("application/octet-stream"), timeout), Some(NotTheFile::Json(Some("storage_timeout".into()))));
+        assert_eq!(not_the_file(None, b"  {\"oops\": 1}"), Some(NotTheFile::Json(None)));
+        assert_eq!(not_the_file(None, b"<!DOCTYPE html><html>"), Some(NotTheFile::Page));
+        // The file itself, and a range from the middle of it (no head to read).
+        assert_eq!(not_the_file(Some("application/x-7z-compressed"), &seven_z), None);
+        assert_eq!(not_the_file(Some("application/octet-stream"), b"PK\x03\x04rest"), None);
+        assert_eq!(not_the_file(Some("application/octet-stream"), &[]), None);
+        assert_eq!(not_the_file(None, &[]), None);
+        assert_eq!(json_error(timeout).as_deref(), Some("storage_timeout"));
+        assert_eq!(json_error(b"{\"error\":"), None);
+    }
+
+    /// dl.kryo.to's `{"error":"storage_timeout"}` (report 4): our own host
+    /// failing is tried again, and then its mirrors, in words that say so;
+    /// a mirror's message is final, as its page is.
+    #[test]
+    fn our_host_timing_out_is_said_and_tried_again() {
+        let ours = refuse_answer(NotTheFile::Json(Some("storage_timeout".into())), OWN_HOST);
+        assert!(matches!(&ours, Transfer::Retry(e) if e == "Kryoto's file host timed out (storage_timeout)"));
+        assert!(matches!(refuse_answer(NotTheFile::Json(None), OWN_HOST), Transfer::Retry(e) if e == "Kryoto's file host had a problem (no reason given)"));
+        let mirror = refuse_answer(NotTheFile::Json(Some("not_found".into())), "Pixeldrain");
+        assert!(matches!(&mirror, Transfer::Fatal(e) if e == "Pixeldrain sent a message instead of the file (not_found). Take another mirror, or Kryoto's own copy."));
+        assert!(matches!(refuse_answer(NotTheFile::Json(None), "Pixeldrain"), Transfer::Fatal(e) if e.starts_with("Pixeldrain sent a message instead of the file. ")));
+        assert!(matches!(refuse_answer(NotTheFile::Page, OWN_HOST), Transfer::Fatal(e) if e == web_page_sent(OWN_HOST)));
+        assert_eq!(own_host_trouble("internal"), "Kryoto's file host had a problem (internal)");
+
+        let timed_out = own_host_trouble("storage_timeout");
+        assert_eq!(retry_notice(&timed_out, 8), "Kryoto's file host timed out (storage_timeout). Trying again in 8 s.");
+        assert_eq!(retry_notice("the server answered 503", 8), "Connection lost. Trying again in 8 s.");
+        assert_eq!(
+            kept_failing(&timed_out),
+            "Kryoto's file host timed out (storage_timeout) on every try. Retry in a few minutes, or download it from one of the game's mirrors on its page."
+        );
+        assert_eq!(kept_failing("timed out"), "The connection kept dropping (timed out). Resume to try again.");
+    }
+
+    /// Plan 05: a finished or cancelled row drops its ranges; one that can
+    /// still resume keeps them. Cancel pressed on a running row is not tidied
+    /// up yet (bytes still counted): its ranges stay until it is.
+    #[test]
+    fn only_rows_that_can_resume_keep_their_ranges() {
+        for (status, received, kept) in [
+            (Status::Installed, 1 << 30, false),
+            (Status::Canceled, 0, false),
+            (Status::Canceled, 1 << 20, true),
+            (Status::Failed, 1 << 20, true),
+            (Status::Paused, 1 << 20, true),
+            (Status::Downloading, 1 << 20, true),
+        ] {
+            let mut d = Download { status, received, segments: split(1 << 30, 4), ..Default::default() };
+            forget_ranges(&mut d);
+            assert_eq!(!d.segments.is_empty(), kept, "{status:?} with {received} received");
+        }
+    }
+
+    /// Our host failing on its very first answer leaves no size and nothing
+    /// on disk: a mirror can still start the download from zero, at the size
+    /// kryo.to lists, never at whatever size the mirror has.
+    #[test]
+    fn a_mirror_takes_over_from_zero_when_nothing_came() {
+        assert_eq!(takeover_size(Some(5_000), 1_000, Some(9)), Ok(5_000));
+        assert_eq!(takeover_size(Some(5_000), 0, None), Ok(5_000));
+        assert_eq!(takeover_size(None, 0, Some(4_000)), Ok(4_000));
+        assert!(takeover_size(None, 0, None).is_err());
+        assert!(takeover_size(None, 1_000, Some(4_000)).is_err());
+    }
+
+    /// The size a mirror must match from zero: the build's file of this name,
+    /// else its only file. Two files and none of this name say nothing.
+    #[test]
+    fn the_listed_size_is_the_builds_file() {
+        let listing = serde_json::json!({ "releases": [
+            { "version": "1.1", "primary": true, "hashes": [
+                { "name": "Game - Kryoto.7z", "sha256": "a".repeat(64), "bytes": 300u64 },
+                { "name": "Game - Kryoto.part2.rar", "sha256": "b".repeat(64), "bytes": 100u64 },
+            ] },
+            { "version": "1.0", "hashes": [{ "name": "Old.7z", "sha256": "c".repeat(64), "bytes": 200u64 }] },
+        ] });
+        assert_eq!(listed_size(&listing, None, Some("Game - Kryoto.7z")), Some(300));
+        assert_eq!(listed_size(&listing, None, Some("other.7z")), None);
+        assert_eq!(listed_size(&listing, None, None), None);
+        assert_eq!(listed_size(&listing, Some("1.0"), Some("renamed.7z")), Some(200));
+        assert_eq!(listed_size(&serde_json::json!({}), None, Some("Game - Kryoto.7z")), None);
+    }
+
     /// KB-0117: the mirrors that can carry on a download our server keeps
     /// cutting are the ones listed for its build, that Kryoto downloads from.
     #[test]
@@ -6868,6 +7542,88 @@ mod tests {
         assert_eq!(mirror_pages(&listing, None), ["https://pixeldrain.com/u/abc"]);
         assert_eq!(mirror_pages(&listing, Some("1.0")), ["https://pixeldrain.com/u/old"]);
         assert!(mirror_pages(&serde_json::json!({}), None).is_empty());
+    }
+
+    /// Suggestion #110: our own copy is one of the sources a failed mirror can
+    /// hand on to, unless the build has none (archived: mirrors only).
+    #[test]
+    fn the_build_has_our_copy_unless_it_is_archived() {
+        let listing = serde_json::json!({ "releases": [
+            { "version": "1.1", "primary": true, "links": [{ "url": "/api/download/v/9" }, { "url": "https://gofile.io/d/x" }] },
+            { "version": "1.0", "archived": true, "links": [{ "url": "/api/download/v/8" }] },
+            { "version": "0.9", "links": [{ "url": "https://pixeldrain.com/u/old" }] },
+        ] });
+        assert!(has_own_copy(&listing, None));
+        assert!(!has_own_copy(&listing, Some("1.0")));
+        assert!(!has_own_copy(&listing, Some("0.9")));
+        assert!(!has_own_copy(&serde_json::json!({}), None));
+    }
+
+    /// Suggestion #110: a failed mirror goes on to the next source in the
+    /// player's order that the build has, then our own copy; never back to
+    /// one that failed, and nowhere when no order is set (as before).
+    #[test]
+    fn a_failed_mirror_hands_on_down_the_players_order() {
+        let order: Vec<String> = ["Gofile", "Pixeldrain", "kryoto", "VikingFile"].map(String::from).into();
+        let has = ["Pixeldrain", "Gofile", "VikingFile"];
+        let next = |failed: &str, has: &[&str], ours: bool, tried: &[&str]| {
+            let tried: Vec<String> = tried.iter().map(|t| t.to_string()).collect();
+            next_source(&order, failed, has, ours, &tried)
+        };
+        assert_eq!(next("Gofile", &has, true, &["Gofile"]).as_deref(), Some("Pixeldrain"));
+        assert_eq!(next("Pixeldrain", &has, true, &["Gofile", "Pixeldrain"]).as_deref(), Some("kryoto"));
+        // A host the build lacks is passed over; the name's case does not matter.
+        assert_eq!(next("gofile", &["Gofile", "VikingFile"], true, &[]).as_deref(), Some("kryoto"));
+        // No copy of ours (an archived build): the mirror after it.
+        assert_eq!(next("Pixeldrain", &has, false, &["Pixeldrain"]).as_deref(), Some("VikingFile"));
+        // The last one in the order failed: our copy, as the fallback.
+        assert_eq!(next("VikingFile", &has, true, &["Gofile", "VikingFile"]).as_deref(), Some("kryoto"));
+        // A host picked by hand that the order leaves out: from the top.
+        assert_eq!(next("Buzzheavier", &has, true, &[]).as_deref(), Some("Gofile"));
+        // Our copy cut the download and a mirror took over (it counts as
+        // failed then), and that mirror failed too: the next mirror, never
+        // our copy again, so a row cannot go round the two for ever.
+        assert_eq!(next("Gofile", &has, true, &["kryoto", "Gofile"]).as_deref(), Some("Pixeldrain"));
+        assert_eq!(next("VikingFile", &has, true, &["kryoto", "Gofile", "Pixeldrain", "VikingFile"]), None);
+        // Everything tried: the failure stands.
+        assert_eq!(next("VikingFile", &has, false, &["VikingFile"]), None);
+        assert_eq!(next_source(&[], "Gofile", &has, true, &[]), None);
+    }
+
+    /// Suggestion #110: when our own server keeps cutting a download, the
+    /// mirrors are asked in the player's order, and never one that failed.
+    #[test]
+    fn our_copy_is_carried_on_from_mirrors_in_the_players_order() {
+        let pages = || ["https://pixeldrain.com/u/a", "https://buzzheavier.com/b", "https://gofile.io/d/c"].map(String::from).to_vec();
+        let order: Vec<String> = ["kryoto", "Gofile", "Pixeldrain"].map(String::from).into();
+        assert_eq!(pages_in_order(pages(), &order, &[]), ["https://gofile.io/d/c", "https://pixeldrain.com/u/a", "https://buzzheavier.com/b"]);
+        assert_eq!(pages_in_order(pages(), &order, &["gofile".into()]), ["https://pixeldrain.com/u/a", "https://buzzheavier.com/b"]);
+        // No order: kryo.to's, as before.
+        assert_eq!(pages_in_order(pages(), &[], &["kryoto".into()]), pages());
+    }
+
+    /// Suggestion #110: a mirror's failure is handed on when its copy is gone
+    /// for good, or when none of the file is here yet. Part of a file is never
+    /// thrown away for a timeout or a refusal that a Retry may get past.
+    #[test]
+    fn only_a_failing_source_is_handed_on() {
+        let fatal = |code| match check_status(code) {
+            Err(Transfer::Fatal(e)) => e,
+            _ => String::new(),
+        };
+        let filez_refused = "filez.stream refused the download twice (it answered 403). Its check is tied to the network that passed it: press Retry, or take another mirror.";
+        for gone in [fatal(404), fatal(451), web_page_sent("VikingFile"), check_head("x.7z", &[0u8; 32], 10, "Gofile").unwrap_err(), "The file is gone from filez.stream. Take another mirror.".into()] {
+            assert!(worth_handing_on(&gone, false, 30 << 30), "{gone}");
+        }
+        assert!(worth_handing_on("could not solve the page", true, 0));
+        assert!(worth_handing_on(&refused_text(403, true), false, 0));
+        assert!(worth_handing_on(filez_refused, false, 0));
+        // 30 GB here: the error stands, and Retry carries on.
+        assert!(!worth_handing_on("the page timed out", true, 30 << 30));
+        assert!(!worth_handing_on(&refused_text(403, true), false, 30 << 30));
+        assert!(!worth_handing_on(filez_refused, false, 30 << 30));
+        assert!(!worth_handing_on("Writing the download failed: the disk is full", false, 0));
+        assert!(!worth_handing_on("The connection kept dropping (the server answered 503). Resume to try again.", false, 0));
     }
 
     /// What the log says when a link never passes, without an address in it.
@@ -6898,6 +7654,70 @@ mod tests {
         assert_eq!(safe_name("Half-Life: Alyx?"), "Half-Life Alyx");
         assert_eq!(safe_name("..\\..\\x"), "x");
         assert_eq!(safe_name("   "), "Game");
+    }
+
+    /// A second mirror of one release sends the same file name. It used to
+    /// truncate the first row's archive, and Cancel on the first deleted it.
+    #[test]
+    fn a_second_download_of_the_same_file_gets_its_own_archive() {
+        // A folder that is not there, so no installed row's archive is found.
+        let dir = &std::env::temp_dir().join(format!("kryoto-claim-none-{}", std::process::id()));
+        let at = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let row = |id: &str, status: Status, path: &str| Download { id: id.into(), status, archive_path: path.into(), ..Default::default() };
+        let new = row("b", Status::Queued, "");
+        let idle: &[String] = &[];
+        for status in [Status::Failed, Status::Paused, Status::Downloading] {
+            let list = [row("a", status, &at("X.7z")), new.clone()];
+            assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X (2).7z"), "{status:?}");
+            assert!(archive_shared(&list, idle, "b", &at("X.7z")));
+        }
+        // Finished with, or its archive already gone: free to take.
+        for status in [Status::Installed, Status::Canceled] {
+            let list = [row("a", status, &at("X.7z")), new.clone()];
+            assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X.7z"), "{status:?}");
+            assert!(!archive_shared(&list, idle, "b", &at("X.7z")));
+        }
+        // Cancelled, but its task still has the file open until it stops.
+        let list = [row("a", Status::Canceled, &at("X.7z")), new.clone()];
+        assert_eq!(claim_archive_path(&list, &["a".to_string()], "b", dir, "X.7z"), dir.join("X (2).7z"));
+        // The player's own file is theirs whatever its row says.
+        let mut theirs = row("a", Status::Installed, &at("X.7z"));
+        theirs.from_file = true;
+        assert_eq!(claim_archive_path(&[theirs, new.clone()], idle, "b", dir, "X.7z"), dir.join("X (2).7z"));
+        // Its own path is no other row's, and an empty path is nobody's.
+        let list = [row("b", Status::Failed, &at("X.7z"))];
+        assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X.7z"));
+        assert!(!archive_shared(&[row("a", Status::Failed, "")], idle, "b", ""));
+        let list = [row("a", Status::Failed, &at("X.7z")), row("c", Status::Paused, &at("X (2).7z")), new.clone()];
+        assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X (3).7z"));
+        assert_eq!(claim_archive_path(&[row("a", Status::Failed, &at("Game")), new.clone()], idle, "b", dir, "Game"), dir.join("Game (2)"));
+        // A row that got `X (2).7z` keeps it when it starts over after the first is gone.
+        let list = [row("b", Status::Downloading, &at("X (2).7z"))];
+        assert_eq!(claim_archive_path(&list, idle, "b", dir, "X.7z"), dir.join("X (2).7z"));
+    }
+
+    #[test]
+    fn a_numbered_archive_keeps_its_kind_and_volume() {
+        assert_eq!(numbered_name("X.7z", 2), "X (2).7z");
+        assert_eq!(numbered_name("Game.7z.001", 2), "Game (2).7z.001");
+        assert_eq!(numbered_name("Game.001", 3), "Game (3).001");
+        assert_eq!(numbered_name("Game v1.2.zip", 2), "Game v1.2 (2).zip");
+        assert_eq!(numbered_name("Game", 2), "Game (2)");
+        assert_eq!(numbered_name(".7z", 2), ".7z (2)");
+    }
+
+    /// An installed game's archive kept on disk is what Get the files back
+    /// reads, so a new download of the same file does not write over it.
+    #[test]
+    fn a_kept_archive_of_an_installed_game_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("kryoto-claim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kept = dir.join("X.7z");
+        std::fs::write(&kept, b"7z").unwrap();
+        let installed = Download { id: "a".into(), status: Status::Installed, archive_path: kept.to_string_lossy().into_owned(), ..Default::default() };
+        let list = [installed, Download { id: "b".into(), status: Status::Queued, ..Default::default() }];
+        assert_eq!(claim_archive_path(&list, &[], "b", &dir, "X.7z"), dir.join("X (2).7z"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -6959,6 +7779,7 @@ mod tests {
         assert_eq!(plain_name("Ōkami HD", None), "Okami HD");
         assert_eq!(plain_name("Pokémon™ Legends – Z-A", None), "Pokemon Legends - Z-A");
         assert_eq!(plain_name("Mörkö: Straße… 2", None), "Morko Strasse... 2");
+        assert_eq!(plain_name("Ștefan și Țara", None), "Stefan si Tara");
         assert_eq!(plain_name("ドラゴンクエスト", Some("dragon-quest")), "dragon-quest");
         assert_eq!(plain_name("ドラゴンクエスト", None), "Game");
         assert_eq!(plain_name("Half-Life: Alyx?", None), "Half-Life Alyx");
@@ -7490,6 +8311,24 @@ mod tests {
         std::fs::write(&file, b"kryoto").unwrap();
         assert!(sync_to_disk(&file).is_ok());
         assert!(disk_failed(&file, "I/O error").contains("Retry"));
+    }
+
+    /// One stream whose last sync failed: all of it arrived, but the disk
+    /// confirmed only part. Retry fetches the rest rather than install it.
+    #[test]
+    fn retry_skips_the_fetch_only_for_what_the_disk_confirmed() {
+        let one = |synced| Download { archive_path: "C:/x.7z".into(), total: Some(100), received: 100, synced, ..Default::default() };
+        assert!(!fully_fetched(&one(Some(40))), "the disk confirmed 40 of 100");
+        assert!(fully_fetched(&one(Some(100))));
+        assert!(fully_fetched(&one(None)), "an older row goes by its length as before");
+
+        // Ranges go by their ranges, whatever `synced` says.
+        let ranged = |done| Download { segments: vec![Segment { start: 0, end: 99, done }], ..one(Some(0)) };
+        assert!(!fully_fetched(&ranged(60)));
+        assert!(fully_fetched(&ranged(100)));
+
+        assert!(!fully_fetched(&Download { archive_path: String::new(), ..one(Some(100)) }));
+        assert!(!fully_fetched(&Download { total: Some(0), received: 0, ..one(None) }));
     }
 
     /// Ranges one after another on the same client go on the connection the

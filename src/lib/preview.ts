@@ -90,6 +90,8 @@ const games = [
     version: 'b20488383',
   }),
   game(367520, 'Hollow Knight', {
+    // Steam's square icon for the Library list; the other games draw their covers there.
+    icon: 'https://shared.akamai.steamstatic.com/community_assets/images/apps/367520/f6ab055c2366237200b1a31cccbd6cf81e436d72.jpg',
     playtimeSeconds: 162000,
     lastPlayed: now() - 3600 * 3,
     source: 'Steam (DRM-free)',
@@ -153,6 +155,7 @@ const settings: Record<string, unknown> = {
   connections: 16,
   speedLimitMb: 0,
   speedInBits: false,
+  downloadOrder: [] as string[],
   catalogEndpoint: '',
   savesEndpoint: '',
   achievementsEndpoint: '',
@@ -327,6 +330,7 @@ const previewAddons: Record<string, Record<string, unknown>[]> = {
     addonFixture(9006, 'DLC: Silksong Preview Pack', '95 MB'),
     addonFixture(9007, 'DLC: Gods and Glory Costume Set', '60 MB'),
     addonFixture(9008, 'DLC: Voidheart Edition Extras', '150 MB'),
+    addonFixture(9009, 'Language: Polish', '30 MB', { source: 'Language', language: 'polish', links: [{ name: 'Hollow Knight - Language Polish - Kryoto.7z' }] }),
   ],
   terraria: [
     addonFixture(9101, 'Japanese language pack', '45 MB', { source: 'Language', note: 'Menus and dialogue in Japanese.' }),
@@ -369,7 +373,13 @@ export function startPreview() {
         if (owner) {
           // An add-on goes into its game (addons.rs `install`).
           const list = ((owner.addons as Record<string, unknown>[] | undefined) ?? []).filter((a) => a.file !== d.fileName)
-          if (!d.repair) owner.addons = [...list, { label: d.addon, file: d.fileName, files: [`DLC/${String(d.fileName)}.pak`], replaced: [], installedAt: now() }]
+          // The language pack Add asked for: the game takes its language now (addons.rs `language_on_landing`).
+          const asked = owner.askedPack as { label: string; language: string } | null | undefined
+          const mine = !!asked && asked.label.toLowerCase() === String(d.addon).toLowerCase()
+          const setLanguage = mine && owner.gameLanguage == null && settings.gameLanguage !== asked.language
+          if (mine) owner.askedPack = null
+          if (setLanguage) owner.gameLanguage = asked.language
+          if (!d.repair) owner.addons = [...list, { label: d.addon, file: d.fileName, files: [`DLC/${String(d.fileName)}.pak`], replaced: [], installedAt: now(), language: mine ? asked.language : null, setLanguage }]
           previewBus.emit('library-changed', null)
           previewBus.emit('notify', { title: `${String(d.addon).replace(/^DLC: /, '')} applied`, body: `Added to ${String(owner.title)}.`, gameId: owner.id })
         } else {
@@ -786,7 +796,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   library_artwork: (a) => {
     const game = games.find((g) => g.id === a.id)
     if (!game) throw new Error('Game not found.')
-    for (const key of ['cover', 'hero', 'logo', 'header']) if (a[key]) game[key] = a[key]
+    for (const key of ['cover', 'hero', 'logo', 'header', 'icon']) if (a[key]) game[key] = a[key]
     return clone(game)
   },
   game_running: () => [...running],
@@ -795,7 +805,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     const i = games.findIndex((g) => g.id === next.id)
     const old = games[i]
     if (!old) return clone(next)
-    games[i] = { ...next, playtimeSeconds: old.playtimeSeconds, lastPlayed: old.lastPlayed }
+    games[i] = { ...next, playtimeSeconds: old.playtimeSeconds, lastPlayed: old.lastPlayed, askedPack: old.askedPack }
     return clone(games[i])
   },
   library_add: (a) => {
@@ -867,6 +877,7 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
     const g = games.find((x) => x.id === a.gameId)
     if (!g) throw new Error('That game is no longer in the library.')
     if (running.has(String(g.id))) throw new Error(`Close ${String(g.title)} first: its files are in use.`)
+    if (a.pack) g.askedPack = a.pack
     const challenge = typeof location !== 'undefined' && location.search.includes('addonchallenge')
     const queued: string[] = []
     for (const want of a.ids as string[]) {
@@ -1334,6 +1345,12 @@ Object.assign(HANDLERS, {
       if (host === 'filez.stream' && /#[A-Za-z0-9_-]{43}$/.test(u)) return { host: 'filez.stream', kind: 'api' }
       return null
     }),
+  // Every host `known_hosts` names, as a Windows build lists them (VikingFile
+  // is on Windows only), for the download order in Settings > Downloads.
+  download_hosts: () => [
+    'filez.stream', 'Pixeldrain', 'Gofile', 'Buzzheavier', 'MediaFire', 'FuckingFast', 'Mocha', 'catbox',
+    'VikingFile', 'DropDrive', 'FileDitch', '1fichier', 'AkiraBox', 'Qiwi', 'DataNodes', 'KrakenFiles', 'Send.cm',
+  ],
   // A mirror download: its page is solved in the background, then it comes down like ours.
   download_mirror: (a: Record<string, unknown>) => {
     const id = `dl-${Date.now()}`

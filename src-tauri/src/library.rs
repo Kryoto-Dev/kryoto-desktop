@@ -33,6 +33,11 @@ pub struct LibraryGame {
     pub logo: Option<String>,
     /// The wide store header, for rows and cards.
     pub header: Option<String>,
+    /// Steam's small square icon, for the Library's list. None draws the cover
+    /// there instead, as before there were icons.
+    pub icon: Option<String>,
+    /// The player's own icon, kept like their cover and banner.
+    pub custom_icon: Option<String>,
     /// Absolute folder the game lives in.
     pub install_dir: String,
     /// Exe to start when no Steam entry is picked, relative to `install_dir`.
@@ -90,6 +95,9 @@ pub struct LibraryGame {
     /// Add-ons put into it (language packs, the Online add-on), with the files
     /// each wrote, for Undo.
     pub addons: Vec<crate::addons::InstalledAddon>,
+    /// The language pack Add was last pressed on, until it lands: then the
+    /// game starts in its language (addons.rs `language_on_landing`).
+    pub asked_pack: Option<crate::addons::AskedPack>,
     /// Kryoto Online set up on this PC (not from a kryo.to add-on), for Undo.
     pub online: Option<crate::online::LocalOnline>,
     pub repair: Option<crate::repair::LocalRepair>,
@@ -269,7 +277,7 @@ fn drop_unstartable_entries(g: &mut LibraryGame) {
 fn keep_private(games: &[LibraryGame]) {
     let mut values = Vec::new();
     for g in games.iter().filter(|g| g.slug.is_none()) {
-        crate::art::load_directly([&g.cover, &g.hero, &g.logo, &g.header, &g.custom_cover, &g.custom_hero].into_iter().flatten().cloned());
+        crate::art::load_directly([&g.cover, &g.hero, &g.logo, &g.header, &g.icon, &g.custom_cover, &g.custom_hero, &g.custom_icon].into_iter().flatten().cloned());
         if let Some(id) = &g.steam_appid {
             crate::art::load_app_directly(id);
         }
@@ -832,6 +840,49 @@ pub fn fill_branches<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
+/// Steam's square icon for each game that has none, so the whole list shows
+/// icons and not only the games whose art was looked up again. Off the main
+/// thread, one request to Steam per fifty such games; a game with an icon,
+/// or the player's own, is not asked.
+pub fn fill_icons<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(games) = load(&app) else { return };
+        let missing: Vec<(String, String)> = games
+            .iter()
+            .filter(|g| g.icon.is_none() && g.custom_icon.is_none())
+            .filter_map(|g| Some((g.id.clone(), steam_app_of(g)?)))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = missing.iter().map(|(_, a)| a.clone()).collect::<HashSet<_>>().into_iter().collect();
+        let art = crate::steam_art::many(&ids).await;
+        let found: Vec<(String, String)> = missing.into_iter().filter_map(|(id, a)| Some((id, art.get(&a)?.icon.clone()?))).collect();
+        if found.is_empty() {
+            return;
+        }
+        let _ = update(&app, |games| {
+            for (id, icon) in &found {
+                if let Some(g) = games.iter_mut().find(|g| &g.id == id) {
+                    g.icon.get_or_insert_with(|| icon.clone());
+                }
+            }
+            Ok(())
+        });
+        let _ = app.emit("library-changed", ());
+    });
+}
+
+/// The Steam app a game's pictures are of: the AppID kept for it, else the
+/// one in a Steam picture's address (kryo.to's art is Steam's). Never
+/// Spacewar (480), the AppID emulators stand in with.
+fn steam_app_of(g: &LibraryGame) -> Option<String> {
+    let kept = g.steam_appid.as_deref().map(|a| a.chars().take_while(char::is_ascii_digit).collect::<String>());
+    let seen = || [&g.cover, &g.hero, &g.header, &g.logo].into_iter().flatten().find_map(|u| crate::art::steam_app(u)).map(str::to_string);
+    kept.filter(|a| !a.is_empty()).or_else(seen).filter(|a| a != "480")
+}
+
 /// Library writes are serialised: a game closing while Properties saves must
 /// not lose either change.
 static WRITE: Mutex<()> = Mutex::new(());
@@ -1031,6 +1082,7 @@ pub fn library_artwork(
     hero: Option<String>,
     logo: Option<String>,
     header: Option<String>,
+    icon: Option<String>,
 ) -> Result<LibraryGame, String> {
     update(&app, |games| {
         let game = games.iter_mut().find(|g| g.id == id).ok_or("Game not found.")?;
@@ -1038,6 +1090,7 @@ pub fn library_artwork(
         game.hero = hero.or(game.hero.take());
         game.logo = logo.or(game.logo.take());
         game.header = header.or(game.header.take());
+        game.icon = icon.or(game.icon.take());
         Ok(game.clone())
     })
 }
@@ -1072,6 +1125,7 @@ pub fn upsert_installed<R: Runtime>(app: &AppHandle<R>, mut game: LibraryGame) -
                 slot.pinned_version = game.pinned_version.clone();
                 slot.logo = game.logo.clone().or(slot.logo.take());
                 slot.header = game.header.clone().or(slot.header.take());
+                slot.icon = game.icon.clone().or(slot.icon.take());
                 slot.cover = game.cover.clone().or(slot.cover.take());
                 slot.hero = game.hero.clone().or(slot.hero.take());
                 slot.short = game.short.clone().or(slot.short.take());
@@ -1321,6 +1375,7 @@ pub fn library_save(app: AppHandle, game: LibraryGame) -> Result<LibraryGame, St
         }
         // Only applying and undoing change these, never the Properties window.
         next.addons = slot.addons.clone();
+        next.asked_pack = slot.asked_pack.clone();
         next.online = slot.online.clone();
         let had_repair = next.repair.is_some() || slot.repair.is_some();
         next.repair = slot.repair.clone();
@@ -2240,7 +2295,7 @@ pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, rename_target, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
+    use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, rename_target, set_hidden, slugify, steam_app_of, title_with_branch, LibraryGame, MARKER};
     use crate::launch::LaunchEntry;
 
     /// KB-0288: Properties offers the folder's start files, likeliest first,
@@ -2271,6 +2326,33 @@ mod tests {
         let mut picked_page = LibraryGame { entries: vec![e("Game.exe"), e("Cosplay DLC/index.html")], preferred_entry: Some(1), ..Default::default() };
         drop_unstartable_entries(&mut picked_page);
         assert_eq!(picked_page.preferred_entry, None, "back to the game's own exe");
+    }
+
+    /// A library saved before games had icons loads with none, and the
+    /// sidebar draws their covers as it did.
+    #[test]
+    fn a_library_from_before_icons_loads_without_them() {
+        let old = br#"[{"id":"hades","title":"Hades","slug":"hades","cover":"https://x/c.jpg","customCover":"kryoto-art://local/a","installDir":"D:/Games/Hades","executable":"Hades.exe"}]"#;
+        let games = parse(old).unwrap();
+        assert_eq!((games[0].icon.as_deref(), games[0].custom_icon.as_deref(), games[0].custom_cover.as_deref()), (None, None, Some("kryoto-art://local/a")));
+        let game = LibraryGame { icon: Some("https://x/i.jpg".into()), custom_icon: Some("kryoto-art://local/b".into()), ..games[0].clone() };
+        let again = parse(serde_json::to_string(&[game]).unwrap().as_bytes()).unwrap();
+        assert_eq!((again[0].icon.as_deref(), again[0].custom_icon.as_deref()), (Some("https://x/i.jpg"), Some("kryoto-art://local/b")));
+    }
+
+    /// A game added before icons gets Steam's from the AppID kept for it, or
+    /// from its Steam pictures' addresses (a kryo.to game keeps no AppID).
+    #[test]
+    fn an_icon_is_asked_for_the_steam_app_its_pictures_are_of() {
+        let old = br#"[{"id":"hades","title":"Hades","installDir":"D:/Games/Hades","executable":"Hades.exe"}]"#;
+        let game = parse(old).unwrap().remove(0);
+        assert_eq!(steam_app_of(&game), None);
+        let kept = LibraryGame { steam_appid: Some("2027330x".into()), cover: Some("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/c.jpg".into()), ..game.clone() };
+        assert_eq!(steam_app_of(&kept).as_deref(), Some("2027330"));
+        let listed = LibraryGame { cover: Some("kryoto-art://local/a".into()), hero: Some("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1145360/abc/library_hero.jpg".into()), ..game.clone() };
+        assert_eq!(steam_app_of(&listed).as_deref(), Some("1145360"));
+        let spacewar = LibraryGame { steam_appid: Some("480".into()), ..game };
+        assert_eq!(steam_app_of(&spacewar), None);
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
 import { automaticArtwork, coverFor } from '@/lib/game-artwork'
 import { autofixBlock } from '@/lib/autofix'
+import { orderSources } from '@/lib/download-order'
 import type { FilesRestored, FilesState } from '@/lib/release-files'
 import type { OnlineFixState } from '@/lib/online-fix'
 
@@ -64,6 +65,9 @@ export type LibraryGame = {
   hero: string | null
   customCover?: string | null
   customHero?: string | null
+  /** Steam's small square icon, for the Library list; the cover stands in without one. */
+  icon?: string | null
+  customIcon?: string | null
   /** The transparent title logo, when Steam has one. */
   logo?: string | null
   /** The wide store header, for rows and cards. */
@@ -141,7 +145,18 @@ export const vrApi = { status: () => call<VrStatus>('vr_status') }
 /** Play time Play can give back (src-tauri library.rs `playtime_offer`). */
 export type PlaytimeOffer = { seconds: number; source: 'folder' | 'account' | 'both' }
 
-export type InstalledAddon = { label: string; file: string; files: string[]; /** Game files it replaced, kept for Undo (missing: applied before 0.3.0). */ replaced?: string[]; installedAt: number }
+export type InstalledAddon = {
+  label: string
+  file: string
+  files: string[]
+  /** Game files it replaced, kept for Undo (missing: applied before 0.3.0). */
+  replaced?: string[]
+  installedAt: number
+  /** A language pack's Steam code, as Add said it. */
+  language?: string | null
+  /** Landing it set the game's Language (missing: applied before Kryoto kept this). */
+  setLanguage?: boolean | null
+}
 
 /** One of a game's add-ons on kryo.to (`/api/games/<slug>/downloads`). */
 export type KryoAddon = {
@@ -212,6 +227,9 @@ export type AddonsGot = {
   store: boolean
 }
 
+/** A language pack Add was pressed on by itself (addons.rs `AskedPack`): its label and Steam code. */
+export type AskedPack = { label: string; language: string }
+
 /** Where a release can be downloaded from, as Kryoto Desktop sees it. */
 export type ReleaseSource =
   /** Our own copy: through the Store's download sheet (it passes kryo.to's check). */
@@ -252,7 +270,9 @@ type RawRelease = {
 /**
  * A game's releases, newest first, each with the ways Kryoto can get it. Our
  * own copy leads (fastest, and checked against its hash); mirrors the app
- * resolves by itself follow, API hosts before page hosts.
+ * resolves by itself follow, API hosts before page hosts. A download order
+ * set in Settings > Downloads goes before both (suggestion #110), so every
+ * download button starts with the player's first pick the build has.
  */
 export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
   const res = await fetchGameApi(slug, '/downloads')
@@ -274,6 +294,7 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
     const kinds = await call<({ host: string; kind: string } | null)[]>('mirror_hosts', { urls: external }).catch(() => [])
     external.forEach((u, i) => known.set(u, kinds[i] ?? null))
   }
+  const order = (await call<{ downloadOrder?: string[] }>('settings_get').catch(() => null))?.downloadOrder ?? []
   return raw.map((r) => {
     const links = r.links ?? []
     const ours = links.some((l) => l.url?.startsWith('/api/download/'))
@@ -295,7 +316,7 @@ export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
       createdAt: r.created_at ?? null,
       primary: !!r.primary,
       archived: !!r.archived,
-      sources: [...(ours && !r.archived ? [{ kind: 'ours' } as const] : []), ...mirrors],
+      sources: orderSources([...(ours && !r.archived ? [{ kind: 'ours' } as const] : []), ...mirrors], order),
       elsewhere,
     }
   })
@@ -380,6 +401,7 @@ export const library = {
       hero: game.hero ?? art?.hero ?? null,
       logo: game.logo ?? art?.logo ?? null,
       header: game.header ?? art?.header ?? null,
+      icon: game.icon ?? art?.icon ?? null,
     } })
   },
   save: (game: LibraryGame) => call<LibraryGame>('library_save', { game }),
@@ -390,8 +412,8 @@ export const library = {
   updateBackup: (slug: string) => call<UpdateBackup | null>('game_update_backup', { slug }),
   /** Put the build from before the last update back. */
   undoUpdate: (slug: string) => call<void>('game_update_undo', { slug }),
-  refreshArtwork: (id: string, art: { cover: string | null; hero: string | null; logo?: string | null; header?: string | null }) =>
-    call<LibraryGame>('library_artwork', { id, ...art, logo: art.logo ?? null, header: art.header ?? null }),
+  refreshArtwork: (id: string, art: { cover: string | null; hero: string | null; logo?: string | null; header?: string | null; icon?: string | null }) =>
+    call<LibraryGame>('library_artwork', { id, ...art, logo: art.logo ?? null, header: art.header ?? null, icon: art.icon ?? null }),
   /** `deletePrefix`: on Linux, its Wine prefix goes too. `together`: the games
    *  uninstalled in the same go, which may share its folder. `permanent`: the
    *  player was told it cannot go to the Recycle Bin and said yes. */
@@ -428,8 +450,12 @@ export const library = {
   onState: (fn: (e: GameStateEvent) => void) => on<GameStateEvent>('game-state', fn),
   onChanged: (fn: () => void) => on<unknown>('library-changed', fn),
   addonUndo: (gameId: string, file: string) => call<LibraryGame>('addon_undo', { gameId, file }),
-  /** Queue add-ons (by kryo.to id) for this installed game: they apply to its folder as they land. */
-  addonsGet: (gameId: string, ids: string[]) => call<AddonsGot>('addons_get', { gameId, ids }),
+  /**
+   * Queue add-ons (by kryo.to id) for this installed game: they apply to its
+   * folder as they land. `pack`: one language pack added by itself, whose
+   * language the game takes once it lands.
+   */
+  addonsGet: (gameId: string, ids: string[], pack: AskedPack | null = null) => call<AddonsGot>('addons_get', { gameId, ids, pack }),
   /** `null` when the game can use Kryoto Online, else why it cannot. */
   onlineCheck: (gameId: string) => call<string | null>('online_check', { gameId }),
   onlineApply: (gameId: string) => call<LibraryGame>('online_apply', { gameId }),

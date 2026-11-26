@@ -138,6 +138,7 @@ commands.allow = [
   "downloads_when_done_get",
   "download_mirror",
   "mirror_hosts",
+  "download_hosts",
   "compat_tools",
   "compat_status",
   "compat_install",

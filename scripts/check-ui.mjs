@@ -532,6 +532,67 @@ try {
       assert.ok(now.seenNotices.includes('check-seen'), `seen: ${JSON.stringify(now.seenNotices)}`)
     } finally { await cloud.close() }
   })
+  await check('the download order in Settings ranks every host, and a build downloads from the first one it has', async () => {
+    const order = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    order.on('pageerror', e => failures.push(e.message))
+    await order.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+    await order.route('**/api/games/celeste/downloads', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ releases: [
+      { id: 2, version: '1.4', primary: true, links: [{ url: '/api/download/v/2' }, { url: 'https://pixeldrain.com/u/abc' }, { url: 'https://gofile.io/d/xyz' }] },
+    ] }) }))
+    try {
+      await order.goto(base)
+      const rail = order.getByRole('complementary', { name: 'Your games' })
+      await rail.waitFor()
+      // Every mirror download asked for, by its page.
+      await order.evaluate(async () => {
+        const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(`/src/lib/${name}.ts`))
+        const bridge = await import(loaded('bridge'))
+        const preview = await import(loaded('preview'))
+        window.mirrorsAsked = []
+        bridge.useWebBackend({
+          call: (c, a) => { if (c === 'download_mirror') window.mirrorsAsked.push(a.url); return preview.previewCall(c, a) },
+          on: (e, h) => preview.previewBus.on(e, h),
+        })
+      })
+      await order.getByRole('button', { name: 'Account menu' }).click()
+      await order.getByRole('menuitem', { name: /Settings/ }).click()
+      // The Settings section, not the top bar's Downloads.
+      await order.getByRole('button', { name: 'Downloads', exact: true }).and(order.getByText('Downloads', { exact: true })).click()
+      const list = order.getByRole('list', { name: 'Download order' })
+      const names = () => list.getByRole('listitem').allInnerTexts().then(t => t.map(x => x.replace(/^\d+\s*/, '').trim()))
+      // Untouched: kryo.to's order, our copy first, every host the app fetches from after it.
+      await list.getByRole('listitem').filter({ hasText: 'Gofile' }).waitFor()
+      assert.deepEqual((await names()).slice(0, 4), ["Kryoto's own copy", 'filez.stream', 'Pixeldrain', 'Gofile'])
+      assert.equal(await list.getByRole('button', { name: "Move Kryoto's own copy up" }).isDisabled(), true)
+      // Nothing is handed on in kryo.to's order, and the hint does not say it is.
+      const handsOn = order.getByText(/the next one below it that the build has takes over/)
+      assert.equal(await handsOn.count(), 0)
+      for (let i = 0; i < 3; i++) await list.getByRole('button', { name: 'Move Gofile up', exact: true }).click()
+      await order.waitForFunction(() => document.querySelector('[aria-label="Download order"] li')?.textContent?.includes('Gofile'))
+      assert.deepEqual((await names()).slice(0, 4), ['Gofile', "Kryoto's own copy", 'filez.stream', 'Pixeldrain'])
+      const saved = () => order.evaluate(async () => (await (await import('/src/lib/bridge.ts')).call('settings_get')).downloadOrder)
+      for (let i = 0; i < 20 && (await saved())?.[0] !== 'Gofile'; i++) await order.waitForTimeout(100)
+      assert.deepEqual((await saved()).slice(0, 2), ['Gofile', 'kryoto'])
+      await order.getByRole('button', { name: "Use kryo.to's order", exact: true }).waitFor()
+      await handsOn.waitFor()
+      // Celeste's build has our copy, Pixeldrain and Gofile: its download starts from Gofile.
+      await order.getByRole('button', { name: 'Library', exact: true }).click()
+      await rail.getByRole('button', { name: 'Celeste', exact: true }).click()
+      const region = order.getByRole('region', { name: 'Celeste', exact: true })
+      await region.getByRole('button', { name: 'Manage', exact: true }).click()
+      await order.getByRole('menuitem', { name: 'Properties', exact: true }).click()
+      await order.getByRole('button', { name: 'Builds', exact: true }).click()
+      const build = order.getByRole('dialog').getByRole('listitem').filter({ hasText: 'Current' })
+      await build.getByText('from Gofile').waitFor()
+      await build.getByRole('button', { name: 'Download from', exact: true }).click()
+      const menu = await order.getByRole('menu').getByRole('menuitem').allInnerTexts()
+      assert.deepEqual(menu.map(t => t.split('\n')[0].trim()), ['Gofile', 'kryo.to', 'Pixeldrain'])
+      await order.keyboard.press('Escape')
+      await build.getByRole('button', { name: /from Gofile/ }).click()
+      await order.waitForFunction(() => window.mirrorsAsked.length > 0)
+      assert.deepEqual(await order.evaluate(() => window.mirrorsAsked), ['https://gofile.io/d/xyz'])
+    } finally { await order.close() }
+  })
   await check('the Troubleshooting log stays where it was scrolled, and Refresh goes to the newest lines', async () => {
     const logs = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     logs.on('pageerror', e => failures.push(e.message))
@@ -654,6 +715,46 @@ try {
       assert.equal(await region.getByText('This copy does not record achievements', { exact: true }).count(), 0)
     } finally { await page.close() }
   })
+  await check("a game's row in the list shows its square icon, its cover when the icon does not load, and Properties has an Icon slot", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 860 } })
+    await page.addInitScript(() => localStorage.setItem('kryo:runtimes-ask', 'never'))
+    page.on('pageerror', e => failures.push(e.message))
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
+    let iconMissing = false
+    await page.route('**/api/steam/image.jpg?**', route => {
+      const url = new URL(route.request().url()).searchParams.get('url') ?? ''
+      if (iconMissing && url.includes('/community_assets/')) return route.fulfill({ status: 404, body: '' })
+      return route.fulfill({ status: 200, contentType: 'image/png', body: png })
+    })
+    const sidebar = page.getByRole('complementary', { name: 'Your games' })
+    const thumb = (name) => sidebar.getByRole('button', { name, exact: true }).locator('img').first()
+    const shown = async (name) => decodeURIComponent((await thumb(name).getAttribute('src')) ?? '')
+    try {
+      await page.goto(base)
+      await thumb('Hollow Knight').waitFor()
+      assert.match(await shown('Hollow Knight'), /community_assets\/images\/apps\/367520\/f6ab055c\w+\.jpg/)
+      // A game from before icons draws its cover, as the list always did.
+      assert.match(await shown('Celeste'), /\/504230\/library_600x900\.jpg/)
+      await sidebar.getByRole('button', { name: 'Hollow Knight', exact: true }).click({ button: 'right' })
+      await page.getByRole('menu').getByText('Properties', { exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Hollow Knight', exact: true })
+      await dialog.getByText('Artwork', { exact: true }).first().click()
+      await dialog.getByText('Icon', { exact: true }).waitFor()
+      const choose = dialog.getByRole('button', { name: 'Choose icon picture', exact: true })
+      assert.equal(await choose.isDisabled(), true, 'local pictures only in the desktop app')
+      const art = choose.locator('xpath=..').locator('img').first()
+      await art.waitFor()
+      const box = await art.boundingBox()
+      assert.ok(box && Math.abs(box.width - box.height) <= 1, `the icon box is square: ${JSON.stringify(box)}`)
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+      iconMissing = true
+      await page.reload()
+      await page.waitForFunction(() => {
+        const row = [...document.querySelectorAll('aside button')].find((b) => b.textContent?.trim() === 'Hollow Knight')
+        return decodeURIComponent(row?.querySelector('img')?.getAttribute('src') ?? '').includes('/367520/library_600x900.jpg')
+      })
+    } finally { await page.close() }
+  })
   await check('a game shows its Linux compatibility and setup through the shared renderer, and an untested game shows none', async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' })
     const linux = await context.newPage()
@@ -697,6 +798,64 @@ try {
       await linux.waitForTimeout(300)
       assert.equal(await linux.getByText('On Linux', { exact: true }).count(), 0)
     } finally { await context.close() }
+  })
+  await check("a language pack sets the game's Language once it lands, and one that fails leaves it", async () => {
+    // The preview backend's own record of the game, as the app would reload it.
+    const languageOf = (p, id) => p.evaluate(async (id) => {
+      const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(`/src/lib/${name}.ts`))
+      const preview = await import(loaded('preview'))
+      return (await preview.previewCall('library_list', {})).find(g => g.id === id)?.gameLanguage ?? null
+    }, id)
+    for (const failing of [true, false]) {
+      const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+      page.on('pageerror', e => failures.push(e.message))
+      await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+      try {
+        await page.goto(failing ? `${base}?addonchallenge` : base)
+        await page.getByRole('complementary', { name: 'Your games' }).getByRole('button', { name: 'Hollow Knight', exact: true }).click()
+        const row = page.getByRole('region', { name: 'Hollow Knight', exact: true }).locator('[data-addon-row="Polish"]')
+        await row.getByRole('button', { name: 'Add', exact: true }).click()
+        await row.getByRole('button', { name: 'Add', exact: true }).waitFor({ state: 'detached' })
+        // Queued is not in: the game still follows Settings.
+        assert.equal(await languageOf(page, 'hollow-knight'), null)
+        if (failing) {
+          await row.getByRole('button', { name: 'Download window', exact: true }).waitFor()
+          assert.equal(await languageOf(page, 'hollow-knight'), null)
+        } else {
+          await row.getByRole('button', { name: 'Remove', exact: true }).waitFor({ timeout: 30_000 })
+          assert.equal(await languageOf(page, 'hollow-knight'), 'polish')
+        }
+      } finally { await page.close() }
+    }
+  })
+  await check('removing a language pack puts back only the Language it set, never one the player picked', async () => {
+    const backend = (p, fn, arg) => p.evaluate(async ([fn, arg]) => {
+      const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(`/src/lib/${name}.ts`))
+      const preview = await import(loaded('preview'))
+      const game = (await preview.previewCall('library_list', {})).find(g => g.id === 'hollow-knight')
+      if (fn === 'pick') await preview.previewCall('library_save', { game: { ...game, gameLanguage: arg } })
+      return game.gameLanguage ?? null
+    }, [fn, arg])
+    for (const picked of [null, 'polish']) {
+      const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+      page.on('pageerror', e => failures.push(e.message))
+      await page.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+      try {
+        await page.goto(base)
+        const rail = page.getByRole('complementary', { name: 'Your games' })
+        await rail.waitFor()
+        if (picked) await backend(page, 'pick', picked)
+        await rail.getByRole('button', { name: 'Hollow Knight', exact: true }).click()
+        const row = page.getByRole('region', { name: 'Hollow Knight', exact: true }).locator('[data-addon-row="Polish"]')
+        await row.getByRole('button', { name: 'Add', exact: true }).click()
+        await row.getByRole('button', { name: 'Remove', exact: true }).click({ timeout: 30_000 })
+        assert.equal(await backend(page, 'read'), 'polish')
+        await page.getByRole('dialog', { name: 'Remove the Polish language pack', exact: true }).getByRole('button', { name: 'Remove', exact: true }).click()
+        await row.getByRole('button', { name: 'Add', exact: true }).waitFor()
+        // Set by the pack: back on Settings. Picked in Properties first: still the player's.
+        assert.equal(await backend(page, 'read'), picked)
+      } finally { await page.close() }
+    }
   })
   assert.deepEqual(failures, [])
   console.log('All Desktop UI regressions passed')

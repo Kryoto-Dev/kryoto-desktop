@@ -160,17 +160,16 @@ export function AddonsCard({
     setAdding((s) => new Set(s).add(key))
     setError(null)
     try {
-      const got = await library.addonsGet(game.id, ids)
+      // One language pack added by itself: once it lands, a game that follows
+      // Settings starts in that language, and its packs lead with it after an
+      // update (addons.rs `language_on_landing`). Not before: a pack that
+      // fails or is canceled would leave the game in a language it lacks.
+      const only = list.length === 1 ? list[0] : undefined
+      const lang = only && isLanguagePack(only) ? packLanguage(only) : null
+      const got = await library.addonsGet(game.id, ids, only && lang ? { label: only.label ?? '', language: lang } : null)
       // Signed out, or a host only a browser reaches: the download window
       // still adds it to this game when it lands.
       if (got.store) onGet()
-      // One language pack added to a game that follows Settings: the game now
-      // starts in that language, and its packs lead with it after an update.
-      const only = list.length === 1 ? list[0] : undefined
-      const lang = only && isLanguagePack(only) ? packLanguage(only) : null
-      if (lang && game.gameLanguage == null && settings?.gameLanguage !== lang) {
-        onChanged(await library.save({ ...game, gameLanguage: lang }))
-      }
     } catch (e) {
       setError(errorText(e))
     } finally {
@@ -270,7 +269,7 @@ export function AddonsCard({
           </Caption>
           {packOffers.length > 0 ? (
             <p className="text-xs leading-relaxed text-muted-foreground">
-              Adding one also sets the game&apos;s Language in Properties, unless you picked one there.
+              Adding one also sets the game&apos;s Language in Properties once it is in, unless you picked one there.
             </p>
           ) : null}
           {packsApplied.map((a) => (
@@ -398,9 +397,9 @@ export function AddonsCard({
                     void run(c.file, async () => {
                       const g = await library.addonUndo(game.id, c.file)
                       setRemovedAt(Date.now() / 1000)
-                      // The language it set goes with it (`add` above set it).
-                      const removed = applied.find((a) => a.file === c.file)?.label ?? ''
-                      const lang = languageAfterRemoving(g.gameLanguage, removed, (g.addons ?? []).map((a) => a.label))
+                      // The language it set when it landed goes with it.
+                      const removed = applied.find((a) => a.file === c.file) ?? { label: '' }
+                      const lang = languageAfterRemoving(g.gameLanguage, removed, g.addons ?? [])
                       return lang === (g.gameLanguage ?? null) ? g : library.save({ ...g, gameLanguage: lang })
                     })
                 }}
