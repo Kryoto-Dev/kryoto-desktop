@@ -267,6 +267,12 @@ pub struct PlanInput<'a> {
     pub wrappers: Vec<String>,
     /// Linux: environment from Settings; the launch options line still wins.
     pub env: Vec<(String, String)>,
+    /// Linux: DLL overrides for files the release did not ship, joined with
+    /// the release's rather than set through `env`, where the first value
+    /// would replace the online layer's. Used whether or not
+    /// `apply_overrides`, which is about the release's own; the launch
+    /// options line still replaces everything.
+    pub extra_overrides: Option<String>,
 }
 
 pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
@@ -336,10 +342,13 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
             } else {
                 set_default(&mut env, "WINEPREFIX", &wine_prefix.to_string_lossy());
             }
-            if input.apply_overrides {
-                if let Some(o) = wine_overrides_for(input.source).or_else(|| wine_overrides_from_files(input.install_dir, &exe)) {
-                    set_default(&mut env, "WINEDLLOVERRIDES", o);
-                }
+            let release = if input.apply_overrides {
+                wine_overrides_for(input.source).or_else(|| wine_overrides_from_files(input.install_dir, &exe))
+            } else {
+                None
+            };
+            if let Some(o) = join_overrides(release, input.extra_overrides.as_deref()) {
+                set_default(&mut env, "WINEDLLOVERRIDES", &o);
             }
         }
         chain.push(exe.to_string_lossy().into_owned());
@@ -351,6 +360,34 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
         (PathBuf::from(&chain[0]), chain[1..].to_vec())
     };
     Ok(LaunchPlan { program, lead_args, game_args, env, cwd, exe })
+}
+
+/// The release's overrides followed by the extra ones it does not already
+/// name. For a dll both name the release's entry is kept: the online layer
+/// stops working without its own setting, and `compat::steam_client_for`
+/// looks for its names in the result. An entry with no `=` is left out:
+/// Wine skips it, but written back as `name=` it would turn that dll off.
+/// None when neither has any.
+fn join_overrides(release: Option<&str>, extra: Option<&str>) -> Option<String> {
+    let mut taken: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for part in [release, extra].into_iter().flatten().flat_map(|v| v.split(';')) {
+        let Some((names, mode)) = part.trim().split_once('=') else {
+            continue;
+        };
+        // Wine takes several dlls before one `=`: keep the ones not set yet.
+        let names: Vec<&str> = names
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && !taken.contains(&n.to_ascii_lowercase()))
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        taken.extend(names.iter().map(|n| n.to_ascii_lowercase()));
+        out.push(format!("{}={mode}", names.join(",")));
+    }
+    (!out.is_empty()).then(|| out.join(";"))
 }
 
 /// An explicit value in the launch options line wins over ours.
@@ -511,6 +548,7 @@ mod tests {
             umu: None,
             wrappers: Vec::new(),
             env: Vec::new(),
+            extra_overrides: None,
         }
     }
 
@@ -645,6 +683,39 @@ mod tests {
         assert_eq!(env["WINEPREFIX"], "/data/prefixes/captain-hardcore");
         assert_eq!(env["GAMEID"], "umu-default");
         assert_eq!(env["PROTONPATH"], "/opt/GE-Proton9");
+    }
+
+    #[test]
+    fn extra_overrides_join_the_release_ones_and_the_release_keeps_its_dlls() {
+        let mut i = input(None, "", false);
+        i.extra_overrides = Some("winhttp=n,b;STEAM_API64=b".into());
+        let p = plan(&i).unwrap();
+        let env: std::collections::HashMap<_, _> = p.env.iter().cloned().collect();
+        assert_eq!(env["WINEDLLOVERRIDES"], "steam_api64=n,b;steam_api=n,b;kryotoO=n,b;kryotoO32=n,b;photon_universal=n,b;winhttp=n,b");
+        // Proton still gets Steam's client files for the online layer.
+        let mut env = p.env.clone();
+        assert!(crate::compat::steam_client_for(&mut env, Path::new("/nonexistent-home")).is_some());
+        // A release with none: the extra ones alone, also with the switch off.
+        i.source = Some("Steam + gbe_fork");
+        i.extra_overrides = Some("winhttp,version=n,b;winhttp=b".into());
+        let env: std::collections::HashMap<_, _> = plan(&i).unwrap().env.into_iter().collect();
+        assert_eq!(env["WINEDLLOVERRIDES"], "winhttp,version=n,b");
+        // An entry with no `=` is dropped, not turned into one that turns the dll off.
+        i.extra_overrides = Some("dinput8;winhttp=n,b;".into());
+        let env: std::collections::HashMap<_, _> = plan(&i).unwrap().env.into_iter().collect();
+        assert_eq!(env["WINEDLLOVERRIDES"], "winhttp=n,b");
+        i.extra_overrides = Some("dinput8".into());
+        assert!(!plan(&i).unwrap().env.iter().any(|(k, _)| k == "WINEDLLOVERRIDES"));
+        i.extra_overrides = Some("winhttp,version=n,b;winhttp=b".into());
+        i.source = Some("Steam + Kryoto Online");
+        i.apply_overrides = false;
+        let env: std::collections::HashMap<_, _> = plan(&i).unwrap().env.into_iter().collect();
+        assert_eq!(env["WINEDLLOVERRIDES"], "winhttp,version=n,b");
+        // The player's own line still replaces everything.
+        i.apply_overrides = true;
+        i.launch_options = r#"WINEDLLOVERRIDES="winmm=n,b" %command%"#;
+        let env: std::collections::HashMap<_, _> = plan(&i).unwrap().env.into_iter().collect();
+        assert_eq!(env["WINEDLLOVERRIDES"], "winmm=n,b");
     }
 
     #[test]
@@ -847,6 +918,7 @@ mod tests {
                 umu: None,
                 wrappers: Vec::new(),
                 env: Vec::new(),
+                extra_overrides: None,
             })
             .unwrap();
             let mut child = command(&p).spawn().unwrap();

@@ -1683,6 +1683,7 @@ pub(crate) fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry
         umu: umu.as_deref(),
         wrappers,
         env,
+        extra_overrides: None,
     })?;
     Ok((plan, tool_path))
 }
@@ -2373,6 +2374,7 @@ mod tests {
             umu: None,
             wrappers: Vec::new(),
             env: Vec::new(),
+            extra_overrides: None,
         })
         .unwrap();
         eprintln!("{}", plan.display());
