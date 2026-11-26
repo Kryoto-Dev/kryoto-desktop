@@ -2266,6 +2266,22 @@ mod tests {
         assert_eq!(files, ["PlayRDR2.exe", "RDR2.exe", "Redist/vcredist_x64.exe", "x64/tools/helper.exe"]);
     }
 
+    /// The packed exe Repair took SteamStub off, kept in `.kryoto-orig`, is a
+    /// backup: Properties does not offer it to start the game with.
+    #[test]
+    fn start_files_leave_out_kryotos_own_folders() {
+        let root = std::env::temp_dir().join(format!("kryoto-start-files-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for f in ["Game.exe", ".kryoto-orig/Game.exe", ".kryoto-repair/release-emulator/steamclient_loader_x64.exe"] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"").unwrap();
+        }
+        let files = super::start_files(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(files, ["Game.exe"]);
+    }
+
     /// KB-0263: a library saved before the fix keeps the DLC page as an
     /// entry; it goes on load, and the picked entry follows its own.
     #[test]

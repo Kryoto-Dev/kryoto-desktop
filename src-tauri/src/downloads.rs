@@ -6120,14 +6120,17 @@ pub fn locate(dest: &Path, wanted: &str) -> (PathBuf, String) {
     (root, exe)
 }
 
-/// Files Play can start.
+/// Files Play can start. Kryoto's own folders are left out: what they hold
+/// are backups, not the game. Repair keeps the packed exe it took SteamStub
+/// off in `.kryoto-orig`, which would otherwise be offered in Properties, and
+/// could be taken for the release's exe and the game rooted inside it.
 pub(crate) fn find_exes(dir: &Path, depth: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(read) = std::fs::read_dir(dir) else { return out };
     for entry in read.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if depth > 0 {
+            if depth > 0 && !entry.file_name().to_string_lossy().starts_with(".kryoto") {
                 out.extend(find_exes(&path, depth - 1));
             }
         } else if path.extension().is_some_and(|e| ["exe", "bat", "cmd", "sh"].iter().any(|x| e.eq_ignore_ascii_case(x))) {
@@ -7098,6 +7101,18 @@ mod tests {
         let (root, exe) = locate(&d, "");
         assert_eq!(root, d.join("Captain Hardcore"));
         assert_eq!(exe, "Captain Hardcore.exe");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_backup_in_kryotos_own_folder_is_never_taken_for_the_game() {
+        let d = scratch("locate-own");
+        for f in [".kryoto-orig/Game.exe", ".kryoto-mods/originals/Game.exe", "Game.exe"] {
+            std::fs::create_dir_all(d.join(f).parent().unwrap()).unwrap();
+            std::fs::write(d.join(f), b"x").unwrap();
+        }
+        assert_eq!(find_exes(&d, 4), vec![d.join("Game.exe")]);
+        assert_eq!(locate(&d, "Game.exe"), (d.clone(), "Game.exe".to_string()));
         let _ = std::fs::remove_dir_all(d);
     }
 
