@@ -145,6 +145,28 @@ fn an_empty_directory_is_not_a_game_and_dll_architecture_must_match() {
     assert!(detection::scan(&f.0).is_ok());
 }
 #[test]
+fn the_workshop_folder_is_not_part_of_the_game_for_repair_or_runes_exe_pick() {
+    let f = Folder::new();
+    f.write("Game.exe", &pe(0x8664));
+    f.write("steam_api64.dll", &pe(0x8664));
+    // A 32-bit dll under the 64-bit name stops a scan that looks in here.
+    f.write(".kryoto-mods/steam_api64.dll", &pe(0x14c));
+    f.write(".kryoto-mods/originals/Game.exe", &pe(0x8664));
+    let evidence = detection::scan(&f.0).unwrap();
+    assert_eq!(evidence.dlls, vec![f.0.join("steam_api64.dll")]);
+    assert_eq!(evidence.executable_dirs.len(), 1);
+    assert!(evidence.executable_dirs.contains(&f.0));
+    assert_eq!(
+        kryoto_repair::crack::find_steam_api_dlls(&f.0),
+        vec![f.0.join("steam_api64.dll")]
+    );
+    let exes: Vec<String> = kryoto_repair::find_executables(&f.0)
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
+    assert_eq!(exes, vec!["Game.exe"]);
+}
+#[test]
 fn a_steam_id_alone_does_not_prove_kryoto_origin_and_conflicting_ids_stop_repair() {
     let f = Folder::new();
     f.write("Game.exe", &pe(0x8664));

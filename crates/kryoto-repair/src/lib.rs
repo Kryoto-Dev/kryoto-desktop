@@ -44,7 +44,8 @@ pub fn find_executables(root: &Path) -> Vec<(String, u64)> {
         .max_depth(12)
         .into_iter()
         .filter_entry(|e| {
-            ![".kryoto-repair", ".kryoto-orig"].contains(&e.file_name().to_string_lossy().as_ref())
+            ![".kryoto-repair", ".kryoto-orig", ".kryoto-mods"]
+                .contains(&e.file_name().to_string_lossy().as_ref())
         })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())

@@ -145,10 +145,12 @@ pub fn scan(root: &Path) -> Result<Evidence, String> {
         .follow_links(false)
         .max_depth(12)
         .into_iter()
+        // The Workshop keeps its store and the game's original files in
+        // `.kryoto-mods`; a spare `steam_api64.dll` or exe in there is not the
+        // game's own.
         .filter_entry(|e| {
-            !e.file_name()
-                .to_string_lossy()
-                .starts_with(".kryoto-repair")
+            let name = e.file_name().to_string_lossy();
+            !name.starts_with(".kryoto-repair") && !name.starts_with(".kryoto-mods")
         });
     let mut visited = 0;
     for entry in entries {

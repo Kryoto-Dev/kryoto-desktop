@@ -97,7 +97,7 @@ pub fn find_steam_api_dlls(game_dir: &Path) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = WalkDir::new(game_dir)
         .into_iter()
         .filter_entry(|e| {
-            ![".kryoto-repair", ".kryoto-orig"]
+            ![".kryoto-repair", ".kryoto-orig", ".kryoto-mods"]
                 .iter()
                 .any(|n| e.file_name().eq_ignore_ascii_case(n))
         })
