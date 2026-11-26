@@ -7534,11 +7534,17 @@ mod tests {
 
     /// Ranges one after another on the same client go on the connection the
     /// last one used, not on a new one each (KB-0289).
+    ///
+    /// On one thread, so the order is fixed. Once an answer is read to its end,
+    /// hyper puts the connection back in the pool from a task of its own. On
+    /// worker threads the next range could ask for a connection before that
+    /// task ran, find the pool empty and open a second one, which is what made
+    /// this fail now and then on a busy CI runner.
     #[test]
     fn ranges_one_after_another_reuse_their_connection() {
         use std::sync::atomic::AtomicUsize;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let connections = Arc::new(AtomicUsize::new(0));
         let url = rt.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7584,9 +7590,14 @@ mod tests {
         let (stop, limiter) = (AtomicU8::new(RUN), Limiter::new(0));
         let expect = Expected { etag: None, total: Some(3000) };
         let client = client_builder().build().unwrap();
-        for (i, seg) in segs.iter().enumerate() {
-            assert!(rt.block_on(fetch_range(&client, &url, &path, i, seg.clone(), &progress, &arrived, &stop, &limiter, &expect)).is_ok());
-        }
+        rt.block_on(async {
+            for (i, seg) in segs.iter().enumerate() {
+                assert!(fetch_range(&client, &url, &path, i, seg.clone(), &progress, &arrived, &stop, &limiter, &expect).await.is_ok());
+                // Reading the end of the answer woke that task; it runs here,
+                // before the next range asks for a connection.
+                tokio::task::yield_now().await;
+            }
+        });
         let file = std::fs::read(&path).unwrap();
         assert!((0..3000).all(|i| file[i] == byte_at(i as u64)));
         assert_eq!(connections.load(Ordering::SeqCst), 1, "each range opened a connection of its own");
