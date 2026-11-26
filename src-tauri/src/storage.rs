@@ -489,6 +489,21 @@ fn wide_warning(path: &Path) -> Option<String> {
     })
 }
 
+/// A folder typed or pasted as well as picked (KB-0042): only a whole path,
+/// and one without "..". The check for a drive or the home folder cannot
+/// work that out while the folder is not there yet, so `/home/deck/New/..`
+/// got the home folder in.
+fn whole_path(path: &Path) -> Result<(), String> {
+    let example = if cfg!(windows) { r"D:\Kryoto Games" } else { "/home/deck/Games" };
+    if !path.is_absolute() {
+        return Err(format!("Type the folder's whole path, such as {example}."));
+    }
+    if path.components().any(|c| c == Component::ParentDir) {
+        return Err(format!("Type the folder's path without \"..\", such as {example}."));
+    }
+    Ok(())
+}
+
 /// Add a library folder. Made if it does not exist yet. Never a whole drive
 /// or the home folder: a folder for games inside it instead.
 #[tauri::command(async)]
@@ -497,10 +512,7 @@ pub fn storage_add_folder(app: AppHandle, path: String) -> Result<(), String> {
     if path.is_empty() {
         return Err("Pick a folder.".into());
     }
-    // Typed or pasted as well as picked (KB-0042): only a whole path.
-    if !Path::new(&path).is_absolute() {
-        return Err(format!("Type the folder's whole path, such as {}.", if cfg!(windows) { r"D:\Kryoto Games" } else { "/home/deck/Games" }));
-    }
+    whole_path(Path::new(&path))?;
     if let Some(what) = too_wide(Path::new(&path), crate::safe_delete::home().as_deref()) {
         let inside = Path::new(&path).join("Kryoto Games");
         return Err(format!("{path} is {what}, which holds much more than games. Add a folder for games inside it instead, such as {}.", inside.display()));
@@ -1173,7 +1185,7 @@ mod tests {
     fn record_at(at: &Path, files: &[&str]) {
         let files: std::collections::BTreeMap<String, kryoto_repair::community::Stamp> =
             files.iter().map(|f| (f.to_string(), kryoto_repair::community::Stamp { size: 1, modified_ms: 0 })).collect();
-        let record = crate::community_offer::ReleaseRecord { version: Some("1.0".into()), source: None, at: 1, files };
+        let record = crate::community_offer::ReleaseRecord { version: Some("1.0".into()), source: None, at: 1, files, unpacked: true };
         std::fs::write(at.join(crate::community_offer::RELEASE_RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
     }
 
@@ -1467,6 +1479,16 @@ mod tests {
         let home = temp.join("kryoto-home");
         assert_eq!(too_wide(&temp, Some(&home)), Some("your home folder"));
         assert_eq!(too_wide(&temp.join("Kryoto Games"), Some(&temp)), None);
+    }
+
+    /// A typed folder is a whole path without "..": `New\..` is the folder it
+    /// is in, which the check above cannot tell while New is not there.
+    #[test]
+    fn a_typed_folder_is_a_whole_path_without_dot_dot() {
+        let temp = dunce::canonicalize(std::env::temp_dir()).unwrap();
+        assert_eq!(whole_path(&temp.join("Kryoto Games")), Ok(()));
+        assert!(whole_path(Path::new("Kryoto Games")).unwrap_err().contains("whole path"));
+        assert!(whole_path(&temp.join("kryoto-not-there").join("..")).unwrap_err().contains("without \"..\""));
     }
 
     #[test]

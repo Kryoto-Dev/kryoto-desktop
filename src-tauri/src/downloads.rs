@@ -5230,7 +5230,10 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     let room_needed = unpacked.map(|size| size + if same_drive { archive_len } else { 0 }).unwrap_or(archive_len * 2);
     let (title_clone, parent_clone) = (title.clone(), parent.clone());
     let (journal_slug, to_version) = (item.slug.clone().unwrap_or_default(), item.meta.version.clone());
-    let damaged = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<String>, Option<crate::game_update::Journal>), String> {
+    // What went wrong unpacking, the update's journal, and every file the
+    // unpack wrote (relative to the folder it went into).
+    type Unpacked = (Vec<String>, Option<crate::game_update::Journal>, Vec<String>);
+    let damaged = tauri::async_runtime::spawn_blocking(move || -> Result<Unpacked, String> {
         let (title, parent) = (title_clone, parent_clone);
         // An unpack HatchZip left half done carries on from where it got to;
         // what it had already written is part of that.
@@ -5249,7 +5252,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             }
             move_tree(&staging_clone, &dest_clone).map_err(|e| format!("Installing into {} failed: {e}", dest_clone.display()))?;
             let _ = std::fs::remove_dir_all(&staging_clone);
-            return Ok((Vec::new(), None));
+            return Ok((Vec::new(), None, vec![safe_name(&name)]));
         }
         let progress = |done: u64, total: Option<u64>| {
             edit(&progress_app, &progress_id, |d| {
@@ -5307,6 +5310,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             }
             None => None,
         };
+        let staged = staged_files(&top);
         if let Err(e) = move_tree(&top, &dest_clone) {
             return Err(match journal {
                 Some(mut j) => match crate::game_update::restore(&mut j) {
@@ -5317,11 +5321,11 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             });
         }
         let _ = std::fs::remove_dir_all(&staging_clone);
-        Ok((damaged, journal))
+        Ok((damaged, journal, staged))
     })
     .await
     .map_err(|e| e.to_string())??;
-    let (damaged, journal) = damaged;
+    let (damaged, journal, staged) = damaged;
     let warning = damage_warning(&damaged, item.verified);
     if let Some(w) = &warning {
         crate::logging::error("install", &format!("{title}: {w}"));
@@ -5336,8 +5340,11 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     // so the game's page can bring them back.
     let lost: Vec<(String, u64)> = if Path::new(&item.archive_path).is_file() { crate::antivirus::unpack_losses(Path::new(&item.archive_path), &dest) } else { Vec::new() }
         .into_iter()
-        .filter_map(|(rel, size)| Some((dest.join(&rel).strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/"), size)))
+        .filter_map(|(rel, size)| Some((from_root(&dest, &root, &rel)?, size)))
         .collect();
+    // What the unpack wrote, from the game's root: all the release record
+    // lists, never what the folder already held (saves, mods, the player's own files).
+    let staged: Vec<String> = staged.iter().filter_map(|rel| from_root(&dest, &root, rel)).collect();
     let game = library::upsert_installed(app, installed_entry(&item, &title, &root, executable))?;
     // Only now, with the library saying so, is the update done; until here a
     // crash leaves the journal at "applying" and the next start rolls it back.
@@ -5360,7 +5367,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     set_status(app, id, Status::Installed, None);
     // What Kryoto's release put here, so a later community update can tell
     // what its updater changed from what anything else did (community_offer.rs).
-    crate::community_offer::record_release(&game, &lost);
+    crate::community_offer::record_release(&game, &staged, &lost);
     crate::antivirus::after_install(app, &game.id, &title, &root, &lost, item.added_at);
     if let Some(slug) = &game.slug {
         crate::antivirus::restored(slug);
@@ -5608,6 +5615,24 @@ pub(crate) fn single_child_dir(dir: &Path) -> Option<PathBuf> {
         [only] if only.path().is_dir() => Some(only.path()),
         _ => None,
     }
+}
+
+/// Every file an unpack wrote under `top`, `/`-separated: what is merged into
+/// the game's folder, and all of it the release record may list.
+fn staged_files(top: &Path) -> Vec<String> {
+    walkdir::WalkDir::new(top)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| Some(e.path().strip_prefix(top).ok()?.to_string_lossy().replace('\\', "/")))
+        .collect()
+}
+
+/// `rel`, a path in the folder the install went into, as a path in the
+/// game's root, `/`-separated; None when it is outside the root.
+fn from_root(dest: &Path, root: &Path, rel: &str) -> Option<String> {
+    Some(dest.join(rel).strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/"))
 }
 
 /// Move everything under `from` into `to`, replacing files that are there and
@@ -6563,10 +6588,17 @@ mod tests {
         std::fs::write(new.join("Game.exe"), b"new").unwrap();
         std::fs::write(new.join("Data/level.bin"), b"L").unwrap();
         let top = single_child_dir(&d.join("staging")).unwrap();
+        // What the update wrote, for its install record: never the save.
+        let mut staged = staged_files(&top);
+        staged.sort();
+        assert_eq!(staged, ["Data/level.bin", "Game.exe"]);
         move_tree(&top, &old).unwrap();
         assert_eq!(std::fs::read(old.join("Game.exe")).unwrap(), b"new");
         assert_eq!(std::fs::read(old.join("save.dat")).unwrap(), b"mine", "saves stay");
         assert!(old.join("Data/level.bin").is_file());
+        // From a root a level down, files beside it are not the game's.
+        assert_eq!(from_root(&old, &old.join("Data"), "Data/level.bin").as_deref(), Some("level.bin"));
+        assert_eq!(from_root(&old, &old.join("Data"), "Game.exe"), None);
         let _ = std::fs::remove_dir_all(d);
     }
 

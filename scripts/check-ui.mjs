@@ -588,6 +588,43 @@ try {
       await atBottom()
     } finally { await logs.close() }
   })
+  await check('uninstalling several games deletes first, and one that keeps its files never shares a folder', async () => {
+    const storage = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    storage.on('pageerror', e => failures.push(e.message))
+    await storage.addInitScript(() => { performance.setResourceTimingBufferSize(4000); localStorage.setItem('kryo:runtimes-ask', 'never') })
+    try {
+      await storage.goto(base)
+      await storage.getByRole('complementary', { name: 'Your games' }).waitFor()
+      await storage.evaluate(async () => {
+        const loaded = name => performance.getEntriesByType('resource').map(r => r.name).find(url => url.includes(name))
+        const bridge = await import(loaded('/src/lib/bridge.ts'))
+        const preview = await import(loaded('/src/lib/preview.ts'))
+        window.removes = []
+        bridge.useWebBackend({
+          call: (c, a) => {
+            // Added by hand: it only leaves the Library, its files stay.
+            if (c === 'library_uninstall_plan' && a.id === 'stardew-valley') {
+              return Promise.resolve({ kind: 'listOnly', reason: 'You added this game yourself, so its files stay where they are.', folder: null, whole: false, files: 0, bytes: 0, keptFiles: 0, keptBytes: 0, bin: false, binNote: null })
+            }
+            if (c === 'library_remove') window.removes.push([a.id, a.deleteFiles, a.together])
+            return preview.previewCall(c, a)
+          },
+          on: (e, h) => preview.previewBus.on(e, h),
+        })
+      })
+      await storage.getByRole('button', { name: 'Account menu' }).click()
+      await storage.getByRole('menuitem', { name: /Settings/ }).click()
+      await storage.getByRole('button', { name: 'Storage', exact: true }).click()
+      await storage.getByRole('checkbox', { name: /^Select stardew/i }).click()
+      await storage.getByRole('checkbox', { name: /^Select celeste/i }).click()
+      await storage.getByRole('button', { name: 'Uninstall', exact: true }).click()
+      const dialog = storage.getByRole('dialog')
+      await dialog.getByText('only leaves the Library').waitFor()
+      await dialog.getByRole('button', { name: 'Uninstall', exact: true }).click()
+      await storage.waitForFunction(() => window.removes.length === 2)
+      assert.deepEqual(await storage.evaluate(() => window.removes), [['celeste', true, ['celeste']], ['stardew-valley', false, ['celeste']]])
+    } finally { await storage.close() }
+  })
   await check('achievement repair offers gbe_fork and every RUNE profile with Undo between attempts', async () => {
     const achievements = await browser.newPage({ viewport: { width: 1100, height: 860 } })
     // This journey starts after startup setup; Windows otherwise waits at the

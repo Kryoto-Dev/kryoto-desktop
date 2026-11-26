@@ -18,7 +18,9 @@
 //! - With that install record (`.kryoto-release.json`: every file the
 //!   installer unpacked, written since 0.3.0) or kryo.to's list of the
 //!   release's files: those files and Kryoto's own, then folders left empty.
-//!   Anything else stays.
+//!   Anything else stays. A record from before it noted only what it
+//!   unpacked lists the whole folder, saves too: only the files kryo.to's
+//!   list also has, and without that list, refused when it lists a save.
 //! - Without either (installs before 0.3.0): the folder that holds this game's
 //!   own `.kryoto-game.json`, inside a library folder and named for the game,
 //!   and only when something says Kryoto installed it (the archive's hash, a
@@ -86,6 +88,13 @@ const SLACK: u64 = 5 << 30;
 /// Settle what an uninstall of `game` deletes. `leaving` are the games
 /// uninstalled in the same go (Settings > Storage), which may share a folder.
 pub fn plan(known: &Known, game: &LibraryGame, leaving: &[&str]) -> Verdict {
+    settle(known, game, leaving, true)
+}
+
+/// [`plan`]. With `narrow`, only the games of `leaving` whose own uninstall
+/// deletes their files may share the folder ([`going_with`]); without, all of
+/// them, for working that out.
+fn settle(known: &Known, game: &LibraryGame, leaving: &[&str], narrow: bool) -> Verdict {
     if let Some(who) = game.launcher.as_deref() {
         return Verdict::ListOnly(format!("{} keeps this game, so it stays installed there. Only its place in your Kryoto Library goes.", launcher_name(who)));
     }
@@ -129,7 +138,11 @@ pub fn plan(known: &Known, game: &LibraryGame, leaving: &[&str]) -> Verdict {
     }
     let own_marker = read_marker(&folder).is_some_and(|m| same_game(&m, game));
     let list: Option<Vec<(String, u64)>> = match &record {
-        Some(r) => Some(r.files.iter().map(|(p, s)| (p.clone(), s.size)).collect()),
+        Some(r) if r.unpacked => Some(r.files.iter().map(|(p, s)| (p.clone(), s.size)).collect()),
+        Some(r) => match older_record(r, known.release_list.as_deref(), &folder) {
+            Ok(list) => Some(list),
+            Err(why) => return Verdict::Refused(why),
+        },
         // kryo.to's list says what the release is, not where: only for the
         // folder carrying this game's marker, and only when that folder
         // really holds the release (Properties > Browse can point anywhere).
@@ -147,7 +160,8 @@ pub fn plan(known: &Known, game: &LibraryGame, leaving: &[&str]) -> Verdict {
             ));
         }
     }
-    let found = match guard(known, game, leaving, &folder) {
+    let going = if narrow { going_with(known, game, &folder, leaving) } else { leaving.to_vec() };
+    let found = match guard(known, game, &going, &folder) {
         Ok(found) => found,
         Err(why) => return Verdict::Refused(why),
     };
@@ -212,12 +226,76 @@ pub fn guard(known: &Known, game: &LibraryGame, leaving: &[&str], folder: &Path)
     walk(folder, game, known.games, leaving)
 }
 
+/// The games of `leaving` that may share `folder` with `game`: those inside
+/// it whose own uninstall deletes their files. One that only leaves the
+/// Library, or is refused, keeps its files where they are, so it still holds
+/// the folder like any other game (a batch uninstall in Settings > Storage
+/// took a game added by hand along with the folder around it). One whose
+/// folder is gone has nothing there to keep.
+fn going_with<'a>(known: &Known, game: &LibraryGame, folder: &Path, leaving: &[&'a str]) -> Vec<&'a str> {
+    leaving
+        .iter()
+        .copied()
+        .filter(|id| {
+            *id == game.id
+                || known.games.iter().find(|g| g.id == *id).is_some_and(|g| {
+                    inside(g, game, folder) && (std::fs::symlink_metadata(&g.install_dir).is_err() || matches!(settle(known, g, leaving, false), Verdict::Delete(_)))
+                })
+        })
+        .collect()
+}
+
+/// `g`'s folder is in `folder`, by its words or on the disk.
+fn inside(g: &LibraryGame, game: &LibraryGame, folder: &Path) -> bool {
+    path_is_in(&g.install_dir, &folder.to_string_lossy())
+        || path_is_in(&g.install_dir, &game.install_dir)
+        || dunce::canonicalize(&g.install_dir).is_ok_and(|d| d.starts_with(folder))
+}
+
 /// Something says Kryoto installed `game`, beyond the fields "Add a game"
 /// also fills in (title, slug, source, version, art): the archive it was
 /// installed from (`build_sha`, the player's own file `unverified`), both
 /// only ever set by an install, or a row in Downloads for it.
 fn installed_by_kryoto(known: &Known, game: &LibraryGame) -> bool {
     game.build_sha.is_some() || game.unverified || known.downloaded.iter().any(|(id, _)| *id == game.id)
+}
+
+/// The files of a record written before Kryoto noted only what it unpacked.
+/// That one listed the whole folder after the install, so after an update, or
+/// an install into a folder of the player's, it lists their saves, mods and
+/// own files too. Only those kryo.to's list of the release also has go, when
+/// one is kept and the folder holds it. Without it, a record listing a save
+/// the game keeps in its folder is refused: it was made after the game saved
+/// there, and anything else the player put there may be in it as well.
+fn older_record(record: &ReleaseRecord, release: Option<&[(String, u64)]>, folder: &Path) -> Result<Vec<(String, u64)>, String> {
+    let files = record.files.iter().map(|(p, s)| (p.clone(), s.size));
+    if let Some(release) = release.filter(|l| holds_release(folder, l)) {
+        let theirs: HashSet<String> = release.iter().map(|(p, _)| key(p)).collect();
+        return Ok(files.filter(|(p, _)| theirs.contains(&key(p))).collect());
+    }
+    let saves = save_places(folder);
+    if record.files.keys().any(|rel| saves.iter().any(|s| path_is_in(rel, s))) {
+        return Err(format!(
+            "Kryoto noted the files in {} after the game had saved there, so its record may count your saves and mods as the game's, and it deletes nothing. Remove it from the Library only, then delete the folder yourself if it holds only this game.",
+            show(folder)
+        ));
+    }
+    Ok(files.collect())
+}
+
+/// Where the game keeps saves in its own folder, as they are on the disk and
+/// relative to it: the Steam emulator's, and its engine's (RPG Maker's
+/// `www/save`, Ren'Py's `game/saves`, Unreal's `Saved/SaveGames`).
+fn save_places(folder: &Path) -> Vec<String> {
+    let roots = kryoto_saves::SaveRoots { game_dir: Some(folder.to_path_buf()), ..Default::default() };
+    kryoto_saves::emulator::rules(folder, None)
+        .into_iter()
+        .chain(kryoto_saves::engine::rules(folder, &roots, &Default::default()))
+        .filter(|r| r.root == kryoto_saves::Root::GameDir && !r.path.is_empty())
+        .flat_map(|r| kryoto_saves::rules::expand(&r, &roots))
+        .filter_map(|p| p.strip_prefix(folder).ok().map(|r| r.to_string_lossy().into_owned()))
+        .filter(|r| !r.is_empty())
+        .collect()
 }
 
 /// A folder of `total` bytes is far bigger than the `listed` installed in it.
@@ -342,12 +420,7 @@ fn system_dirs() -> Vec<PathBuf> {
 /// disk: one whose folder is gone still counts (KB-0375: those were exactly
 /// the games that went).
 fn entry_inside<'a>(known: &'a Known, game: &LibraryGame, leaving: &[&str], folder: &Path) -> Option<&'a LibraryGame> {
-    let words = folder.to_string_lossy();
-    known.games.iter().filter(|g| g.id != game.id && !leaving.contains(&g.id.as_str()) && !g.install_dir.trim().is_empty()).find(|g| {
-        path_is_in(&g.install_dir, &words)
-            || path_is_in(&g.install_dir, &game.install_dir)
-            || dunce::canonicalize(&g.install_dir).is_ok_and(|d| d.starts_with(folder))
-    })
+    known.games.iter().filter(|g| g.id != game.id && !leaving.contains(&g.id.as_str()) && !g.install_dir.trim().is_empty()).find(|g| inside(g, game, folder))
 }
 
 /// Every file in `folder` with its size, never following a link. Refused
@@ -356,6 +429,12 @@ fn entry_inside<'a>(known: &'a Known, game: &LibraryGame, leaving: &[&str], fold
 fn walk(folder: &Path, game: &LibraryGame, games: &[LibraryGame], leaving: &[&str]) -> Result<Vec<(PathBuf, u64)>, String> {
     let shown = show(folder);
     let mut out = Vec::new();
+    // Where the game's own install record is: a level down or more when the
+    // folder wraps the game's root (Library\Celeste\Celeste), which is still
+    // the game's alone. Another game's record refuses, even one leaving with
+    // it: that game may keep its saves and mods there, which a delete of the
+    // whole folder would take.
+    let own_record = dunce::canonicalize(&game.install_dir).ok();
     for e in walkdir::WalkDir::new(folder).follow_links(false) {
         let e = e.map_err(|e| format!("Kryoto could not read everything in {shown} ({e}), so it deletes nothing in it."))?;
         if e.depth() == 0 {
@@ -393,7 +472,7 @@ fn walk(folder: &Path, game: &LibraryGame, games: &[LibraryGame], leaving: &[&st
                 return Err(format!("{shown} also holds {title}, so Kryoto deletes nothing in it."));
             }
         }
-        if e.depth() > 1 && name == RELEASE_RECORD {
+        if e.depth() > 1 && name == RELEASE_RECORD && !path.parent().zip(own_record.as_deref()).is_some_and(|(p, d)| same_dir(p, d)) {
             return Err(format!("{shown} also holds another release ({}), so Kryoto deletes nothing in it.", show(path.parent().unwrap_or(&path))));
         }
         let size = e.metadata().map(|m| m.len()).unwrap_or(0);
@@ -581,7 +660,7 @@ fn remove_file(f: &Path) -> bool {
 /// Folders inside the game's folder left empty, the folder itself once empty,
 /// then empty folders above it up to its library folder. Only ever empty
 /// ones: `remove_dir` refuses any other.
-fn prune(plan: &Plan) {
+pub(crate) fn prune(plan: &Plan) {
     if plan.folder.is_dir() {
         let mut dirs: Vec<PathBuf> = walkdir::WalkDir::new(&plan.folder)
             .follow_links(false)
@@ -759,7 +838,7 @@ mod tests {
             .filter(|e| e.file_type().is_file())
             .map(|e| (e.path().strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/"), Stamp { size: e.metadata().unwrap().len(), modified_ms: 0 }))
             .collect();
-        let r = ReleaseRecord { version: Some("1".into()), source: None, at: 1, files };
+        let r = ReleaseRecord { version: Some("1".into()), source: None, at: 1, files, unpacked: true };
         put(&dir.join(RELEASE_RECORD), &serde_json::to_vec(&r).unwrap());
     }
 
@@ -1006,6 +1085,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    /// A record from before Kryoto noted only what it unpacked lists the whole
+    /// folder, saves and mods too once an update went in over them. With
+    /// kryo.to's list of the release only its files go; without it, a record
+    /// listing a save is refused.
+    #[test]
+    fn an_older_record_of_the_whole_folder_keeps_saves_and_mods() {
+        let base = scratch("older-record");
+        let dir = base.join("Hades");
+        put(&dir.join("Game.exe"), b"game");
+        put(&dir.join("www").join("data").join("System.json"), b"{}");
+        put(&dir.join("www").join("save").join("file1.rpgsave"), b"save");
+        put(&dir.join("mods").join("mine.pak"), b"a mod");
+        let g = game("hades", &dir);
+        mark(&g);
+        record(&dir);
+        // As it was written then.
+        let mut r: ReleaseRecord = read_json(&dir.join(RELEASE_RECORD)).unwrap();
+        r.unpacked = false;
+        put(&dir.join(RELEASE_RECORD), &serde_json::to_vec(&r).unwrap());
+        let folders = vec![text(&base)];
+        let games = vec![g.clone()];
+        assert!(refused(&plan(&known(&games, &folders), &g, &[])).contains("after the game had saved"));
+        assert!(dir.join("www").join("save").join("file1.rpgsave").exists());
+        let listed = vec![("Game.exe".into(), 4), ("www/data/System.json".into(), 2)];
+        let k = Known { release_list: Some(listed), ..known(&games, &folders) };
+        let p = uninstall(plan(&k, &g, &[]));
+        assert!(!p.whole && p.kept_files == 2, "{p:?}");
+        assert!(!dir.join("Game.exe").exists() && !dir.join("www").join("data").exists());
+        assert!(dir.join("www").join("save").join("file1.rpgsave").exists() && dir.join("mods").join("mine.pak").exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// A folder far bigger than what was installed in it is refused: three
     /// times over and by more than 5 GB (a game with its mods and caches is not).
     #[test]
@@ -1035,6 +1146,67 @@ mod tests {
         let games = vec![ga.clone(), gb.clone()];
         assert!(matches!(plan(&known(&games, &folders), &ga, &["pack"]), Verdict::Refused(_)));
         assert!(matches!(plan(&known(&games, &folders), &ga, &["pack", "extra"]), Verdict::Delete(_)));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// One picked with it that only leaves the Library, or is refused, keeps
+    /// its files, so it still holds the folder around it.
+    #[test]
+    fn games_leaving_together_that_keep_their_files_hold_the_folder() {
+        let base = scratch("together-kept");
+        let doom = base.join("Doom");
+        put(&doom.join("Doom.exe"), b"doom");
+        let inner = doom.join("gzdoom");
+        put(&inner.join("gzdoom.exe"), b"mine");
+        let ga = game("doom", &doom);
+        mark(&ga);
+        let mut by_hand = game("gzdoom", &inner);
+        by_hand.added_by_hand = true;
+        let folders = vec![text(&base)];
+        let games = vec![ga.clone(), by_hand.clone()];
+        let k = known(&games, &folders);
+        assert!(matches!(plan(&k, &by_hand, &["doom", "gzdoom"]), Verdict::ListOnly(_)));
+        assert!(refused(&plan(&k, &ga, &["doom", "gzdoom"])).contains("gzdoom"));
+        // Installed by Kryoto but refused itself: no record, and a folder not named for it.
+        let engine = game("engine", &inner);
+        mark(&engine);
+        let games = vec![ga.clone(), engine.clone()];
+        let k = known(&games, &folders);
+        assert!(matches!(plan(&k, &engine, &["doom", "engine"]), Verdict::Refused(_)));
+        assert!(refused(&plan(&k, &ga, &["doom", "engine"])).contains("engine"));
+        assert!(inner.join("gzdoom.exe").exists());
+        // One whose folder is gone, deleted by hand, keeps nothing there.
+        std::fs::remove_dir_all(&inner).unwrap();
+        let games = vec![ga.clone(), by_hand];
+        let k = known(&games, &folders);
+        assert!(refused(&plan(&k, &ga, &["doom"])).contains("gzdoom"));
+        assert!(matches!(plan(&k, &ga, &["doom", "gzdoom"]), Verdict::Delete(_)));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Another game's install record inside refuses, even one picked with it:
+    /// that game keeps its saves and mods there, which a delete of the whole
+    /// folder would take.
+    #[test]
+    fn another_games_record_inside_refuses_even_leaving_together() {
+        let base = scratch("together-record");
+        let pack = base.join("Pack");
+        put(&pack.join("Pack.exe"), b"pack");
+        let extra = pack.join("Extra");
+        put(&extra.join("Extra.exe"), b"extra");
+        let mut ga = game("pack", &pack);
+        ga.title = "Pack".into();
+        let gb = game("extra", &extra);
+        mark(&ga);
+        mark(&gb);
+        record(&extra);
+        put(&extra.join("www").join("save").join("file1.rpgsave"), b"save");
+        let folders = vec![text(&base)];
+        let games = vec![ga.clone(), gb.clone()];
+        let k = known(&games, &folders);
+        assert!(matches!(plan(&k, &gb, &["pack", "extra"]), Verdict::Delete(p) if p.kept_files == 1));
+        assert!(refused(&plan(&k, &ga, &["pack", "extra"])).contains("another release"));
+        assert!(extra.join("www").join("save").join("file1.rpgsave").exists());
         let _ = std::fs::remove_dir_all(base);
     }
 

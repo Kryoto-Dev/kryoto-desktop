@@ -1544,13 +1544,9 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
         Some(Bin::No(_)) => true,
         _ => permanent == Some(true),
     };
-    if delete_prefix.unwrap_or(false) && game.is_some() {
-        let dir = prefix_root(&app, &id)?;
-        tauri::async_runtime::spawn_blocking(move || if dir.is_dir() { std::fs::remove_dir_all(dir) } else { Ok(()) })
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("Could not delete the game's Wine prefix: {e}"))?;
-    }
+    // Found now, deleted only once the game's files went: the Recycle Bin may
+    // still refuse those, and the game then stays as it was.
+    let prefix = if delete_prefix.unwrap_or(false) && game.is_some() { Some(prefix_root(&app, &id)?) } else { None };
     let mut deleted = false;
     if let (Some(game), Some(plan)) = (game.as_ref(), files) {
         crate::logging::info(
@@ -1570,12 +1566,15 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
         let addon_backups = [crate::addons::backups_of(&plan.folder), crate::addons::backups_of(&crate::addons::game_root(&app, game))];
         let (progress_app, pid) = (app.clone(), id.clone());
         let result = tauri::async_runtime::spawn_blocking(move || {
-            for b in addon_backups.iter().filter(|b| b.file_name().is_some_and(|n| n.to_string_lossy().ends_with(".kryoto-addons")) && b.is_dir()) {
-                let _ = std::fs::remove_dir_all(b);
-            }
-            crate::safe_delete::run(&plan, for_good, &mut |removed, total| {
-                let _ = progress_app.emit("library-uninstall", DeleteProgress { id: pid.clone(), removed, total, done: false });
-            })
+            files_then(
+                || {
+                    crate::safe_delete::run(&plan, for_good, &mut |removed, total| {
+                        let _ = progress_app.emit("library-uninstall", DeleteProgress { id: pid.clone(), removed, total, done: false });
+                    })
+                },
+                &addon_backups,
+                &plan,
+            )
         })
         .await
         .map_err(|e| e.to_string())
@@ -1591,6 +1590,18 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
             tauri::async_runtime::spawn_blocking(move || crate::game_update::forget(&data, &slug));
         }
     }
+    if let Some(dir) = prefix {
+        let gone = tauri::async_runtime::spawn_blocking(move || if dir.is_dir() { std::fs::remove_dir_all(dir) } else { Ok(()) }).await.map_err(|e| e.to_string())?;
+        if let Err(e) = gone {
+            let why = format!("Could not delete the game's Wine prefix: {e}");
+            if !deleted {
+                return Err(why);
+            }
+            // Its files are gone, so it leaves the Library all the same; the
+            // prefix stays listed in Settings > Storage.
+            crate::logging::warn("library", &format!("{id}: {why}"));
+        }
+    }
     update(&app, |games| {
         games.retain(|g| g.id != id);
         Ok(())
@@ -1604,6 +1615,19 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool, dele
     // from (Settings > Storage left the sidebar listing it).
     let _ = app.emit("library-changed", ());
     Ok(deleted)
+}
+
+/// The game's files first, then the originals its add-ons replaced, which
+/// Kryoto keeps beside them: when the Recycle Bin refuses the files after all,
+/// the game stays as it was and its add-ons can still be taken off. Then the
+/// folders above the game left empty once those went.
+fn files_then<T>(files: impl FnOnce() -> Result<T, String>, beside: &[PathBuf], plan: &crate::safe_delete::Plan) -> Result<T, String> {
+    let done = files()?;
+    for b in beside.iter().filter(|b| b.file_name().is_some_and(|n| n.to_string_lossy().ends_with(".kryoto-addons")) && b.is_dir()) {
+        let _ = std::fs::remove_dir_all(b);
+    }
+    crate::safe_delete::prune(plan);
+    Ok(done)
 }
 
 /// How far deleting a game's files has got (KB-0305), in the shape and at the
@@ -2243,6 +2267,27 @@ mod tests {
     use super::{added_place, drop_unstartable_entries, from_folder, hidden_differences, parse, prepare_launch, rename_target, set_hidden, slugify, title_with_branch, LibraryGame, MARKER};
     use crate::launch::LaunchEntry;
 
+    /// The originals add-ons replaced go only once the game's files did: a
+    /// Recycle Bin that refuses them leaves the game with its originals. The
+    /// folder that held the game and them goes after, once empty.
+    #[test]
+    fn add_on_originals_stay_when_the_files_could_not_go() {
+        let base = std::env::temp_dir().join(format!("kryoto-addon-originals-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (lib, stuff) = (base.join("Lib"), base.join("Lib").join("Stuff"));
+        let (dir, backups) = (stuff.join("Hades"), stuff.join(".Hades.kryoto-addons"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::write(dir.join("Hades.exe"), b"hades").unwrap();
+        std::fs::write(backups.join("steam_api64.dll"), b"original").unwrap();
+        let plan = crate::safe_delete::Plan { folder: dir.clone(), whole: true, files: vec![dir.join("Hades.exe")], bytes: 5, stop_at: Some(lib.clone()), ..Default::default() };
+        let refused: Result<(), String> = super::files_then(|| Err("Could not move it to the Recycle Bin".into()), std::slice::from_ref(&backups), &plan);
+        assert!(refused.is_err() && backups.join("steam_api64.dll").exists() && dir.join("Hades.exe").exists());
+        super::files_then(|| crate::safe_delete::run(&plan, true, &mut |_, _| {}), std::slice::from_ref(&backups), &plan).unwrap();
+        assert!(!backups.exists() && !stuff.exists() && lib.is_dir());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// KB-0288: Properties offers the folder's start files, likeliest first,
     /// an installer or redistributable last, paths with forward slashes.
     #[test]
@@ -2511,6 +2556,35 @@ mod tests {
         // The library folder itself, and a folder that is gone.
         assert!(rename_target(&games, &folders, &game("lib", lib.clone())).is_err());
         assert!(rename_target(&games, &folders, &game("gone", root.join("Gone"))).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A download a level down (Library\Celeste\Celeste, with its install
+    /// record and marker there): Rename and Move take Celeste, which holds the
+    /// game alone. Another release's record inside still refuses.
+    #[test]
+    fn rename_folder_takes_a_wrapper_with_the_games_own_record_a_level_down() {
+        use kryoto_repair::community::Stamp;
+        let root = std::env::temp_dir().join(format!("kryoto-rename-wrapper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let lib = root.join("Library");
+        let (outer, inner) = (lib.join("Celeste"), lib.join("Celeste").join("Celeste"));
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("Celeste.exe"), b"x").unwrap();
+        let record = |at: &std::path::Path, file: &str| {
+            let r = crate::community_offer::ReleaseRecord { at: 1, files: [(file.to_string(), Stamp { size: 1, modified_ms: 0 })].into(), ..Default::default() };
+            std::fs::write(at.join(crate::community_offer::RELEASE_RECORD), serde_json::to_vec(&r).unwrap()).unwrap();
+        };
+        let game = LibraryGame { id: "celeste".into(), title: "Celeste".into(), install_dir: inner.to_string_lossy().into_owned(), ..Default::default() };
+        std::fs::write(inner.join(MARKER), serde_json::to_vec(&game).unwrap()).unwrap();
+        record(&inner, "Celeste.exe");
+        let (games, folders) = (vec![game.clone()], vec![lib.to_string_lossy().into_owned()]);
+        let plain = |p: &std::path::Path| dunce::canonicalize(p).unwrap();
+        assert_eq!(rename_target(&games, &folders, &game), Ok((plain(&inner), plain(&outer))));
+        let mods = inner.join("Mods").join("Other");
+        std::fs::create_dir_all(&mods).unwrap();
+        record(&mods, "Other.exe");
+        assert!(rename_target(&games, &folders, &game).unwrap_err().contains("another release"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
