@@ -612,6 +612,8 @@ mod tests {
 
     #[cfg(not(windows))]
     fn check_forwarded_args(line: &str, expected: &[&str]) {
+        // The handoff tests' Stop ends anything new run from this folder.
+        let _turn = crate::handoff::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let exe = std::env::current_exe().unwrap();
         // libtest's --skip takes a value just like a game's --profile. Using
         // it lets the same executable inspect the actual child process argv.
