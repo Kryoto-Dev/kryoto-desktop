@@ -545,6 +545,17 @@ mod tests {
     #[cfg(windows)]
     const PIPE_NAME: &str = r"\\.\pipe\kryoto-unit-ipc-0";
 
+    /// Stop the app's side and wait until it has stopped. Its end of the last
+    /// connection keeps the pipe in being after the stand-in's end is gone,
+    /// and while any of it is, the next test's first pipe of that name is
+    /// refused with "Access is denied". An abort only asks: the task ends on
+    /// a worker thread, now and then after the next test has started.
+    #[cfg(windows)]
+    async fn stop(task: tauri::async_runtime::JoinHandle<()>) {
+        task.abort();
+        let _ = task.await;
+    }
+
     #[cfg(windows)]
     async fn next(server: &mut tokio::net::windows::named_pipe::NamedPipeServer, frames: &mut Frames) -> (u32, Value) {
         let mut bytes = [0u8; 4096];
@@ -587,7 +598,7 @@ mod tests {
             tx.send(None).unwrap();
             let (_, clear) = next(&mut server, &mut frames).await;
             assert_eq!(clear["args"]["activity"], Value::Null);
-            task.abort();
+            stop(task).await;
         });
     }
 
@@ -639,7 +650,7 @@ mod tests {
             let (mut server, mut frames) = tokio::join!(accept(false), async move { drop(again) }).0;
             server.write_all(&frame(OP_FRAME, &json!({ "evt": "READY" }))).await.unwrap();
             assert!(shows(&next(&mut server, &mut frames).await.1));
-            task.abort();
+            stop(task).await;
         });
     }
 
