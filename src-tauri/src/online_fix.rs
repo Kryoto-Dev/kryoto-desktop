@@ -340,6 +340,7 @@ async fn published_sha256(page_url: &str, name: &str) -> Option<String> {
 /// The fix put into the game. Plain words on every refusal; nothing in the
 /// game changes until the archive and the fix have passed every check.
 async fn install(app: &AppHandle, game_id: &str, archive: &Path, published: Option<String>) -> Result<OnlineFixState, String> {
+    let busy = crate::busy::enter(game_id, "getting its online fix")?;
     let say = |text: &str| crate::repair::progress(app, game_id, text, None);
     let game = crate::repair::game(app, game_id)?;
     if library::is_running(app, game_id) {
@@ -374,7 +375,7 @@ async fn install(app: &AppHandle, game_id: &str, archive: &Path, published: Opti
         // Before anything in the game changes: its app id, folders and architecture.
         fixpack::plan(&fix_root, &scope, &root, &appid)?;
         let before = game.clone();
-        let cleaned = crate::repair::clear_for_switch(app, game_id, &before).await?;
+        let cleaned = crate::repair::clear_for_switch(app, game_id, &before, &busy).await?;
         let before = crate::repair::game(app, game_id)?;
         let back_out = |error: String| -> String {
             match cleaned.map(|_| crate::release_files::unclean(&root)) {

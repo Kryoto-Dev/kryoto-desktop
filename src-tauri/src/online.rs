@@ -247,14 +247,25 @@ fn undo_files(root: &Path, rec: &LocalOnline) {
 
 #[tauri::command(async)]
 pub fn online_undo(app: AppHandle, game_id: String) -> Result<LibraryGame, String> {
+    let busy = crate::busy::enter(&game_id, "having Kryoto Online taken out")?;
+    undo(&app, &game_id, &busy)
+}
+
+/// `online_undo` for a caller that already holds the game in the busy set
+/// (an emulator switch or the online fix clearing the way).
+pub(crate) fn undo(app: &AppHandle, game_id: &str, busy: &crate::busy::Busy) -> Result<LibraryGame, String> {
+    debug_assert_eq!(busy.id(), game_id);
+    let (app, game_id) = (app.clone(), game_id.to_string());
     let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     if game.repair.is_some() {
-        crate::repair::repair_undo(app.clone(), game_id.clone())?;
+        crate::repair::undo(&app, &game_id, busy)?;
         return library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.".into());
     }
     if app.state::<library::Running>().0.lock().map_err(|e| e.to_string())?.contains_key(&game_id) { return Err("Close the game before Undo.".into()) }
     let rec = game.online.clone().ok_or("Kryoto Online is not set up for this game.")?;
-    undo_files(&game_root(&app, &game), &rec);
+    let root = game_root(&app, &game);
+    let _lock = crate::busy::lock(&root)?;
+    undo_files(&root, &rec);
     crate::logging::info("online", &format!("Kryoto Online removed from {}", game.title));
     let updated = library::update(&app, |games| {
         let g = games.iter_mut().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;

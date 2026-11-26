@@ -280,6 +280,13 @@ pub fn wait_gone(pid: u32) {
     }
 }
 
+/// Tests that start this test binary as a game, here and in launch.rs, take
+/// turns. The ones here follow anything new running from its folder, and Stop
+/// ends it: side by side, they took another test's copy for the game, and
+/// launch.rs's argument check was killed before it printed a line.
+#[cfg(test)]
+pub(crate) static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,10 +320,6 @@ mod tests {
             std::thread::sleep(Duration::from_secs(seconds.parse().unwrap()));
         }
     }
-
-    /// These two start helpers in one folder and look for what is new there, so
-    /// run side by side each would find the other's.
-    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn a_second_handoff_is_followed_too() {

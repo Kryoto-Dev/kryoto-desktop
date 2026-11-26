@@ -26,6 +26,7 @@ mod handoff;
 mod health;
 mod hatchzip;
 mod bridge;
+mod busy;
 mod channel;
 mod discord_rpc;
 mod discord_web;

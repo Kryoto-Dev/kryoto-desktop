@@ -1129,6 +1129,7 @@ fn tool_files<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, u64, PathBuf)> {
 #[tauri::command]
 pub async fn game_files_restore(app: AppHandle, game_id: String) -> Result<Restored, String> {
     crate::required::refuse()?;
+    let _busy = crate::busy::enter(&game_id, "getting its files back")?;
     let game = game(&app, &game_id)?;
     if crate::library::is_running(&app, &game.id) {
         return Err("Close the game before getting its files back.".into());

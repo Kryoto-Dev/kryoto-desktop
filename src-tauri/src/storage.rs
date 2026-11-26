@@ -618,6 +618,12 @@ pub fn recover_move<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return set_aside(&path, &journal, "the game's library entry changed since");
     }
     recover_paths(&journal, &game.install_dir)?;
+    // Moved, and stopped before its add-ons' kept files went along.
+    if same_path(&game.install_dir, &journal.new_dir) {
+        if let Err(e) = crate::addons::carry_backups(&journal.from, &journal.dest) {
+            crate::logging::warn("storage", &format!("An interrupted move left its add-ons' kept files beside {}: {e}", journal.from.display()));
+        }
+    }
     if journal.from.exists() && journal.dest.exists() {
         let extra = if same_path(&game.install_dir, &journal.new_dir) { &journal.from } else { &journal.dest };
         crate::logging::warn("storage", &format!("An interrupted move kept a second folder at {}. Inspect it before removing it.", extra.display()));
@@ -669,7 +675,7 @@ fn install_suffix(from: &Path, install: &Path) -> Result<PathBuf, String> {
     install.strip_prefix(from).map(Path::to_path_buf).map_err(|_| "The install folder is outside the game folder.".into())
 }
 
-fn copy_tree(from: &Path, to: &Path, progress: &mut dyn FnMut(u64)) -> std::io::Result<()> {
+pub(crate) fn copy_tree(from: &Path, to: &Path, progress: &mut dyn FnMut(u64)) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
@@ -702,6 +708,7 @@ pub async fn storage_move(
     to: String,
 ) -> Result<(), String> {
     crate::required::refuse()?;
+    let _busy = crate::busy::enter(&id, "being moved")?;
     if running.0.lock().map(|m| m.contains_key(&id)).unwrap_or(false) {
         return Err("Close the game first.".into());
     }
@@ -729,19 +736,7 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     if let Some(who) = keeper(&game) {
         return Err(who);
     }
-    // A game added from elsewhere moves in with its whole own folder.
-    let from = match game_folder(&folders, &game) {
-        Some(from) if holds_other_games(&games, &[game.id.as_str()], &from) => return Err(NOT_OWN.into()),
-        Some(from) => from,
-        None => outside_root(&games, &folders, &game)?,
-    };
-    // Whatever found it, only a folder that is the game's own moves (KB-0375):
-    // `guard` below says nothing else of the library's is in it, this says
-    // nothing else at all is.
-    match PathBuf::from(&game.install_dir).canonicalize() {
-        Ok(dir) if is_own_top(&game, &from, &dir) => {}
-        _ => return Err(NOT_OWN.into()),
-    }
+    let from = move_source(&games, &folders, &game)?;
     let name = from.file_name().ok_or("That game folder has no name.")?.to_owned();
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
     let target_root = PathBuf::from(to).canonicalize().map_err(|e| e.to_string())?;
@@ -847,6 +842,16 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     })
     .await
     .map_err(|e| e.to_string())? };
+    // The originals its add-ons keep sit beside the folder, under its name.
+    let (from_c, dest_c) = (from.clone(), dest.clone());
+    let carried = tauri::async_runtime::spawn_blocking(move || crate::addons::carry_backups(&from_c, &dest_c)).await.map_err(|e| e.to_string())?;
+    let leftover = match carried {
+        Ok(()) => leftover,
+        Err(e) => {
+            let note = format!("{e}, so taking an add-on out may leave some of the game's files missing.");
+            Some(leftover.map_or_else(|| format!("Moved. {note}"), |l| format!("{l} {note}")))
+        }
+    };
     if let Some(note) = &leftover {
         crate::logging::warn("storage", &format!("moving {id}: {note}"));
     }
@@ -855,6 +860,26 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     let _ = app.emit("storage-move", MoveProgress { id: id.to_string(), copied: total, total, done: true, error: leftover });
     let _ = app.emit("library-changed", ());
     Ok(())
+}
+
+/// The folder a Move takes: the game's own folder, or for a game added from
+/// elsewhere its whole own folder. Refused while a repair from another
+/// Kryoto, which the busy set cannot see, is changing it: the copy would take
+/// its half-written files along.
+fn move_source(games: &[LibraryGame], folders: &[String], game: &LibraryGame) -> Result<PathBuf, String> {
+    let from = match game_folder(folders, game) {
+        Some(from) if holds_other_games(games, &[game.id.as_str()], &from) => return Err(NOT_OWN.into()),
+        Some(from) => from,
+        None => outside_root(games, folders, game)?,
+    };
+    crate::busy::idle(&[&from, Path::new(&game.install_dir)])?;
+    // Whatever found it, only a folder that is the game's own moves (KB-0375):
+    // `guard` in `move_game` says nothing else of the library's is in it,
+    // this says nothing else at all is.
+    match PathBuf::from(&game.install_dir).canonicalize() {
+        Ok(dir) if is_own_top(game, &from, &dir) => Ok(from),
+        _ => Err(NOT_OWN.into()),
+    }
 }
 
 /// A size in the unit that reads best: "66848.2 GB" was a drive's worth of
@@ -1295,6 +1320,27 @@ mod tests {
         std::fs::create_dir_all(root.join("Bar")).unwrap();
         let folders = vec![root.to_string_lossy().into_owned()];
         assert_eq!(game_folder(&folders, &titled("Foo", &foo)), Some(foo.canonicalize().unwrap()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A Move during a repair from another Kryoto copied its half-written
+    /// files along: refused with the repair lock's words, and nothing moves.
+    #[test]
+    fn a_game_another_change_has_locked_does_not_move() {
+        let root = std::env::temp_dir().join(format!("kryoto-storage-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let foo = root.join("Foo");
+        std::fs::create_dir_all(&foo).unwrap();
+        std::fs::write(foo.join("game.exe"), b"exe").unwrap();
+        let folders = vec![root.to_string_lossy().into_owned()];
+        let game = titled("Foo", &foo);
+        let games = vec![game.clone()];
+        assert_eq!(move_source(&games, &folders, &game), Ok(foo.canonicalize().unwrap()));
+        let lock = kryoto_repair::journal::lock(&foo).unwrap();
+        assert!(move_source(&games, &folders, &game).unwrap_err().starts_with("Kryoto is changing this game's files"));
+        assert!(foo.join("game.exe").is_file());
+        drop(lock);
+        assert!(move_source(&games, &folders, &game).is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
