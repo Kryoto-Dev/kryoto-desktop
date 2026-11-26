@@ -31,12 +31,8 @@ export type FilesReport = {
 export type FilesState = {
   list: 'yes' | 'none' | 'unknown'
   files: number
-  emulator: string | null
-  emulatorOff: boolean
-  keptOwn: string[]
   report: FilesReport | null
   checking: boolean
-  archive: boolean
   downloadSize: string | null
 }
 

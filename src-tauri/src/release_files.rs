@@ -32,7 +32,7 @@
 //! check runs off the UI thread and gives the disk room between reads (D: is a
 //! hard disk on many PCs, see `achievements_cloud.rs`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -340,10 +340,53 @@ fn entry<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> GameEntry {
         .unwrap_or_default()
 }
 
+/// Lists already read, by file, the last used last. A list never changes
+/// once kept, and a big release's (up to ~60 MB of JSON) was read again on
+/// every game page refresh and Properties question.
+static HELD: Mutex<Vec<(PathBuf, Arc<FileList>)>> = Mutex::new(Vec::new());
+/// Listed files held at most: about one of the biggest lists kryo.to allows.
+const HELD_FILES: usize = 300_000;
+
+/// `list` held as the newest, the oldest let go past `most` files (the
+/// newest always stays). Pure, for tests.
+fn hold_in(held: &mut Vec<(PathBuf, Arc<FileList>)>, path: PathBuf, list: Arc<FileList>, most: usize) {
+    held.retain(|(p, _)| p != &path);
+    held.push((path, list));
+    while held.len() > 1 && held.iter().map(|(_, l)| l.listed().len()).sum::<usize>() > most {
+        held.remove(0);
+    }
+}
+
+fn hold(path: PathBuf, list: Arc<FileList>) {
+    hold_in(&mut HELD.lock().unwrap_or_else(|e| e.into_inner()), path, list, HELD_FILES);
+}
+
+/// The held list for `path`, moved to newest: a list in use is the last
+/// one let go, not the first one read. Pure, for tests.
+fn held_in(held: &mut Vec<(PathBuf, Arc<FileList>)>, path: &Path) -> Option<Arc<FileList>> {
+    let at = held.iter().position(|(p, _)| p == path)?;
+    let entry = held.remove(at);
+    let list = entry.1.clone();
+    held.push(entry);
+    Some(list)
+}
+
+/// A release's kept list, read from disk once and then shared.
+fn list_of(dir: &Path, release_id: &str) -> Option<Arc<FileList>> {
+    let path = dir.join(format!("{release_id}.json"));
+    let known = held_in(&mut HELD.lock().unwrap_or_else(|e| e.into_inner()), &path);
+    if let Some(list) = known {
+        return Some(list);
+    }
+    let list = Arc::new(read_kept(dir, release_id).list?);
+    hold(path, list.clone());
+    Some(list)
+}
+
 /// The list kept for this game's release, without asking kryo.to.
-pub fn cached_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<FileList> {
+pub fn cached_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<Arc<FileList>> {
     let id = entry(app, game).release_id?;
-    read_kept(&dir(app)?, &id).list
+    list_of(&dir(app)?, &id)
 }
 
 /// What kryo.to answered for a list.
@@ -432,16 +475,19 @@ async fn resolve<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<S
 
 /// This game's list: kept, or fetched once when `network` and due. Never
 /// fails: no list is the answer for every older release and when offline.
-pub async fn ensure_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, network: bool) -> Option<FileList> {
+pub async fn ensure_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, network: bool) -> Option<Arc<FileList>> {
     if game.slug.is_none() || game.launcher.is_some() {
         return None;
     }
     let id = if network { resolve(app, game).await? } else { entry(app, game).release_id? };
     let d = dir(app)?;
-    let mut kept = read_kept(&d, &id);
-    if kept.list.is_some() || !network {
-        return kept.list;
+    if let Some(list) = list_of(&d, &id) {
+        return Some(list);
     }
+    if !network {
+        return None;
+    }
+    let mut kept = read_kept(&d, &id);
     let at = now();
     if !due(kept.none_at, NO_LIST_RETRY_SECS, at) || !due(kept.failed_at, FAILED_RETRY_SECS, at) {
         return None;
@@ -476,12 +522,12 @@ pub async fn ensure_list<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, net
         Answer::Failed => kept.failed_at = Some(at),
     }
     let _ = write_kept(&d, &id, &kept);
-    if kept.list.is_some() {
-        crate::logging::info("files", &format!("{}: release {id} lists {} files", game.title, kept.list.as_ref().map(|l| l.listed().len()).unwrap_or(0)));
-        // Properties' Emulator row says what the release came with now.
-        let _ = app.emit("files-checked", &game.id);
-    }
-    kept.list
+    let list = Arc::new(kept.list?);
+    hold(d.join(format!("{id}.json")), list.clone());
+    crate::logging::info("files", &format!("{}: release {id} lists {} files", game.title, list.listed().len()));
+    // Properties' Emulator row says what the release came with now.
+    let _ = app.emit("files-checked", &game.id);
+    Some(list)
 }
 
 /* ── Checking an install ────────────────────────────────────────────────── */
@@ -776,12 +822,25 @@ fn stamps_of(root: &Path) -> HashMap<String, Stamp> {
 /// The stored report, with what has come back since left out (a player who
 /// put a file back by hand): cheap, a look at the few files it names.
 /// A broken file stays named until the next check or Get the files back:
-/// being there again proves nothing about its bytes.
-fn current(report: Option<CheckReport>, root: &Path) -> Option<CheckReport> {
+/// being there again proves nothing about its bytes. What Kryoto changed
+/// itself since the check (a switch, an add-on, Kryoto Online) is left out
+/// too: Get the files back must never put the release's old emulator over
+/// the one the player switched to.
+fn current(report: Option<CheckReport>, game: &LibraryGame, root: &Path) -> Option<CheckReport> {
     let mut r = report?;
+    let (skip, switched) = kryoto_changes(game, root);
+    without_kryotos(&mut r, &skip, switched);
     let mut finder = Finder::new(root);
     r.missing.retain(|f| finder.find(&f.path).is_none());
     Some(r)
+}
+
+/// Findings on files Kryoto changed itself, left out the way `check_tree`
+/// skips them. Pure.
+fn without_kryotos(r: &mut CheckReport, skip: &BTreeSet<String>, switched: bool) {
+    let ours = |f: &Finding| skip.contains(&key(&f.path)) || (switched && f.role.emulator());
+    r.missing.retain(|f| !ours(f));
+    r.broken.retain(|f| !ours(f));
 }
 
 static CHECKING: Mutex<Vec<(String, Arc<AtomicBool>)>> = Mutex::new(Vec::new());
@@ -866,7 +925,8 @@ pub fn after_install<R: Runtime>(app: &AppHandle<R>, game_id: &str) {
     });
 }
 
-/// A game's list, its findings, and what the Emulator row says about it.
+/// A game's list and its findings, for the Files row. What the release's
+/// emulator is comes from repair.rs `game_emulators`, for the Emulator row.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilesState {
@@ -874,38 +934,31 @@ pub struct FilesState {
     /// `unknown`: not asked yet, or this game is not a kryo.to release.
     pub list: &'static str,
     pub files: usize,
-    pub emulator: Option<String>,
-    pub emulator_off: bool,
-    /// Steam files the uploader kept as the game shipped them.
-    pub kept_own: Vec<String>,
     pub report: Option<CheckReport>,
     pub checking: bool,
-    /// The download is still on this PC: missing files come from it.
-    pub archive: bool,
     /// "12.3 GB": what downloading it again takes.
     pub download_size: Option<String>,
 }
 
 fn state_of<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> FilesState {
     let e = entry(app, game);
-    let kept = e.release_id.as_deref().and_then(|id| dir(app).map(|d| read_kept(&d, id))).unwrap_or_default();
+    let (id, d) = (e.release_id.as_deref(), dir(app));
+    let held = id.zip(d.as_deref()).and_then(|(id, d)| list_of(d, id));
+    let list = held.as_deref();
+    // Without a list, its small file says whether kryo.to has none.
+    let none_at = list.is_none() && id.zip(d.as_deref()).is_some_and(|(id, d)| read_kept(d, id).none_at.is_some());
     let root = PathBuf::from(&game.install_dir);
-    let list = kept.list.as_ref();
     FilesState {
         list: if list.is_some() {
             "yes"
-        } else if kept.none_at.is_some() || (e.resolved_at.is_some() && e.release_id.is_none()) {
+        } else if none_at || (e.resolved_at.is_some() && e.release_id.is_none()) {
             "none"
         } else {
             "unknown"
         },
         files: list.map(|l| l.listed().len()).unwrap_or(0),
-        emulator: list.and_then(FileList::emulator_words),
-        emulator_off: list.is_some_and(|l| l.emulator_off),
-        kept_own: list.map(|l| l.excluded.clone()).unwrap_or_default(),
-        report: current(e.report.filter(|_| list.is_some()), &root),
+        report: current(e.report.filter(|_| list.is_some()), game, &root),
         checking: CHECKING.lock().map(|c| c.iter().any(|(id, _)| id == &game.id)).unwrap_or(false),
-        archive: kept_archive(app, game).is_some(),
         download_size: e.download_size,
     }
 }
@@ -952,8 +1005,11 @@ pub fn game_files_check_cancel(game_id: String) {
 /// For the game page's antivirus card: the files the last check found
 /// missing or broken, with what each is, when the release has a list.
 pub fn alarms<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<Vec<Finding>> {
-    cached_list(app, game)?;
-    let report = current(entry(app, game).report, Path::new(&game.install_dir))?;
+    // Most games have no report: then nothing else is read.
+    let e = entry(app, game);
+    let report = e.report?;
+    list_of(&dir(app)?, e.release_id.as_deref()?)?;
+    let report = current(Some(report), game, Path::new(&game.install_dir))?;
     Some(report.missing.into_iter().chain(report.broken).collect())
 }
 
@@ -977,20 +1033,24 @@ fn kept_archive<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> Option<Pa
 
 /// The folder inside the archive the game's files sit under ("" when at the
 /// top): the one most wanted files agree on, the shortest on a tie. Pure.
+/// Every tail of each entry after a '/' is looked up among the wanted
+/// files, so thousands of missing files against a big archive stay quick,
+/// and what is held grows with the files wanted, not with the archive.
 pub fn archive_prefix(entries: &[String], wanted: &[String]) -> Option<String> {
-    let lower: Vec<String> = entries.iter().map(|e| e.replace('\\', "/").to_lowercase()).collect();
-    let mut votes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut want: HashMap<String, usize> = HashMap::new();
     for w in wanted {
-        let w = key(w);
-        for e in &lower {
-            if *e == w {
-                *votes.entry(String::new()).or_default() += 1;
-            } else if e.len() > w.len() && e.ends_with(&w) && e.as_bytes()[e.len() - w.len() - 1] == b'/' {
-                *votes.entry(e[..e.len() - w.len()].to_string()).or_default() += 1;
+        *want.entry(key(w)).or_default() += 1;
+    }
+    let lower: Vec<String> = entries.iter().map(|e| key(e)).collect();
+    let mut votes: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in &lower {
+        for at in std::iter::once(0).chain(e.match_indices('/').map(|(at, _)| at + 1)) {
+            if let Some(n) = want.get(&e[at..]) {
+                *votes.entry(&e[..at]).or_default() += n;
             }
         }
     }
-    votes.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.len().cmp(&a.0.len()))).map(|(p, _)| p)
+    votes.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.len().cmp(&a.0.len()))).map(|(p, _)| p.to_string())
 }
 
 /// Each wanted path's name in the archive, under `prefix`. Pure.
@@ -1079,11 +1139,23 @@ fn place(root: &Path, from: &Path, rel: &str, sha: &str) -> Result<(), String> {
     })
 }
 
+/// The listed files by hash, for `local_twin`, without the wanted ones: they
+/// are missing or broken, so never a source. Built once per Get the files back.
+fn twins_of<'a>(list: &'a FileList, wanted: &[ListedFile]) -> HashMap<&'a str, Vec<&'a ListedFile>> {
+    let gone: HashSet<String> = wanted.iter().map(|f| key(&f.path)).collect();
+    let mut by_sha: HashMap<&str, Vec<&ListedFile>> = HashMap::new();
+    for f in list.listed().iter().filter(|f| !gone.contains(&key(&f.path))) {
+        by_sha.entry(f.sha256.as_str()).or_default().push(f);
+    }
+    by_sha
+}
+
 /// Files on this PC with the same bytes as a wanted one: another listed file
 /// (a shipped `.dll.kryoto` is the original's twin) or an emulator build
 /// Repair keeps. Matched by name and size first, then proven by hash.
-fn local_twin(finder: &mut Finder, list: &FileList, want: &ListedFile, tools: &[(String, u64, PathBuf)]) -> Option<PathBuf> {
-    for other in list.listed().iter().filter(|o| o.sha256 == want.sha256 && key(&o.path) != key(&want.path)) {
+fn local_twin(finder: &mut Finder, twins: &HashMap<&str, Vec<&ListedFile>>, want: &ListedFile, tools: &[(String, u64, PathBuf)]) -> Option<PathBuf> {
+    let own = key(&want.path);
+    for other in twins.get(want.sha256.as_str()).into_iter().flatten().filter(|o| key(&o.path) != own) {
         if let Some(p) = finder.find(&other.path).filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == want.size)) {
             if journal::digest(&p).ok().as_deref() == Some(want.sha256.as_str()) {
                 return Some(p);
@@ -1123,6 +1195,10 @@ fn tool_files<R: Runtime>(app: &AppHandle<R>) -> Vec<(String, u64, PathBuf)> {
     out
 }
 
+/// Said when an install or update of the game is unpacking: the old
+/// release's files must not land in the new build.
+const INSTALLING: &str = "The game is being installed. Get its files back once that is done.";
+
 /// Get the files back: every missing or broken file the last check named,
 /// from this PC when its bytes are here, else said plainly (with the
 /// download's size) so the game's page offers downloading it again.
@@ -1133,11 +1209,18 @@ pub async fn game_files_restore(app: AppHandle, game_id: String) -> Result<Resto
     if crate::library::is_running(&app, &game.id) {
         return Err("Close the game before getting its files back.".into());
     }
+    let installing = {
+        let (app, slug) = (app.clone(), game.slug.clone());
+        move || slug.as_deref().is_some_and(|s| crate::downloads::unpacking(&app, s))
+    };
+    if installing() {
+        return Err(INSTALLING.into());
+    }
     let list = cached_list(&app, &game).ok_or("Kryoto has no list of this release's files.")?;
     let root = PathBuf::from(&game.install_dir);
     let e = entry(&app, &game);
     let wanted: Vec<ListedFile> = {
-        let report = current(e.report.clone(), &root).unwrap_or_default();
+        let report = current(e.report.clone(), &game, &root).unwrap_or_default();
         let names: BTreeSet<String> = report.missing.iter().chain(report.broken.iter()).map(|f| key(&f.path)).collect();
         list.listed().iter().filter(|f| names.contains(&key(&f.path))).cloned().collect()
     };
@@ -1151,72 +1234,9 @@ pub async fn game_files_restore(app: AppHandle, game_id: String) -> Result<Resto
     let say = move |text: &str, percent: Option<u8>| {
         let _ = app2.emit("files-restore-progress", RestoreProgress { game_id: id.clone(), text: text.into(), percent });
     };
-    let mut out = tauri::async_runtime::spawn_blocking(move || -> Result<Restored, String> {
-        let _guard = journal::lock(&root)?;
-        let mut out = Restored::default();
-        let mut finder = Finder::new(&root);
-        let mut left: Vec<ListedFile> = Vec::new();
-        say("Looking for the files on this PC", None);
-        for f in &wanted {
-            match local_twin(&mut finder, &list, f, &tools) {
-                Some(from) => match place(&root, &from, &f.path, &f.sha256) {
-                    Ok(()) => out.restored.push(f.path.clone()),
-                    Err(e) => {
-                        crate::logging::warn("files", &e);
-                        left.push(f.clone());
-                    }
-                },
-                None => left.push(f.clone()),
-            }
-        }
-        if let (false, Some(archive)) = (left.is_empty(), archive) {
-            let entries = archive_entries(&archive).unwrap_or_default();
-            let paths: Vec<String> = left.iter().map(|f| f.path.clone()).collect();
-            let prefix = archive_prefix(&entries, &paths).unwrap_or_default();
-            let names = archive_names(&entries, &prefix, &paths);
-            if !names.is_empty() {
-                let staging = root.with_file_name(format!(".{}.kryoto-restore", root.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
-                let _ = std::fs::remove_dir_all(&staging);
-                let count = names.len();
-                let label = format!("Taking {count} file{} from the download Kryoto kept", if count == 1 { "" } else { "s" });
-                say(&label, Some(0));
-                let progress = |done: u64, total: Option<u64>| {
-                    let pct = total.filter(|t| *t > 0).map(|t| (done.min(t) * 100 / t) as u8);
-                    say(&label, pct);
-                };
-                let stop = AtomicU8::new(0);
-                let list_names: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
-                let unpacked = match crate::downloads::extract_named(&archive, &staging, &list_names, &progress, &stop) {
-                    Ok(true) => Ok(()),
-                    Ok(false) if archive.extension().is_some_and(|x| x.eq_ignore_ascii_case("7z")) => {
-                        extract_7z_named(&archive, &staging, &list_names.iter().cloned().collect(), &stop, &progress)
-                    }
-                    Ok(false) => Err("no 7-Zip to read it".to_string()),
-                    Err(e) => Err(e),
-                };
-                if let Err(e) = &unpacked {
-                    crate::logging::warn("files", &format!("could not take files from {}: {e}", archive.display()));
-                }
-                if unpacked.is_ok() {
-                    for (rel, name) in &names {
-                        let Some(f) = left.iter().find(|f| &f.path == rel) else { continue };
-                        let from = staging.join(name);
-                        if from.is_file() && place(&root, &from, &f.path, &f.sha256).is_ok() {
-                            out.restored.push(f.path.clone());
-                            out.from_archive += 1;
-                        }
-                    }
-                }
-                let _ = std::fs::remove_dir_all(&staging);
-                let _ = std::fs::remove_file(staging.with_extension("names"));
-                left.retain(|f| !out.restored.contains(&f.path));
-            }
-        }
-        out.left = left.into_iter().map(|f| f.path).collect();
-        Ok(out)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let mut out = tauri::async_runtime::spawn_blocking(move || restore_into(&root, &list, &wanted, &tools, archive.as_deref(), &installing, &say))
+        .await
+        .map_err(|e| e.to_string())??;
     out.download_size = e.download_size;
     // What came back is no longer a finding.
     let back: BTreeSet<String> = out.restored.iter().map(|p| key(p)).collect();
@@ -1229,6 +1249,107 @@ pub async fn game_files_restore(app: AppHandle, game_id: String) -> Result<Resto
     crate::logging::info("files", &format!("{}: {} file(s) back ({} from the kept download), {} not on this PC", game.title, out.restored.len(), out.from_archive, out.left.len()));
     let _ = app.emit("files-checked", &game.id);
     let _ = app.emit("library-changed", ());
+    Ok(out)
+}
+
+/// `game_files_restore`'s work, off the UI thread. `installing` is asked
+/// once the folder is locked, and again before each file goes in: an update
+/// that started meanwhile wins. Asked after the lock, an install that began
+/// before it (one that takes no lock in a fresh folder) is still caught,
+/// and one that begins after it finds the lock and refuses.
+fn restore_into(
+    root: &Path,
+    list: &FileList,
+    wanted: &[ListedFile],
+    tools: &[(String, u64, PathBuf)],
+    archive: Option<&Path>,
+    installing: &dyn Fn() -> bool,
+    say: &dyn Fn(&str, Option<u8>),
+) -> Result<Restored, String> {
+    let _guard = journal::lock(root)?;
+    if installing() {
+        return Err(INSTALLING.into());
+    }
+    let mut out = Restored::default();
+    let mut finder = Finder::new(root);
+    let mut left: Vec<ListedFile> = Vec::new();
+    say("Looking for the files on this PC", None);
+    let twins = twins_of(list, wanted);
+    // Many copies of one file (the same asset shipped in every level) are
+    // looked for once: the first source found serves them all.
+    let mut found: HashMap<&str, PathBuf> = HashMap::new();
+    for f in wanted {
+        let from = match found.get(f.sha256.as_str()) {
+            Some(p) => Some(p.clone()),
+            None => local_twin(&mut finder, &twins, f, tools),
+        };
+        match from {
+            Some(from) => {
+                found.insert(f.sha256.as_str(), from.clone());
+                if installing() {
+                    return Err(INSTALLING.into());
+                }
+                match place(root, &from, &f.path, &f.sha256) {
+                    Ok(()) => out.restored.push(f.path.clone()),
+                    Err(e) => {
+                        crate::logging::warn("files", &e);
+                        left.push(f.clone());
+                    }
+                }
+            }
+            None => left.push(f.clone()),
+        }
+    }
+    if let (false, Some(archive)) = (left.is_empty(), archive) {
+        let entries = archive_entries(archive).unwrap_or_default();
+        let paths: Vec<String> = left.iter().map(|f| f.path.clone()).collect();
+        let prefix = archive_prefix(&entries, &paths).unwrap_or_default();
+        let names = archive_names(&entries, &prefix, &paths);
+        if !names.is_empty() {
+            let staging = root.with_file_name(format!(".{}.kryoto-restore", root.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
+            let _ = std::fs::remove_dir_all(&staging);
+            let count = names.len();
+            let label = format!("Taking {count} file{} from the download Kryoto kept", if count == 1 { "" } else { "s" });
+            say(&label, Some(0));
+            let progress = |done: u64, total: Option<u64>| {
+                let pct = total.filter(|t| *t > 0).map(|t| (done.min(t) * 100 / t) as u8);
+                say(&label, pct);
+            };
+            let stop = AtomicU8::new(0);
+            let list_names: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
+            let unpacked = match crate::downloads::extract_named(archive, &staging, &list_names, &progress, &stop) {
+                Ok(true) => Ok(()),
+                Ok(false) if archive.extension().is_some_and(|x| x.eq_ignore_ascii_case("7z")) => {
+                    extract_7z_named(archive, &staging, &list_names.iter().cloned().collect(), &stop, &progress)
+                }
+                Ok(false) => Err("no 7-Zip to read it".to_string()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = &unpacked {
+                crate::logging::warn("files", &format!("could not take files from {}: {e}", archive.display()));
+            }
+            if unpacked.is_ok() {
+                let by_path: HashMap<&str, &ListedFile> = left.iter().map(|f| (f.path.as_str(), f)).collect();
+                for (rel, name) in &names {
+                    let Some(f) = by_path.get(rel.as_str()) else { continue };
+                    let from = staging.join(name);
+                    if installing() {
+                        let _ = std::fs::remove_dir_all(&staging);
+                        return Err(INSTALLING.into());
+                    }
+                    if from.is_file() && place(root, &from, &f.path, &f.sha256).is_ok() {
+                        out.restored.push(f.path.clone());
+                        out.from_archive += 1;
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            let _ = std::fs::remove_file(staging.with_extension("names"));
+            let back: HashSet<&str> = out.restored.iter().map(String::as_str).collect();
+            left.retain(|f| !back.contains(f.path.as_str()));
+        }
+    }
+    out.left = left.into_iter().map(|f| f.path).collect();
     Ok(out)
 }
 
@@ -1432,7 +1553,9 @@ pub fn unclean(root: &Path) -> Result<bool, String> {
     for e in record.entries.iter().rev() {
         let live = journal::safe_path(root, &e.path)?;
         let stashed = e.stash.as_deref().map(|s| journal::safe_path(root, s)).transpose()?.filter(|p| p.is_file());
-        if (e.restored_from.is_some() || stashed.is_some()) && live.is_file() {
+        // A stash that was named but never made means the release's file
+        // never moved: it is still the one at `live`, so it stays.
+        if (stashed.is_some() || (e.restored_from.is_some() && e.stash.is_none())) && live.is_file() {
             journal::make_writable(&live)?;
             std::fs::remove_file(&live).map_err(|err| format!("{}: {err}", e.path))?;
         }
@@ -1532,7 +1655,32 @@ mod tests {
         assert_eq!(back.etag.as_deref(), Some("\"t\""));
         assert!(read_kept(&dir, "43").list.is_none());
         assert!(write_kept(&dir, "../x", &kept).is_err() && read_kept(&dir, "../x").list.is_none());
+        // Read once, then the same list is shared.
+        let first = list_of(&dir, "42").unwrap();
+        assert!(Arc::ptr_eq(&first, &list_of(&dir, "42").unwrap()));
+        assert_eq!(first.release_id, "42");
+        assert!(list_of(&dir, "43").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_latest_lists_are_held() {
+        let sized = |n: usize| Arc::new(FileList { files: Some(vec![ListedFile::default(); n]), ..Default::default() });
+        let mut held = Vec::new();
+        hold_in(&mut held, "a".into(), sized(4), 10);
+        hold_in(&mut held, "b".into(), sized(4), 10);
+        hold_in(&mut held, "a".into(), sized(4), 10);
+        let names = |h: &Vec<(PathBuf, Arc<FileList>)>| h.iter().map(|(p, _)| p.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(names(&held), ["b", "a"], "read again: newest");
+        hold_in(&mut held, "c".into(), sized(4), 10);
+        assert_eq!(names(&held), ["a", "c"], "the oldest goes past the limit");
+        assert!(held_in(&mut held, Path::new("a")).is_some());
+        assert_eq!(names(&held), ["c", "a"], "used again: newest");
+        hold_in(&mut held, "d".into(), sized(4), 10);
+        assert_eq!(names(&held), ["a", "d"], "the list in use outlives one only read");
+        assert!(held_in(&mut held, Path::new("gone")).is_none());
+        hold_in(&mut held, "huge".into(), sized(50), 10);
+        assert_eq!(names(&held), ["huge"], "the newest always stays");
     }
 
     #[test]
@@ -1709,13 +1857,63 @@ mod tests {
     }
 
     #[test]
+    fn a_report_from_before_a_switch_no_longer_names_the_old_emulator() {
+        let dir = scratch("switch-report");
+        write(&dir, "bin/steam_api64.dll", b"gbe");
+        write(&dir, "bin/steam_api64.dll.kryoto", b"valve");
+        write(&dir, "bin/steam_settings/steam_appid.txt", b"480");
+        let finding = |path: &str, role, problem| Finding { path: path.into(), role, problem };
+        let report = CheckReport {
+            missing: vec![finding("bin/steam_settings/steam_appid.txt", Role::EmulatorAdded, Problem::Missing), finding("PlayGTAV.exe", Role::Game, Problem::Missing)],
+            broken: vec![finding("bin/steam_api64.dll", Role::EmulatorReplaced, Problem::Broken)],
+            ..Default::default()
+        };
+        let game = LibraryGame::default();
+        assert_eq!(current(Some(report.clone()), &game, &dir).unwrap().broken.len(), 1, "before the switch it is damage");
+        clean_for_switch(&dir, &swap_list()).unwrap().unwrap();
+        let after = current(Some(report), &game, &dir).unwrap();
+        assert!(after.broken.is_empty(), "the switch changed it, not an antivirus");
+        assert_eq!(after.missing.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["PlayGTAV.exe"], "the game's own file is still missing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_noted_but_never_set_aside_is_left_in_place() {
+        let dir = scratch("swap-never-moved");
+        write(&dir, "bin/steam_api64.dll", b"gbe");
+        write(&dir, "bin/steam_api64.dll.kryoto", b"valve");
+        // A crash right after the note, or a move that failed: no stash file.
+        let record = SwapRecord {
+            release_id: "9".into(),
+            at: 1,
+            entries: vec![SwapEntry {
+                path: "bin/steam_api64.dll".into(),
+                stash: Some(format!("{SWAP_DIR}/0")),
+                sha256: Some(sha(b"gbe")),
+                restored_from: Some("bin/steam_api64.dll.kryoto".into()),
+            }],
+        };
+        save_swap(&dir, &record).unwrap();
+        assert!(unclean(&dir).unwrap());
+        assert_eq!(std::fs::read(dir.join("bin/steam_api64.dll")).unwrap(), b"gbe", "the release's own file stays");
+        assert!(!has_swap(&dir));
+        // A swap that failed halfway puts back what it did and nothing more.
+        std::fs::create_dir_all(dir.join(".kryoto-repair")).unwrap();
+        std::fs::write(dir.join(SWAP_DIR), b"a file where the folder goes").unwrap();
+        assert!(clean_for_switch(&dir, &swap_list()).is_err());
+        assert_eq!(std::fs::read(dir.join("bin/steam_api64.dll")).unwrap(), b"gbe");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_missing_file_comes_back_from_its_twin_proven_by_hash() {
         let dir = scratch("twin");
         let list = swap_list();
         write(&dir, "bin/steam_api64.dll.kryoto", b"valve");
         let want = ListedFile { path: "bin/original.dll".into(), size: 5, sha256: sha(b"valve"), ..Default::default() };
         let mut finder = Finder::new(&dir);
-        let twin = local_twin(&mut finder, &list, &want, &[]).unwrap();
+        let twins = twins_of(&list, &[]);
+        let twin = local_twin(&mut finder, &twins, &want, &[]).unwrap();
         place(&dir, &twin, &want.path, &want.sha256).unwrap();
         assert_eq!(std::fs::read(dir.join("bin/original.dll")).unwrap(), b"valve");
         assert!(dir.join("bin/steam_api64.dll.kryoto").is_file(), "the source stays");
@@ -1724,10 +1922,35 @@ mod tests {
         write(&tools_dir, "steam_api64.dll", b"nope");
         let want = ListedFile { path: "bin/steam_api64.dll".into(), size: 4, sha256: sha(b"gbe!"), ..Default::default() };
         let tools = vec![("steam_api64.dll".to_string(), 4u64, tools_dir.join("steam_api64.dll"))];
-        assert!(local_twin(&mut finder, &list, &want, &tools).is_none());
+        assert!(local_twin(&mut finder, &twins, &want, &tools).is_none());
         write(&tools_dir, "steam_api64.dll", b"gbe!");
-        assert!(local_twin(&mut finder, &list, &want, &tools).is_some());
+        assert!(local_twin(&mut finder, &twins, &want, &tools).is_some());
+        // A file that is itself wanted is never the source of another.
+        let gone = file("bin/steam_api64.dll.kryoto", b"valve", Role::EmulatorAdded);
+        assert!(!twins_of(&list, &[gone]).contains_key(sha(b"valve").as_str()));
         assert!(place(&dir, &tools_dir.join("steam_api64.dll"), "../escape.dll", &want.sha256).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_is_put_back_while_the_game_is_being_installed() {
+        let dir = scratch("restore-installing");
+        write(&dir, "bin/steam_api64.dll.kryoto", b"valve");
+        let list = swap_list();
+        let want = ListedFile { path: "bin/original.dll".into(), size: 5, sha256: sha(b"valve"), ..Default::default() };
+        let wanted = [want];
+        let said = |_: &str, _: Option<u8>| {};
+        let err = restore_into(&dir, &list, &wanted, &[], None, &|| true, &said).unwrap_err();
+        assert_eq!(err, INSTALLING);
+        assert!(!dir.join("bin/original.dll").exists(), "the update's files are left alone");
+        // Asked once the folder is locked, not only before a file goes in:
+        // a file found nowhere on this PC would go straight to the kept
+        // download, which can take minutes while the update runs on.
+        let nowhere = [ListedFile { path: "bin/gone.dll".into(), size: 4, sha256: sha(b"gone"), ..Default::default() }];
+        assert_eq!(restore_into(&dir, &list, &nowhere, &[], None, &|| true, &said).unwrap_err(), INSTALLING);
+        let out = restore_into(&dir, &list, &wanted, &[], None, &|| false, &said).unwrap();
+        assert_eq!(out.restored, ["bin/original.dll"]);
+        assert_eq!(std::fs::read(dir.join("bin/original.dll")).unwrap(), b"valve");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1741,6 +1964,23 @@ mod tests {
         assert_eq!(names, vec![("x64/Steam_Api64.dll".to_string(), "Hades/x64/steam_api64.dll".to_string()), ("Hades.exe".to_string(), "Hades/Hades.exe".to_string())]);
         let flat: Vec<String> = ["a.exe".to_string()].to_vec();
         assert_eq!(archive_prefix(&flat, &["A.exe".to_string()]).as_deref(), Some(""));
+        // The shortest folder wins a tie, as before.
+        let both: Vec<String> = ["a/x.dll", "b/c/x.dll"].map(String::from).to_vec();
+        assert_eq!(archive_prefix(&both, &["x.dll".to_string()]).as_deref(), Some("a/"));
+        assert_eq!(archive_prefix(&both, &["c/x.dll".to_string()]).as_deref(), Some("b/"));
+        assert_eq!(archive_prefix(&both, &["gone.dll".to_string()]), None);
+    }
+
+    #[test]
+    fn many_missing_files_against_a_big_archive_are_matched_quickly() {
+        // 40,000 missing files of a 40,000-file archive: compared pair by pair
+        // that was 1.6 billion comparisons on a frozen progress line.
+        let entries: Vec<String> = (0..40_000).map(|i| format!("Game/data/{}/file{i}.pak", i % 97)).collect();
+        let wanted: Vec<String> = (0..40_000).map(|i| format!("data/{}/file{i}.pak", i % 97)).collect();
+        let started = Instant::now();
+        assert_eq!(archive_prefix(&entries, &wanted).as_deref(), Some("game/"));
+        assert_eq!(archive_names(&entries, "game/", &wanted).len(), 40_000);
+        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
     }
 
     /// Packs a small game with this PC's 7-Zip, then takes one file back out
